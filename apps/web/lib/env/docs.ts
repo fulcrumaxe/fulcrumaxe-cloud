@@ -49,6 +49,8 @@ export function describeValidation(validation: Validation): string {
       return "hostname";
     case "stripe-secret-key":
       return "`sk_` or `rk_` Stripe key";
+    case "stripe-restricted-key":
+      return "`rk_` restricted Stripe key, read-only on customers and subscriptions";
     case "stripe-webhook-secret":
       return "`whsec_` signing secret";
     case "stripe-price-list":

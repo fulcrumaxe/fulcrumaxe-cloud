@@ -81,3 +81,15 @@ export function defaultStripeClient(): StripeLike {
   }
   return cachedClient;
 }
+
+/**
+ * D#454 H2d: the reconciler's Stripe client, built from the restricted key and pinned to the same API version as the
+ * webhook. No network retries: the job counts its calls against a budget, and the next tick is the retry. `connection`
+ * exists for tests, which point the real SDK at a local TLS server; production passes nothing.
+ */
+export function reconcileStripeClient(
+  restrictedKey: string,
+  connection: Pick<Stripe.StripeConfig, 'host' | 'port' | 'protocol' | 'httpAgent'> = {},
+): Stripe {
+  return new Stripe(restrictedKey, { apiVersion: STRIPE_API_VERSION, maxNetworkRetries: 0, ...connection });
+}

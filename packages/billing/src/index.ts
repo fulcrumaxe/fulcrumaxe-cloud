@@ -71,6 +71,7 @@ export {
   assertStripePriceIdsConfigured,
   assertSitekitPriceIdsConfigured,
   stripeKeyIsLive,
+  stripeReconcileKeyFromEnv,
   stripeSitekitPriceIdFromEnv,
   sitekitBundleCouponFromEnv,
 } from './env.js';

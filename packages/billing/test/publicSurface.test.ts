@@ -31,6 +31,9 @@ describe('@fx/billing public export surface (security-review fix round 3, MUST 3
       'readAccountStatusInTx',
       // D#69 B2: the sync and the price-map builders are webhook-internal.
       'syncSubscriptionEvent',
+      // D#454 H2d: the reconciler's apply step is a paid-state writer; it is reachable only by the explicit subpath.
+      'applyFetchedSubscription',
+      'readFetchClock',
       'buildPriceMap',
       'resolveSubscriptionPlan',
       'handleSitekitEvent',
@@ -114,6 +117,9 @@ describe('@fx/billing public export surface (security-review fix round 3, MUST 3
       'listSites',
       'readSitekitBilling',
       'assertSitekitPriceIdsConfigured',
+      // D#454 H2d: the reconciler's read-only key reader and its pinned client (neither can write an account).
+      'stripeReconcileKeyFromEnv',
+      'reconcileStripeClient',
       'IllegalStatusTransitionError', // a class, also typeof 'function'
     ]);
     const actualFunctionNames = Object.entries(billingPublic)

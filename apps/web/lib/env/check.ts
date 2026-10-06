@@ -127,6 +127,8 @@ export function validateValue(validation: Validation, value: string): string | n
       return HOSTNAME_RE.test(value) ? null : "not_a_hostname";
     case "stripe-secret-key":
       return /^(sk|rk)_(test|live)_[A-Za-z0-9]+$/.test(value) ? null : "not_a_stripe_secret_key";
+    case "stripe-restricted-key":
+      return /^rk_(test|live)_[A-Za-z0-9]+$/.test(value) ? null : "not_a_stripe_restricted_key";
     case "stripe-webhook-secret":
       return /^whsec_[A-Za-z0-9+/=_-]+$/.test(value) ? null : "not_a_stripe_webhook_secret";
     case "stripe-price-list": {
