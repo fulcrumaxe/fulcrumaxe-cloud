@@ -54,6 +54,9 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.3.0(react@19.3.0)
+      web:
+        specifier: workspace:*
+        version: link:../web
     devDependencies:
       '@types/node':
         specifier: ^24.19.0
@@ -222,6 +225,9 @@ importers:
       '@fx/plan-data':
         specifier: workspace:*
         version: link:../plan-data
+      '@fx/sitekit-publish-gates':
+        specifier: workspace:*
+        version: link:../sitekit-publish-gates
       '@fx/spend':
         specifier: workspace:*
         version: link:../spend
@@ -235,6 +241,15 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+      '@fx/runner':
+        specifier: workspace:*
+        version: link:../runner
+      '@fx/sitekit-checks':
+        specifier: workspace:*
+        version: link:../sitekit-checks
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -272,6 +287,9 @@ importers:
         specifier: ^17.4.0
         version: 17.7.0
     devDependencies:
+      '@fx/db':
+        specifier: workspace:*
+        version: link:../db
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -324,6 +342,9 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+      workspace:
+        specifier: workspace:*
+        version: link:../../apps/workspace
 
   packages/db:
     dependencies:
@@ -337,6 +358,12 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
+      '@fx/sitekit-checks':
+        specifier: workspace:*
+        version: link:../sitekit-checks
+      '@fx/sitekit-publish-gates':
+        specifier: workspace:*
+        version: link:../sitekit-publish-gates
       '@fx/trust':
         specifier: workspace:*
         version: link:../trust
@@ -355,6 +382,9 @@ importers:
 
   packages/decisions:
     devDependencies:
+      '@fx/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -452,6 +482,9 @@ importers:
         specifier: workspace:*
         version: link:../env-spec
     devDependencies:
+      '@fx/runner':
+        specifier: workspace:*
+        version: link:../runner
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -561,6 +594,15 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
+      '@fx/roles':
+        specifier: workspace:*
+        version: link:../roles
+      '@fx/webhooks':
+        specifier: workspace:*
+        version: link:../webhooks
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -595,6 +637,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/runner':
+        specifier: workspace:*
+        version: link:../runner
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -657,6 +702,9 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@fx/core':
+        specifier: workspace:*
+        version: link:../core
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -721,6 +769,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -762,6 +813,15 @@ importers:
       '@fx/billing':
         specifier: workspace:*
         version: link:../billing
+      '@fx/runner':
+        specifier: workspace:*
+        version: link:../runner
+      '@fx/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      '@fx/webhooks':
+        specifier: workspace:*
+        version: link:../webhooks
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -804,6 +864,9 @@ importers:
       '@fx/core':
         specifier: workspace:*
         version: link:../core
+      '@fx/features':
+        specifier: workspace:*
+        version: link:../features
       '@fx/net-guard':
         specifier: workspace:*
         version: link:../net-guard
@@ -829,6 +892,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/discussions':
+        specifier: workspace:*
+        version: link:../discussions
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -953,6 +1019,12 @@ importers:
       '@fx/sitekit-checks':
         specifier: workspace:*
         version: link:../sitekit-checks
+      '@fx/sitekit-claims':
+        specifier: workspace:*
+        version: link:../sitekit-claims
+      '@fx/sitekit-template':
+        specifier: workspace:*
+        version: link:../sitekit-template
     devDependencies:
       '@types/node':
         specifier: ^24.19.0
@@ -1004,6 +1076,9 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
+      '@fx/db':
+        specifier: workspace:*
+        version: link:../db
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -1154,6 +1229,9 @@ importers:
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../runner-protocol
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../runner-cloud

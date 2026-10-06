@@ -24,6 +24,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@fx/core": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",

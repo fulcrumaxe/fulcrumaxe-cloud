@@ -18,6 +18,7 @@
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
+    "@fx/features": "workspace:*",
     "@fx/net-guard": "workspace:*",
     "@fx/runtime": "workspace:*",
     "@fx/spend": "workspace:*",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@fx/db": "workspace:*",
+    "@fx/discussions": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "typescript": "^5.7.2",

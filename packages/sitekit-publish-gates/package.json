@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fx/sitekit-checks": "workspace:*"
+    "@fx/sitekit-checks": "workspace:*",
+    "@fx/sitekit-claims": "workspace:*",
+    "@fx/sitekit-template": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.19.0",

@@ -19,12 +19,16 @@
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",
     "@fx/plan-data": "workspace:*",
+    "@fx/sitekit-publish-gates": "workspace:*",
     "@fx/spend": "workspace:*",
     "@fx/webhooks": "workspace:*",
     "pg": "^8.13.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@fx/pipeline": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/sitekit-checks": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "ajv": "^8.17.1",

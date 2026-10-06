@@ -14,6 +14,8 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
+    "@fx/sitekit-checks": "workspace:*",
+    "@fx/sitekit-publish-gates": "workspace:*",
     "@fx/trust": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",

@@ -519,6 +519,7 @@ test("hosted setup: every hosted step has a timeout-minutes, so a hang cannot bu
 // ---- scripts/check.sh --------------------------------------------------------
 const TODAY = [
   "pnpm install",
+  "declared cross-package imports",
   "pnpm lint",
   "pnpm typecheck",
   "scripts/check-globalsetup-env.sh",
@@ -595,7 +596,7 @@ test("check.sh in affected mode runs the browser tier only when sitekit-checks i
 test("check.sh in affected mode still runs the cheap guards, always", () => {
   for (const affected of ["packages/env-spec", "none"]) {
     const r = checkSh({ FX_CHECK_AFFECTED: affected });
-    for (const h of ["pnpm install", "scripts/check-globalsetup-env.sh", "packages/db migration order", "pnpm test:guard"]) {
+    for (const h of ["pnpm install", "declared cross-package imports", "scripts/check-globalsetup-env.sh", "packages/db migration order", "pnpm test:guard"]) {
       assert.ok(r.headers.includes(`==> ${h}`), `${h} (${affected})`);
     }
     assert.ok(r.out.includes("(dry run) bash packages/db/scripts/check-migration-order.sh"));

@@ -23,6 +23,7 @@
   "devDependencies": {
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/runner": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "typescript": "^5.7.2",
