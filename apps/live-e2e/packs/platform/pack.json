@@ -1,0 +1,16 @@
+{
+  "id": "platform",
+  "rows": ["P1", "P2", "P3"],
+  "tier": "smoke",
+  "tags": ["@ui", "@api"],
+  "targets": ["staging", "production"],
+  "destructive": false,
+  "model_spend": false,
+  "projects": ["desktop", "phone", "tablet"],
+  "needs": ["bypass"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/web/app/api/health/**", "apps/web/middleware.ts", "apps/web/next.config.*"]
+}

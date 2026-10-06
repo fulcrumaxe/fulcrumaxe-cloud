@@ -1,0 +1,8 @@
+{
+  "name": "production",
+  "origin_env": "LIVE_E2E_PRODUCTION_ORIGIN",
+  "project_id_env": "LIVE_E2E_PRODUCTION_PROJECT_ID",
+  "protected": true,
+  "env": ["VERCEL_AUTOMATION_BYPASS_SECRET"],
+  "budget_usd": { "default": 0, "max": 0 }
+}

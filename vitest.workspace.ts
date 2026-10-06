@@ -52,6 +52,9 @@ export default defineWorkspace([
       setupFiles: ["./src/setup.ts"],
     },
   },
+  // Live end-to-end packs: vitest runs only apps/live-e2e/test/**/*.test.ts (its own vitest.config.ts);
+  // the Playwright *.spec.ts files under packs/ are never collected.
+  "apps/live-e2e",
   "packages/api",
   "packages/billing",
   "packages/core",

@@ -1,0 +1,25 @@
+{
+  "name": "live-e2e",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Live end-to-end packs against the deployed app (staging now, production smoke later). This slice: pack manifest, selection, targets with the production guard, env-only needs, and the plan command. No browser is started here.",
+  "bin": {
+    "live-e2e": "bin/live-e2e.mjs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "live-e2e": "workspace:*",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
