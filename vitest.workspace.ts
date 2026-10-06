@@ -64,6 +64,7 @@ export default defineWorkspace([
   "packages/discussions",
   "packages/env-build",
   "packages/env-network",
+  "packages/env-orchestration",
   "packages/env-presets",
   "packages/env-spec",
   "packages/features",
