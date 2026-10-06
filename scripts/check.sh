@@ -60,6 +60,9 @@ fi
 echo "==> pnpm install"
 run pnpm install --frozen-lockfile
 
+echo "==> declared cross-package imports"
+run node --test scripts/ci/declared-imports.test.mjs
+
 if [ "$mode" = full ]; then
   echo "==> pnpm lint"
   run pnpm lint

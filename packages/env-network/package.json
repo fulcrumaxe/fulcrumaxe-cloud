@@ -18,6 +18,7 @@
     "@fx/env-spec": "workspace:*"
   },
   "devDependencies": {
+    "@fx/runner": "workspace:*",
     "@types/node": "^24.19.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

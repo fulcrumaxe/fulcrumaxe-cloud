@@ -20,6 +20,9 @@
   },
   "devDependencies": {
     "@fx/billing": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "@fx/webhooks": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "stripe": "^17.4.0",
