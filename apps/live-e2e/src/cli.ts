@@ -15,15 +15,15 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPacks, ManifestError, TIERS, type Tier } from "./manifest.js";
+import { loadPacks, ManifestError, TIERS, type Pack, type Tier } from "./manifest.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
-import { readHostProbe, type HostProbe } from "./needs.js";
+import { BYPASS_ENV, readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
 import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
 import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
-import { loadTarget, TargetError } from "./targets.js";
+import { identityGuard, isProdSafe, loadTarget, readDeploymentIdentity, TargetError } from "./targets.js";
 
 export interface Args {
   command: "plan" | "run";
@@ -98,6 +98,8 @@ export interface Io {
   /** Test seams for `run`: the Playwright runner and the path of its CLI. */
   exec?: Executor;
   cli?: string;
+  /** Test seam: the fetch layer 2 reads `/api/health` with. */
+  fetch?: typeof fetch;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
@@ -214,7 +216,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
             repoRoot: io.repoRoot ?? resolve(io.root, "..", ".."),
             ledgerFile: join(io.root, "routing-ledger.json"),
           });
-    const plan = buildPlan({
+    const planInput = {
       ...(routing !== undefined ? { routing } : {}),
       packs,
       target,
@@ -223,7 +225,17 @@ export async function main(argv: string[], io: Io): Promise<number> {
       ...(tier !== undefined ? { tier } : {}),
       ...(args.tag !== undefined ? { tag: args.tag } : {}),
       ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
-    });
+    };
+    let plan = buildPlan(planInput);
+    if (args.command === "run") {
+      // Layer 2 (T5): before any pack that is not prod-safe, ask the origin who it is. Only when one would run.
+      const packById = new Map(packs.map((p) => [p.id, p]));
+      if (plan.selected.some((s) => !isProdSafe(packById.get(s.id) as Pack))) {
+        const identity = await readDeploymentIdentity(target, target.protected ? io.env[BYPASS_ENV] : undefined, io.fetch);
+        const layer2 = identityGuard(identity, target);
+        if (layer2 !== null) plan = buildPlan({ ...planInput, layer2 });
+      }
+    }
     const outFile = resolve(io.cwd, args.out ?? "plan.json");
     mkdirSync(dirname(outFile), { recursive: true });
     writeFileSync(outFile, `${JSON.stringify(plan, null, 2)}\n`);

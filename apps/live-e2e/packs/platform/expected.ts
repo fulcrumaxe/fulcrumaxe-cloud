@@ -15,7 +15,30 @@ export const EXPECTED_SHELL_HEADERS: Record<string, string> = {
 
 export const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 
-/** Exact bodies of the static contract routes. `/api/health` is checked by shape (T5 adds fields to it). */
+/**
+ * What `/api/health` must say, by target (T5). Staging identifies itself fully; production gives `deploy_env`
+ * only (no project id, no commit). Returns the violations; empty means the body is as expected.
+ */
+export function healthViolations(body: unknown, target: { name: string; project_id: string }): string[] {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return ["body is not an object"];
+  const b = body as Record<string, unknown>;
+  const out: string[] = [];
+  if (b.ok !== true) out.push("ok is not true");
+  if (b.config !== "ok") out.push("config is not ok");
+  if (b.planData !== "ok" && b.planData !== "missing") out.push("planData is neither ok nor missing");
+  if (b.deploy_env !== target.name) out.push(`deploy_env is not ${target.name}`);
+  const keys = Object.keys(b).sort().join(",");
+  if (target.name === "staging") {
+    if (b.project_id !== target.project_id) out.push("project_id is not the staging project's");
+    if (b.commit !== null && typeof b.commit !== "string") out.push("commit is neither a string nor null");
+    if (keys !== "commit,config,deploy_env,ok,planData,project_id") out.push(`unexpected keys: ${keys}`);
+  } else if (keys !== "config,deploy_env,ok,planData") {
+    out.push(`unexpected keys: ${keys}`);
+  }
+  return out;
+}
+
+/** Exact bodies of the static contract routes. `/api/health` differs by target and is checked by `healthViolations`. */
 export const EXPECTED_BODIES: Record<string, unknown> = {
   "/api/mode": {
     mode: "cloud",
