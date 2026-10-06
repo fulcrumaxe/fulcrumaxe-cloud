@@ -1167,17 +1167,29 @@ test("pr-gates fixture: a diff adding docs/ops/x.md fails the denylist and names
 // required check as passing; the wrapper must not. That script is private-plane tooling (it is not in the
 // public tree), so this block runs only where it exists.
 const statusLib = path.join(repoRoot, "scripts/lib/ci-status-check.sh");
+// What the last gate run printed, so a red assertion says why instead of just "fail".
+let lastStatusDetail = "";
+// The gate shells out to python3. Whatever PATH a nested `bash -c` ends up with on a given runner, python3 must
+// be reachable: the directory is taken from the interpreter this process itself can run, and put first inside
+// the script, so the control case does not depend on the runner's own PATH (on the CI runner the nested bash
+// saw the service PATH, which has no python3, and the gate failed closed with "unrecognized evaluator response").
+const pythonDir = (() => {
+  const py = spawnSync("python3", ["-c", "import sys, os; print(os.path.dirname(sys.executable))"], { encoding: "utf8" });
+  return py.status === 0 ? py.stdout.trim() : "";
+})();
 function runStatusGate(runs, { disabled = false } = {}) {
   const env = {
     PATH: process.env.PATH,
     HOME: process.env.HOME ?? "/nonexistent",
     LIB: statusLib,
+    PY_DIR: pythonDir,
     CI_STATUS_TEST_MODE: "1",
     CI_KILL_SWITCH_OVERRIDE: disabled ? "true" : "HTTP_404",
     CI_STATUS_HEAD_SHA_1: "abc1234",
     CI_STATUS_OVERRIDE_1: JSON.stringify(runs),
   };
-  const r = spawnSync("bash", ["-c", 'source "$LIB"; CI_REQUIRED_CHECKS=("check" "pr-gates"); check_ci_status 1 example/example >/dev/null 2>&1; rc=$?; echo "rc=$rc state=$CI_STATUS_STATE"'], { env, encoding: "utf8" });
+  const r = spawnSync("bash", ["-c", '[ -z "$PY_DIR" ] || PATH="$PY_DIR:$PATH"; source "$LIB"; CI_REQUIRED_CHECKS=("check" "pr-gates"); check_ci_status 1 example/example >"$GATE_OUT" 2>&1; rc=$?; echo "rc=$rc state=$CI_STATUS_STATE"; echo "reason=$CI_STATUS_FAIL_REASON"; echo "bash=$BASH python3=$(command -v python3) PATH=$PATH"; sed "s/^/gate-output: /" "$GATE_OUT"'], { env: { ...env, GATE_OUT: path.join(tmpdir(), `ci-status-gate-${process.pid}.out`) }, encoding: "utf8" });
+  lastStatusDetail = r.stdout + r.stderr;
   const m = /rc=(\d+) state=(\S*)/.exec(r.stdout);
   assert.ok(m, `no result line: ${r.stdout} ${r.stderr}`);
   return { rc: Number(m[1]), state: m[2] };
@@ -1186,7 +1198,8 @@ const run = (name, conclusion) => ({ name, status: "completed", conclusion, app:
 const skipUnlessGate = { skip: existsSync(statusLib) ? false : "scripts/lib/ci-status-check.sh is private-plane tooling and is not in this tree" };
 
 test("merge gate: every required check green is a pass (the control)", skipUnlessGate, () => {
-  assert.deepEqual(runStatusGate([run("check", "success"), run("pr-gates", "success")]), { rc: 0, state: "pass" });
+  const got = runStatusGate([run("check", "success"), run("pr-gates", "success")]);
+  assert.deepEqual(got, { rc: 0, state: "pass" }, lastStatusDetail);
 });
 
 test("merge gate: a required check that concluded skipped is not a pass", skipUnlessGate, () => {
