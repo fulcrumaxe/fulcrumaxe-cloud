@@ -1053,6 +1053,19 @@ test("CI_DISABLED: unset, empty or anything but true leaves CI on (public pull r
   }
 });
 
+// ---- private push to main ---------------------------------------------------------------------------------
+test("check: a push to the private repository is skipped; private pull requests and every public run still run", () => {
+  const job = ciDoc.jobs.check;
+  assert.equal(job.if, "vars.CI_DISABLED != 'true' && !(github.event_name == 'push' && github.event.repository.private == true)");
+  const ctx = (event, isPrivate) => ({ "github.event_name": event, "github.event.repository.private": isPrivate, "vars.CI_DISABLED": "false" });
+  assert.equal(Boolean(evalExpr(job.if, ctx("push", true))), false, "private push to main must be skipped");
+  assert.equal(Boolean(evalExpr(job.if, ctx("pull_request", true))), true, "overlay PRs on the private repo still get CI");
+  assert.equal(Boolean(evalExpr(job.if, ctx("push", false))), true, "public push to main still runs");
+  assert.equal(Boolean(evalExpr(job.if, ctx("pull_request", false))), true);
+  // the other jobs are pull_request-only, so a private push already skips every job in the workflow
+  for (const [name, j] of jobsOf(ciDoc)) assert.equal(Boolean(evalExpr(j.if, { ...ctx("push", true), "github.event.label.name": "", "github.event.pull_request.head.repo.full_name": "", "github.repository": "" })), false, `${name} ran on a private push`);
+});
+
 // ---- pr-gates ----------------------------------------------------------------------------------------------
 const prGates = ciDoc.jobs["pr-gates"];
 
