@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { TOKEN_SHAPE_PATTERN_SOURCES } from "@fulcrumaxe/runner-protocol";
 import { describe, expect, it } from "vitest";
-import { PACKAGE_DIR } from "./helpers/srcFiles.js";
+import { IMPORT_SPECIFIER, PACKAGE_DIR, filesUnder, opaqueLoads } from "./helpers/srcFiles.js";
 
 const manifest = JSON.parse(readFileSync(path.join(PACKAGE_DIR, "package.json"), "utf8")) as {
   private?: boolean;
@@ -13,12 +13,6 @@ const manifest = JSON.parse(readFileSync(path.join(PACKAGE_DIR, "package.json"),
   devDependencies?: Record<string, string>;
 };
 
-function filesUnder(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const full = path.join(dir, name);
-    return statSync(full).isDirectory() ? filesUnder(full) : [full];
-  });
-}
 const sourceFiles = filesUnder(path.join(PACKAGE_DIR, "src")).filter((f) => f.endsWith(".ts"));
 const testFiles = filesUnder(path.join(PACKAGE_DIR, "test")).filter((f) => f.endsWith(".ts"));
 
@@ -44,7 +38,19 @@ describe("licence and manifest", () => {
 });
 
 describe("boundary: what the source may import, and every workspace import is declared", () => {
-  const specifier = /(?:\bfrom\s+|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gm;
+  const specifier = IMPORT_SPECIFIER;
+
+  it("src loads no module in a way the import scan cannot see: no createRequire, no computed import() or require()", () => {
+    for (const file of sourceFiles) expect(opaqueLoads(readFileSync(file, "utf8")), file).toEqual([]);
+  });
+
+  it("the scans see template-literal and computed loads, and createRequire", () => {
+    const tick = "`";
+    const sample = `import(${tick}./${"$"}{name}.js${tick}); require(name); createRequire(import.meta.url); import(${tick}node:fs${tick}); import("node:fs");`;
+    expect(opaqueLoads(sample)).toEqual(["createRequire", "import(`./${name}.js`)", "require(name)"]);
+    const found = [...`import(${tick}@scope/pkg${tick})`.matchAll(specifier)].map((m) => m[1]);
+    expect(found).toEqual(["@scope/pkg"]);
+  });
 
   it("src imports only itself, node built-ins and the protocol package", () => {
     const violations: string[] = [];
@@ -85,5 +91,11 @@ describe("G4: nothing secret in the source, the tests or the README", () => {
       for (const source of TOKEN_SHAPE_PATTERN_SOURCES) if (new RegExp(source).test(text)) found.push(`${path.relative(PACKAGE_DIR, file)}: ${source}`);
     }
     expect(found).toEqual([]);
+  });
+
+  it("the scan can find a token: the pattern list is not empty and matches a planted one", () => {
+    expect(TOKEN_SHAPE_PATTERN_SOURCES.length).toBeGreaterThan(0);
+    const planted = ["sk-ant-", "api03-", "A".repeat(24)].join("");
+    expect(TOKEN_SHAPE_PATTERN_SOURCES.some((source) => new RegExp(source).test(`const key = "${planted}";`))).toBe(true);
   });
 });
