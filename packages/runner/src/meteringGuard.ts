@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { RUN_LIMIT_BOUNDS } from "@fx/core/src/run-limits/limits.js";
 import type { RunLimit } from "./executionTarget.js";
 import type { NormalizedEvent } from "./types.js";
@@ -348,8 +349,9 @@ export function createRunGuard(initial: RunLimits, onLimit: (limit: RunLimit) =>
         else limits.maxModelCalls = next;
         try {
           extension.applied(limit, next);
-        } catch {
+        } catch (err) {
           // a throwing observer does not undo the extension, nor leave the limits unarmed
+          reportError(err, { stage: "run.limit_applied" });
         }
         // Whichever limit was raised, the other may have run out while the decision was pending.
         armWall();

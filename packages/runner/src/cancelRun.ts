@@ -10,6 +10,7 @@ import {
   type ExecutionTargetRegistry,
 } from "./executionTarget.js";
 import { isLegalRunTransition, type RunStatus } from "./statusTransitions.js";
+import { reportError } from "@fx/telemetry";
 import { writeRunStatus } from "./runStatusWriter.js";
 import type { Product, Role } from "./types.js";
 
@@ -190,12 +191,16 @@ export async function cancelRun(
     try {
       target = resolveExecutionTarget(row.execution_mode, registry);
     } catch {
+      // fx-swallow-ok: an unregistered or legacy execution mode is the expected answer here; it falls closed to the target-agnostic release below
       target = undefined;
     }
   }
 
   const totals: CancelResult = target
-    ? await target.cancel(run).catch(() => fallbackRelease(pool, principal.accountId, runId))
+    ? await target.cancel(run).catch((err: unknown) => {
+        reportError(err, { stage: "run.cancel_target" });
+        return fallbackRelease(pool, principal.accountId, runId);
+      })
     : await fallbackRelease(pool, principal.accountId, runId);
 
   return { status, settled_usd: totals.settled_usd, released_usd: totals.released_usd };

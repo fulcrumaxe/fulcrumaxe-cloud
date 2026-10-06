@@ -1135,7 +1135,8 @@ export class SandboxTarget implements ExecutionTarget {
     try {
       handle = { runId: run.id, sandboxName: sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr }) };
     } catch {
-      return; // no identifiable sandbox
+      // fx-swallow-ok: a run whose identity cannot name a sandbox has none to delete; that is an expected answer
+      return;
     }
     try {
       await this.deps.sandboxPort.deleteSandbox(handle);
@@ -1149,7 +1150,8 @@ export class SandboxTarget implements ExecutionTarget {
     try {
       const sandboxName = sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr });
       return await this.deps.sandboxPort.sandboxExists({ runId: run.id, sandboxName });
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "run.sandbox_exists" });
       return true;
     }
   }
@@ -1176,8 +1178,9 @@ export class SandboxTarget implements ExecutionTarget {
       try {
         const sandboxName = sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr });
         usage = await this.deps.sandboxPort.measure({ runId: run.id, sandboxName }, state.sessionIds);
-      } catch {
+      } catch (err) {
         // Unreadable now: the figures stay missing, so the deferred settle tries again and then takes a lower tier.
+        reportError(err, { stage: "run.measure" });
       }
     }
     return figuresOf(state.sessionIds, usage, state.selfMeasured);
@@ -1249,7 +1252,8 @@ export class SandboxTarget implements ExecutionTarget {
         if (!bk.cancelled) await this.finalize(run, report);
         await this.deps.hooks.resume(bk.hookToken, { runId: run.id, status: report.status });
       }
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "run.finalize_resume" });
       console.warn(JSON.stringify({ event: "run.finalize_or_resume_failed", run_id: run.id }));
     }
     // Pruning does NOT happen here (a prior fix round's mistake this PR
@@ -1490,8 +1494,9 @@ export class SandboxTarget implements ExecutionTarget {
               }),
             };
           await this.stopAndMeasure(run, bk, handle);
-        } catch {
+        } catch (err) {
           // best-effort -- see comment above.
+          reportError(err, { stage: "run.cancel_stop" });
         }
       }
       // D#2 H09b2 fix round 1 (S-MUST 1): a cancelled/timed-out run (the
@@ -1595,8 +1600,9 @@ export class SandboxTarget implements ExecutionTarget {
       if (state.requestedAt !== null) await this.markSandbox(run, { stopped: true }).catch(() => reportError(new Error("stop mark failed"), { stage: "run.stop_mark" }));
       try {
         await port.stop(handle);
-      } catch {
+      } catch (err) {
         // best-effort -- matches the reservation-gated stop's own handling.
+        reportError(err, { stage: "run.stop" });
       }
       const last = ids[ids.length - 1];
       const started = last === undefined ? undefined : bk.sessionStartedMs.get(last);
@@ -1625,7 +1631,8 @@ export class SandboxTarget implements ExecutionTarget {
       try {
         handle = { runId: run.id, sandboxName: sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr }) };
       } catch {
-        return; // no identifiable sandbox
+        // fx-swallow-ok: a run whose identity cannot name a sandbox has none to delete; that is an expected answer
+        return;
       }
     }
     if (!handle) return; // this instance never made one, and `derive` was not asked for
@@ -1641,7 +1648,8 @@ export class SandboxTarget implements ExecutionTarget {
       try {
         handle = { runId: run.id, sandboxName: sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr }) };
       } catch {
-        return undefined; // no identifiable sandbox (see `cancel`)
+        // fx-swallow-ok: a run whose identity cannot name a sandbox has none to delete; that is an expected answer
+        return undefined;
       }
     }
     if (!bk.stoppedDirectly) {

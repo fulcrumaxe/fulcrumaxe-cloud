@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RUN_LIMIT_BOUNDS } from "@fx/core/src/run-limits/limits.js";
+import { configureErrorReporter } from "@fx/telemetry";
 import { normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { RunLimit } from "../src/executionTarget.js";
 import {
@@ -292,6 +293,28 @@ describe("createRunGuard with an extension: a pending decision does not disable 
     expect(guard.current().maxRunMs).toBe(9000);
     await vi.advanceTimersByTimeAsync(4000); // the wall was re-armed for the new deadline
     expect(fired).toEqual([{ kind: "run_time", limit: 9000, observed: 9000 }]);
+  });
+
+  it("a throwing applied() is reported as a class: its stage, never the planted token in its message", async () => {
+    const lines: string[] = [];
+    configureErrorReporter({ service: "runner", write: (line) => void lines.push(line) });
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const guard = createRunGuard(limits, () => undefined, {
+        decide: async (l) => (l.kind === "run_time" ? 9000 : undefined),
+        applied: () => {
+          throw Object.assign(new Error("recorder failed for h1d-canary-plainword at github.com/octo/repo"), { code: "h1d-canary-plainword" });
+        },
+      });
+      guard.start();
+      await vi.advanceTimersByTimeAsync(5000);
+    } finally {
+      configureErrorReporter({ service: "app" });
+    }
+    expect(lines).toHaveLength(1);
+    const out = lines.join("\n");
+    expect(out).toContain("run.limit_applied");
+    for (const leak of ["h1d-canary", "plainword", "octo", "github.com"]) expect(out).not.toContain(leak);
   });
 
   it("a decision that never settles ends the run at the injected bound with the original limit", async () => {

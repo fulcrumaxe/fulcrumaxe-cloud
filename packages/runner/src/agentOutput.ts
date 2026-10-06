@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordAgentOutput, recordAgentOutputCapped } from "./runStatusWriter.js";
 
@@ -118,7 +119,10 @@ export class AgentOutputRecorder {
       runId: this.runId,
       droppedMessages: this.droppedMessages,
       droppedBytes: this.droppedBytes,
-    }).catch(() => this.fail());
+    }).catch((err: unknown) => {
+      reportError(err, { stage: "run.agent_output_capped" });
+      this.fail();
+    });
   }
 
   private fail(): void {
@@ -153,7 +157,8 @@ export class AgentOutputRecorder {
       await recordAgentOutput(this.pool, { accountId: this.accountId, runId: this.runId, payload });
       this.rows += 1;
       this.bytes += storedBytes;
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "run.agent_output" });
       this.fail();
     }
   }

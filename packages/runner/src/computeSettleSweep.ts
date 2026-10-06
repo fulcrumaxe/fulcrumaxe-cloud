@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import type { ExecutionRun } from "./executionTarget.js";
 import type { Role } from "./types.js";
 import { DEFAULT_SDK_CALL_TIMEOUT_MS } from "./vercelSandboxPort.js";
@@ -102,6 +103,7 @@ export async function sweepComputeSettle(deps: SweepDeps): Promise<SweepResult> 
         result.deleted++;
       } catch (err) {
         result.failed++;
+        reportError(err, { stage: "run.settle_delete" });
         deps.onError?.(run.id, err);
       }
     };
@@ -113,12 +115,14 @@ export async function sweepComputeSettle(deps: SweepDeps): Promise<SweepResult> 
       }
     } catch (err) {
       result.failed++;
+      reportError(err, { stage: "run.settle" });
       deps.onError?.(run.id, err);
       // Back the run off so a settle that keeps throwing cannot crowd newer due runs out of the batch. A throw only:
       // a settle still waiting for figures (wrote=false) is not a failure. If this write fails, the run stays due.
       try {
         await recordSettleFailed(deps.pool, run);
       } catch (markErr) {
+        reportError(markErr, { stage: "run.settle_mark" });
         deps.onError?.(run.id, markErr);
       }
       // Backstop: past the deadline a stopped sandbox is not left to run up cost because its settle keeps failing.
