@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. This slice has one command, `plan`; `run` arrives with T1b.
+ * The `live-e2e` command line. Commands: `plan` and `scrub` (the upload gate); `run` arrives with T1b.
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -14,8 +14,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPacks, ManifestError, TIERS, type Tier } from "./manifest.js";
+import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
+import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
 import { loadTarget, TargetError } from "./targets.js";
 
@@ -89,7 +91,91 @@ export function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+/**
+ * `live-e2e scrub --dir <folder> [--manifest <file>] [--target <name> --include-unscanned <glob>]...`: the gate in
+ * front of the artifact upload. Only text files and PNG screenshots may be uploaded; every other file is listed as
+ * `not-uploaded:<type>` and left out (not an error). The manifest is the upload set: `upload`, `not_uploaded` and
+ * `included_unscanned`.
+ *
+ * `--include-unscanned <glob>` (repeatable) is the debugging opt-in: matching files that are not on the allowlist
+ * are put in the upload set WITHOUT being opened. It needs `--target`, and is refused on production (exit 2).
+ *
+ * Exit 0 when nothing matched, 1 when a secret was found or an allowed file is not what it claims (each finding
+ * printed as path, kind and route, never the value), 2 on usage errors and refusals. Runtime secrets come from the
+ * file named by LIVE_E2E_MASK_FILE; the run's own environment is checked too.
+ */
+function scrubCommand(argv: string[], io: Io): number {
+  const usage = "usage: live-e2e scrub --dir <folder> [--manifest <file>] [--target <name> --include-unscanned <glob>]...";
+  let dir: string | undefined;
+  let manifest: string | undefined;
+  let target: string | undefined;
+  const globs: string[] = [];
+  for (let i = 0; i < argv.length; i += 2) {
+    const flag = argv[i];
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      io.stderr(usage);
+      return 2;
+    }
+    if (flag === "--dir" && dir === undefined) dir = value;
+    else if (flag === "--manifest" && manifest === undefined) manifest = value;
+    else if (flag === "--target" && target === undefined) target = value;
+    else if (flag === "--include-unscanned") globs.push(value);
+    else {
+      io.stderr(usage);
+      return 2;
+    }
+  }
+  if (dir === undefined) {
+    io.stderr(usage);
+    return 2;
+  }
+  if (globs.length > 0) {
+    if (target === undefined) {
+      io.stderr("--include-unscanned needs --target");
+      return 2;
+    }
+    try {
+      const refusal = includeUnscannedRefusal(loadTarget(join(io.root, "targets"), target, io.env).name);
+      if (refusal !== null) {
+        io.stderr(`REFUSED ${refusal}`);
+        return 2;
+      }
+    } catch (err) {
+      if (err instanceof TargetError) {
+        io.stderr(err.message);
+        return 2;
+      }
+      throw err;
+    }
+  }
+  const maskFile = io.env[MASK_FILE_ENV];
+  let result: ScanResult;
+  try {
+    const registry = new MaskRegistry({ emit: () => undefined, ...(maskFile ? { file: maskFile } : {}) });
+    result = scanDir(resolve(io.cwd, dir), { registry, env: io.env }, { includeUnscanned: globs });
+  } catch (err) {
+    // Never an uncaught throw: a gate that crashes looks like a leak with no path. The message of a MaskError
+    // names a file, not a value; anything else is reported without its text.
+    io.stderr(`SECRET .: ${err instanceof MaskError ? `unscannable:${err.message}` : "unscannable:internal-error"} (plain)`);
+    io.stdout("scrub: could not complete, 1 finding(s)");
+    return 1;
+  }
+  for (const n of result.notUploaded) io.stdout(`not-uploaded:${n.type} ${n.path}`);
+  for (const f of result.includedUnscanned) io.stdout(`included-unscanned ${f}`);
+  for (const f of result.findings) io.stderr(`SECRET ${describeFinding(f)}`);
+  if (manifest !== undefined) {
+    const file = resolve(io.cwd, manifest);
+    mkdirSync(dirname(file), { recursive: true });
+    const body = { version: 1, upload: result.upload, not_uploaded: result.notUploaded, included_unscanned: result.includedUnscanned };
+    writeFileSync(file, `${JSON.stringify(body, null, 2)}\n`);
+  }
+  io.stdout(`scrub: ${result.files} file(s) scanned, ${result.upload.length} to upload, ${result.notUploaded.length} not uploaded, ${result.findings.length} finding(s)`);
+  return result.findings.length > 0 ? 1 : 0;
+}
+
 export async function main(argv: string[], io: Io): Promise<number> {
+  if (argv[0] === "scrub") return scrubCommand(argv.slice(1), io);
   let args: Args;
   try {
     args = parseArgs(argv);
