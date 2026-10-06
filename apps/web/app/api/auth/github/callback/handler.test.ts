@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import type { AuthProvider } from "@fx/core/src/auth/provider";
+import { GitHubOAuthProvider, type AuthProvider } from "@fx/core/src/auth/provider";
 import { SESSION_COOKIE_NAME } from "@fx/core/src/auth/session";
 import { fakePlatformOpsPool } from "../../_lib/testFakes";
+import { captureReports } from "../../../../../test/captureReports";
 import { OAUTH_STATE_COOKIE } from "../handler";
 import { githubCallbackHandler } from "./handler";
 
@@ -45,6 +46,67 @@ describe("GET /api/auth/github/callback", () => {
     );
     const res = await githubCallbackHandler(req, fakeProvider(), fakePlatformOpsPool());
     expect(res.status).toBe(400);
+  });
+
+  it("reports a failed code exchange by stage, route and code, never the provider's text", async () => {
+    const reports = captureReports();
+    const provider: AuthProvider = {
+      name: "fake",
+      getAuthorizationUrl: vi.fn(),
+      exchangeCode: vi.fn().mockRejectedValue(Object.assign(new Error("upstream said alice-h1c-canary@example.com"), { code: "ECONNRESET" })),
+    };
+    const req = requestWithStateCookie("https://example.test/api/auth/github/callback?code=abc&state=s1", "s1");
+    const res = await githubCallbackHandler(req, provider, fakePlatformOpsPool());
+    expect(res.status).toBe(400);
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/auth/github/callback", stage: "auth.exchange_code", code: "ECONNRESET" }]);
+    expect(reports.everything()).not.toContain("alice-h1c-canary");
+  });
+
+  describe("which exchange failures are reported (the real provider over a fake fetch)", () => {
+    const answer = (token: Response, user?: Response) =>
+      new GitHubOAuthProvider(
+        { clientId: "cid", clientSecret: "secret", callbackUrl: "https://example.test/cb" },
+        vi.fn().mockResolvedValueOnce(token).mockResolvedValueOnce(user ?? new Response("{}")) as unknown as typeof fetch,
+      );
+    const run = async (provider: AuthProvider) => {
+      const reports = captureReports();
+      const req = requestWithStateCookie("https://example.test/api/auth/github/callback?code=abc&state=s1", "s1");
+      const res = await githubCallbackHandler(req, provider, fakePlatformOpsPool());
+      return { res, reports };
+    };
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+    it("a stale or made-up code (200 with bad_verification_code) is the caller's: 400, nothing reported", async () => {
+      const { res, reports } = await run(answer(json({ error: "bad_verification_code" })));
+      expect(res.status).toBe(400);
+      expect(reports.classes).toEqual([]);
+    });
+
+    it("an account with no verified email is the caller's: 400, nothing reported", async () => {
+      const provider = new GitHubOAuthProvider(
+        { clientId: "cid", clientSecret: "secret", callbackUrl: "https://example.test/cb" },
+        vi
+          .fn()
+          .mockResolvedValueOnce(json({ access_token: "t" }))
+          .mockResolvedValueOnce(json({ id: 1, login: "a", email: null, name: null }))
+          .mockResolvedValueOnce(json([])) as unknown as typeof fetch,
+      );
+      const { res, reports } = await run(provider);
+      expect(res.status).toBe(400);
+      expect(reports.classes).toEqual([]);
+    });
+
+    it("a non-2xx from the token endpoint, a wrong client secret and a failing /user are reported", async () => {
+      for (const provider of [
+        answer(json({}, 503)),
+        answer(json({ error: "incorrect_client_credentials" })),
+        answer(json({ access_token: "t" }), json({}, 500)),
+      ]) {
+        const { res, reports } = await run(provider);
+        expect(res.status).toBe(400);
+        expect(reports.classes).toEqual([{ service: "test", route: "/api/auth/github/callback", stage: "auth.exchange_code", code: "other" }]);
+      }
+    });
   });
 
   it("rejects when the code exchange fails", async () => {

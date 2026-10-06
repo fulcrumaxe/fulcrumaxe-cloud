@@ -37,6 +37,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "idempotency_key_reused",
   "idempotency_not_supported",
   "import_running",
+  "installation_not_writable",
   "insufficient_scope",
   "install_first",
   "internal_error",
@@ -55,11 +56,14 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "not_approvable",
   "action_not_available",
   "not_cancellable",
+  "not_supported",
   "not_found",
   "not_pausable",
   "not_paused",
   "not_reorderable",
+  "payload_too_large",
   "payment_not_settled",
+  "plan_data_unavailable",
   "plan_import_unavailable",
   "preview_cap_not_confirmed",
   "preview_capacity",
@@ -78,6 +82,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sync_not_active",
   "tokens_not_available",
   "unauthenticated",
+  "unknown_role",
   "unsupported_media_type",
   "untrusted_author",
   "validation_failed",
@@ -125,7 +130,40 @@ export const STRIPE_ERROR_CODES: readonly string[] = [
   "url_invalid",
 ];
 
-const LITERAL_CODES: ReadonlySet<string> = new Set([...OWN_ERROR_CODES, ...STRIPE_ERROR_CODES]);
+/**
+ * The codes a browser may report through `POST /api/rum` (H1c). A signed-in caller picks one of these and one of
+ * CLIENT_WINDOW_IDS; nothing else is accepted. They are listed here, not matched by a `client.` prefix, so a
+ * caller can never mint a code of its own.
+ */
+export const CLIENT_ERROR_CODES: readonly string[] = [
+  "client.render_failed",
+  "client.request_failed",
+  "client.request_timeout",
+  "client.script_error",
+  "client.unhandled_rejection",
+];
+
+/** The one class an anonymous browser report is stored under: the caller chooses nothing. */
+export const CLIENT_ANONYMOUS_CODE = "client.anonymous";
+
+/** The workspace windows a signed-in report may name (the directory names under apps/workspace). */
+export const CLIENT_WINDOW_IDS: readonly string[] = [
+  "activation",
+  "agents",
+  "budget-billing",
+  "developer",
+  "kanban",
+  "model-key",
+  "onboarding",
+  "pipeline",
+  "repos",
+  "roles",
+  "runs",
+  "site-review",
+  "themes",
+];
+
+const LITERAL_CODES: ReadonlySet<string> = new Set([...OWN_ERROR_CODES, ...STRIPE_ERROR_CODES, ...CLIENT_ERROR_CODES, CLIENT_ANONYMOUS_CODE]);
 // Every real SQLSTATE has a digit in it (the class is two characters, the subclass three, '000' for the general case).
 const SQLSTATE = /^(?=.*[0-9])[0-9A-Z]{5}$/;
 const NODE_ERR = /^ERR_[A-Z0-9_]{1,60}$/;

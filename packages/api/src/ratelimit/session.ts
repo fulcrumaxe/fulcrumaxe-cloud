@@ -99,6 +99,8 @@ export const SESSION_LIMITS = {
   githubReturn: { name: "github-return", account: TEN_PER_MINUTE },
   /** Starting a plan import reads a repository through the code host (up to 400 requests): 20 an hour per account. The database holds the per-repository 6 an hour. */
   planImport: { name: "plan-import", account: [{ limit: 20, seconds: 3600 }] },
+  /** A signed-in browser's error report to `POST /api/rum`: 30 a minute per account (the report is a log line and one coalesced upsert). */
+  rumClientError: { name: "rum-client-error", account: [{ limit: 30, seconds: 60 }] },
   /** Redeeming an invitation token: a guessing path, so capped per user as well as per account. */
   invitationAccept: { name: "invitation-accept", account: TEN_PER_MINUTE, user: TEN_PER_MINUTE },
 } as const satisfies Record<string, SessionLimit>;

@@ -5,6 +5,9 @@ export { VolumeCap, VOLUME_CAP_LIMIT, VOLUME_CAP_MAX_KEYS, VOLUME_CAP_WINDOW_MS 
 export { EVENTS, EVENT_CODE_PATTERN, isEventCode } from "./events.js";
 export type { EventCode } from "./events.js";
 export {
+  CLIENT_ANONYMOUS_CODE,
+  CLIENT_ERROR_CODES,
+  CLIENT_WINDOW_IDS,
   LABEL_PATTERN,
   OTHER_ERROR_CODE,
   OVERFLOW_ERROR_CODE,

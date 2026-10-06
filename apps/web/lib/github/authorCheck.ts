@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import { resolveChecked } from "@fx/net-guard";
 import { platformOpsPool } from "@fx/api/src/sse/pools.js";
 import {
@@ -43,7 +44,9 @@ export const getAuthorCheck: AuthorCheckProvider = () => {
   try {
     lookup ??= build();
     return { lookup, allowlist: intakeAllowlist() ?? [] };
-  } catch {
+  } catch (err) {
+    // Unavailable, never trusted (see above); the failure is counted so a missing setting shows up.
+    reportError(err, { stage: "author_check.build" });
     return null;
   }
 };

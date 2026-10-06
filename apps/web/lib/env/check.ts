@@ -60,6 +60,7 @@ function parseUrl(value: string): URL | null {
   try {
     return new URL(value);
   } catch {
+    // fx-swallow-ok: a value that does not parse as a URL is reported by the caller as a fixed reason code
     return null;
   }
 }
@@ -107,6 +108,7 @@ export function validateValue(validation: Validation, value: string): string | n
         createPrivateKey(value);
         return null;
       } catch {
+        // fx-swallow-ok: a fixed reason code is returned; the parser's message can quote key material and must never reach a result
         return "not_a_pem_private_key";
       }
     case "ed25519-private-key":

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { reportError } from "@fx/telemetry";
 import type { AuthProvider } from "@fx/core/src/auth/provider";
 import { defaultGithubProvider } from "../_lib/deps";
 
@@ -32,7 +33,9 @@ export function canonicalOriginRedirect(req: NextRequest): NextResponse | null {
   let canonical: URL;
   try {
     canonical = new URL(raw);
-  } catch {
+  } catch (err) {
+    // The sign-in goes ahead on this host, but a setting that does not parse is ours to hear about.
+    reportError(err, { stage: "auth.canonical_origin", route: req.nextUrl.pathname });
     return null;
   }
   if (req.nextUrl.host === canonical.host) return null;

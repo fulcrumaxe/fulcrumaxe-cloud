@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import type { AuthProvider } from "@fx/core/src/auth/provider";
+import { captureReports } from "../../../../test/captureReports";
 import { OAUTH_STATE_COOKIE, githubSignInHandler } from "./handler";
 
 describe("GET /api/auth/github", () => {
@@ -52,6 +53,15 @@ describe("GET /api/auth/github", () => {
       const res = await githubSignInHandler(new NextRequest("https://alias.example/api/auth/github"), provider());
       expect(res.headers.get("location")).toBe("https://github.example/authorize?state=abc");
       expect(res.cookies.get(OAUTH_STATE_COOKIE)).toBeDefined();
+    });
+
+    it("reports an unparsable canonical origin (our setting) and still signs the user in on this host", async () => {
+      const reports = captureReports();
+      vi.stubEnv("FX_APP_ORIGIN", "not a url alice-h1c-canary@example.com");
+      const res = await githubSignInHandler(new NextRequest("https://alias.example/api/auth/github"), provider());
+      expect(res.headers.get("location")).toBe("https://github.example/authorize?state=abc");
+      expect(reports.classes).toEqual([{ service: "test", route: "/api/auth/github", stage: "auth.canonical_origin", code: "ERR_INVALID_URL" }]);
+      expect(reports.everything()).not.toContain("alice-h1c-canary");
     });
 
     it("never lets Host or X-Forwarded-Host choose the redirect target", async () => {

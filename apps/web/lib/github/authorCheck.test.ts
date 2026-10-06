@@ -5,7 +5,6 @@ import { checkRetryAuthor } from "@fx/core/src/runActions/authorCheck.js";
 import { defaultGithubWebhookDeps } from "../../app/api/github/webhook/handler";
 import { getAuthorCheck, setAuthorCheckSeamForTests } from "./authorCheck";
 import { setIntakeAllowlistForTests } from "./intakeTrust";
-
 /**
  * D#31 AUTHOR-CHECK-WIRE A3, A4, A5: the production provider over a fetch fake, a fake
  * platform_ops resolver (the test seam) and a fake pg pool. Nothing here reaches a network or a database.
@@ -61,7 +60,14 @@ describe("fail closed (A3)", () => {
     vi.resetModules();
     const fresh = await import("./authorCheck");
     vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "");
+    // The reporter is process-wide per module graph, so it is configured on the fresh graph's copy.
+    const { configureErrorReporter } = await import("@fx/telemetry");
+    const classes: unknown[] = [];
+    configureErrorReporter({ service: "test", write: () => undefined, sink: { record: (event) => void classes.push(event) } });
     expect(fresh.getAuthorCheck()).toBeNull();
+    // The failure is counted by stage, with no message.
+    expect(classes).toEqual([{ service: "test", route: "/", stage: "author_check.build", code: "other" }]);
+    configureErrorReporter({ service: "app" });
     vi.stubEnv("DATABASE_URL_PLATFORM_OPS", "postgres://u:p@127.0.0.1:1/none");
     expect(fresh.getAuthorCheck()).not.toBeNull();
   });
