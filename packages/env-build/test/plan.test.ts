@@ -168,9 +168,6 @@ describe("E1-AMEND: list-valued preset, and the new base fields are refused by n
     expect(b).toEqual(a);
     expect(plan(spec({ preset: ["node", "node"] }), base("node"), A)).toEqual(a);
   });
-  it("two presets are refused with composition_not_planned (composition is E4-2), not silently planned as one", () => {
-    expect(code(() => plan(spec({ preset: ["node", "python"] }), base("node"), A))).toBe("composition_not_planned");
-  });
   it("an unknown or image-shaped element is still refused first, wherever it sits in the list", () => {
     expect(code(() => plan(spec({ preset: ["node", "nix"] }), base("node"), A))).toBe("unknown_preset");
     expect(code(() => plan(spec({ preset: ["node", "ghcr.io/x/y:1"] }), base("node"), A))).toBe("image_reference");

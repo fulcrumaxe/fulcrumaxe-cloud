@@ -32,7 +32,7 @@ export function renderLayer(layer: Layer): string[] {
     out.push(`COPY --chmod=${f.mode} <<'${HEREDOC}' ${f.path}`, `${body}${HEREDOC}`);
   }
   for (const [k, v] of Object.entries(layer.env ?? {})) {
-    if (!/^[A-Z][A-Z0-9_]*$/.test(k) || /[\s"\\$\n]/.test(v)) throw new EnvBuildError("invalid_layer_env", `layer ${layer.id} has an env entry that is not a plain literal`);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(k) || /[\s"\\$\n]/.test(v.replaceAll("${PATH}", ""))) throw new EnvBuildError("invalid_layer_env", `layer ${layer.id} has an env entry that is not a plain literal`);
     out.push(`ENV ${k}="${v}"`);
   }
   for (const s of layer.steps) out.push(runLine(s));
