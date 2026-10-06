@@ -309,9 +309,9 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then unset FX_CHECK_AFFECTED; fi
           nix develop .#ci --command bash scripts/check.sh
 
-      # The runner protocol package is installed on customers' machines, where the supported minimum is Node
-      # 22.22.2, while this repository builds and tests on Node 24. This step runs that package's own tests under
-      # Node 22 so the minimum stays true. It takes seconds on the machine the job is already on: no new job, no
+      # The runner protocol package and the local runner (packages/fx-runner) are installed on customers' machines,
+      # where the supported minimum is Node 22.22.2, while this repository builds and tests on Node 24. This step runs
+      # those packages' own tests under Node 22 so the minimum stays true. It takes seconds on the machine the job is already on: no new job, no
       # matrix, no hosted runner.
       #   - Node 22 comes from the flake's own locked nixpkgs. The step fails if it is older than 22.22.2.
       #   - It uses the dependencies "Run checks" just installed, and starts vitest's entry file with that `node`
@@ -323,6 +323,8 @@ jobs:
           nix shell --inputs-from . nixpkgs#nodejs_22 --command node --version
           nix shell --inputs-from . nixpkgs#nodejs_22 --command node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 22 || (minor === 22 && patch < 2)) { console.error("need Node 22.22.2 or newer, got " + process.versions.node); process.exit(1); }'
           cd packages/runner-protocol
+          nix shell --inputs-from ../.. nixpkgs#nodejs_22 --command node node_modules/vitest/vitest.mjs run
+          cd ../fx-runner
           nix shell --inputs-from ../.. nixpkgs#nodejs_22 --command node node_modules/vitest/vitest.mjs run
 
   # The workspace shell's Playwright specs (apps/workspace/e2e, all three

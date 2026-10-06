@@ -1,0 +1,29 @@
+{
+  "name": "@fulcrumaxe/fx-runner",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "The fulcrumaxe local runner: the job checks, the role tool table, the prompt and the clean environment an agent run on your own machine starts from.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@fx/runner": "workspace:*",
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

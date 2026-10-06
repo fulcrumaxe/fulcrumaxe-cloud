@@ -542,7 +542,10 @@ async function main() {
         ...(result.mode === "affected" ? { FX_CHECK_AFFECTED: result.packages.length > 0 ? result.packages.join(",") : "none" } : {}),
         // Extra paths check.sh lints in an affected run (a standalone CI test is in no package).
         ...(result.mode === "affected" && result.lint.length > 0 ? { FX_CHECK_LINT_PATHS: result.lint.join(",") } : {}),
-        CI_SCOPE_RUNNER_PROTOCOL: String(result.mode === "full" || result.packages.includes("packages/runner-protocol")),
+        // The Node 22 step covers both packages that install on customers' machines.
+        CI_SCOPE_RUNNER_PROTOCOL: String(
+          result.mode === "full" || result.packages.includes("packages/runner-protocol") || result.packages.includes("packages/fx-runner"),
+        ),
         CI_SCOPE_E2E: String(result.e2e),
       });
     }
