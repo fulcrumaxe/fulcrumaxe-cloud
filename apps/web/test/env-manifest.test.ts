@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ENV_MANIFEST } from "../env-manifest";
 import { DOCS_BEGIN, DOCS_END, renderEnvDocs, replaceGeneratedBlock } from "../lib/env/docs";
 import { namesOnlyViolations, RUNNER_LOGIN_NAME, scanRunnerLoginReaders } from "../../../packages/worker/test/support/scanRunnerLoginReaders";
-import { DYNAMIC_KEY, scanEnvReads, scanFile, spelledNames } from "./support/envScan";
+import { DYNAMIC_KEY, NOT_DEPLOYED_PACKAGES, listSourceFiles, scanEnvReads, scanFile, spelledNames } from "./support/envScan";
 
 const ROOT = path.join(__dirname, "..", "..", "..");
 
@@ -424,6 +424,17 @@ describe("the env scan itself", () => {
       ].join("\n"),
     });
     expect(reads).toEqual([]);
+  });
+
+  it("leaves out only the named not-deployed packages: fx-runner, and nothing else under packages", () => {
+    expect(Object.keys(NOT_DEPLOYED_PACKAGES)).toEqual(["packages/fx-runner"]);
+    expect(existsSync(path.join(ROOT, "packages/fx-runner/src/job/cleanEnv.ts"))).toBe(true);
+    const files = listSourceFiles(ROOT).map((f) => path.relative(ROOT, f));
+    expect(files.filter((f) => f.startsWith("packages/fx-runner/"))).toEqual([]);
+    // the sibling the runner depends on, and the web app, are still scanned
+    expect(files.some((f) => f.startsWith("packages/runner-protocol/src/"))).toBe(true);
+    expect(files.some((f) => f.startsWith("packages/runner/src/"))).toBe(true);
+    expect(files.some((f) => f.startsWith("apps/web/"))).toBe(true);
   });
 
   it("skips test files and test directories", () => {

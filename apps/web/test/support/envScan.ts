@@ -41,12 +41,21 @@ const SKIP_DIRS = new Set(["node_modules", ".next", "dist", "test", "tests", "__
 const SOURCE_FILE = /\.(?:ts|tsx|mjs|js|cjs)$/;
 const TEST_FILE = /\.(?:test|spec)\.[a-z]+$|\.d\.ts$/;
 
+/**
+ * Packages that are never deployed to Vercel, so the deploy manifest has no business listing what they read.
+ * Each needs a reason. This is a list of exact package directories, never a pattern.
+ */
+export const NOT_DEPLOYED_PACKAGES: Readonly<Record<string, string>> = {
+  "packages/fx-runner": "customer-machine runner, not a deployed app: it reads the host's own environment by name and is never built for or run on Vercel",
+};
+
 export function listSourceFiles(root: string): string[] {
   const out: string[] = [];
+  const skipped = new Set(Object.keys(NOT_DEPLOYED_PACKAGES).map((dir) => path.join(root, dir)));
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
+        if (!SKIP_DIRS.has(entry.name) && !skipped.has(path.join(dir, entry.name))) walk(path.join(dir, entry.name));
       } else if (SOURCE_FILE.test(entry.name) && !TEST_FILE.test(entry.name)) {
         out.push(path.join(dir, entry.name));
       }

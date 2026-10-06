@@ -1,18 +1,22 @@
 # @fulcrumaxe/fx-runner
 
 The local runner: the program that runs an agent on a customer's own machine for the fulcrumaxe cloud. This first
-slice holds the parts that decide what an agent run may do. The prompt, the clean environment, the engine that starts
-the agent, the sandbox and the daemon come in later changes.
+slice holds the parts that decide what an agent run may start with. The engine that starts the agent, the sandbox and
+the daemon come in later changes.
 
 - `src/job/verifyHashes.ts`: checks a job's task prompt, role card and tool list against the digests the cloud signed.
   A mismatch refuses the job before a workspace or process exists.
 - `src/job/roleTools.ts`: the tool table, one entry per runner-eligible role. It never grants web fetch, web search or
   a platform MCP tool, and an unknown role is an error, never a default.
+- `src/job/prompt.ts`: builds the text written to the agent's standard input. The task prompt is marked untrusted and
+  is the last thing in it. Nothing in this package runs a string that came from a job.
+- `src/job/cleanEnv.ts`: builds the agent's environment from a fixed list of names. The host environment is never
+  copied as a whole, so an API key, a cloud token or a git token in your shell cannot reach the agent.
 
 ## Boundaries
 
-No `@anthropic-ai/*` package is a dependency or an import. `test/publicBoundary.test.ts` checks that, the licence
-file, and that every workspace import is declared.
+No `@anthropic-ai/*` package is a dependency or an import. `test/` checks that, that no host-side tool is defined, that
+no code spreads or loops over the process environment, and that no file names the places a Claude login is stored.
 
 ## Node
 
