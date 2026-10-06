@@ -115,10 +115,10 @@ describe("check-env-manifest as the build runs it (real child process, real type
   });
 });
 
-describe("apps/web prebuild", () => {
+describe("apps/web build:prepare", () => {
   it("runs the gate after the workspace copy and before the migrations", () => {
-    const pkg = JSON.parse(readFileSync(path.join(WEB_DIR, "package.json"), "utf8")) as { scripts: { prebuild: string } };
-    const steps = pkg.scripts.prebuild.split("&&").map((s) => s.trim());
+    const pkg = JSON.parse(readFileSync(path.join(WEB_DIR, "package.json"), "utf8")) as { scripts: { "build:prepare": string } };
+    const steps = pkg.scripts["build:prepare"].split("&&").map((s) => s.trim());
     const at = (needle: string) => steps.findIndex((s) => s.includes(needle));
     expect(at("copy-workspace.mjs")).toBeGreaterThanOrEqual(0);
     expect(at("check-env-manifest.mjs")).toBeGreaterThan(at("copy-workspace.mjs"));
