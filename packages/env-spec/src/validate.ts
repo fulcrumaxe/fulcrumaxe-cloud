@@ -119,8 +119,13 @@ function imageDigest(v: unknown): string {
     : fail(["image"], "invalid_value", "must be a sha256 digest: sha256:<64 lowercase hex>");
 }
 
-/** Nix reads its configuration from NIX_* variables, so a spec cannot set them (B5: the locked nix.conf must hold). */
-const NIX_ENV = /^nix_/i;
+/**
+ * Toolchain managers read their configuration and download sources from these variables, so a spec cannot set them:
+ * NIX_* (B5: the locked nix.conf must hold), and MISE_*, RUSTUP_* (RUSTUP_DIST_SERVER, RUSTUP_UPDATE_ROOT), ASDF_*,
+ * NVM_*, PYENV_* and NODE_MIRROR (M-B9: the pinned download hosts and checksums must hold).
+ */
+const TOOLCHAIN_ENV = /^(?:(?:nix|mise|rustup|asdf|nvm|pyenv)_|node_mirror$)/i;
+const refusedEnv = (name: string): string => `"${name}" is refused: it would override the locked ${/^nix_/i.test(name) ? "Nix" : "toolchain"} configuration`;
 
 /** Setup and run commands are argv arrays; a string form is rejected so nothing is ever shell-parsed. */
 function commands(v: unknown, path: Path): string[][] {
@@ -145,7 +150,7 @@ export function validate(input: unknown): EnvSpec {
   if (Object.keys(envIn).length > LIMITS.entries) fail(["env"], "limit_exceeded", `at most ${LIMITS.entries} entries`);
   for (const [k, v] of Object.entries(envIn)) {
     const name = matching(k, ["env", k], /^[A-Za-z_][A-Za-z0-9_]{0,127}$/, "an environment variable name");
-    if (NIX_ENV.test(name)) fail(["env", k], "forbidden_env_name", `"${name}" is refused: NIX_* variables would override the locked Nix configuration`);
+    if (TOOLCHAIN_ENV.test(name)) fail(["env", k], "forbidden_env_name", refusedEnv(name));
     if (RESERVED_ENV.has(name)) fail(["env", k], "invalid_value", `"${name}" is a reserved name and cannot be an environment variable`);
     env.push([name, str(v, ["env", k])]);
   }
@@ -156,7 +161,7 @@ export function validate(input: unknown): EnvSpec {
     if (kind !== "brokered_http" && kind !== "in_sandbox") return fail([...p, "kind"], "invalid_value", "must be brokered_http or in_sandbox");
     // 39: the longest name env_secret_refs can actually store (see D#5 correction, E7 lowers the column cap to match).
     const name = matching(s.name, [...p, "name"], /^[A-Za-z_][A-Za-z0-9_]{0,38}$/, "a secret name of at most 39 characters");
-    if (NIX_ENV.test(name)) fail([...p, "name"], "forbidden_env_name", `"${name}" is refused: a NIX_* variable would override the locked Nix configuration`);
+    if (TOOLCHAIN_ENV.test(name)) fail([...p, "name"], "forbidden_env_name", refusedEnv(name));
     return { name, kind } as const;
   });
   if (new Set(secrets.map((s) => s.name)).size !== secrets.length) fail(["secrets"], "invalid_value", "names must be unique");

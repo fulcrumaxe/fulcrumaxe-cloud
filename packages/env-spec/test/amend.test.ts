@@ -264,6 +264,23 @@ describe("NIX_* is refused as an env key (B5: the locked nix.conf must hold)", (
   });
 });
 
+describe("toolchain-manager variables are refused as env keys and secret names (M-B9)", () => {
+  it.each(["MISE_CONFIG_FILE", "MISE_", "mise_experimental", "RUSTUP_DIST_SERVER", "RUSTUP_UPDATE_ROOT", "ASDF_DATA_DIR", "NVM_DIR", "NVM_NODEJS_ORG_MIRROR", "PYENV_ROOT", "NODE_MIRROR", "node_mirror"])("refuses env %s without echoing the value", (k) => {
+    const e = err(`version: 1\nenv:\n  ${k}: 'https://evil.example SECRETVALUE'\n`);
+    expect(e).toMatchObject({ code: "forbidden_env_name", field: `env.${k}` });
+    expect(e.message).not.toContain("SECRETVALUE");
+    expect(e.message).toContain("toolchain");
+  });
+
+  it("also refuses them as secret names, which are delivered as env vars", () => {
+    expect(err("version: 1\nsecrets:\n  - name: RUSTUP_DIST_SERVER\n")).toMatchObject({ code: "forbidden_env_name", field: "secrets[0].name" });
+  });
+
+  it.each(["MISE", "NVM", "ASDF", "PYENV", "RUSTUP", "NODE_MIRRORS", "NODE_ENV", "NODE_OPTIONS", "CARGO_HOME", "RUSTFLAGS", "MY_MISE_VAR", "PYTHONPATH"])("still allows %s", (k) => {
+    expect(parse(`version: 1\nenv:\n  ${k}: x\n`).ok).toBe(true);
+  });
+});
+
 // inputsDigest ---------------------------------------------------------------------------------------------
 
 const tree = (over: Record<string, string> = {}): TreeEntry[] =>
