@@ -6,7 +6,6 @@ to start.
 Sources:
 - `apps/`
 - `packages/`
-- `sites/`
 
 ## Overview
 
@@ -47,8 +46,4 @@ Sources:
 - [Data model](data-model.md) — the tenant schema across all migrations.
 - [Security](security.md) — the tenancy, auth and RLS model.
 - [Operations](operations.md) — running and operating this repo.
-- [Hosted Postgres](ops/hosted-postgres.md) — the Neon-shaped, non-superuser migration owner requirements.
-- [Stripe](ops/stripe.md) — the site-kit go-live check (no Payment Links) and its price variables.
-- [Staging](ops/staging.md) — the locked `cloud-staging` project: migrate-on-build, sign-in allowlist, env, GitHub App and Stripe test setup.
-- [Staging owner runbook](ops/staging-github-apps.md) — step-by-step owner setup of the sign-in OAuth App, secrets, Stripe test webhook and the two staging GitHub Apps.
-- [Staging pipeline pack](ops/live-pipeline-pack.md) — automated live tests that walk every pipeline path on staging: how to run it, what it needs, what each scenario proves.
+- Operator runbooks (hosted Postgres, billing, staging) are not part of this public tree.
