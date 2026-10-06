@@ -1,0 +1,8 @@
+{
+  "_comment": "Fixture copy of each workflow trigger's `live-e2e plan|run` argument list, until T2b adds .github/workflows/live-e2e.yml and the test reads the workflow itself. deploy, nightly and poll always carry a tier of smoke or higher and no --tag.",
+  "deploy": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "deploy"],
+  "nightly": ["plan", "--target", "staging", "--tier", "standard", "--trigger", "nightly"],
+  "poll": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "poll"],
+  "weekly": ["plan", "--target", "staging", "--tier", "full", "--trigger", "weekly"],
+  "dispatch": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "dispatch"]
+}

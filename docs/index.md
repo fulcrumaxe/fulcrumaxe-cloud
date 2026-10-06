@@ -40,6 +40,7 @@ Sources:
 
 - [`apps/web`](apps/web.md) — the Next.js App Router console.
 - [`apps/workspace`](apps/workspace.md) — the imported fulcrumaxe workspace UI, filtered to a cloud build profile.
+- [`apps/live-e2e`](apps/live-e2e.md) — live end-to-end packs: manifest, selection, targets and the `plan` command.
 
 ## Cross-cutting
 

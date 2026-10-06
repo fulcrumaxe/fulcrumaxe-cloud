@@ -1,0 +1,8 @@
+{
+  "name": "staging",
+  "origin_env": "LIVE_E2E_STAGING_ORIGIN",
+  "project_id_env": "LIVE_E2E_STAGING_PROJECT_ID",
+  "protected": true,
+  "env": ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_STRIPE_RESTRICTED_KEY"],
+  "budget_usd": { "default": 0, "max": 8 }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "auth-negative",
+  "rows": ["P6", "A4"],
+  "tier": "smoke",
+  "tags": ["@ui", "@api"],
+  "targets": ["staging", "production"],
+  "destructive": false,
+  "model_spend": false,
+  "projects": ["desktop", "phone", "tablet"],
+  "needs": ["bypass"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/web/app/api/auth/**", "packages/core/src/auth/**"]
+}
