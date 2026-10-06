@@ -580,11 +580,11 @@ describe('D#31 API-3b: API tokens, token principal, revocation', () => {
       const before = await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext));
       expect(before.status).toBe(200);
 
-      await setMemberRole(appUserPool, accountId, secondOwnerId, creatorId, 'member');
+      await setMemberRole(appUserPool, accountId, secondOwnerId, creatorId, 'member', { failRunnerLeases: null });
       const afterDemote = await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext));
       expect(afterDemote.status).toBe(401);
 
-      await setMemberRole(appUserPool, accountId, secondOwnerId, creatorId, 'owner');
+      await setMemberRole(appUserPool, accountId, secondOwnerId, creatorId, 'owner', { failRunnerLeases: null });
       const afterRepromote = await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext));
       expect(afterRepromote.status).toBe(401);
       expect(((await afterRepromote.json()) as { error: { code: string } }).error.code).toBe('invalid_token');
@@ -600,7 +600,7 @@ describe('D#31 API-3b: API tokens, token principal, revocation', () => {
       ]);
       const { plaintext } = await mintToken({ accountId, userId: creatorId }, { scopes: ['read'] });
 
-      await removeMember(appUserPool, accountId, secondOwnerId, creatorId);
+      await removeMember(appUserPool, accountId, secondOwnerId, creatorId, { failRunnerLeases: null });
       const afterRemove = await dispatch(bearerRequest('http://localhost/api/v1/account', plaintext));
       expect(afterRemove.status).toBe(401);
 

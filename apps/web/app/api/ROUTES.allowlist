@@ -8,6 +8,7 @@ cron/api-sweep/route.ts
 cron/compute-settle-sweep/route.ts
 cron/reconcile/route.ts
 cron/run-action-sweep/route.ts
+cron/runner-sweeper/route.ts
 csp-report/route.ts
 gh-proxy/[...path]/route.ts
 github/create-repo/callback/route.ts

@@ -126,6 +126,8 @@ describe('migration 0619 (fix round 1, was 0614): platform_ops read on agent_run
         // 0714: the definer agent_run_set_runner_job filters on the run's runtime and mode. Not job_signed: the signed job
         // carries task text, so platform_ops (the proxy's login) can write that column and never read it.
         'runtime', 'execution_mode',
+        // 0734: the definer agent_run_list_pending_runner_runs orders the waiting runner runs by when they were created.
+        'created_at',
       ].sort(),
     );
 

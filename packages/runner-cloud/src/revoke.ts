@@ -79,14 +79,37 @@ export async function revokeRunner(deps: RunnerCloudDeps, principal: SessionPrin
   return { status: 200, body: { revoked: true, already_revoked: alreadyRevoked, runs_failed: runsFailed } };
 }
 
-/** POST /api/runners/revoke-all (a session route, owner or admin): revokes every active runner of the account. */
+/**
+ * POST /api/runners/revoke-all (a session route, owner or admin): revokes every active runner of the account.
+ *
+ * A runner can be revoked by someone else between the list and its turn here. `runner_revoke` then waits for that other
+ * transaction's row lock and, once it has committed, answers 55000 ("already revoked"). Each revoke runs in its own
+ * savepoint so that answer undoes only that one call: the rest of the revoke-all stands, and the runner the other party
+ * revoked still has its leases failed below (idempotent). Without the savepoint 55000 aborted the transaction and the
+ * whole revoke-all rolled back as a 500 (CWE-362, CWE-703).
+ */
 export async function revokeAllRunners(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
-  const revoked = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+  const outcome = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
     const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
     if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can revoke every runner");
     const { rows } = await client.query<{ id: string }>("SELECT id FROM runners WHERE revoked_at IS NULL ORDER BY id");
-    for (const row of rows) await client.query("SELECT runner_revoke($1, 'revoke_all')", [row.id]);
-    return rows.map((row) => row.id);
+    const revoked: string[] = [];
+    const concurrent: string[] = [];
+    for (const row of rows) {
+      await client.query("SAVEPOINT revoke_one");
+      try {
+        await client.query("SELECT runner_revoke($1, 'revoke_all')", [row.id]);
+        await client.query("RELEASE SAVEPOINT revoke_one");
+        revoked.push(row.id);
+      } catch (error) {
+        await client.query("ROLLBACK TO SAVEPOINT revoke_one");
+        if (pgCode(error) !== "55000") throw error;
+        // fx-swallow-ok: 55000 is "already revoked": another request revoked this runner after the list was read
+        concurrent.push(row.id);
+      }
+    }
+    return { revoked, concurrent };
   }).catch((error: unknown) => (error instanceof RunnerHttpError ? Promise.reject(error) : revokeError(error)));
-  return { status: 200, body: { revoked: revoked.length, runs_failed: await failLeases(deps, principal.accountId, revoked) } };
+  const runsFailed = await failLeases(deps, principal.accountId, [...outcome.revoked, ...outcome.concurrent]);
+  return { status: 200, body: { revoked: outcome.revoked.length, already_revoked: outcome.concurrent.length, runs_failed: runsFailed } };
 }

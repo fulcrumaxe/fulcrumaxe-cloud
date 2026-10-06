@@ -26,7 +26,7 @@ import { securityTriggers } from "./securityTrigger.js";
  *     posted; that the gate itself merged).
  *
  * D#6 R3b (C12 section 1): for a `runner_local` repo the reviewers ran on the customer's machine. When the repo's admin has turned
- * on auto-merge for runner reviews (`LocalReviewOptInPort`; off until R2b adds the setting, and off on any failure to read it),
+ * on auto-merge for runner reviews (`LocalReviewOptInPort`, stored in repo_local_review_optins by migration 0733 and read by `createPgLocalReviewOptIn`; off with no stored opt-in, and off on any failure to read it),
  * a trusted runner's verdict counts, the repo's own CI and branch protection are required (see build/mergeGate.ts), and the
  * status description says "Local review". With it off, the gate never merges such a repo.
  *
@@ -37,8 +37,8 @@ import { securityTriggers } from "./securityTrigger.js";
 
 /**
  * D#6 R3b, safeguard (a): whether an owner or admin of the repo's account turned on auto-merge for runner reviews on this one
- * repo. R2b adds the stored setting and the real port; until then the composition root passes none and this reads as off. A
- * throw is off too.
+ * repo. R2b adds the stored setting (0733) and the real port (`createPgLocalReviewOptIn`); a caller that passes none gets off.
+ * A throw is off too.
  */
 export interface LocalReviewOptInPort {
   enabled(input: { accountId: string; repoId: string }): Promise<boolean>;

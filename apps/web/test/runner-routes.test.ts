@@ -9,6 +9,9 @@ import { handleRunnerRequest, readCappedBody } from "../lib/runnerRoutes";
 import { mintCodeHandler } from "../app/api/runners/registration-codes/handler";
 import { revokeRunnerHandler } from "../app/api/runners/[id]/revoke/handler";
 import { revokeAllHandler } from "../app/api/runners/revoke-all/handler";
+import { makeRegisterHandler } from "../app/api/runner/register/handler";
+import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
+import type { RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 
 const WEB = path.join(__dirname, "..");
 const REPO = path.join(WEB, "..", "..");
@@ -25,6 +28,31 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 const rel = (file: string): string => path.relative(REPO, file).split(path.sep).join("/");
 const isTest = (file: string): boolean => /(^|\/)test\/|\.test\.tsx?$/.test(rel(file));
+
+/** The text of each setMemberRole / removeMember call's argument list in `source`, with comments removed. */
+function membershipCalls(source: string): string[] {
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/([^:])\/\/.*$/gm, "$1");
+  const out: string[] = [];
+  for (const m of text.matchAll(/\b(?:setMemberRole|removeMember)\s*\(/g)) {
+    if (text.slice(Math.max(0, m.index! - 9), m.index!).endsWith("function ")) continue;
+    let depth = 1;
+    let i = m.index! + m[0].length;
+    for (; i < text.length && depth > 0; i++) {
+      if ("([{".includes(text[i]!)) depth++;
+      else if (")]}".includes(text[i]!)) depth--;
+    }
+    out.push(text.slice(m.index! + m[0].length, i - 1));
+  }
+  return out;
+}
+
+/** True when the call's last argument is an object literal with a `failRunnerLeases` property (shorthand or `key: value`). */
+function namesLeaseFailer(args: string): boolean {
+  const last = args.trim().replace(/,$/, "");
+  const open = last.lastIndexOf("{");
+  if (open < 0 || !last.endsWith("}")) return false;
+  return /[{,]\s*failRunnerLeases\s*(:|,|\})/.test(last.slice(open));
+}
 
 /** A signed runner request, as a Next request, with whatever extra headers the case needs. */
 function signedNext(url: string, extra: Record<string, string> = {}): NextRequest {
@@ -46,6 +74,29 @@ describe("who may set app.runner_id, and who may use the runner door (D#6 R2a, C
   it("only runner-cloud's own code opens a runner session or verifies a runner request", () => {
     const allowed = ["packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-protocol/src/httpSignature.ts"];
     expect(filesWith(/withRunnerSession|verifyRunnerRequest|verifySelfSignedRequest/)).toEqual(allowed);
+  });
+
+  it("every call of setMemberRole or removeMember names failRunnerLeases in its own options object (R2a follow-up 7, checked per call site)", () => {
+    const callers = sources.filter((f) => !/packages\/core\/src\/tenancy\/membership\.ts$/.test(rel(f)) && /\b(setMemberRole|removeMember)\s*\(/.test(readFileSync(f, "utf8")));
+    // No membership route exists yet. When one is added every call must pass the lease failer, and this test is what makes it.
+    for (const file of callers) {
+      for (const call of membershipCalls(readFileSync(file, "utf8"))) expect(namesLeaseFailer(call), `${rel(file)}: ${call.slice(0, 120)}`).toBe(true);
+    }
+    // The type enforces the same thing: the option is required and has no default.
+    const definition = readFileSync(path.join(REPO, "packages/core/src/tenancy/membership.ts"), "utf8");
+    expect(definition).toMatch(/failRunnerLeases: RunnerLeaseFailer \| null;/);
+    expect(definition).not.toMatch(/options: MembershipChangeOptions\s*=/);
+  });
+
+  it("the call-site scan is not fooled: a mention in a comment, a second call without it, an alias or a variable all fail", () => {
+    const calls = (src: string) => membershipCalls(src).map(namesLeaseFailer);
+    expect(calls("await removeMember(pool, a, b, c, { failRunnerLeases: fail });")).toEqual([true]);
+    expect(calls("await removeMember(pool, a, b, c, { failRunnerLeases });")).toEqual([true]);
+    expect(calls("// failRunnerLeases\nawait removeMember(pool, a, b, c, {});")).toEqual([false]);
+    expect(calls("const failRunnerLeases = f;\nawait removeMember(pool, a, b, c, { failRunnerLeases: fail });\nawait setMemberRole(pool, a, b, c, 'admin', opts);")).toEqual([true, false]);
+    expect(calls("await removeMember(pool, a, b, c);")).toEqual([false]);
+    expect(calls("await setMemberRole(pool, a, b, c, 'admin', { fail: failRunnerLeases });")).toEqual([false]);
+    expect(calls("await setMemberRole(pool, a, b, c, 'admin', opts); // { failRunnerLeases: null }")).toEqual([false]);
   });
 
   it("no route outside api/runner/** touches the runner door, the runner key tables or the setting", () => {
@@ -109,5 +160,67 @@ describe("the runner routes' edge", () => {
     const res = await handleRunnerRequest(req, async () => { throw new Error("password=hunter2 at /srv/db"); }, () => deps());
     expect(res.status).toBe(500);
     expect(JSON.stringify(await res.json())).not.toContain("hunter2");
+  });
+});
+
+describe("register is limited per client address before anything else happens (D#6 R2b, CWE-770)", () => {
+  const KEYS = ["DATABASE_URL_PLATFORM_OPS", "DATABASE_URL_APP_USER", "FX_APP_ORIGIN"] as const;
+  const saved = KEYS.map((key) => [key, process.env[key]] as const);
+  afterAll(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  beforeAll(() => {
+    process.env.DATABASE_URL_PLATFORM_OPS = "postgres://unused:unused@127.0.0.1:1/unused";
+    process.env.DATABASE_URL_APP_USER = "postgres://unused:unused@127.0.0.1:1/unused";
+    process.env.FX_APP_ORIGIN = ORIGIN;
+  });
+
+  /** A fixed-window counter with the contract of rate_limit_check: the call counts, then it is allowed while the count is within the limit; the retry hint is at least one second. */
+  function fakeStore(): RateLimitStore & { keys: string[] } {
+    const counts = new Map<string, number>();
+    const keys: string[] = [];
+    return {
+      keys,
+      checkAndIncrement: async (key, limit) => {
+        keys.push(key);
+        const n = (counts.get(key) ?? 0) + 1;
+        counts.set(key, n);
+        return { allowed: n <= limit, retryAfterSeconds: 37 };
+      },
+    };
+  }
+  const from = (ip: string, body: string | Uint8Array = "not json") => new NextRequest(`${ORIGIN}/api/runner/register`, { method: "POST", headers: { "x-real-ip": ip }, body });
+
+  it("lets the first requests of an address through to the handler, then answers 429 with Retry-After, whatever the body", async () => {
+    const store = fakeStore();
+    const handler = makeRegisterHandler(() => store);
+    expect(REGISTER_LIMIT_PER_IP_PER_MINUTE).toBe(10); // packages/api/test/ratelimit.test.ts drives the real bucket with this literal
+    for (let i = 0; i < REGISTER_LIMIT_PER_IP_PER_MINUTE; i++) expect((await handler(from("203.0.113.7"))).status, `request ${i + 1}`).toBe(400); // the handler ran and refused the body
+    // The 11th is stopped before the body is read: a body over the 256 KiB cap would otherwise be a 413.
+    const limited = await handler(from("203.0.113.7", Buffer.alloc(MAX_BODY_BYTES + 10)));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("37");
+    expect(await limited.json()).toMatchObject({ error: { code: "rate_limited" }, retry_after: 37 });
+    // Another address has its own budget.
+    expect((await handler(from("203.0.113.8"))).status).toBe(400);
+    expect(new Set(store.keys)).toEqual(new Set(["anon:runner-register:203.0.113.7", "anon:runner-register:203.0.113.8"]));
+  });
+
+  it("buckets an IPv6 client by its /64, so rotating inside a block does not open a fresh budget", async () => {
+    const store = fakeStore();
+    const handler = makeRegisterHandler(() => store);
+    await handler(from("2001:db8:1:2:aaaa::1"));
+    await handler(from("2001:db8:1:2:bbbb::9"));
+    expect(new Set(store.keys).size).toBe(1);
+  });
+
+  it("fails closed when the limiter is down: an error, never an unlimited registration", async () => {
+    const down: RateLimitStore = { checkAndIncrement: () => Promise.reject(new Error("db down")) };
+    const res = await makeRegisterHandler(() => down)(from("203.0.113.9"));
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain("db down");
   });
 });

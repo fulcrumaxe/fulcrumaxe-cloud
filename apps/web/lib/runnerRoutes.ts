@@ -3,6 +3,8 @@ import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, toResponse } from "@fx/runner-cloud";
 import type { FailRunnerLeases, RunnerCloudDeps, RunnerHttpRequest, RunnerHttpResponse, SessionPrincipal } from "@fx/runner-cloud";
+import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
+import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
 import { getWorker } from "./worker";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
@@ -49,14 +51,40 @@ function send(res: RunnerHttpResponse): NextResponse {
   return NextResponse.json(res.body, { status: res.status, headers: { "cache-control": "no-store", ...res.headers } });
 }
 
-/** A runner-signed route. The body is capped before anything else happens; no cookie or token is read. */
+/**
+ * Registration is the one runner route with no signature from a known runner to key a limit on (the runner row does not
+ * exist yet), so it is limited per client address, before the body is read or any query is made (CWE-770). Real use is one
+ * registration per machine; 10 a minute leaves room for several machines behind one address and still caps a guessing
+ * run against the code space. The WAF rule in README.md is the outer layer.
+ */
+export const REGISTER_LIMIT_PER_IP_PER_MINUTE = 10;
+
+let cachedStore: RateLimitStore | undefined;
+const defaultStore = (): RateLimitStore => (cachedStore ??= new PgRateLimitStore(defaultAuthDeps().appUserPool));
+
+/** A guard that answers 429 with Retry-After once `limit` requests from one address have been seen this minute. A store failure throws (a 500): never served unlimited. */
+export function perIpLimit(routeName: string, limit: number, store: () => RateLimitStore = defaultStore, clientIp: (req: Request) => string = clientIpFromRequest): RequestGuard {
+  return async (req) => {
+    const decision = await store().checkAndIncrement(bucketKeyForAnonIp(routeName, clientIp(req)), limit);
+    if (decision.allowed) return null;
+    return { status: 429, body: { error: { code: "rate_limited", message: "too many requests" }, retry_after: decision.retryAfterSeconds }, headers: { "retry-after": String(decision.retryAfterSeconds) } };
+  };
+}
+
+/** Runs before the body is read. A response ends the request. */
+export type RequestGuard = (req: NextRequest) => Promise<RunnerHttpResponse | null>;
+
+/** A runner-signed route. A guard (if any) and then the body cap come before anything else; no cookie or token is read. */
 export async function handleRunnerRequest(
   req: NextRequest,
   run: (deps: RunnerCloudDeps, request: RunnerHttpRequest) => Promise<RunnerHttpResponse>,
   deps: () => RunnerCloudDeps = runnerDeps,
+  guard?: RequestGuard,
 ): Promise<NextResponse> {
   return send(
     await toResponse(async () => {
+      const refused = await guard?.(req);
+      if (refused) return refused;
       const body = await readCappedBody(req, MAX_BODY_BYTES);
       if (!body) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
       return run(deps(), { method: req.method, headers: Object.fromEntries(req.headers), body });

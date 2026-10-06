@@ -59,3 +59,25 @@ Every revoke (self, member, revoke-all, and a demotion or removal of the registr
 the worker's `failRunnerLeases` after the revoking transaction commits. If the worker cannot, the revoke stands and the
 response is 503 `leases_not_failed` with `revoked: true`; a session revoke can be repeated to finish the job. The Vercel WAF
 rate limit on `/api/runner/*` (120 requests per 60 seconds per IP, action 429) is applied by the Team Lead or owner.
+
+`POST /api/runner/register` is the one runner route with no known runner to key a limit on, so the route also limits it
+per client address (10 a minute, IPv6 by its /64, the Postgres `rate_limit_check` bucket `anon:runner-register:<ip>`) before
+the body is read. A limiter failure is a 500, never an unlimited registration. The WAF rule above is the outer layer.
+
+A route that calls `setMemberRole` or `removeMember` (packages/core `tenancy/membership.ts`) must pass
+`failRunnerLeases`, because a demotion or removal revokes the member's runners in its own transaction and only the worker
+can then fail their leases. `apps/web/test/runner-routes.test.ts` fails if a caller does not name it. Say so in that
+route's brief.
+
+## Queue time and the opt-in (R2b)
+
+A run for a `runner_local` repo waits in `pending` until a runner claims it. The runner sweeper (`apps/web/app/api/cron/
+runner-sweeper`, every 5 minutes behind the shared pending-work gate: a tick with no due marker and no backstop makes no database connection)
+moves a run still waiting at its job's `expires_at` (72 hours after dispatch) to `timed_out` with the reason `queue_ttl`,
+through the worker's `sweepRunnerQueue` and the compare-and-set status writer. A run that ends this way is requeued with
+the existing `retry_run`, on the same model. `RunnerTarget.dispatch` marks the sweep due at the end of the queue time.
+
+Auto-merge on a runner repo's local reviews is off until an owner or admin turns it on for that repo
+(`repo_local_review_optin_set`, migration 0733). Turning it on needs the repo to be on a runner, and a repo cannot leave
+the runner mode while it is on: the route that changes a repo's mode (the next child) turns the opt-in off first, in the
+same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.

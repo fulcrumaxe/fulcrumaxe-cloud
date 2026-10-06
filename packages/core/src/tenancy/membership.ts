@@ -12,8 +12,13 @@ import { ROLE_RANK, revokeTokensForCreatorChange } from '../tokens/service.js';
  */
 export type RunnerLeaseFailer = (input: { accountId: string; runnerId: string; reason: 'runner_revoked' }) => Promise<{ complete: boolean }>;
 
+/**
+ * REQUIRED on every call, with no default (D#6 R2b): a caller must name the worker's lease failer, or `null` to say it has
+ * none. `null` is not silent: if the change revokes any runner the call still ends in `RunnerLeasesNotFailedError`, so the
+ * caller learns that those runners' leases were not failed. Omitting it is a type error, and a test checks each call site.
+ */
 export interface MembershipChangeOptions {
-  failRunnerLeases?: RunnerLeaseFailer;
+  failRunnerLeases: RunnerLeaseFailer | null;
 }
 
 /** The change is committed and the runners are revoked, but their leases could not all be failed. A caller may repeat the revoke from the runners list. */
@@ -35,7 +40,7 @@ async function activeRunnerIds(client: PoolClient, accountId: string, userId: st
 }
 
 /** Runs after the membership transaction has committed. Each runner is tried even if another fails. */
-async function failLeasesAfterCommit(accountId: string, runnerIds: string[], fail: RunnerLeaseFailer | undefined): Promise<void> {
+async function failLeasesAfterCommit(accountId: string, runnerIds: string[], fail: RunnerLeaseFailer | null): Promise<void> {
   if (runnerIds.length === 0) return;
   const failed: string[] = [];
   for (const runnerId of runnerIds) {
@@ -124,7 +129,7 @@ export async function setMemberRole(
   actorUserId: string,
   targetUserId: string,
   newRole: MembershipRole,
-  options: MembershipChangeOptions = {},
+  options: MembershipChangeOptions,
 ): Promise<void> {
   const runnerIds = await withTenant(pool, accountId, actorUserId, async (client) => {
     const actorRole = await roleInTx(client, accountId, actorUserId);
@@ -173,7 +178,7 @@ export async function removeMember(
   accountId: string,
   actorUserId: string,
   targetUserId: string,
-  options: MembershipChangeOptions = {},
+  options: MembershipChangeOptions,
 ): Promise<void> {
   const runnerIds = await withTenant(pool, accountId, actorUserId, async (client) => {
     const actorRole = await roleInTx(client, accountId, actorUserId);

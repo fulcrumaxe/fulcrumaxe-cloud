@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { runMergeGateForItem, localReviewOptInOff, type LocalReviewOptInPort } from "../../src/review/mergeGateRun.js";
+import { createPgLocalReviewOptIn } from "../../src/review/localReviewOptIn.js";
 import { LOCAL_REVIEW_DESCRIPTION, REVIEW_STATUS_CONTEXT } from "../../src/review/githubReads.js";
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
@@ -373,5 +375,69 @@ describe("a repo that is not runner_local keeps the production rule", () => {
     await passBoth(w, { runtime: "production" });
     expect((await gate(w)).outcome).toBe("merged");
     expect(w.gh.posts[0]!.body.description).toBe("Every required reviewer passed on this commit");
+  });
+});
+
+describe("the stored opt-in, end to end (D#6 R2b, migration 0733)", () => {
+  /** The real port over the real table; an admin turns the opt-in on or off through the one definer, as the app does. */
+  const real = () => createPgLocalReviewOptIn(h.runWriterPool);
+  const setOptIn = (w: World, userId: string, enabled: boolean) =>
+    withTenant(h.pureAppUserPool, w.accountId, userId, (c) => c.query("SELECT repo_local_review_optin_set($1, $2)", [w.repoId, enabled]));
+
+  it("a repo with no stored opt-in is advisory: verdicts that all pass get no merge call", async () => {
+    const w = await world();
+    await passBoth(w);
+    const out = await gate(w, real());
+    expect(reasonsOf(out)).toContain("local_review_not_enabled");
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("turned on by an admin it merges on the head SHA", async () => {
+    const w = await world();
+    await setOptIn(w, await user(w.accountId, "admin"), true);
+    await passBoth(w);
+    expect(await real().enabled({ accountId: w.accountId, repoId: w.repoId })).toBe(true);
+    expect((await gate(w, real())).outcome).toBe("merged");
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+
+  it("turned off again it stops, with the verdicts unchanged", async () => {
+    const w = await world();
+    const owner = await user(w.accountId, "owner");
+    await setOptIn(w, owner, true);
+    await passBoth(w);
+    await setOptIn(w, owner, false);
+    expect(reasonsOf(await gate(w, real()))).toContain("local_review_not_enabled");
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("a member cannot turn it on, so nothing merges", async () => {
+    const w = await world();
+    await expect(setOptIn(w, await user(w.accountId, "member"), true)).rejects.toMatchObject({ code: "42501" });
+    await passBoth(w);
+    expect((await gate(w, real())).outcome).toBe("ready_human_merges");
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("one repo's opt-in does not count for another repo of the same account, or for another account's repo", async () => {
+    const w = await world();
+    const other = await world();
+    await setOptIn(w, await user(w.accountId, "owner"), true);
+    const sibling = randomUUID();
+    await seedRepo(h.admin, w.accountId, sibling);
+    await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [sibling]);
+    expect(await real().enabled({ accountId: w.accountId, repoId: sibling })).toBe(false);
+    expect(await real().enabled({ accountId: other.accountId, repoId: other.repoId })).toBe(false);
+    // Naming this account's repo from the other account's context finds nothing either.
+    expect(await real().enabled({ accountId: other.accountId, repoId: w.repoId })).toBe(false);
+  });
+
+  it("a read that fails throws out of the port, and the gate reads that as off", async () => {
+    const broken = createPgLocalReviewOptIn({ connect: () => Promise.reject(new Error("db down")) } as never);
+    await expect(broken.enabled({ accountId: randomUUID(), repoId: randomUUID() })).rejects.toThrow("db down");
+    const w = await world();
+    await passBoth(w);
+    expect((await gate(w, broken)).outcome).toBe("ready_human_merges");
+    expect(w.gh.merges).toEqual([]);
   });
 });

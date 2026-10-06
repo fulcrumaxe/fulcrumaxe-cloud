@@ -1,5 +1,5 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
-import { debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type VerdictRole } from "@fx/pipeline";
+import { createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type VerdictRole } from "@fx/pipeline";
 import { openInstallationHttp } from "./github/installationHttp";
 
 /**
@@ -38,7 +38,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const c = loaded.ctx;
       try {
         const http = await open("merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name });
-        const out = await runMergeGateForItem({ pool, http }, input);
+        // D#6 R2b: the stored per-repo opt-in decides whether a runner repo's local reviews count; a repo with none is advisory.
+        const out = await runMergeGateForItem({ pool, http, localReviewOptIn: createPgLocalReviewOptIn(pool) }, input);
         return out.outcome === "refused" ? { outcome: "refused", reason: out.reason } : { outcome: out.outcome, headSha: out.headSha, reasons: out.reasons, status: out.status };
       } catch (err) {
         const e = err as { name?: string; reason?: string };

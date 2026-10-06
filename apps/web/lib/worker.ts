@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerLeaseFacade, type Worker } from "@fx/worker";
+import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerLeaseFacade, type RunnerQueueSweeper, type Worker } from "@fx/worker";
 import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
 import { createAppRepoVisibility } from "./github/repoVisibility";
@@ -30,8 +30,11 @@ export interface ComputeSettleSweepWorker {
   sweepComputeSettle(): Promise<{ listed: number; settled: number; deleted: number; failed: number; skipped: number; lost?: { listed: number } }>;
 }
 
-/** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick and (D#6 R2a) the runner lease-fail method. */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RunnerLeaseFacade;
+/** What one runner-queue tick reports (D#6 R2b): the worker's `sweepRunnerQueue`, checked against this shape at `getWorker`'s return. */
+export type RunnerQueueSweepWorker = RunnerQueueSweeper;
+
+/** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a) and the runner queue tick (R2b). */
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RunnerLeaseFacade & RunnerQueueSweepWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

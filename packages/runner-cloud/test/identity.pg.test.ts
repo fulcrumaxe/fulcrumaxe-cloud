@@ -224,6 +224,40 @@ describe("runner identity routes [pg]", () => {
       expect(await audit(f.accountId, "runner.revoked")).toHaveLength(2);
     });
 
+    it("revoke-all survives a runner being revoked at the same moment: the row lock is held, then the other revoke commits", async () => {
+      const f = await fresh();
+      const [first, contested, last] = [await registerKey(h.admin, f.accountId, f.a1, newKey()), await registerKey(h.admin, f.accountId, f.a1, newKey()), await registerKey(h.admin, f.accountId, f.m1, newKey())];
+      const rec = recorder();
+      const holder = await h.adminPool.connect();
+      try {
+        // Another request holds the contested runner's row and is about to revoke it.
+        await holder.query("BEGIN");
+        await holder.query("SELECT 1 FROM runners WHERE id = $1 FOR UPDATE", [contested]);
+        const running = respond(() => revokeAllRunners(h.deps({ failRunnerLeases: rec.fail }), { accountId: f.accountId, userId: f.o1 }));
+        // Wait until revoke-all is blocked on that lock, so the other revoke really does land in the middle of it.
+        for (let i = 0; i < 200; i++) {
+          const waiting = await h.admin.query("SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%runner_revoke%'");
+          if (waiting.rowCount) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await holder.query("UPDATE runners SET revoked_at = now(), revoked_reason = 'revoked' WHERE id = $1", [contested]);
+        await holder.query("COMMIT");
+        const res = await running;
+        expect(res).toMatchObject({ status: 200, body: { revoked: 2, already_revoked: 1, runs_failed: 3 } });
+      } finally {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        holder.release();
+      }
+      for (const id of [first, contested, last]) expect((await runnerRow(id)).revoked_at, id).not.toBeNull();
+      // The two it revoked itself carry revoke-all's reason and an audit row each; the contested one is the other request's.
+      expect((await runnerRow(first)).revoked_reason).toBe("revoke_all");
+      expect((await runnerRow(last)).revoked_reason).toBe("revoke_all");
+      expect((await runnerRow(contested)).revoked_reason).toBe("revoked");
+      expect(await audit(f.accountId, "runner.revoked")).toHaveLength(2);
+      // Every runner of the account, the contested one included, had its leases failed.
+      expect(rec.calls.map((c) => c.runnerId).sort()).toEqual([first, contested, last].sort());
+    });
+
     it("revoke-all is for owners and admins even when a member would only touch their own runners", async () => {
       const f = await fresh();
       const own = await registerKey(h.admin, f.accountId, f.m1, newKey());
@@ -234,6 +268,17 @@ describe("runner identity routes [pg]", () => {
 
   describe("hello (criterion 10)", () => {
     const hello = { protocol_version: 1, binary_version: "0.1.0+abc", model_auth_present: false, isolation: "microvm" };
+
+    it("refuses a protocol_version outside a Postgres integer as a 400 and writes nothing, never a 500", async () => {
+      const f = await fresh();
+      const key = newKey();
+      const id = await registerKey(h.admin, f.accountId, f.a1, key);
+      for (const version of [2 ** 31, 2 ** 53 - 1]) {
+        expect((await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { ...hello, protocol_version: version })))).status, String(version)).toBe(400);
+      }
+      expect((await runnerRow(id)).protocol_version).toBeNull();
+      expect((await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { ...hello, protocol_version: 2 ** 31 - 1 })))).status).toBe(200);
+    });
 
     it("records the versions and the isolation tier, and refuses unknown fields", async () => {
       const f = await fresh();
