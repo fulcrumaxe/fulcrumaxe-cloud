@@ -617,7 +617,7 @@ describe('account_members role gate (D#64)', () => {
       const c2 = await rawClient();
       let t1: ReturnType<typeof setMemberRole> | undefined;
       try {
-        t1 = setMemberRole(appUserPool, f2.accountId, f2.o1, f2.o1, 'member');
+        t1 = setMemberRole(appUserPool, f2.accountId, f2.o1, f2.o1, 'member', { failRunnerLeases: null });
 
         // Wait until T1's own connection shows up as a WAITER for the
         // advisory lock lockHolder is holding -- proof T1 has already

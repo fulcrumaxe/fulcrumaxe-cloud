@@ -45,6 +45,7 @@ import { createWorkerPools, type WorkerPools } from "./pools.js";
 import { loadJobSigner } from "./jobSigner.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
+import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
 import { createAdvanceModule, type AdvanceFacade, type AdvanceModuleDeps } from "./advance.js";
@@ -121,7 +122,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends RunActionFacade, RunnerLeaseFacade, PreviewFacade, RetryFacade, AdvanceFacade {
+export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerQueueSweeper, PreviewFacade, RetryFacade, AdvanceFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -254,6 +255,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     configureAgentRunWiring({ pool: pools.runnerPool, registry });
     const runActions = createRunActionFacade(pools.runnerPool, registry);
     const runnerLeases = createRunnerLeaseFacade(pools.runnerPool);
+    const runnerQueue = createRunnerQueueSweeper(pools.runnerPool, { onError: (runId) => console.warn(JSON.stringify({ event: "runner.queue_sweep_failed", run_id: runId })) });
     const authorCheck = options.ports.authorCheck ?? (() => null);
     const resolveRunSeat = createSeatResolver({ pool: pools.runnerPool, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     // The three pieces a preview needs, wired together: its seat (from the resolver), the production run starter and the prompt builder.
@@ -277,7 +279,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     };
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
-    return { ...runActions, ...runnerLeases, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...runActions, ...runnerLeases, ...runnerQueue, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -297,7 +299,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, sweepRunnerQueue, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -312,6 +314,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         performCancelRun,
         performCancelWorkItem,
         failRunnerLeases,
+        sweepRunnerQueue,
         performStartPreview,
         previewReady,
         performRetryRun,

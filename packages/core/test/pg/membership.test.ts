@@ -56,7 +56,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
 
   it('a member cannot promote themselves to admin', async () => {
     await expect(
-      setMemberRole(appUserPool, refs.accountId, memberUserId, memberUserId, 'admin'),
+      setMemberRole(appUserPool, refs.accountId, memberUserId, memberUserId, 'admin', { failRunnerLeases: null }),
     ).rejects.toThrow(ForbiddenError);
 
     const role = await getMemberRole(appUserPool, refs.accountId, memberUserId);
@@ -65,41 +65,41 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
 
   it('a member cannot promote someone else either', async () => {
     await expect(
-      setMemberRole(appUserPool, refs.accountId, memberUserId, refs.userId, 'admin'),
+      setMemberRole(appUserPool, refs.accountId, memberUserId, refs.userId, 'admin', { failRunnerLeases: null }),
     ).rejects.toThrow(ForbiddenError);
   });
 
   it('an owner CAN promote a member to admin', async () => {
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, memberUserId, 'admin');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, memberUserId, 'admin', { failRunnerLeases: null });
     expect(await getMemberRole(appUserPool, refs.accountId, memberUserId)).toBe('admin');
     // restore for later tests
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, memberUserId, 'member');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, memberUserId, 'member', { failRunnerLeases: null });
   });
 
   it('demoting the last owner is refused', async () => {
     // refs.userId and secondOwnerId are both owners right now; demoting
     // EITHER one alone must succeed (two owners remain -> one), but
     // demoting the account down to zero owners must fail.
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'admin');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'admin', { failRunnerLeases: null });
     expect(await getMemberRole(appUserPool, refs.accountId, secondOwnerId)).toBe('admin');
 
     // Now only refs.userId is an owner. Demoting them must be refused.
     await expect(
-      setMemberRole(appUserPool, refs.accountId, refs.userId, refs.userId, 'admin'),
+      setMemberRole(appUserPool, refs.accountId, refs.userId, refs.userId, 'admin', { failRunnerLeases: null }),
     ).rejects.toThrow(ForbiddenError);
     expect(await getMemberRole(appUserPool, refs.accountId, refs.userId)).toBe('owner');
 
     // restore
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'owner');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'owner', { failRunnerLeases: null });
   });
 
   it('removing the last owner is refused', async () => {
     // Demote secondOwnerId to admin so refs.userId is the sole owner,
     // then attempt to remove refs.userId as themselves (an owner acting
     // on their own membership is still gated by the same rule).
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'admin');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'admin', { failRunnerLeases: null });
 
-    await expect(removeMember(appUserPool, refs.accountId, secondOwnerId, refs.userId)).rejects.toThrow(
+    await expect(removeMember(appUserPool, refs.accountId, secondOwnerId, refs.userId, { failRunnerLeases: null })).rejects.toThrow(
       ForbiddenError,
     );
 
@@ -107,7 +107,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
     expect(stillThere).toBe('owner');
 
     // restore
-    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'owner');
+    await setMemberRole(appUserPool, refs.accountId, refs.userId, secondOwnerId, 'owner', { failRunnerLeases: null });
   });
 
   it('removing a non-owner member succeeds for an owner/admin actor', async () => {
@@ -121,18 +121,18 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
       disposableId,
     ]);
 
-    await removeMember(appUserPool, refs.accountId, refs.userId, disposableId);
+    await removeMember(appUserPool, refs.accountId, refs.userId, disposableId, { failRunnerLeases: null });
     expect(await getMemberRole(appUserPool, refs.accountId, disposableId)).toBeNull();
   });
 
   it('acting on a target with no membership at all raises NotFoundError, not a silent no-op', async () => {
     await expect(
-      setMemberRole(appUserPool, refs.accountId, refs.userId, randomUUID(), 'admin'),
+      setMemberRole(appUserPool, refs.accountId, refs.userId, randomUUID(), 'admin', { failRunnerLeases: null }),
     ).rejects.toThrow(NotFoundError);
   });
 
   it('a member (not owner/admin) cannot remove anyone', async () => {
-    await expect(removeMember(appUserPool, refs.accountId, memberUserId, secondOwnerId)).rejects.toThrow(
+    await expect(removeMember(appUserPool, refs.accountId, memberUserId, secondOwnerId, { failRunnerLeases: null })).rejects.toThrow(
       ForbiddenError,
     );
   });
@@ -158,7 +158,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
       );
 
       await expect(
-        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, adminUserId, 'owner'),
+        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, adminUserId, 'owner', { failRunnerLeases: null }),
       ).rejects.toThrow(ForbiddenError);
       expect(await getMemberRole(appUserPool, acctRefs.accountId, adminUserId)).toBe('admin');
     });
@@ -185,7 +185,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
       );
 
       await expect(
-        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, targetMemberId, 'owner'),
+        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, targetMemberId, 'owner', { failRunnerLeases: null }),
       ).rejects.toThrow(ForbiddenError);
     });
 
@@ -214,7 +214,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
       // this demotion -- it must still be refused because the actor is
       // an admin, not an owner.
       await expect(
-        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, secondOwner, 'admin'),
+        setMemberRole(appUserPool, acctRefs.accountId, adminUserId, secondOwner, 'admin', { failRunnerLeases: null }),
       ).rejects.toThrow(ForbiddenError);
       expect(await getMemberRole(appUserPool, acctRefs.accountId, secondOwner)).toBe('owner');
     });
@@ -241,7 +241,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
       );
 
       await expect(
-        removeMember(appUserPool, acctRefs.accountId, adminUserId, secondOwner),
+        removeMember(appUserPool, acctRefs.accountId, adminUserId, secondOwner, { failRunnerLeases: null }),
       ).rejects.toThrow(ForbiddenError);
       expect(await getMemberRole(appUserPool, acctRefs.accountId, secondOwner)).toBe('owner');
     });
@@ -258,7 +258,7 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
         [acctRefs.accountId, targetMemberId],
       );
 
-      await setMemberRole(appUserPool, acctRefs.accountId, acctRefs.userId, targetMemberId, 'owner');
+      await setMemberRole(appUserPool, acctRefs.accountId, acctRefs.userId, targetMemberId, 'owner', { failRunnerLeases: null });
       expect(await getMemberRole(appUserPool, acctRefs.accountId, targetMemberId)).toBe('owner');
     });
   });
@@ -284,8 +284,8 @@ describe('membership role authorization + at-least-one-owner (sec-criteria A7)',
     ]);
 
     const results = await Promise.allSettled([
-      setMemberRole(appUserPool, acctRefs.accountId, acctRefs.userId, secondOwner, 'admin'),
-      setMemberRole(appUserPool, acctRefs.accountId, secondOwner, acctRefs.userId, 'admin'),
+      setMemberRole(appUserPool, acctRefs.accountId, acctRefs.userId, secondOwner, 'admin', { failRunnerLeases: null }),
+      setMemberRole(appUserPool, acctRefs.accountId, secondOwner, acctRefs.userId, 'admin', { failRunnerLeases: null }),
     ]);
 
     const fulfilledCount = results.filter((r) => r.status === 'fulfilled').length;

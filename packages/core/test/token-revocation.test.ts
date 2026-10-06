@@ -162,7 +162,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await addMember(refs.accountId, targetId, 'owner');
       const { id: tokenId } = await mintToken(refs.accountId, targetId, ['audit:read']);
 
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member', { failRunnerLeases: null });
 
       const row = await tokenRow(tokenId);
       expect(row.revoked_at).not.toBeNull();
@@ -183,7 +183,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
 
       await expect(
         withCommitFailureInjected((failingPool) =>
-          setMemberRole(failingPool, refs.accountId, refs.userId, targetId, 'member'),
+          setMemberRole(failingPool, refs.accountId, refs.userId, targetId, 'member', { failRunnerLeases: null }),
         ),
       ).rejects.toThrow();
 
@@ -207,12 +207,12 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       const tokenA = await mintToken(refs.accountId, targetId, ['read']);
       const tokenB = await mintToken(refs.accountId, targetId, ['read']);
 
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'admin');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'admin', { failRunnerLeases: null });
       expect((await tokenRow(tokenA.id)).revoked_reason).toBe('creator_demoted');
       expect((await tokenRow(tokenB.id)).revoked_reason).toBe('creator_demoted');
 
       const tokenC = await mintToken(refs.accountId, targetId, ['read']);
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member', { failRunnerLeases: null });
       expect((await tokenRow(tokenC.id)).revoked_reason).toBe('creator_demoted');
     });
 
@@ -223,11 +223,11 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       const { id: tokenId } = await mintToken(refs.accountId, memberId, ['read']);
 
       // promotion: member -> admin
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, memberId, 'admin');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, memberId, 'admin', { failRunnerLeases: null });
       expect((await tokenRow(tokenId)).revoked_at).toBeNull();
 
       // same rank: admin -> admin (a no-op role write, still goes through setMemberRole)
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, memberId, 'admin');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, memberId, 'admin', { failRunnerLeases: null });
       expect((await tokenRow(tokenId)).revoked_at).toBeNull();
     });
 
@@ -246,7 +246,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       const tokenInB = await mintToken(refsB.accountId, sharedUserId, ['read']);
       const otherMembersTokenInA = await mintToken(refsA.accountId, refsA.userId, ['read']);
 
-      await setMemberRole(appUserPool, refsA.accountId, refsA.userId, sharedUserId, 'member');
+      await setMemberRole(appUserPool, refsA.accountId, refsA.userId, sharedUserId, 'member', { failRunnerLeases: null });
 
       expect((await tokenRow(tokenInA.id)).revoked_at).not.toBeNull();
       expect((await tokenRow(tokenInB.id)).revoked_at).toBeNull();
@@ -261,10 +261,10 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await addMember(refs.accountId, targetId, 'owner');
       const { id: tokenId } = await mintToken(refs.accountId, targetId, ['read']);
 
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member', { failRunnerLeases: null });
       expect((await tokenRow(tokenId)).revoked_at).not.toBeNull();
 
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'owner');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'owner', { failRunnerLeases: null });
       const row = await tokenRow(tokenId);
       expect(row.revoked_at).not.toBeNull();
       expect(row.revoked_reason).toBe('creator_demoted');
@@ -278,7 +278,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await addMember(refs.accountId, targetId, 'owner');
       const { id: tokenId } = await mintToken(refs.accountId, targetId, ['read']);
 
-      await removeMember(appUserPool, refs.accountId, refs.userId, targetId);
+      await removeMember(appUserPool, refs.accountId, refs.userId, targetId, { failRunnerLeases: null });
 
       const row = await tokenRow(tokenId);
       expect(row.revoked_at).not.toBeNull();
@@ -296,7 +296,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       const { id: tokenId } = await mintToken(refs.accountId, targetId, ['read']);
 
       await expect(
-        withCommitFailureInjected((failingPool) => removeMember(failingPool, refs.accountId, refs.userId, targetId)),
+        withCommitFailureInjected((failingPool) => removeMember(failingPool, refs.accountId, refs.userId, targetId, { failRunnerLeases: null })),
       ).rejects.toThrow();
 
       const { rows: memberRows } = await admin.query(
@@ -316,7 +316,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await addMember(refs.accountId, targetId, 'owner');
       const { id: tokenId } = await mintToken(refs.accountId, targetId, ['read']);
 
-      await removeMember(appUserPool, refs.accountId, refs.userId, targetId);
+      await removeMember(appUserPool, refs.accountId, refs.userId, targetId, { failRunnerLeases: null });
       expect((await tokenRow(tokenId)).revoked_at).not.toBeNull();
 
       await admin.query('INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, $3)', [
@@ -336,7 +336,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await addMember(refs.accountId, secondOwnerId, 'owner');
       const { id: tokenId } = await mintToken(refs.accountId, refs.userId, ['read']);
 
-      await removeMember(appUserPool, refs.accountId, refs.userId, refs.userId);
+      await removeMember(appUserPool, refs.accountId, refs.userId, refs.userId, { failRunnerLeases: null });
 
       const row = await tokenRow(tokenId);
       expect(row.revoked_at).not.toBeNull();
@@ -405,7 +405,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await lockAcquiredPromise;
 
       const demoteStart = Date.now();
-      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member');
+      await setMemberRole(appUserPool, refs.accountId, refs.userId, targetId, 'member', { failRunnerLeases: null });
       const demoteElapsedMs = Date.now() - demoteStart;
 
       const { id: tokenId } = await mintPromise;
@@ -439,7 +439,7 @@ describe('D#31 C13d: creator demotion/removal revoke tokens (API-3e)', () => {
       await lockAcquiredPromise;
 
       const removeStart = Date.now();
-      await removeMember(appUserPool, refs.accountId, refs.userId, targetId);
+      await removeMember(appUserPool, refs.accountId, refs.userId, targetId, { failRunnerLeases: null });
       const removeElapsedMs = Date.now() - removeStart;
 
       const { id: tokenId } = await mintPromise;

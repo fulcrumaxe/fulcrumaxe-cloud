@@ -20,9 +20,13 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === path)).toEqual([{ path, schedule }]);
   });
 
+  it("the runner sweeper (D#6 R2b, C14 section 4) runs every 5 minutes through the shared pending-work gate: every timer is a 'not before' rule, so the cadence only adds up to 5 minutes of delay", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/runner-sweeper")).toEqual([{ path: "/api/cron/runner-sweeper", schedule: "*/5 * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);
-    for (const path of Object.keys(EXPECTED)) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
+    for (const path of [...Object.keys(EXPECTED), "/api/cron/runner-sweeper"]) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
   });
 });

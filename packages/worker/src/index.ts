@@ -1,6 +1,7 @@
 export { createWorker, assertWorkdirAllowed, type CreateWorkerOptions, type Worker, type WorkerPorts } from "./compositionRoot.js";
 export type { RunActionFacade, RunActionPrincipal, ClaimedRunAction, SettleRunActionInput, RunActionSettleState, PerformResult } from "./runActions.js";
 export type { RunnerLeaseFacade, FailRunnerLeasesInput, FailRunnerLeasesResult, RunnerLeaseFailReason } from "./runnerLeases.js";
+export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
 export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError, RunActionRefusedError } from "./runActions.js";
 export { productionVercelCredentials, VercelCredentialsUnavailableError } from "./vercelCredentials.js";
 export { StartupGuardError, type StartupRule } from "./pools.js";

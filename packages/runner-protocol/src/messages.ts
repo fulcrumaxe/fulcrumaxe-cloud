@@ -48,9 +48,13 @@ export const LocalOnlyEvent = z
   .strict();
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
+/** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
+export const INT4_MAX = 2_147_483_647;
+
 export const HelloMessage = z
   .object({
-    protocol_version: safeInt.min(1),
+    // Bounded by the column it is stored in: a larger value would otherwise reach the database and fail there as a 500.
+    protocol_version: safeInt.min(1).max(INT4_MAX),
     binary_version: z.string().regex(/^[A-Za-z0-9._+-]{1,64}$/),
     // Whether a model login is present. Never an email, organisation or account name.
     model_auth_present: z.boolean(),

@@ -468,6 +468,16 @@ describe('D#31 API-3d: token, tenant and failed-auth rate limits', () => {
       expect(otherDecision.allowed).toBe(true);
     });
 
+    it('the runner-register bucket (D#6 R2b: 10 a minute per address, apps/web/lib/runnerRoutes.ts) is accepted by rate_limit_check and cuts off at the 11th, separately from rum', async () => {
+      const REGISTER_LIMIT = 10; // the literal apps/web/lib/runnerRoutes.ts exports as REGISTER_LIMIT_PER_IP_PER_MINUTE
+      const ip = randomUUID();
+      for (let i = 0; i < REGISTER_LIMIT; i++) expect((await checkAnon('runner-register', ip, REGISTER_LIMIT)).allowed, `request ${i + 1}`).toBe(true);
+      const over = await checkAnon('runner-register', ip, REGISTER_LIMIT);
+      expect(over.allowed).toBe(false);
+      expect(over.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+      expect((await checkAnon('rum', ip)).allowed).toBe(true);
+    });
+
     it("is keyed on an IPv6 address's /64, not its full address -- rotating within one /64 does not reset the cap", async () => {
       // Same /64 (first four hextets 2001:db8:cafe:aaaa), different host bits.
       const sameBlockA = '2001:db8:cafe:aaaa::1';

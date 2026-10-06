@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { JobSchema, SignedJobSchema } from "../src/job.js";
-import { CREDENTIAL_MODES, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, type RunnerMessageName } from "../src/messages.js";
+import { CREDENTIAL_MODES, INT4_MAX, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, type RunnerMessageName } from "../src/messages.js";
 import { CREDENTIAL_NAME, G1_ALLOWLIST, fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const UUID = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -86,6 +86,13 @@ describe("hello", () => {
     for (const extra of ["email", "org", "organization", "account_name", "account"]) {
       expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), [extra]: "x" }).success, extra).toBe(false);
     }
+  });
+
+  it("keeps protocol_version inside a Postgres integer, so an out-of-range value is a refused message and never a database error", () => {
+    const hello = (protocol_version: number) => RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), protocol_version });
+    expect(INT4_MAX).toBe(2 ** 31 - 1);
+    expect(hello(INT4_MAX).success).toBe(true);
+    for (const bad of [INT4_MAX + 1, 2 ** 31, 2 ** 53 - 1, Number.MAX_SAFE_INTEGER, 0, -1, 1.5]) expect(hello(bad).success, String(bad)).toBe(false);
   });
 
   it("isolation is one of the four tiers and never none", () => {

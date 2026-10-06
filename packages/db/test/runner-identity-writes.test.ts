@@ -224,6 +224,86 @@ describe('runner identity writes (0712)', () => {
       expect(results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.code)).toEqual(['53400', '53400', '53400', '53400']);
       expect((await admin.query('SELECT count(*)::int AS n FROM runners WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(2);
     });
+
+    // 0732 (CWE-367): the minter's membership row is locked FOR SHARE, so a demotion cannot slip between the check and the insert.
+    describe('against a demotion of its minter at the same moment (0732)', () => {
+      const demote = (accountId: string, userId: string, role = 'member') => admin.query(`UPDATE account_members SET role = $3 WHERE account_id = $1 AND user_id = $2`, [accountId, userId, role]);
+      /** Waits until some backend is blocked on a lock whose statement matches `like`. */
+      async function waitForLockWait(like: string): Promise<void> {
+        for (let i = 0; i < 200; i++) {
+          if ((await admin.query(`SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1`, [like])).rowCount) return;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error(`nothing blocked on a lock matching ${like}`);
+      }
+
+      it('a registration that has checked its minter holds the minter, so a demotion waits for it and then revokes the new runner', async () => {
+        const f = await freshAccount();
+        const code = await mintCode(f, f.a1);
+        const reg = await appPool.connect();
+        const other = await adminPool.connect();
+        try {
+          await reg.query('BEGIN');
+          await reg.query(`SELECT set_config('app.account_id', $1, true)`, [f.accountId]);
+          const id = (await reg.query<{ id: string }>('SELECT runner_register($1, $2::jsonb, NULL) AS id', [code, JSON.stringify(newKey())])).rows[0]!.id;
+          // The registration is open and uncommitted. A demotion of the minter cannot proceed.
+          await other.query(`SET lock_timeout = '400ms'`);
+          let refusedByLock: { code?: string } | undefined;
+          try {
+            await other.query(`UPDATE account_members SET role = 'member' WHERE account_id = $1 AND user_id = $2`, [f.accountId, f.a1]);
+          } catch (error) {
+            refusedByLock = error as { code?: string };
+          }
+          expect(refusedByLock?.code, 'the demotion should have waited on the registration').toBe('55P03');
+          await other.query('RESET lock_timeout');
+          await reg.query('COMMIT');
+          // Now it goes through, and its trigger sees the runner the registration committed.
+          await demote(f.accountId, f.a1);
+          expect((await runnerRow(id)).revoked_reason).toBe('member_demoted');
+        } finally {
+          await reg.query('ROLLBACK').catch(() => undefined);
+          reg.release();
+          other.release();
+        }
+      });
+
+      it('a demotion that is already under way is waited for, and the registration is then refused with no runner and an unused code', async () => {
+        const f = await freshAccount();
+        const code = await mintCode(f, f.a1);
+        const demoting = await adminPool.connect();
+        try {
+          await demoting.query('BEGIN');
+          await demoting.query(`UPDATE account_members SET role = 'member' WHERE account_id = $1 AND user_id = $2`, [f.accountId, f.a1]);
+          const attempt = register(f.accountId, code, newKey()).then(() => 'registered', (error: { code?: string }) => error.code);
+          await waitForLockWait('%runner_register%');
+          await demoting.query('COMMIT');
+          expect(await attempt).toBe('P0002');
+        } finally {
+          await demoting.query('ROLLBACK').catch(() => undefined);
+          demoting.release();
+        }
+        expect((await admin.query('SELECT count(*)::int AS n FROM runners WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(0);
+        expect((await admin.query('SELECT used_at FROM runner_registration_codes WHERE code_sha256 = $1', [code])).rows[0].used_at).toBeNull();
+      });
+
+      it('a demotion that is rolled back leaves the registration standing', async () => {
+        const f = await freshAccount();
+        const code = await mintCode(f, f.a1);
+        const demoting = await adminPool.connect();
+        let attempt: Promise<string>;
+        try {
+          await demoting.query('BEGIN');
+          await demoting.query(`UPDATE account_members SET role = 'member' WHERE account_id = $1 AND user_id = $2`, [f.accountId, f.a1]);
+          attempt = register(f.accountId, code, newKey());
+          await waitForLockWait('%runner_register%');
+          await demoting.query('ROLLBACK');
+        } finally {
+          demoting.release();
+        }
+        const id = await attempt;
+        expect((await runnerRow(id)).registered_by).toBe(f.a1);
+      });
+    });
   });
 
   describe('runner_rotate_key', () => {

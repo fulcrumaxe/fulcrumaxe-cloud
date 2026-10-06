@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type {
   AdmitResult,
@@ -115,12 +116,23 @@ export class RunnerTarget implements ExecutionTarget {
 
   async dispatch(run: ExecutionRun): Promise<DispatchResult> {
     await this.deps.issuer.issue({ run });
+    this.markQueued();
     return { queued: true };
   }
 
   async resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
     await this.deps.issuer.issue({ run, continues: { parentRunId: run.parentRunId ?? null, sessionId } });
+    this.markQueued();
     return { queued: true };
+  }
+
+  /**
+   * Tells the runner sweeper when this run's queue time ends, so its cron tick does not open the database before then
+   * (D#454 H3c's marker). Best effort and never awaited: the marker is a hint and the sweeper's backstop tick finds the
+   * run anyway. An earlier marker is never pushed later.
+   */
+  private markQueued(): void {
+    void markWorkPending("runner-sweeper", { since: Date.now() + this.queueTtlMs });
   }
 
   async cancel(run: ExecutionRun): Promise<CancelResult> {

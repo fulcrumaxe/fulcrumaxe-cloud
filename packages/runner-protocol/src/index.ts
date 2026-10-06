@@ -9,3 +9,4 @@ export * from "./messages.js";
 export * from "./job.js";
 export * from "./jobSignature.js";
 export * from "./httpSignature.js";
+export * from "./copy.js";

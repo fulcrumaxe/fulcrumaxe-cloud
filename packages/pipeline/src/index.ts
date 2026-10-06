@@ -16,5 +16,6 @@ export * from "./review/verdicts.js";
 export * from "./review/githubReads.js";
 export * from "./review/context.js";
 export * from "./review/mergeGateRun.js";
+export * from "./review/localReviewOptIn.js";
 export * from "./review/roundDecision.js";
 export * from "./advance/lightSpec.js";

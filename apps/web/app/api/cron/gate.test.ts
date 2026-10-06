@@ -16,6 +16,7 @@ vi.mock("@fx/db/src/pool", () => ({ createPool }));
 import { apiSweepHandler, apiSweepKickHandler, defaultApiSweepDeps } from "./api-sweep/handler";
 import { runActionSweepHandler } from "./run-action-sweep/handler";
 import { computeSettleSweepHandler } from "./compute-settle-sweep/handler";
+import { runnerSweeperHandler } from "./runner-sweeper/handler";
 
 const SECRET = "test-cron-secret";
 const KICK_KEY = apiSweepKickKey(SECRET); // what the kick is signed with: derived from the cron secret, never the secret itself
@@ -331,5 +332,101 @@ describe("compute-settle-sweep", () => {
     expect(res.status).toBe(401);
     expect(getWorker).not.toHaveBeenCalled();
     expect(region.calls).toEqual({ get: 0, set: 0, delete: 0 });
+  });
+});
+
+describe("runner-sweeper (D#6 R2b)", () => {
+  const HOUR = 60 * MIN;
+  const none = { listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null as number | null };
+  const sweepRunnerQueue = vi.fn(async () => none);
+  const getWorker = vi.fn(async () => ({ sweepRunnerQueue }) as { sweepRunnerQueue: typeof sweepRunnerQueue } | null);
+  const deps = () => ({ cronSecret: SECRET, getWorker, log: vi.fn() });
+  beforeEach(() => {
+    getWorker.mockClear();
+    sweepRunnerQueue.mockReset();
+    sweepRunnerQueue.mockResolvedValue(none);
+  });
+
+  it("with no pending work builds no worker and sweeps nothing", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    getWorker.mockClear();
+    sweepRunnerQueue.mockClear();
+    const res = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(await res.json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+    expect(sweepRunnerQueue).not.toHaveBeenCalled();
+  });
+
+  it("a dispatched run is swept when its queue time ends: ticks before then skip, the due tick expires it, and the ticks after skip again", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps()); // the first tick is overdue and connects with nothing to do
+    sweepRunnerQueue.mockClear();
+    advance(20 * MIN);
+    const dueAt = clock.value + 72 * HOUR;
+    await markWorkPending("runner-sweeper", { since: dueAt }); // what RunnerTarget.dispatch does
+    // The backstop tick (30 minutes since the last connection) looks, finds the run still waiting and keeps the marker at its due time.
+    advance(15 * MIN);
+    sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, waiting: 1, nextDueAt: dueAt });
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(sweepRunnerQueue).toHaveBeenCalledTimes(1);
+    // Ticks until the next backstop and the due time end without a connection.
+    advance(10 * MIN);
+    getWorker.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+    // Not before: a tick 29 minutes ahead connects only through the backstop and keeps the marker; a tick 1 ms before the due
+    // time is skipped, so nothing is looked at early.
+    clock.value = dueAt - 29 * MIN;
+    vi.setSystemTime(clock.value);
+    sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, waiting: 1, nextDueAt: dueAt });
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    clock.value = dueAt - 1;
+    vi.setSystemTime(clock.value);
+    getWorker.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+    // The first tick at or after the due time connects through the marker, expires the run and, with nothing left waiting, clears it.
+    clock.value = dueAt;
+    vi.setSystemTime(clock.value);
+    sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, expired: 1 });
+    const due = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, waiting: 0, skipped: 0, failed: 0 });
+    // A marker younger than a minute is kept, as its writer may not have committed; the next tick finds nothing and clears it.
+    advance(6 * MIN);
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(6 * MIN);
+    getWorker.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+  });
+
+  it("a failed run keeps the next tick coming soon instead of dropping the marker", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(20 * MIN);
+    await markWorkPending("runner-sweeper");
+    advance(2 * MIN);
+    sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, failed: 1, nextDueAt: clock.value + 5 * MIN });
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(3 * MIN);
+    getWorker.mockClear();
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(getWorker).not.toHaveBeenCalled(); // not yet
+    advance(3 * MIN);
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(getWorker).toHaveBeenCalledTimes(1); // after the delay it tries again
+  });
+
+  it("an unauthenticated call builds no worker and reads no cache", async () => {
+    const res = await runnerSweeperHandler(new NextRequest("https://example.test/api/cron/runner-sweeper"), deps());
+    expect(res.status).toBe(401);
+    expect(getWorker).not.toHaveBeenCalled();
+    expect(region.calls).toEqual({ get: 0, set: 0, delete: 0 });
+  });
+
+  it("a worker that is not configured answers 200 with zeros", async () => {
+    const d = { cronSecret: SECRET, getWorker: async () => null, log: vi.fn() };
+    const res = await runnerSweeperHandler(cronRequest("runner-sweeper"), d);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ configured: false, listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0 });
+    expect(d.log).toHaveBeenCalledWith("runner sweeper: worker not configured");
   });
 });

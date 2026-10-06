@@ -138,12 +138,13 @@ describe("the Stripe job's key", () => {
 });
 
 describe("the schedule", () => {
-  it("vercel.json has the reconcile cron at 7 */6 * * * next to the three sweeps at their gated cadence (see vercel-crons.test.ts)", () => {
+  it("vercel.json has the reconcile cron at 7 */6 * * * next to the sweeps at their gated cadence (see vercel-crons.test.ts)", () => {
     const config = JSON.parse(readFileSync(path.join(__dirname, "../../../../vercel.json"), "utf8")) as { crons: { path: string; schedule: string }[] };
     expect(config.crons).toEqual([
       { path: "/api/cron/api-sweep", schedule: "*/5 * * * *" },
       { path: "/api/cron/run-action-sweep", schedule: "*/5 * * * *" },
       { path: "/api/cron/compute-settle-sweep", schedule: "*/10 * * * *" },
+      { path: "/api/cron/runner-sweeper", schedule: "*/5 * * * *" },
       { path: "/api/cron/reconcile", schedule: "7 */6 * * *" },
     ]);
   });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
+import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { isAdmitDenyReason, type ExecutionRun } from "../src/executionTarget.js";
 import {
   RUNNER_QUEUE_TTL_MS,
@@ -178,6 +179,46 @@ describe("RunnerTarget [pg]", () => {
       const t = target(db.runWriterPool);
       expect(await t.target.resume(run, "session-1")).toEqual({ queued: true });
       expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1" } }]);
+    });
+
+    describe("tells the runner sweeper when the queue time ends (D#6 R2b, the cron's no-database marker)", () => {
+      const marks = new Map<string, number>();
+      /** The marker write is fire and forget, with a read before it: give it a moment. */
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+      beforeEach(() => {
+        marks.clear();
+        setPendingHooks({ store: { get: async (k) => marks.get(k), set: async (k, v) => void marks.set(k, v), delete: async (k) => void marks.delete(k) } });
+      });
+      afterEach(() => setPendingHooks(null));
+
+      it("dispatch and resume each mark the sweep due 72 hours from now, once the job is recorded", async () => {
+        const w = await world();
+        const t = target(db.runWriterPool);
+        const before = Date.now();
+        await t.target.dispatch(await insertRun(w));
+        await settle();
+        const first = marks.get("pending:runner-sweeper");
+        expect(first).toBeGreaterThanOrEqual(before + RUNNER_QUEUE_TTL_MS);
+        expect(first).toBeLessThanOrEqual(Date.now() + RUNNER_QUEUE_TTL_MS);
+        marks.clear();
+        await t.target.resume(await insertRun(w, { role: "executor" }), "session-1");
+        await settle();
+        expect(marks.get("pending:runner-sweeper")).toBeGreaterThanOrEqual(before + RUNNER_QUEUE_TTL_MS);
+      });
+
+      it("a dispatch whose job could not be issued marks nothing", async () => {
+        const w = await world();
+        const t = new RunnerTarget({ pool: db.runWriterPool, issuer: { issue: async () => Promise.reject(new Error("no key")) }, visibility: createFakeVisibility("private") });
+        await expect(t.dispatch(await insertRun(w))).rejects.toThrow("no key");
+        await settle();
+        expect(marks.size).toBe(0);
+      });
+
+      it("a store that fails never fails the dispatch", async () => {
+        setPendingHooks({ store: { get: async () => { throw new Error("store down"); }, set: async () => { throw new Error("store down"); }, delete: async () => undefined } });
+        const w = await world();
+        expect(await target(db.runWriterPool).target.dispatch(await insertRun(w))).toEqual({ queued: true });
+      });
     });
 
     it("an issuer that fails makes dispatch fail: nothing is reported queued without a job behind it", async () => {

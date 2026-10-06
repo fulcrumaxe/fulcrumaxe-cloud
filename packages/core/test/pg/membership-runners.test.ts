@@ -101,6 +101,6 @@ describe('demoting or removing a member who registered runners (C11 section 4)',
     // No failer supplied at all is the same loud outcome, not a silent skip.
     const g = await seedF2(admin);
     await insertRunner(admin, g.accountId, g.a1);
-    await expect(setMemberRole(appUserPool, g.accountId, g.o1, g.a1, 'member')).rejects.toBeInstanceOf(RunnerLeasesNotFailedError);
+    await expect(setMemberRole(appUserPool, g.accountId, g.o1, g.a1, 'member', { failRunnerLeases: null })).rejects.toBeInstanceOf(RunnerLeasesNotFailedError);
   });
 });

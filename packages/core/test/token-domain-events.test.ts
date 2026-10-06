@@ -108,8 +108,8 @@ describe('api_token.* domain events (API-5c)', () => {
     const d1 = await mint(app, refs.accountId, demoted);
     const r1 = await mint(app, refs.accountId, removed);
     const r2 = await mint(app, refs.accountId, removed);
-    await setMemberRole(app, refs.accountId, refs.userId, demoted, 'member');
-    await removeMember(app, refs.accountId, refs.userId, removed);
+    await setMemberRole(app, refs.accountId, refs.userId, demoted, 'member', { failRunnerLeases: null });
+    await removeMember(app, refs.accountId, refs.userId, removed, { failRunnerLeases: null });
     const revoked = (await events(refs.accountId)).filter((e) => e.type === 'api_token.revoked');
     expect(revoked).toHaveLength(3);
     expect(revoked.find((e) => e.subject_id === d1.id)?.payload).toEqual({ reason: 'creator_demoted' });
