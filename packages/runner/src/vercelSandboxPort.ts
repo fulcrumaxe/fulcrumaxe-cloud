@@ -504,7 +504,7 @@ function boundedInt(value: unknown, max: number): value is number {
 function dropInvalidUsage(event: NormalizedEvent, report: (reason: InvalidEventReason) => void): NormalizedEvent {
   const { usage, costUsd } = event;
   if (usage !== undefined) {
-    const fields = [usage.inputTokens, usage.outputTokens, usage.cacheWriteTokens, usage.cacheReadTokens];
+    const fields = [usage.inputTokens, usage.outputTokens, usage.cacheWriteTokens, usage.cacheReadTokens, usage.reasoningTokens];
     if (!isPlainObject(usage) || !fields.every((v) => v === undefined || boundedInt(v, MAX_EVENT_TOKENS))) {
       delete event.usage;
       report("usage");
@@ -995,7 +995,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         // An assistant line with a malformed body, or usage it cannot key by
         // message id, is dropped and counted; it never reaches the meter.
         if (isMalformedAssistant(parsed)) return reportInvalid("shape");
-        const event = dropInvalidUsage(normalizeMessage(opts, parsed, seq++, opts.workdir), reportInvalid);
+        const event = dropInvalidUsage(normalizeMessage({ ...opts, backend: backend.name }, parsed, seq++, opts.workdir), reportInvalid);
         if (parsed.type === "result") {
           lastResult = event;
           lastResultSubtype = parsed.subtype;
@@ -1086,6 +1086,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         seq: seq++,
         type: "error",
         ts: new Date().toISOString(),
+        backend: backend.name,
         isError: true,
         sessionId: lastResult?.sessionId,
         usage: lastResult?.usage,

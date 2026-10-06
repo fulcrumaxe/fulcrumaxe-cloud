@@ -15,6 +15,11 @@ export interface NormalizedUsage {
   outputTokens: number;
   cacheWriteTokens?: number;
   cacheReadTokens?: number;
+  /**
+   * Reasoning tokens, for a backend that reports them separately (D#221 R1b). Absent for Claude Code. Untrusted like
+   * every usage field; nothing prices or meters it until a backend that sends it is selectable.
+   */
+  reasoningTokens?: number;
 }
 
 /**
@@ -53,6 +58,11 @@ export interface NormalizedEvent {
   seq: number;
   type: "system" | "assistant" | "user" | "result" | "error";
   ts: string;
+  /**
+   * D#221 R1b: the name of the backend that produced this event, stamped by the runner from the run's own backend
+   * (never read from a line the agent printed). Absent on events a runtime that has no backend seam emits.
+   */
+  backend?: string;
   sessionId?: string;
   /**
    * An `assistant` event's model message id (`message.id` of the raw

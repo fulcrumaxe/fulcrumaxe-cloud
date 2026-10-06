@@ -45,6 +45,7 @@ import { CloneError } from "../repoClone.js";
 import { detectModelFailure, type ModelFailureCode } from "../modelFailure.js";
 import { pauseQueuedRuns, recordLimitExtended, writeRunStatus } from "../runStatusWriter.js";
 import type { ExtensionPolicy, ExtensionPolicyInput } from "../runLimitDecision.js";
+import { BACKENDS } from "../backends.js";
 import { buildSandboxEnv } from "../sandboxEnv.js";
 import { isPersistentRole, retentionPolicyFor, sandboxNameFor } from "../sandboxNaming.js";
 import {
@@ -325,6 +326,8 @@ export class SandboxTarget implements ExecutionTarget {
     // meter, so the run is refused before it reserves anything or gets a
     // sandbox (metering no longer skips an unpriced model).
     if (!isKnownModelId(run.model)) return { admitted: false, reason: "unknown_model" };
+    // D#221 R1b: the backend is resolved here, once. A name the registry does not select refuses the run with nothing reserved.
+    if (!isSelectableBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
     const payerAccountId = this.payerFor(run);
     // An operator-subscription run holds no model money (the subscription is not billed per token) and needs
     // no model connection row; its per-run cap is enforced by the live meter, and its compute is reserved as usual.
@@ -345,6 +348,7 @@ export class SandboxTarget implements ExecutionTarget {
 
   async dispatch(run: ExecutionRun): Promise<{ hookToken: string }> {
     assertMeterableModel(run.model);
+    assertSelectableBackend(run.backend);
     const bk = this.bookkeeping(run.id);
     const payerAccountId = this.payerFor(run);
 
@@ -447,6 +451,7 @@ export class SandboxTarget implements ExecutionTarget {
       roleCard: run.roleCard,
       prompt: run.prompt,
       model: run.model,
+      ...(run.backend !== undefined && { backend: run.backend }),
       workdir: run.workdir,
       ...(run.cloneRepo && { clone: run.cloneRepo }),
       capUsd: perSpawnCapUsd(run),
@@ -624,6 +629,7 @@ export class SandboxTarget implements ExecutionTarget {
    */
   async resume(run: ExecutionRun, sessionId: string): Promise<{ hookToken: string }> {
     assertMeterableModel(run.model);
+    assertSelectableBackend(run.backend);
     const bk = this.bookkeeping(run.id);
     const payerAccountId = this.payerFor(run);
     const sandboxName = sandboxNameFor({
@@ -649,6 +655,7 @@ export class SandboxTarget implements ExecutionTarget {
         roleCard: run.roleCard,
         prompt: run.prompt,
         model: run.model,
+        ...(run.backend !== undefined && { backend: run.backend }),
         workdir: run.workdir,
         capUsd: perSpawnCapUsd(run),
         networkPolicy: networkPolicyRules,
@@ -1748,6 +1755,21 @@ function perSpawnCapUsd(run: ExecutionRun): number {
 function abortOf(bk: RunBookkeeping, err: unknown): RunAbortReason | undefined {
   if (bk.abort === undefined && err instanceof RunLimitError) bk.abort = { kind: "limit", limit: err.limit, reportedUsd: err.reportedUsd };
   return bk.abort;
+}
+
+function isSelectableBackend(name: string | undefined): boolean {
+  try {
+    BACKENDS.select(name);
+    return true;
+  } catch {
+    // fx-swallow-ok: the answer is the boolean; the error carries no data (fixed text) and the caller refuses the run with a fixed reason
+    return false;
+  }
+}
+
+/** D#221 R1b, for the paths that skip `admit` (dispatch, resume): fail closed. */
+function assertSelectableBackend(name: string | undefined): void {
+  if (!isSelectableBackend(name)) throw new Error("SandboxTarget: the run's backend is not selectable");
 }
 
 function isKnownModelId(model: string): model is ModelId {

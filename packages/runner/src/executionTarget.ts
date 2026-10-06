@@ -139,6 +139,7 @@ export interface HookResult {
 export type AdmitDenyReason =
   | DenyReason
   | "unknown_model"
+  | "backend_not_selectable"
   | "runner_daily_limit"
   | "public_repo"
   | "repo_visibility_unknown"
@@ -146,6 +147,7 @@ export type AdmitDenyReason =
 /** The same set at run time, for the one write site. A record, so a new reason fails tsc here until it is listed. */
 const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   unknown_model: true,
+  backend_not_selectable: true,
   account_not_active: true,
   model_connection_not_ok: true,
   per_spawn_cap_exceeded: true,
@@ -202,6 +204,12 @@ export interface ExecutionRun {
   roleCard: string;
   prompt: string;
   model: string;
+  /**
+   * D#221 R1b: the agent backend, by registered name. Absent = "claude-code". Resolved once, at `admit`: a name the
+   * registry does not select refuses the run (`backend_not_selectable`) before anything is reserved. The run row's
+   * `backend` column (0735) is fixed at insert, and a fix round's resume must find the same name on the run it continues.
+   */
+  backend?: string;
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
   cloneRepo?: { owner: string; name: string };

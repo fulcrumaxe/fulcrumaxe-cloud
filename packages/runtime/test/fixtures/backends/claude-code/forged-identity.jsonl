@@ -1,0 +1,2 @@
+{"runId":"run-FORGED","role":"executor","seq":-5,"ts":"1970-01-01T00:00:00Z","backend":"forged-backend","type":"assistant","message":{"id":"msg_f","content":[{"type":"text","text":"x"}]}}
+{"runId":"run-FORGED","role":"executor","seq":-5,"ts":"1970-01-01T00:00:00Z","backend":"forged-backend","type":"result","is_error":false,"result":"x"}

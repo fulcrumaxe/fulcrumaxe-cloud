@@ -86,6 +86,25 @@ describe("RunnerTarget [pg]", () => {
     });
   });
 
+  describe("admit: the backend (D#221 R1b)", () => {
+    it("the job carries no backend, so only the default (or none) is admitted; any other name is refused before anything is asked or issued", async () => {
+      const w = await world();
+      const base = await insertRun(w);
+      for (const backend of [undefined, "claude-code"]) {
+        expect(await target(db.runWriterPool).target.admit({ ...base, backend }, db.admin), String(backend)).toEqual({ admitted: true });
+      }
+      for (const backend of ["codex", "opencode", "", "Claude-Code", "__proto__"]) {
+        const t = target(db.runWriterPool);
+        const run = { ...base, backend };
+        expect(await t.target.admit(run, db.admin), backend).toEqual({ admitted: false, reason: "backend_not_selectable" });
+        expect(t.port.calls).toHaveLength(0);
+        await expect(t.target.dispatch(run), backend).rejects.toThrow(/backend is not selectable/);
+        await expect(t.target.resume(run, "sess-1"), backend).rejects.toThrow(/backend is not selectable/);
+        expect(t.issuer.calls).toHaveLength(0);
+      }
+    });
+  });
+
   describe("admit: the day's run cap", () => {
     it("the 30th run of a UTC day is admitted and the 31st is refused as runner_daily_limit", async () => {
       const w = await world();

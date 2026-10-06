@@ -29,7 +29,21 @@ export class ForeignSessionError extends Error {
   }
 }
 
+/**
+ * D#221 R1b: a fix round must continue on the backend that started the session. Thrown (before anything is written)
+ * when the run being continued has no backend on record, or a different one from the round's. Fixed text: neither name
+ * is echoed.
+ */
+export class ResumeBackendError extends Error {
+  constructor(public readonly reason: "missing" | "different") {
+    super(`refusing to resume: the session's backend is ${reason}`);
+    this.name = "ResumeBackendError";
+  }
+}
+
 export interface OwnedExecutorSession {
+  /** `agent_runs.backend` of that run (0735): what the session was started on. */
+  backend: string;
   /** The `agent_runs.id` the session id was read from -- for
    * `run_events`/audit callers, never used for tenant scoping itself. */
   runId: string;
@@ -65,8 +79,8 @@ export async function lookupOwnedExecutorSession(
   client: PoolClient,
   params: { accountId: string; workItemId: string },
 ): Promise<OwnedExecutorSession> {
-  const { rows } = await client.query<{ id: string; cc_session_id: string | null }>(
-    `SELECT id, cc_session_id FROM agent_runs
+  const { rows } = await client.query<{ id: string; cc_session_id: string | null; backend: string | null }>(
+    `SELECT id, cc_session_id, backend FROM agent_runs
        WHERE account_id = $1 AND work_item_id = $2 AND role = $3 AND cc_session_id IS NOT NULL
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -76,5 +90,7 @@ export async function lookupOwnedExecutorSession(
   if (!row || !row.cc_session_id) {
     throw new ForeignSessionError(params.workItemId);
   }
-  return { runId: row.id, sessionId: row.cc_session_id };
+  // A run with no backend on record cannot be shown to match: fail closed (the column is NOT NULL, so this is a stub or a drift).
+  if (typeof row.backend !== "string" || row.backend === "") throw new ResumeBackendError("missing");
+  return { runId: row.id, sessionId: row.cc_session_id, backend: row.backend };
 }

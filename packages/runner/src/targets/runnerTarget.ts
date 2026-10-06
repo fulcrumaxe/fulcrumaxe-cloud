@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import type {
@@ -91,6 +92,18 @@ export const unwiredJobIssuer: JobIssuer = {
 
 const ZERO: CancelResult = Object.freeze({ settled_usd: 0, released_usd: 0 });
 
+/**
+ * D#221 R1b: the job a runner is issued carries no backend, so the runner always runs Claude Code. A run that names any
+ * other backend would quietly run the wrong one; it is refused instead (at admit, and again by the paths that skip it).
+ */
+function isRunnerBackend(name: string | undefined): boolean {
+  return name === undefined || name === DEFAULT_BACKEND;
+}
+
+function assertRunnerBackend(name: string | undefined): void {
+  if (!isRunnerBackend(name)) throw new Error("RunnerTarget: the run's backend is not selectable on a runner");
+}
+
 export class RunnerTarget implements ExecutionTarget {
   readonly runtime = "runner" as const;
   /** See `RUNNER_QUEUE_TTL_MS`. */
@@ -101,6 +114,7 @@ export class RunnerTarget implements ExecutionTarget {
   /** `client` is accepted for the interface; `startAgentRun` has already released it, so nothing here uses it. */
   async admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult> {
     void client;
+    if (!isRunnerBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
     if (!RUNNER_TARGET_ROLES.has(run.role)) return { admitted: false, reason: "role_not_runner_eligible" };
 
     if ((await this.runsToday(run.accountId)) > RUNNER_RUNS_PER_DAY) return { admitted: false, reason: "runner_daily_limit" };
@@ -115,12 +129,14 @@ export class RunnerTarget implements ExecutionTarget {
   }
 
   async dispatch(run: ExecutionRun): Promise<DispatchResult> {
+    assertRunnerBackend(run.backend);
     await this.deps.issuer.issue({ run });
     this.markQueued();
     return { queued: true };
   }
 
   async resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
+    assertRunnerBackend(run.backend);
     await this.deps.issuer.issue({ run, continues: { parentRunId: run.parentRunId ?? null, sessionId } });
     this.markQueued();
     return { queued: true };

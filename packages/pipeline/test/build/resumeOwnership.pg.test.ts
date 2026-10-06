@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { insertAgentRun, writeRunStatus } from "@fx/runner";
-import { ForeignSessionError, lookupOwnedExecutorSession } from "../../src/build/resumeOwnership.js";
+import { ForeignSessionError, ResumeBackendError, lookupOwnedExecutorSession } from "../../src/build/resumeOwnership.js";
+import { resumeAgentRun } from "../../src/build/resumeAgentRun.js";
+import type { ExecutionTargetRegistry } from "@fx/runner";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { seedAccount, seedRepo, seedWorkItem } from "./helpers/seed.js";
@@ -54,7 +56,7 @@ describe("H14a resumeOwnership [pg]", () => {
     const owned = await withTenant(db.runWriterPool, accountId, (client) =>
       lookupOwnedExecutorSession(client, { accountId, workItemId }),
     );
-    expect(owned).toEqual({ runId, sessionId: "cc-session-owned" });
+    expect(owned).toEqual({ runId, sessionId: "cc-session-owned", backend: "claude-code" });
   });
 
   it("refuses a foreign session: a different tenant's row is invisible even when its workItemId is guessed", async () => {
@@ -138,5 +140,31 @@ describe("H14a resumeOwnership [pg]", () => {
     await expect(
       withTenant(db.runWriterPool, accountId, (client) => lookupOwnedExecutorSession(client, { accountId, workItemId })),
     ).rejects.toBeInstanceOf(ForeignSessionError);
+  });
+  // D#221 R1b: a fix round continues on the backend the session started on, or not at all.
+  it("refuses a round that asks for a different backend, before any run row or target call", async () => {
+    const accountId = randomUUID();
+    const repoId = randomUUID();
+    const workItemId = randomUUID();
+    await seedAccount(db.admin, accountId);
+    await seedRepo(db.admin, accountId, repoId);
+    await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 7 });
+    await seedExecutorRunWithSession(accountId, workItemId, repoId, "cc-session-owned");
+    const before = await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [accountId]);
+    // An empty registry: if the check did not stop the round first, resolving the target would throw something else.
+    const registry = {} as ExecutionTargetRegistry;
+    const base = { accountId, repoId, workItemId, pr: 7, role: "executor" as const, product: "team" as const, roleCard: "c", prompt: "p", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter" as const, estimateComputeUsd: 1, trigger: "foreground" as const } };
+    for (const backend of ["codex", "", "Claude-Code"]) {
+      await expect(resumeAgentRun(db.runWriterPool, registry, { ...base, backend }), backend).rejects.toMatchObject({ name: "ResumeBackendError", reason: "different" });
+    }
+    const after = await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [accountId]);
+    expect(after.rows[0].n).toBe(before.rows[0].n);
+  });
+
+  it("fails closed when the run being continued has no backend on record", async () => {
+    for (const backend of [null, ""]) {
+      const client = { query: async () => ({ rows: [{ id: "r1", cc_session_id: "s1", backend }] }) };
+      await expect(lookupOwnedExecutorSession(client as never, { accountId: "a", workItemId: "w" })).rejects.toBeInstanceOf(ResumeBackendError);
+    }
   });
 });

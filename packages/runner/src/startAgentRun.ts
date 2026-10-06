@@ -83,6 +83,8 @@ export interface StartAgentRunInput {
   roleCard: string;
   prompt: string;
   model: string;
+  /** D#221 R1b: see `ExecutionRun.backend`. */
+  backend?: string;
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only; see `ExecutionRun.cloneRepo`. */
   cloneRepo?: { owner: string; name: string };
@@ -158,6 +160,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     roleCard: input.roleCard,
     prompt: input.prompt,
     model: input.model,
+    backend: input.backend,
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     capUsd: input.capUsd,
