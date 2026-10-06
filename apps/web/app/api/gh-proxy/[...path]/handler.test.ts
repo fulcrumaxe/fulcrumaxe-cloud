@@ -1005,6 +1005,26 @@ describe("buildAccessTokenRequester: the mint request body", () => {
     expect(h.sent).toEqual(['{"repositories":["widgets"],"permissions":{"contents":"write"}}']);
   });
 
+  it("passes on the permissions GitHub reports for the token, unfiltered, so a write cannot vanish on the way to the read-only check", async () => {
+    const reply = (permissions: unknown): PinnedRequester =>
+      vi.fn(async (): Promise<PinnedResponse> => ({
+        status: 201,
+        headers: {},
+        bodyStream: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(JSON.stringify({ token: "ghs_x", expires_at: new Date().toISOString(), permissions })));
+            c.close();
+          },
+        }),
+      }));
+    const mint = (permissions: unknown) =>
+      buildAccessTokenRequester({ resolveUpstream: vi.fn(async () => ["140.82.112.3"]), forwardPinned: reply(permissions) })({ installationId: 1, appJwt: "jwt", repositories: ["widgets"], permissions: { contents: "read" } });
+    expect((await mint({ metadata: "read", contents: "write" })).permissions).toEqual({ metadata: "read", contents: "write" });
+    expect((await mint({ metadata: "read", odd: 5 })).permissions).toEqual({ metadata: "read", odd: 5 });
+    expect((await mint(undefined)).permissions).toBeUndefined();
+    expect((await mint("read")).permissions).toBeUndefined();
+  });
+
   it("sends a User-Agent (the API refuses a request without one), the bearer JWT and the JSON content type", async () => {
     const seen: Array<Record<string, string>> = [];
     const forwardPinned: PinnedRequester = vi.fn(async (p): Promise<PinnedResponse> => {

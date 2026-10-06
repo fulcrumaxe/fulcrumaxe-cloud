@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "repo_not_connected",
+    "message": "this repository isn't connected any more",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

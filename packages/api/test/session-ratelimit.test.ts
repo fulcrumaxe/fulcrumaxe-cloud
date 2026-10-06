@@ -339,6 +339,7 @@ describe('session rate limits', () => {
         cancelSiteSync: 'stripe',
         testWebhookEndpoint: 'webhook-test',
         retryRun: 'run-retry',
+        startPlanImport: 'plan-import',
       });
     });
   });

@@ -386,11 +386,17 @@ export function buildAccessTokenRequester(deps: {
       if (typeof raw === "string") ghMessage = raw.replace(/[^A-Za-z ]/g, "").slice(0, 80);
       throw Object.assign(new Error("access_token_mint_failed"), { status: response.status, ghMessage });
     }
-    const parsed = JSON.parse(text) as { token?: string; expires_at?: string };
+    const parsed = JSON.parse(text) as { token?: string; expires_at?: string; permissions?: unknown };
     if (!parsed.token || !parsed.expires_at) {
       throw new Error("access_token_mint_failed");
     }
-    return { token: parsed.token, expiresAt: parsed.expires_at };
+    // The permissions GitHub reports for the token: only the plan_read mint checks them (E2), but they are always passed on.
+    // Passed through unchanged (never filtered): a value that is not a string makes the read-only check fail, not vanish.
+    const reported =
+      parsed.permissions !== null && typeof parsed.permissions === "object" && !Array.isArray(parsed.permissions)
+        ? (parsed.permissions as Record<string, string>)
+        : undefined;
+    return { token: parsed.token, expiresAt: parsed.expires_at, ...(reported ? { permissions: reported } : {}) };
   };
 }
 

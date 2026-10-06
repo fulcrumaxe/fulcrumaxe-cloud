@@ -95,6 +95,12 @@ export interface MintedAccessToken {
   token: string;
   /** ISO-8601, as GitHub's API returns it. */
   expiresAt: string;
+  /**
+   * The permissions GitHub says the minted token holds (the `permissions` object of the mint response). Only the
+   * `plan_read` purpose needs it: that purpose refuses a token that holds anything but `read`, and refuses a mint
+   * response that does not say (D#483 S3, E2).
+   */
+  permissions?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -180,7 +186,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -210,8 +216,30 @@ export const MERGE_GATE_PERMISSIONS: Readonly<Record<string, "read" | "write">> 
 /** The only permissions a `preview_read` token ever asks for: reads, never a write. Issues are read because the preview prompt lists open issues. */
 const PREVIEW_READ_PERMISSIONS: TokenScope["permissions"] = { metadata: "read", contents: "read", issues: "read" };
 
+/**
+ * D#483 S3 (M0, E1): the only permissions a `plan_read` token ever asks for, whatever the caller's scope says. The
+ * importer reads the repository's roadmap file (contents), its issues and pull requests (the issues list carries both)
+ * and its Discussions. Every value is `read`, and the mint refuses a response that says otherwise (`token_not_read_only`).
+ * `pull_requests: read` is included (owner ruling Q-S3-2, 2026-10-05): the read App was granted it, and the importer
+ * needs merged-PR evidence (`merged_at`, the PR body) to decide done from remaining. Read-only, like `issues`.
+ */
+export const PLAN_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({
+  metadata: "read",
+  contents: "read",
+  issues: "read",
+  pull_requests: "read",
+  discussions: "read",
+});
+
 /** The only permissions a `sitekit_read` token ever asks for: reads, never a write. */
 const SITEKIT_READ_PERMISSIONS: TokenScope["permissions"] = { metadata: "read", contents: "read" };
+
+/** E2 (D#483 S3): every permission GitHub reports for a `plan_read` token must be exactly `read`, and at least one must be reported. */
+export function assertTokenReadOnly(permissions: unknown): asserts permissions is Record<string, "read"> {
+  if (permissions === null || typeof permissions !== "object" || Array.isArray(permissions)) throw new InstallationTokenError("token_not_read_only");
+  const entries = Object.entries(permissions as Record<string, unknown>);
+  if (entries.length === 0 || entries.some(([, level]) => level !== "read")) throw new InstallationTokenError("token_not_read_only");
+}
 
 export interface GetInstallationTokenParams {
   installationId: number;
@@ -257,6 +285,12 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   } else if (params.purpose === "run") {
     assertWriteInstallation(params.appKind);
     appKind = params.appKind;
+  } else if (params.purpose === "plan_read" && (params.appKind === "team_readonly" || params.appKind === "team")) {
+    // D#483 S3: a one-repository, fixed, read-only set. An installation-wide token has no business here.
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: PLAN_READ_PERMISSIONS };
+    allowed = Object.keys(PLAN_READ_PERMISSIONS);
+    appKind = params.appKind;
   } else if (params.purpose === "preview_read" && params.appKind === "team_readonly") {
     // A wide token is already metadata-read only, a subset of what preview_read allows.
     if (!isWide(params.scope)) scope = { repositories: params.scope.repositories, permissions: PREVIEW_READ_PERMISSIONS };
@@ -299,6 +333,9 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (!Number.isFinite(expiresAtMs)) {
     throw new InstallationTokenError("mint_failed");
   }
+  // E2: a read token must be read-only in fact, not only by request. GitHub's own answer is checked, and a response that
+  // does not state the permissions is refused, so the token is neither cached nor handed out.
+  if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
   params.cache.set(
     params.installationId,
     appKind,

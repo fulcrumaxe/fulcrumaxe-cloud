@@ -1,0 +1,33 @@
+{
+  "id": "44444444-4444-4444-8444-444444444444",
+  "repo_id": "55555555-5555-4555-8555-555555555555",
+  "state": "failed",
+  "level": null,
+  "source_path": null,
+  "source_sha": null,
+  "counts": {},
+  "truncated": false,
+  "error_code": "plan_file_inconsistent",
+  "error_detail": "task D#1:T is listed in two milestones",
+  "max_merged_pr": null,
+  "github_requests": [
+    {
+      "method": "POST",
+      "path": "/graphql PlanRepoHead",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/repos/acme/widgets/issues",
+      "status": 200
+    }
+  ],
+  "token_permissions": {
+    "metadata": "read",
+    "contents": "read",
+    "issues": "read",
+    "discussions": "read"
+  },
+  "started_at": "2026-10-05T14:02:00.000Z",
+  "finished_at": "2026-10-05T14:02:09.000Z"
+}

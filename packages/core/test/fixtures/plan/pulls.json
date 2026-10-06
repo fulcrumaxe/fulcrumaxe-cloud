@@ -1,0 +1,148 @@
+{
+ "repo": "example/widgets",
+ "as_of": "a made-up moment (highest merged pull request number 40)",
+ "pulls": [
+  {
+   "number": 1,
+   "title": "Add the widget model",
+   "state": "merged",
+   "dLines": [
+    "Part of D#9001 A1."
+   ]
+  },
+  {
+   "number": 2,
+   "title": "Widget storage",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 3,
+   "title": "Widget storage indexes",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 4,
+   "title": "Widget list endpoint",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 5,
+   "title": "Widget list paging",
+   "state": "open",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 6,
+   "title": "Widget detail view",
+   "state": "open",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 7,
+   "title": "Widget rename",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9001"
+   ]
+  },
+  {
+   "number": 10,
+   "title": "Export widgets as CSV",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9002"
+   ]
+  },
+  {
+   "number": 11,
+   "title": "Export widgets as JSON",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9002"
+   ]
+  },
+  {
+   "number": 12,
+   "title": "Follow-up to B4 for the export header",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9002"
+   ]
+  },
+  {
+   "number": 13,
+   "title": "Add retries to the sender",
+   "state": "merged",
+   "dLines": [
+    "Part of D#9002; builds on B5 first"
+   ]
+  },
+  {
+   "number": 14,
+   "title": "Retry budget",
+   "state": "closed",
+   "dLines": [
+    "Refs D#9002"
+   ]
+  },
+  {
+   "number": 20,
+   "title": "Widget audit log",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9003"
+   ]
+  },
+  {
+   "number": 21,
+   "title": "Widget quotas",
+   "state": "open",
+   "dLines": [
+    "Refs D#9003"
+   ]
+  },
+  {
+   "number": 22,
+   "title": "Widget docs",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9004"
+   ]
+  },
+  {
+   "number": 30,
+   "title": "Prerequisite for C1: the schema",
+   "state": "merged",
+   "dLines": [
+    "Closes D#9003"
+   ]
+  },
+  {
+   "number": 31,
+   "title": "Tidy the queue",
+   "state": "merged",
+   "dLines": [
+    "Refs D#9003 (blocked by C2)"
+   ]
+  },
+  {
+   "number": 40,
+   "title": "Unrelated cleanup",
+   "state": "merged",
+   "dLines": []
+  }
+ ]
+}

@@ -21,7 +21,7 @@ export interface LocalTlsServer {
   /** The certificate (also its own CA), to be passed to the client as `ca`. */
   ca: string;
   /** Every request received, as the server saw it. */
-  seen: Array<{ method: string; path: string; headers: Record<string, string>; body: string; servername: string | false | undefined }>;
+  seen: Array<{ method: string; path: string; query?: string; headers: Record<string, string>; body: string; servername: string | false | undefined }>;
   close: () => Promise<void>;
 }
 
@@ -42,7 +42,9 @@ export async function startLocalTlsServer(
     req.on("end", () => {
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(", ") : v;
-      const gh: GhRequest = { method: req.method ?? "GET", path: (req.url ?? "/").split("?")[0]!, headers, body: Buffer.concat(chunks).toString("utf8") };
+      const rawUrl = req.url ?? "/";
+      const q = rawUrl.indexOf("?");
+      const gh: GhRequest = { method: req.method ?? "GET", path: q === -1 ? rawUrl : rawUrl.slice(0, q), ...(q === -1 ? {} : { query: rawUrl.slice(q + 1) }), headers, body: Buffer.concat(chunks).toString("utf8") };
       seen.push({ ...gh, servername: (req.socket as unknown as { servername?: string | false }).servername });
       Promise.resolve(respond(gh)).then(
         (r) => {
