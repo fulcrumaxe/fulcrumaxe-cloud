@@ -2,10 +2,11 @@
  * The `live-e2e` command line. Commands: `plan` and `scrub` (the upload gate); `run` arrives with T1b.
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
- *                 [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
+ *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
  *
  * `--tier` defaults to smoke only when neither `--pack` is given (naming a pack alone selects just that
- * pack). `--changed-from` and `--budget-usd` are not accepted yet (T4 and T13a); an unknown flag is an error.
+ * pack). `--changed-from` adds the packs its changed files route to (never a full pack, never fewer packs than
+ * the tier gave); `--budget-usd` is not accepted yet (T13a); an unknown flag is an error.
  *
  * Exit codes: 0 plan written; 1 the plan was written (or could not be) because of a refusal of a pack the
  * caller named, or EMPTY-SELECTION; 2 usage, manifest or target errors.
@@ -17,6 +18,7 @@ import { loadPacks, ManifestError, TIERS, type Tier } from "./manifest.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
+import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
 import { loadTarget, TargetError } from "./targets.js";
@@ -28,6 +30,7 @@ export interface Args {
   packs: string[];
   tag?: string;
   trigger?: Trigger;
+  changedFrom?: string;
   out?: string;
 }
 
@@ -38,12 +41,12 @@ export class UsageError extends Error {
   }
 }
 
-const VALUE_FLAGS = ["--target", "--tier", "--pack", "--tag", "--trigger", "--out"] as const;
+const VALUE_FLAGS = ["--target", "--tier", "--pack", "--tag", "--trigger", "--changed-from", "--out"] as const;
 
 export function parseArgs(argv: string[]): Args {
   const [command, ...rest] = argv;
   if (command === "run") throw new UsageError("`run` is not available yet (it lands with T1b); use `plan`");
-  if (command !== "plan") throw new UsageError("usage: live-e2e plan --target <staging|production> [--tier t] [--pack a,b] [--tag @x] [--trigger t] [--out file]");
+  if (command !== "plan") throw new UsageError("usage: live-e2e plan --target <staging|production> [--tier t] [--pack a,b] [--tag @x] [--changed-from base..head] [--trigger t] [--out file]");
   const seen = new Map<string, string[]>();
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i] as string;
@@ -72,14 +75,25 @@ export function parseArgs(argv: string[]): Args {
   if (tier !== undefined) args.tier = tier as Tier;
   if (tag !== undefined) args.tag = tag;
   if (trigger !== undefined) args.trigger = trigger as Trigger;
+  const changedFrom = one("--changed-from");
+  if (changedFrom !== undefined) {
+    try {
+      parseRange(changedFrom);
+    } catch (err) {
+      throw new UsageError(err instanceof Error ? err.message : String(err));
+    }
+    args.changedFrom = changedFrom;
+  }
   const out = one("--out");
   if (out !== undefined) args.out = out;
   return args;
 }
 
 export interface Io {
-  /** The package root: `packs/` and `targets/` are read from here. */
+  /** The package root: `packs/`, `targets/` and `routing-ledger.json` are read from here. */
   root: string;
+  /** The git checkout `--changed-from` diffs in. Defaults to two levels above `root` (apps/live-e2e). */
+  repoRoot?: string;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
@@ -187,7 +201,17 @@ export async function main(argv: string[], io: Io): Promise<number> {
     const target = loadTarget(join(io.root, "targets"), args.target, io.env);
     const packs = loadPacks(join(io.root, "packs"));
     const tier = args.tier ?? (args.packs.length === 0 ? "smoke" : undefined);
+    const routing =
+      args.changedFrom === undefined
+        ? undefined
+        : await computeRouting({
+            changedFrom: args.changedFrom,
+            packs,
+            repoRoot: io.repoRoot ?? resolve(io.root, "..", ".."),
+            ledgerFile: join(io.root, "routing-ledger.json"),
+          });
     const plan = buildPlan({
+      ...(routing !== undefined ? { routing } : {}),
       packs,
       target,
       named: args.packs,
@@ -199,6 +223,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
     const outFile = resolve(io.cwd, args.out ?? "plan.json");
     mkdirSync(dirname(outFile), { recursive: true });
     writeFileSync(outFile, `${JSON.stringify(plan, null, 2)}\n`);
+    if (plan.routing_fallback !== null) io.stdout(`routing fell back to every pack at or below standard: ${plan.routing_fallback}`);
     for (const o of plan.packs) io.stdout(describeOutcome(o));
     io.stdout(`plan written to ${outFile}`);
     const namedRefusals = plan.refused.filter((r) => r.named);
