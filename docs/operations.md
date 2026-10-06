@@ -29,7 +29,7 @@ Runs in order, exiting non-zero on the first failure (`set -euo pipefail`):
 3. `pnpm typecheck` (`pnpm -r --if-present run typecheck` — runs each workspace package's own typecheck script, skipping any package that doesn't define one).
 4. `bash scripts/check-globalsetup-env.sh` — fails, naming the offending file and line, if any `packages/*/test/globalSetup.ts` or `apps/*/test/globalSetup.ts` writes to `process.env.*` or builds a port with `Math.random()`. `vitest.workspace.ts` runs every project's `globalSetup` in one shared orchestrator process before any project's workers fork, so a `process.env` write in one project's setup can be silently overwritten by another's before the first project's own tests ever read it back; this script is a static guard against that class of bug recurring.
 5. `pnpm test` (`vitest run`), with `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` explicitly unset and `FX_FORBID_MODEL_CALLS=1` set — see [the zero-model-token test rule](security.md#the-zero-model-token-test-rule).
-6. `bash packages/db/scripts/test-neon-shape.sh` — proves the migration chain applies under a role shaped like Neon's non-superuser connection owner, both as a fresh install and as an incremental upgrade of an already-migrated database, and (D#94) that the current PR's own new migration files apply safely as an upgrade against the resolved base ref's chain. See [`docs/ops/hosted-postgres.md`](ops/hosted-postgres.md).
+6. `bash packages/db/scripts/test-neon-shape.sh` — proves the migration chain applies under a role shaped like Neon's non-superuser connection owner, both as a fresh install and as an incremental upgrade of an already-migrated database, and (D#94) that the current PR's own new migration files apply safely as an upgrade against the resolved base ref's chain.
 7. `bash packages/db/scripts/check-migration-order.sh` — refuses a new `packages/db/migrations/*.sql` file that doesn't sort strictly after every migration already on the base ref (`MIGRATION_ORDER_BASE`, default `origin/main`), refuses a rename/edit of an existing migration file, and refuses two files sharing a four-digit prefix; fails closed (exit 2) if the base ref can't be resolved. See `packages/db/migrations/README.md` for the numbering rule (R1-R3) this enforces.
 8. `pnpm --filter web build` — a real Next.js production build of `apps/web`.
 9. `pnpm test:guard` (`vitest run packages/test-guard/test/guard-violation.fixture.test.ts`) — the guard's own fixture test, which deliberately trips `installModelCallGuard` to prove the guard itself still catches a violation rather than having silently become a no-op.
@@ -48,7 +48,7 @@ Runs in order, exiting non-zero on the first failure (`set -euo pipefail`):
 
 ## Hosted Postgres
 
-Applying this same migration chain to a real hosted Postgres (Neon) connection, which is never a superuser, has its own owner-shape and privilege-bracket requirements. See [`docs/ops/hosted-postgres.md`](ops/hosted-postgres.md) for the full detail rather than repeating it here.
+Applying this same migration chain to a real hosted Postgres (Neon) connection, which is never a superuser, has its own owner-shape and privilege-bracket requirements. The operator runbooks that cover it are not part of this public tree.
 
 ## Out of scope for these docs
 

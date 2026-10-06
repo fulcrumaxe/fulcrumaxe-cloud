@@ -95,7 +95,7 @@ Every per-tenant table follows the same pattern, laid out in `packages/db/migrat
 
 ## Applying migrations without a superuser
 
-Migrations are written to apply as the database's non-superuser owning role on hosted Postgres (Neon), not only on the superuser-owned clusters local development and CI use — introduced in `#92`. Several migrations that transfer function ownership to `platform_ops` need `platform_ops` to briefly hold `CREATE` on schema `public`, a privilege only available to a `CREATEROLE` role (never a superuser-only grant) under a specific, self-bracketed sequence: grant, do the ownership transfer, revoke. [`docs/ops/hosted-postgres.md`](ops/hosted-postgres.md) covers the full owner shape and the per-file bracket rule this depends on.
+Migrations are written to apply as the database's non-superuser owning role on hosted Postgres (Neon), not only on the superuser-owned clusters local development and CI use — introduced in `#92`. Several migrations that transfer function ownership to `platform_ops` need `platform_ops` to briefly hold `CREATE` on schema `public`, a privilege only available to a `CREATEROLE` role (never a superuser-only grant) under a specific, self-bracketed sequence: grant, do the ownership transfer, revoke. The full owner shape and the per-file bracket rule this depends on are covered in the operator runbooks (not part of this public tree).
 
 ## Append-only evidence tables
 
