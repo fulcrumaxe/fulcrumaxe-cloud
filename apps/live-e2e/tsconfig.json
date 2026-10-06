@@ -8,5 +8,5 @@
     "noUnusedParameters": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "fixtures/**/*.ts", "pw/**/*.ts", "packs/**/*.ts", "playwright.config.ts", "vitest.config.ts"]
 }

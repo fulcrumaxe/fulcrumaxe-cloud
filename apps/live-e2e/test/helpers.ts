@@ -34,6 +34,8 @@ export function makeTarget(overrides: Partial<Target> = {}): Target {
   return {
     name: "staging",
     origin: "https://staging.example.test",
+    origin_env: "LIVE_E2E_STAGING_ORIGIN",
+    project_id_env: "LIVE_E2E_STAGING_PROJECT_ID",
     project_id: "prj_Staging1",
     protected: true,
     env: ["VERCEL_AUTOMATION_BYPASS_SECRET"],

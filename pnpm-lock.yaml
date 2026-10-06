@@ -77,6 +77,9 @@ importers:
         specifier: ^4.19.2
         version: 4.23.15
     devDependencies:
+      '@playwright/test':
+        specifier: 1.63.0
+        version: 1.63.0
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
@@ -89,6 +92,9 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
+      workspace:
+        specifier: workspace:*
+        version: link:../workspace
 
   apps/web:
     dependencies:
