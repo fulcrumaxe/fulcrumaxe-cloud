@@ -52,7 +52,5 @@
   "packages/sitekit-publish-gates/src/approval/checks.ts": 1,
   "packages/sitekit-publish-gates/src/links/links.ts": 1,
   "packages/telemetry/src/logger.ts": 2,
-  "packages/test-guard/src/guard.ts": 1,
-  "packages/worker/src/preview.ts": 4,
-  "packages/worker/src/vercelCredentials.ts": 1
+  "packages/test-guard/src/guard.ts": 1
 }
