@@ -10,6 +10,9 @@ import {
   unwiredRepoVisibility,
   sweepComputeSettle,
   sweepLostRuns,
+  sweepSandboxReap,
+  type SweepSandboxReapInput,
+  type SweepSandboxReapResult,
   type LostSweepResult,
   type AuthorCheckProvider,
   configureAgentRunWiring,
@@ -128,6 +131,14 @@ export interface Worker extends RunActionFacade, RunnerLeaseFacade, PreviewFacad
    * runs that are `running` while their sandbox is gone (`lost`), so a run stopped from outside ends within a few minutes.
    */
   sweepComputeSettle(): Promise<ComputeSettleSweepResult & { lost: LostSweepResult }>;
+  /**
+   * D#2 SANDBOX-REAPER-1a (C82): one pass of the sandbox reaper, over plain data. Like `sweepComputeSettle` it works across
+   * tenants and is for the cron only, never callable from a user request; the pool, the provider port and the stop path stay
+   * inside. `pass: "terminal"` deletes executor sandboxes whose work items have all ended; `ephemeral` and `idle` are
+   * refused with a typed `not_supported` error until they ship. There is no `off` mode: the caller decides that and never calls.
+   * Nothing calls this yet (REAPER-1b adds the cron and the kill switch).
+   */
+  sweepSandboxReap(input: SweepSandboxReapInput): Promise<SweepSandboxReapResult>;
   close(): Promise<void>;
 }
 
@@ -264,7 +275,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       const left = Math.max(SWEEP_TIME_BUDGET_MS - (performance.now() - began), 0);
       return { ...(await sweepComputeSettle({ pool: pools.runnerPool, target: sandboxTarget, timeBudgetMs: left })), lost };
     };
-    return { ...runActions, ...runnerLeases, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
+      sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
+    return { ...runActions, ...runnerLeases, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -284,12 +297,13 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
         resolveRunSeat,
         sweepComputeSettle,
+        sweepSandboxReap,
         claimRunAction,
         settleRunAction,
         listDueRunActions,

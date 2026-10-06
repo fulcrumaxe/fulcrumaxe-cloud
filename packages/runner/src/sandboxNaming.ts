@@ -158,10 +158,32 @@ export function retentionPolicyFor(role: Role): SandboxRetentionPolicy {
   return { persistent: false };
 }
 
-/** The two GitHub events that must delete an executor's persistent
- * sandbox (Spec pass/fail 6). Exported as a literal union so a caller
- * (H09b's webhook route, not built yet) gets a compile-time check that it
- * handles exactly these two events, not a free-form string. */
+/**
+ * What a sandbox name says about itself, read back without trusting it: `null` for anything that is not exactly the shape
+ * `sandboxNameFor` builds, so a foreign name (another tool's, a spike script's) is never mistaken for one of ours.
+ */
+export type ParsedSandboxName =
+  | { kind: "executor"; accountId: string; repoId: string; pr: number }
+  | { kind: "ephemeral"; role: string; runId: string };
+
+export function parseSandboxName(name: string): ParsedSandboxName | null {
+  const executor = /^ex-([0-9a-f-]{36})-([0-9a-f-]{36})-([1-9][0-9]{0,15})$/.exec(name);
+  if (executor) {
+    const [accountId, repoId, pr] = [executor[1]!, executor[2]!, executor[3]!];
+    return UUID_RE.test(accountId) && UUID_RE.test(repoId) ? { kind: "executor", accountId, repoId, pr: Number(pr) } : null;
+  }
+  const ephemeral = /^rn-([0-9]{1,3})-(.+)-([0-9a-f-]{36})$/.exec(name);
+  if (ephemeral) {
+    const [length, role, runId] = [ephemeral[1]!, ephemeral[2]!, ephemeral[3]!];
+    return role.length === Number(length) && UUID_RE.test(runId) ? { kind: "ephemeral", role, runId } : null;
+  }
+  return null;
+}
+
+/**
+ * The two events that end an executor's work on a pull request. They no longer delete its sandbox directly: the webhook moves
+ * the work item to `merged` or `closed_unmerged` and the SANDBOX-REAPER terminal pass (`sandboxReap.ts`) deletes it.
+ */
 export type PrLifecycleEvent = "pr.closed" | "pr.merged";
 
 export const PR_EVENTS_THAT_DELETE_SANDBOX: readonly PrLifecycleEvent[] = Object.freeze([

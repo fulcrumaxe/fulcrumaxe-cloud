@@ -35,6 +35,14 @@ export const WORK_ITEM_STAGES = [
 
 export type WorkItemStage = (typeof WORK_ITEM_STAGES)[number];
 
+/**
+ * The stages a work item has left the pipeline in: it was merged, its pull request was closed unmerged, or it was
+ * closed. (`closed` can be reopened and `closed_unmerged` can go back to `in_progress`; "terminal" means no run is
+ * expected next, not that no edge leaves.) The SANDBOX-REAPER end-of-item pass and the priority queue both read this
+ * one list; migration 0731's `sandbox_reap_terminal_stages()` repeats it and a test keeps the two equal.
+ */
+export const TERMINAL_WORK_ITEM_STAGES: readonly WorkItemStage[] = Object.freeze(['merged', 'closed_unmerged', 'closed'] as const);
+
 /** The 3 legal values of `work_item_transitions.reviewer`. */
 export const WORK_ITEM_TRANSITION_REVIEWERS = ['code', 'security', 'acceptance'] as const;
 

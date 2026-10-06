@@ -1333,6 +1333,14 @@ export class SandboxTarget implements ExecutionTarget {
       return true;
     }
 
+    return !(await this.hasNewerLiveSibling(run));
+  }
+
+  /**
+   * True when another `pending`/`running` run of this persistent role/account/repo/PR was created at or after `run`: that run, not
+   * this one, owns the shared sandbox name. The one test `stillOwnsSandbox` and `stopStraySandbox` both use.
+   */
+  private async hasNewerLiveSibling(run: ExecutionRun): Promise<boolean> {
     const newerRows = await this.withAccount(run.accountId, (client) =>
       client.query<{ exists: boolean }>(
         `SELECT EXISTS (
@@ -1348,7 +1356,27 @@ export class SandboxTarget implements ExecutionTarget {
         [run.accountId, run.role, run.repoId, run.pr, run.id],
       ),
     );
-    return !newerRows.rows[0]?.exists;
+    return newerRows.rows[0]?.exists === true;
+  }
+
+  /**
+   * D#2 SANDBOX-REAPER (C81 criterion 7): stops a sandbox the provider still shows running although `run`, the newest run
+   * that named it, has ended. Returns false (and stops nothing) when a newer live run of the same persistent role/account/repo/PR now
+   * owns the name (the ownership test `cancel` and `endSandbox` use), true once the stop was asked for.
+   * It is `cancel`'s direct-stop half only: it stops and records the stop, so a settle that is still owed can read the sandbox,
+   * and it releases and settles nothing (any compute settle stays with `settleRunCompute`). The sandbox is deleted by a later pass.
+   */
+  async stopStraySandbox(run: ExecutionRun): Promise<boolean> {
+    let handle: SandboxHandle;
+    try {
+      handle = { runId: run.id, sandboxName: sandboxNameFor({ role: run.role, runId: run.id, accountId: run.accountId, repoId: run.repoId, pr: run.pr }) };
+    } catch {
+      // fx-swallow-ok: a run that cannot name a sandbox has none to stop; false tells the caller nothing was stopped
+      return false;
+    }
+    if (await this.hasNewerLiveSibling(run)) return false;
+    await this.stopAndMeasure(run, freshBookkeeping(), handle, true);
+    return true;
   }
 
   async cancel(run: ExecutionRun): Promise<CancelResult> {

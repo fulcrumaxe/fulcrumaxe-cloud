@@ -1,9 +1,15 @@
 import type { AgentRuntime, NormalizedEvent, Role } from "./types.js";
 import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv } from "./sandboxEnv.js";
 import {
+  LISTABLE_PREFIXES,
   SandboxNotFoundError,
   type CreateSandboxOptions,
+  type DeleteSandboxOptions,
+  type ListSandboxesOptions,
+  type ListedSandbox,
   type SandboxComputeState,
+  type SandboxListPage,
+  type SandboxProviderStatus,
   type SandboxHandle,
   type SandboxPort,
   type SandboxCounters,
@@ -68,8 +74,10 @@ export interface FakeSandboxState {
   readonly extended: readonly { handle: SandboxHandle; additionalMs: number }[];
   readonly stopped: readonly SandboxHandle[];
   readonly deleted: readonly SandboxHandle[];
-  /** Every `stop` / `readCounters` / `measure` / `deleteSandbox` call in order, as `"<op>:<sandboxName>"`. */
+  /** Every `stop` / `readCounters` / `measure` / `deleteSandbox` / `state` / `exists` / `list` call in order, as `"<op>:<sandboxName>"` (a list is `"list:<prefix>"`). */
   readonly calls: readonly string[];
+  /** Names whose snapshot the provider still holds. A delete without `deleteSnapshots` leaves it, one with it removes it. */
+  readonly snapshots: readonly string[];
 }
 
 export interface FakeSandboxController {
@@ -94,8 +102,16 @@ export interface FakeSandboxController {
   scriptCounters(sandboxName: string, counters: Omit<SandboxCounters, "sessionId">): void;
   /** After this call, `measure` on this sandbox name throws (an API failure). */
   failMeasure(sandboxName: string): void;
-  /** After this call, `deleteSandbox` on this sandbox name throws (an API failure) and the sandbox stays. */
-  failDelete(sandboxName: string): void;
+  /** After this call, `deleteSandbox` on this sandbox name throws (an API failure, with `status` when given: 429, 500, ...) and the sandbox stays. */
+  failDelete(sandboxName: string, status?: number): void;
+  /** Undoes `failDelete` for this sandbox. */
+  healDelete(sandboxName: string): void;
+  /** Puts a sandbox in the provider's project without going through the port (another tool's, a spike script's): it is listed and has a state. */
+  seedProviderSandbox(sandboxName: string, init?: { status?: SandboxProviderStatus; persistent?: boolean; snapshot?: boolean }): void;
+  /** How many sandboxes one `listSandboxes` page holds (default 100). */
+  setListPageSize(size: number): void;
+  /** After this call, `listSandboxes` throws a provider error with this status (429, 500, ...). */
+  failList(status: number): void;
   /** What `sandboxExists` does for this sandbox: answers `false` (a 404), or "unknown" (it THROWS, as a port that could not answer would). Unscripted: it exists. */
   scriptExists(sandboxName: string, answer: false | "unknown"): void;
 }
@@ -118,7 +134,13 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   const usage = new Map<string, SandboxSessionUsage[]>();
   const counters = new Map<string, Omit<SandboxCounters, "sessionId">>();
   const measureFails = new Set<string>();
-  const deleteFails = new Set<string>();
+  const deleteFails = new Map<string, number | undefined>();
+  /** The provider's project: every sandbox the port created or a test seeded, in creation order. A deleted one is gone from it. */
+  const provider = new Map<string, ListedSandbox>();
+  const snapshots = new Set<string>();
+  let listPageSize = 100;
+  let listFailStatus: number | undefined;
+  let clockMs = 1_700_000_000_000;
   const existence = new Map<string, false | "unknown">();
   /** The session each sandbox is in; a created or resumed sandbox gets a new one. */
   const sessionOf = new Map<string, string>();
@@ -167,6 +189,8 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   const port: SandboxPort = {
     async createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle> {
       created.push(opts);
+      provider.set(opts.sandboxName, { name: opts.sandboxName, persistent: opts.retention.persistent, status: "running", createdAt: ++clockMs, updatedAt: clockMs });
+      if (opts.retention.persistent) snapshots.add(opts.sandboxName);
       // `runId` is unset until `startDetached` supplies one -- a created
       // sandbox has no run in it yet. Held as an empty string (AgentHandle
       // requires the field) rather than made optional, so every
@@ -185,6 +209,8 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     async stop(handle) {
       stopped.push(handle);
       calls.push(`stop:${handle.sandboxName}`);
+      const listed = provider.get(handle.sandboxName);
+      if (listed) provider.set(handle.sandboxName, { ...listed, status: "stopped", updatedAt: ++clockMs });
       // Idempotent (SandboxPort's own contract): swallow a runtime.stop()
       // that errors because there was nothing running -- the fake runtime
       // never errors here today, but a real one might.
@@ -214,11 +240,26 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
       return { handle, hookFired };
     },
 
-    async deleteSandbox(handle) {
-      if (deleteFails.has(handle.sandboxName)) throw new Error("fakeSandbox: deleteSandbox failed");
+    async deleteSandbox(handle, opts?: DeleteSandboxOptions) {
+      if (deleteFails.has(handle.sandboxName)) throw Object.assign(new Error("fakeSandbox: deleteSandbox failed"), { status: deleteFails.get(handle.sandboxName) });
+      // A second delete of a sandbox that is already gone is a 404 at the provider, which the real port treats as done: the fake does not throw either.
       deleted.push(handle);
       calls.push(`delete:${handle.sandboxName}`);
       existence.set(handle.sandboxName, false); // a deleted sandbox is gone: the provider now answers 404
+      provider.delete(handle.sandboxName);
+      // The provider keeps a deleted sandbox's snapshot until it expires, unless asked to remove it (the SDK's `deleteOrphanSnapshots`).
+      if (opts?.deleteSnapshots === true) snapshots.delete(handle.sandboxName);
+    },
+
+    async listSandboxes(opts: ListSandboxesOptions): Promise<SandboxListPage> {
+      calls.push(`list:${opts.prefix}`);
+      if (!LISTABLE_PREFIXES.includes(opts.prefix)) throw new Error("fakeSandbox: listSandboxes accepts only the ex- and rn- prefixes");
+      if (listFailStatus !== undefined) throw Object.assign(new Error("fakeSandbox: listSandboxes failed"), { status: listFailStatus });
+      const all = [...provider.values()].filter((s) => s.name.startsWith(opts.prefix));
+      const from = opts.cursor === undefined ? 0 : Number(opts.cursor);
+      if (!Number.isSafeInteger(from) || from < 0) throw Object.assign(new Error("fakeSandbox: bad cursor"), { status: 400 });
+      const page = all.slice(from, from + listPageSize);
+      return { sandboxes: page.map((s) => ({ ...s })), next: from + listPageSize < all.length ? String(from + listPageSize) : null };
     },
 
     async measure(handle, sessionIds) {
@@ -234,6 +275,8 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
       const scripted = scriptedState.get(handle.sandboxName);
       if (scripted) return scripted;
       if (existence.get(handle.sandboxName) === false || deleted.some((h) => h.sandboxName === handle.sandboxName)) return "gone";
+      const listed = provider.get(handle.sandboxName);
+      if (listed) return listed.status === "running" || listed.status === "pending" ? "running" : listed.status === "stopped" || listed.status === "failed" || listed.status === "aborted" ? "stopped" : "unknown";
       return stopped.some((h) => h.sandboxName === handle.sandboxName) ? "stopped" : "running";
     },
 
@@ -253,7 +296,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
 
   return {
     port,
-    state: { created, extended, stopped, deleted, calls },
+    state: { created, extended, stopped, deleted, calls, get snapshots() { return [...snapshots]; } },
     hang(sandboxName) {
       hungSandboxNames.add(sandboxName);
     },
@@ -275,8 +318,22 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     failMeasure(sandboxName) {
       measureFails.add(sandboxName);
     },
-    failDelete(sandboxName) {
-      deleteFails.add(sandboxName);
+    failDelete(sandboxName, status) {
+      deleteFails.set(sandboxName, status);
+    },
+    healDelete(sandboxName) {
+      deleteFails.delete(sandboxName);
+    },
+    seedProviderSandbox(sandboxName, init = {}) {
+      provider.set(sandboxName, { name: sandboxName, persistent: init.persistent ?? false, status: init.status ?? "stopped", createdAt: ++clockMs, updatedAt: clockMs });
+      if (init.snapshot) snapshots.add(sandboxName);
+      existence.delete(sandboxName);
+    },
+    setListPageSize(size) {
+      listPageSize = size;
+    },
+    failList(status) {
+      listFailStatus = status;
     },
     scriptExists(sandboxName, answer) {
       existence.set(sandboxName, answer);

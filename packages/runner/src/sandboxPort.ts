@@ -179,12 +179,11 @@ export interface SandboxPort {
    * (Spec pass/fail 9). Throws `SandboxNotFoundError` when the sandbox's
    * snapshot is gone. */
   resume(handle: SandboxHandle, sessionId: string, prompt: string, opts: StartDetachedOptions): StartDetachedResult;
-  /** Deletes the sandbox (and its snapshot, if any). Spec pass/fail 6:
-   * called on `pr.closed`/`pr.merged` for the executor's persistent
-   * sandbox; H09b's other, non-persistent sandboxes are also expected to
-   * be deleted once their run settles, but no pass/fail item in 1-11
-   * tests that path directly. */
-  deleteSandbox(handle: SandboxHandle): Promise<void>;
+  /**
+   * Deletes the sandbox. By default the provider keeps its snapshots until they expire (as the compute settle's deletes always
+   * did); `deleteSnapshots: true` also removes the ones no other sandbox uses. An already-gone sandbox (404, 410) is done.
+   */
+  deleteSandbox(handle: SandboxHandle, opts?: DeleteSandboxOptions): Promise<void>;
   /**
    * D#2 COMPUTE-SETTLE CS-1: usage for exactly the sessions in `sessionIds` (never by clock
    * window), read after the stop; at most 3 reads. Figures not reported yet are left out, not
@@ -210,6 +209,45 @@ export interface SandboxPort {
    * port without a provider to ask (a test double) is treated as "unknown"; the real port and the fake implement it.
    */
   sandboxState?(handle: SandboxHandle): Promise<SandboxComputeState>;
+  /**
+   * D#2 SANDBOX-REAPER: one page of the project's sandboxes whose name starts with `prefix` ("ex-" or "rn-" only; any other
+   * prefix throws before a request is made), with the cursor for the next page. A read: it never starts, resumes or changes
+   * a sandbox. `SandboxPortError` on a provider failure. Optional so a test double without a provider is simply not listable.
+   */
+  listSandboxes?(opts: ListSandboxesOptions): Promise<SandboxListPage>;
+}
+
+export interface DeleteSandboxOptions {
+  /** Also delete the snapshots of this sandbox that no other sandbox uses. */
+  deleteSnapshots?: boolean;
+}
+
+/** The only name prefixes a list may ask for: executor sandboxes and every other role's. */
+export type ListablePrefix = "ex-" | "rn-";
+export const LISTABLE_PREFIXES: readonly ListablePrefix[] = Object.freeze(["ex-", "rn-"] as const);
+
+export interface ListSandboxesOptions {
+  prefix: ListablePrefix;
+  /** The `next` of the previous page; absent for the first. */
+  cursor?: string;
+}
+
+/** The provider's sandbox statuses, as the SDK declares them. */
+export type SandboxProviderStatus = "pending" | "running" | "stopping" | "stopped" | "failed" | "aborted" | "snapshotting";
+
+export interface ListedSandbox {
+  name: string;
+  persistent: boolean;
+  status: SandboxProviderStatus;
+  /** Epoch milliseconds. */
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SandboxListPage {
+  sandboxes: ListedSandbox[];
+  /** Pass as `cursor` for the next page; `null` on the last. */
+  next: string | null;
 }
 
 export type SandboxComputeState = "running" | "stopped" | "gone" | "unknown";
