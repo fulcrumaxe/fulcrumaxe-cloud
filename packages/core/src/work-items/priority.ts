@@ -5,13 +5,13 @@ import { NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { compareQueueOrder, type QueueOrderKey } from './queueOrder.js';
-import type { WorkItemStage } from './stages.js';
+import { TERMINAL_WORK_ITEM_STAGES, type WorkItemStage } from './stages.js';
 
 /** D#2 H26b: renumbering leaves gaps this wide, so most moves touch one row. */
 export const QUEUE_RANK_GAP = 1024;
 
 /** Stages a priority change is refused for (409 `not_reorderable`). `needs_human` and the in-flight stages stay reorderable. */
-const TERMINAL_STAGES: ReadonlySet<WorkItemStage> = new Set(['merged', 'closed_unmerged', 'closed']);
+const TERMINAL_STAGES: ReadonlySet<WorkItemStage> = new Set(TERMINAL_WORK_ITEM_STAGES);
 
 export type PriorityMove = 'top' | 'up' | 'down' | { before: string };
 

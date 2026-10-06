@@ -933,6 +933,68 @@ EOSQL
   fi
 }
 
+# D#2 SANDBOX-REAPER-1a: the SECURITY DEFINER functions owned by sandbox_reaper (0731). Prints their oids, comma separated, when
+# each is one of the four definers pinned to search_path=pg_catalog, public, pg_temp and executable by agent_run_writer and no one
+# else, with no grant option; SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic owner check then
+# rejects anything else).
+check_sandbox_reaper_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname IN ('sandbox_reap_candidates_terminal', 'sandbox_reap_claim', 'sandbox_reap_done', 'sandbox_reap_unknown_names')
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'agent_run_writer'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'agent_run_writer'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'sandbox_reaper') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'sandbox-reaper-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by sandbox_reaper fail the exception shape (not one of its four definers, a loose search_path, or EXECUTE for anyone but agent_run_writer)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#2 SANDBOX-REAPER-1a: role shape of sandbox_reaper. A no-op when the role does not exist. Every problem is named: NOLOGIN and
+# unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly the 25 granted
+# by 0731 (column SELECTs on four tables, SELECT/INSERT/UPDATE on sandbox_reaps, USAGE on public), owning only its six functions.
+check_sandbox_reaper_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.compute_settle_due_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.stage SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','table sandbox_reaps SELECT','table sandbox_reaps INSERT','table sandbox_reaps UPDATE','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'sandbox_reaper'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'sandbox_reaper', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 25 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 25 granted by 0731' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname IN
+              ('sandbox_reap_terminal_stages', 'sandbox_reap_ex_state', 'sandbox_reap_candidates_terminal', 'sandbox_reap_claim', 'sandbox_reap_done', 'sandbox_reap_unknown_names')))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond its six functions' END,
+      CASE WHEN has_schema_privilege('sandbox_reaper', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'sandbox_reaper-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): sandbox_reaper role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -989,7 +1051,16 @@ if [ -n "$GUARD_DEFINER_RESULT" ] && ! [[ "$GUARD_DEFINER_RESULT" =~ ^[0-9]+(,\ 
   echo "neon-shape: internal error -- guard_definer exempt function oids were not numeric: $GUARD_DEFINER_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}"
+SANDBOX_REAPER_RESULT="$(check_sandbox_reaper_exception_shape fx_neon)"
+if [[ "$SANDBOX_REAPER_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_REAPER_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_REAPER_RESULT" ] && ! [[ "$SANDBOX_REAPER_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_reaper exempt function oids were not numeric: $SANDBOX_REAPER_RESULT" >&2
+  exit 1
+fi
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1006,6 +1077,7 @@ check_metering_reporter_role_shape fx_neon
 check_error_event_writer_role_shape fx_neon
 check_guard_definer_role_shape fx_neon
 check_guard_definer_owner_cascade fx_neon
+check_sandbox_reaper_role_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"

@@ -3,6 +3,7 @@ import {
   EXECUTOR_KEEP_LAST_SNAPSHOTS,
   PR_EVENTS_THAT_DELETE_SANDBOX,
   isPersistentRole,
+  parseSandboxName,
   retentionPolicyFor,
   sandboxNameFor,
 } from "../src/sandboxNaming.js";
@@ -253,5 +254,26 @@ describe("sandbox persistence and naming (D#2 H09 pass/fail 6)", () => {
     expect(() =>
       sandboxNameFor({ role: "executor", runId: "run-1", accountId: ACCOUNT_ID_A, repoId: REPO_ID_A, pr: hostilePr }),
     ).toThrow(/pr must be a positive safe integer/);
+  });
+});
+
+describe("parseSandboxName (D#2 SANDBOX-REAPER): reads back exactly what sandboxNameFor builds", () => {
+  const RUN_ID = "33333333-3333-4333-8333-333333333333";
+
+  it("round-trips an executor name and every other role's name", () => {
+    expect(parseSandboxName(sandboxNameFor({ role: "executor", runId: RUN_ID, accountId: ACCOUNT_ID_A, repoId: REPO_ID_A, pr: 42 }))).toEqual({ kind: "executor", accountId: ACCOUNT_ID_A, repoId: REPO_ID_A, pr: 42 });
+    for (const role of NON_EXECUTOR_ROLES) {
+      expect(parseSandboxName(sandboxNameFor({ role, runId: RUN_ID }))).toEqual({ kind: "ephemeral", role, runId: RUN_ID });
+    }
+  });
+
+  it("returns null for a foreign name, a near miss or a hostile one", () => {
+    for (const name of [
+      "", "rlr0-spike-1", "fx-sandbox-1", "ex-", "ex-1-2-3", `ex-${ACCOUNT_ID_A}-${REPO_ID_A}`, `ex-${ACCOUNT_ID_A}-${REPO_ID_A}-0`, `ex-${ACCOUNT_ID_A}-${REPO_ID_A}-007`,
+      `ex-ABCDEFAB-1111-4111-8111-111111111111-${REPO_ID_A}-5`, `ex-${ACCOUNT_ID_A}-${REPO_ID_A}-5 `, `EX-${ACCOUNT_ID_A}-${REPO_ID_A}-5`,
+      `rn-9-reviewer-${RUN_ID}`, `rn-8-reviewer-not-a-uuid`, `rn-x-reviewer-${RUN_ID}`, `xrn-8-reviewer-${RUN_ID}`,
+    ]) {
+      expect(parseSandboxName(name), JSON.stringify(name)).toBeNull();
+    }
   });
 });

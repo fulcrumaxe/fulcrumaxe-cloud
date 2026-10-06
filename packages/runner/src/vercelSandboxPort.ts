@@ -32,6 +32,11 @@ import {
   SandboxBusyError,
   SandboxNotFoundError,
   type CreateSandboxOptions,
+  type DeleteSandboxOptions,
+  LISTABLE_PREFIXES,
+  type ListSandboxesOptions,
+  type SandboxListPage,
+  type SandboxProviderStatus,
   SANDBOX_MAX_TIMEOUT_MS,
   SANDBOX_TIMEOUT_MARGIN_MS,
   SANDBOX_VCPUS,
@@ -196,7 +201,8 @@ export interface SdkSandbox {
   updateNetworkPolicy(policy: NetworkPolicy, opts?: { signal?: AbortSignal }): Promise<unknown>;
   extendTimeout(durationMs: number, opts?: { signal?: AbortSignal }): Promise<void>;
   stop(opts?: { signal?: AbortSignal }): Promise<unknown>;
-  delete(opts?: { signal?: AbortSignal }): Promise<void>;
+  /** `deleteOrphanSnapshots` is the SDK's own option (@vercel/sandbox 3.5.1, `Sandbox.delete`): also delete the snapshots no other sandbox uses. */
+  delete(opts?: { deleteOrphanSnapshots?: boolean; signal?: AbortSignal }): Promise<void>;
   /** The current session's status ("running", "stopped", ...). */
   readonly status: string;
   /**
@@ -242,6 +248,20 @@ export interface SdkCommand {
   kill(): Promise<void>;
 }
 
+/** The fields of a listed sandbox the port reads; the real SDK's `Sandbox.list` result is assigned to this type, so an SDK change to any of them stops the build. */
+export interface SdkListedSandbox {
+  name: string;
+  persistent: boolean;
+  createdAt: number;
+  updatedAt: number;
+  status: SandboxProviderStatus;
+}
+
+export interface SdkSandboxListPage {
+  sandboxes: SdkListedSandbox[];
+  pagination: { next: string | null };
+}
+
 /** The `Sandbox.create` parameters the port sets. */
 export interface SdkCreateParams extends VercelCredentials {
   name: string;
@@ -260,15 +280,23 @@ export interface SdkCreateParams extends VercelCredentials {
  * pass a fake; the default is the real class. */
 export interface VercelSandboxSdk {
   create(params: SdkCreateParams): Promise<SdkSandbox>;
-  get(params: { name: string; resume?: boolean; signal?: AbortSignal } & VercelCredentials): Promise<SdkSandbox>;
+  get(params: { name: string; resume?: boolean; signal?: AbortSignal; fetch?: typeof globalThis.fetch } & VercelCredentials): Promise<SdkSandbox>;
+  /** One page of the project's sandboxes (`Sandbox.list`); optional so a test double that never lists needs no body. `fetch` is the SDK's own option and lets a test reach a local server. */
+  list?(params: { namePrefix: string; cursor?: string; signal?: AbortSignal; fetch?: typeof globalThis.fetch } & VercelCredentials): Promise<SdkSandboxListPage>;
 }
 
 const realSdk: VercelSandboxSdk = {
   create: (params) => Sandbox.create({ ...params }),
   get: (params) => Sandbox.get({ ...params }),
+  list: async (params) => {
+    const page = await Sandbox.list({ ...params });
+    return { sandboxes: page.sandboxes, pagination: { next: page.pagination.next } };
+  },
 };
 
 export interface CreateVercelSandboxPortOptions {
+  /** Test seam for the `fetch` the real SDK's `Sandbox.list` uses (a local server in the contract test); production leaves it unset. */
+  fetch?: typeof globalThis.fetch;
   /**
    * The digest-pinned sandbox image. Defaults to the one in `infra/sandbox-image/versions.lock.json`. An unset or
    * unpinned value is refused (`SandboxImageConfigError`), never replaced by a runtime.
@@ -594,6 +622,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   }
 
   const signal = () => AbortSignal.timeout(callTimeoutMs);
+  /** Only a test sets one (a local server standing in for the provider's API); the real SDK uses its own `fetch` otherwise. */
+  const fetchOption = options.fetch ? { fetch: options.fetch } : {};
 
   async function guarded<T>(operation: string, fn: () => Promise<T>): Promise<T> {
     try {
@@ -615,7 +645,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     assertName(handle.sandboxName);
     const creds = await credentials();
     const sandbox = await guarded(operation, () =>
-      sdk.get({ name: handle.sandboxName, resume, signal: signal(), ...creds }),
+      sdk.get({ name: handle.sandboxName, resume, signal: signal(), ...creds, ...fetchOption }),
     );
     // Never act on a sandbox other than the one the handle names.
     if (sandbox.name !== handle.sandboxName) throw new SandboxPortError(operation);
@@ -1244,8 +1274,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       return launch(handle, opts, prompt, sessionId);
     },
 
-    async deleteSandbox(handle) {
-      await tolerateGone(handle, "deleteSandbox", (s) => s.delete({ signal: signal() }));
+    async deleteSandbox(handle, opts?: DeleteSandboxOptions) {
+      await tolerateGone(handle, "deleteSandbox", (s) => s.delete({ ...(opts?.deleteSnapshots === true && { deleteOrphanSnapshots: true }), signal: signal() }));
       runs.delete(handle.sandboxName);
       sandboxTimeouts.delete(handle.sandboxName);
     },
@@ -1290,6 +1320,20 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         // fx-swallow-ok: the provider's failure is the answer ("gone" for a definite 404/410, "unknown" for any doubt); callers act on neither doubt nor a read error
         return err instanceof SandboxPortError && (err.status === 404 || err.status === 410) ? "gone" : "unknown";
       }
+    },
+
+    async listSandboxes(opts: ListSandboxesOptions): Promise<SandboxListPage> {
+      // Checked before any request: only our own two prefixes are ever asked for, so a caller cannot enumerate the project.
+      if (!LISTABLE_PREFIXES.includes(opts?.prefix)) throw new Error(`createVercelSandboxPort: listSandboxes accepts only ${LISTABLE_PREFIXES.map((p) => JSON.stringify(p)).join(" and ")}`);
+      if (sdk.list === undefined) throw new SandboxPortError("listSandboxes");
+      const creds = await credentials();
+      const list = sdk.list.bind(sdk);
+      const page = await guarded("listSandboxes", () => bounded("listSandboxes", list({ namePrefix: opts.prefix, ...(opts.cursor !== undefined && { cursor: opts.cursor }), signal: signal(), ...creds, ...fetchOption })));
+      // The SDK filters by prefix on the server; a name that does not start with it is dropped rather than trusted.
+      return {
+        sandboxes: page.sandboxes.filter((s) => s.name.startsWith(opts.prefix)).map(({ name, persistent, status, createdAt, updatedAt }) => ({ name, persistent, status, createdAt, updatedAt })),
+        next: page.pagination.next ?? null,
+      };
     },
 
     async sandboxExists(handle) {
