@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "action": "role_settings.mode_changed",
+      "actor": "22222222-2222-4222-8222-222222222222",
+      "payload": { "repoId": "33333333-3333-4333-8333-333333333333", "role": "build", "mode": "suggest" },
+      "created_at": "2026-09-19T08:30:00.000Z"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "action": "webhook_endpoint.disabled",
+      "actor": "platform_ops",
+      "payload": { "endpoint_id": "55555555-5555-4555-8555-555555555555", "reason": "failing" },
+      "created_at": "2026-09-18T12:00:00.000000Z"
+    }
+  ],
+  "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0xOFQxMjowMDowMC4wMDAwMDBaIiwiaWQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQifQ"
+}

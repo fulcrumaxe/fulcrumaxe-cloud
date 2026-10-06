@@ -1,0 +1,26 @@
+{
+  "name": "@fx/telemetry",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#68 OPS-T1: the redacting telemetry logger -- one JSON line per event on stdout, an allowlist of fields, every string redacted and truncated, a per-account volume cap. No vendor SDK, no network.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

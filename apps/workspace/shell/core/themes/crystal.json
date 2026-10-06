@@ -1,0 +1,63 @@
+{
+  "id": "crystal",
+  "name": "Crystal",
+  "tokens": {
+    "bg-base":          "#202020",
+    "bg-surface":       "#272727",
+    "bg-elevated":      "#2d2d2d",
+    "bg-overlay":       "rgba(32, 32, 32, 0.85)",
+    "text-primary":     "rgba(255, 255, 255, 0.88)",
+    "text-secondary":   "rgba(255, 255, 255, 0.6)",
+    "text-muted":       "rgba(255, 255, 255, 0.36)",
+    "text-inverse":     "#202020",
+    "accent":           "#0078d4",
+    "accent-bright":    "#60cdff",
+    "accent-rgb":       "0, 120, 212",
+    "accent-secondary": "#005fb8",
+    "border":           "rgba(255, 255, 255, 0.08)",
+    "border-bright":    "rgba(255, 255, 255, 0.2)",
+    "border-radius":    "8px",
+    "border-radius-sm": "4px",
+    "border-radius-lg": "12px",
+    "shadow-sm":        "0 1px 4px rgba(0,0,0,0.5)",
+    "shadow-md":        "0 4px 16px rgba(0,0,0,0.55)",
+    "shadow-lg":        "0 16px 48px rgba(0,0,0,0.7)",
+    "glow-accent":      "0 0 0 rgba(0,0,0,0)",
+    "glow-bright":      "0 0 0 rgba(0,0,0,0)",
+    "glass-blur":       "32px",
+    "glass-bg":         "rgba(32, 32, 32, 0.6)",
+    "font-mono":        "'Cascadia Code', 'Consolas', monospace",
+    "font-display":     "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+    "font-size-base":   "0.875rem",
+    "line-height":      "1.5",
+    "letter-spacing":   "0em",
+    "anim-duration":    "0.167s",
+    "anim-easing":      "cubic-bezier(0.1, 0.9, 0.2, 1)",
+    "effect-scanlines": "0",
+    "effect-glow":      "0",
+    "effect-grain":     "0",
+    "effect-crt-curve": "0"
+  },
+  "layout": {
+    "taskbar-position":      "bottom",
+    "taskbar-style":         "center-dock",
+    "app-toolbar-placement": "top",
+    "window-chrome":         "fluent"
+  },
+  "heritage-adapter": "crystal",
+  "typography": "modern-sans",
+  "data": {
+    "density":           "comfortable",
+    "kpi-view":          "card-grid",
+    "file-manager-view": "list",
+    "kanban-view":       "board"
+  },
+  "terminal": {
+    "ansi": [
+      "#0c0c0c", "#c50f1f", "#13a10e", "#c19c00",
+      "#0037da", "#881798", "#3a96dd", "#cccccc",
+      "#767676", "#e74856", "#16c60c", "#f9f1a5",
+      "#3b78ff", "#b4009e", "#61d6d6", "#f2f2f2"
+    ]
+  }
+}

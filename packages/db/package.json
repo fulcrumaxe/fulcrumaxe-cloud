@@ -1,0 +1,23 @@
+{
+  "name": "@fx/db",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "test": "bash scripts/test-pg.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/decisions": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@fx/trust": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

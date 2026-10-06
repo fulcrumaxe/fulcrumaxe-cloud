@@ -1,0 +1,34 @@
+{
+  "name": "@fx/pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#2 H14a: the packages/pipeline scaffold, the build stage machine (SPEC_READY -> executor -> PR opened -> reviews), the verdict-to-label mapping, and the fix loop (cc_session_id ownership check before SandboxTarget.resume, escalation after the fix-round limit from @fx/spend's maxFixRounds()). Fixture-only, zero model tokens. The merge-gate table (H14criterion 3) and the run-start composition root / real SandboxPort (C26-1/C26-2, C15) are H14b and H14c, not built here.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./plan/runnerContract": "./src/plan/runnerContract.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/discussions": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/spend": "workspace:*",
+    "@fx/trust": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@fx/db": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

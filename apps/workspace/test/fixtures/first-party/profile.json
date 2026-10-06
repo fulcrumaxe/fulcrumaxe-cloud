@@ -1,0 +1,42 @@
+{
+  "name": "cloud",
+  "app_modules": [
+    "themes",
+    "heritage",
+    "fp-fixture"
+  ],
+  "excluded_themes": [
+    "windows-aero",
+    "ubuntu-gnome"
+  ],
+  "default_theme": "classic-crt",
+  "dock_order": [
+    "onboarding",
+    "pipeline",
+    "runs",
+    "repos",
+    "roles",
+    "model-key",
+    "budget-billing",
+    "compute",
+    "developer",
+    "themes"
+  ],
+  "drop_core": [
+    "core/automerge-bootstrap.js",
+    "core/crdt-sync-client.js",
+    "core/crdt-sync.css",
+    "crypto.js",
+    "core/storage-key-migration.js",
+    "vendor/xterm/xterm.css",
+    "editor.css",
+    "editor.js"
+  ],
+  "features": {
+    "presence": false,
+    "liveEntitlements": false,
+    "crdt": false,
+    "messages": false,
+    "updates": false
+  }
+}

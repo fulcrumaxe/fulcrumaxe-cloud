@@ -1,0 +1,95 @@
+/* ── fulcrumaxe-os Context Menu ──────────────────────────────────────────────── */
+
+.fulc-context-menu {
+  position: fixed;
+  z-index: 10000;
+  background: rgba(10, 10, 10, 0.97);
+  border: 1px solid rgba(var(--theme-rgb), 0.4);
+  min-width: 180px;
+  padding: 4px 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.75rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.fulc-ctx-item {
+  /* Native <button> since D#649 PR 3. The UA form-control block has to be reset
+     or every menu item changes appearance; declared FIRST so this rule's own
+     values and the :hover/.kb-active/.danger rules still win. `width: 100%` and
+     `text-align: left` because a button shrink-wraps and centres where the div
+     filled the menu, and `font: inherit` carries only the font-* longhands —
+     the other inherited text properties Chrome's button block clears are
+     restored explicitly. `unicode-bidi` is not inherited, so it takes the div's
+     UA value. */
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: inherit;
+  color: inherit;
+  line-height: inherit;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  unicode-bidi: isolate;
+  padding: 6px 16px;
+  color: var(--theme-primary);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.fulc-ctx-item:hover,
+.fulc-ctx-item.kb-active {
+  background: rgba(var(--theme-rgb), 0.15);
+}
+
+.fulc-ctx-item.danger:hover,
+.fulc-ctx-item.danger.kb-active {
+  background: rgba(255, 65, 65, 0.15);
+  color: #ff4141;
+}
+
+.fulc-ctx-item.disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* A control you can reach but cannot see the focus on is only half reachable.
+   `:focus-visible`, never bare `:focus` — the latter flashes an outline on
+   every mouse click, which is how these rules get deleted again. The offset is
+   negative so the ring stays inside the menu's own border. */
+.fulc-ctx-item:focus-visible {
+  outline: 2px solid var(--theme-primary);
+  outline-offset: -2px;
+}
+
+.fulc-context-menu:focus {
+  /* The container takes focus on open purely to seed arrow navigation; it is
+     not a control and must not paint a ring. */
+  outline: none;
+}
+
+.fulc-ctx-item .submenu-arrow {
+  opacity: 0.5;
+  font-size: 0.55rem;
+  margin-left: 16px;
+}
+
+.fulc-ctx-item .shortcut-hint {
+  opacity: 0.4;
+  font-size: 0.65rem;
+  margin-left: 24px;
+}
+
+.fulc-ctx-divider {
+  height: 1px;
+  background: rgba(var(--theme-rgb), 0.15);
+  margin: 4px 0;
+}

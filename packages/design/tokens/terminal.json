@@ -1,0 +1,47 @@
+{
+  "id": "terminal",
+  "colors": {
+    "bg": "#000",
+    "bgRaised": "#050a07",
+    "bgCard": "#010402",
+    "bgFooter": "#030503",
+    "fg": "#a7ffcb",
+    "fgDim": "#5f8f74",
+    "accent": "#00ff66",
+    "accentFaint": "#00ff6614",
+    "accentDim": "#00ff6640",
+    "accentWash": "rgba(0,255,102,.1)",
+    "muted": "#268b4e",
+    "border": "#0f2f1a",
+    "danger": "#ff6b6b",
+    "dangerDim": "#ff6b6b55",
+    "warn": "#ffb454",
+    "warnDim": "#ffb45455"
+  },
+  "spacing": {
+    "3xs": ".25rem",
+    "2xs": ".4rem",
+    "xs": ".6rem",
+    "sm": ".85rem",
+    "md": "1rem",
+    "lg": "1.5rem",
+    "xl": "2.5rem"
+  },
+  "type": {
+    "fontFamily": "'Fira Mono', ui-monospace, SFMono-Regular, Menlo, monospace",
+    "size2xs": ".62rem",
+    "sizeXs": ".68rem",
+    "sizeSm": ".78rem",
+    "sizeMd": ".85rem",
+    "sizeLg": "1rem",
+    "sizeXl": "1.6rem",
+    "trackingNormal": "normal",
+    "trackingWide": ".12em",
+    "trackingWider": ".18em"
+  },
+  "radius": "4px",
+  "container": {
+    "max": "60rem",
+    "cardMin": "16rem"
+  }
+}

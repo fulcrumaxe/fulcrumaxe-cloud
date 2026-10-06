@@ -1,0 +1,31 @@
+{
+  "name": "@fx/model-call",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#291 PI-2a: the server-side model-call seam -- completeJson over the account's own (BYOK) key, two constant hosts, no tools, no streaming, zod-validated output.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/model-connection": "workspace:*",
+    "@fx/runtime": "workspace:*",
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

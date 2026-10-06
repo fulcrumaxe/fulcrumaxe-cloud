@@ -1,0 +1,28 @@
+{
+  "name": "@fx/core",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "Tenancy and auth core: sessions, GitHub sign-in/sign-up, invitations, membership, role authorization (D#2605 H06).",
+  "scripts": {
+    "test": "bash scripts/test-pg.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/db": "workspace:*",
+    "@fx/plan-data": "workspace:*",
+    "@fx/roles": "workspace:*",
+    "@fx/runtime": "workspace:*",
+    "@fx/stats": "workspace:*",
+    "@fx/trust": "workspace:*",
+    "jose": "^6.0.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "data": [
+    {
+      "seq": 1,
+      "kind": "run.created",
+      "at": "2026-09-18T12:00:00.000Z",
+      "payload": {
+        "role": "build"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:05.000Z",
+      "payload": {
+        "text": "Open [x](javascript:alert(1)) for the details."
+      }
+    },
+    {
+      "seq": 3,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:10.000Z",
+      "payload": {
+        "text": "See [x](https://a\" onmouseover=\"x) for the details."
+      }
+    },
+    {
+      "seq": 4,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:15.000Z",
+      "payload": {
+        "text": "Here is an image: <img src=x onerror=x>"
+      }
+    },
+    {
+      "seq": 5,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:18.000Z",
+      "payload": {
+        "text": "Or try [x](javascript:alert) instead."
+      }
+    },
+    {
+      "seq": 6,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:20.000Z",
+      "payload": {
+        "text": "Generated with Claude Code"
+      }
+    },
+    {
+      "seq": 7,
+      "kind": "agent.output",
+      "at": "2026-09-18T12:00:25.000Z",
+      "payload": {
+        "text": "the tool is claude_code here"
+      }
+    },
+    {
+      "seq": 8,
+      "kind": "tool.invoked",
+      "at": "2026-09-18T12:00:30.000Z",
+      "payload": {
+        "name": "not shown"
+      }
+    },
+    {
+      "seq": 9,
+      "kind": "run.status_changed",
+      "at": "2026-09-18T12:05:00.000Z",
+      "payload": {
+        "from": "running",
+        "to": "succeeded"
+      }
+    }
+  ],
+  "next_cursor": ""
+}

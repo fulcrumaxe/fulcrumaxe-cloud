@@ -1,0 +1,161 @@
+/* D#37 WS-F2a: Runs app (list and replayed detail). Theme variables come from the shell;
+   the fallbacks only matter if a theme leaves one out. */
+
+.runs-app {
+  container-type: inline-size;
+  position: relative;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.runs-main { box-sizing: border-box; height: 100%; overflow: auto; padding: 14px; }
+.runs-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.runs-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.runs-status { margin: 0 0 8px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.runs-status:empty { display: none; }
+.runs-status[data-state="error"] { color: #ff6b6b; }
+
+.runs-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.runs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.runs-row:hover { border-color: var(--accent, #1aff80); }
+.runs-row:focus-visible,
+.runs-back:focus-visible,
+.runs-more:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.runs-row-name { flex: 1 1 8em; font-weight: 600; overflow-wrap: anywhere; }
+.runs-row-time { color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.78rem; }
+
+.runs-chip { padding: 0 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); font-size: 0.78rem; white-space: nowrap; }
+.runs-chip-running { color: var(--accent, #1aff80); border-color: var(--accent, #1aff80); }
+.runs-chip-failed,
+.runs-chip-timed_out,
+.runs-chip-killed_spend { color: #ff6b6b; border-color: #ff6b6b; }
+
+.runs-more,
+.runs-back {
+  min-height: 44px;
+  margin-top: 10px;
+  padding: 4px 12px;
+  background: var(--bg-base, #000);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.runs-more[hidden] { display: none; }
+.runs-more:disabled { opacity: 0.6; cursor: default; }
+.runs-back { margin-top: 0; }
+
+/* ── detail ─────────────────────────────────────────────────────────── */
+
+.runs-detail {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-surface, #0a0a0a);
+  border-left: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+}
+.runs-detail[hidden] { display: none; }
+.runs-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 12px 0 8px; }
+.runs-head-name { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.runs-events { margin: 0; padding: 0; list-style: none; }
+.runs-ev { margin: 0 0 10px; padding-left: 8px; border-left: 2px solid var(--border, rgba(26, 255, 128, 0.3)); overflow-wrap: anywhere; }
+.runs-ev-time { display: block; color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.74rem; }
+.runs-ev-line { margin: 0; }
+
+/* rendered agent text */
+.md p { margin: 0 0 6px; white-space: pre-wrap; }
+.md ul,
+.md ol { margin: 0 0 6px; padding-left: 20px; }
+.md pre { margin: 0 0 6px; padding: 6px 8px; overflow-x: auto; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.md code { font-family: inherit; }
+.md a { color: var(--accent, #1aff80); }
+
+/* ── phone: the detail takes the whole window ───────────────────────── */
+
+@container (max-width: 640px) {
+  .runs-detail { width: 100%; border-left: 0; }
+}
+
+/* ── D#483 P5: what the run did (outcome, cost, activity, facts) ──────── */
+
+.runs-detail-body { min-width: 0; }
+.runs-head-meta { margin: 0 0 6px; overflow-wrap: anywhere; }
+.runs-links { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 6px 0; }
+.runs-link {
+  min-height: 44px;
+  padding: 4px 10px;
+  background: var(--bg-base, #000);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  color: var(--accent, #1aff80);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.runs-link:hover { border-color: var(--accent, #1aff80); }
+.runs-link:focus-visible,
+.runs-fold-sum:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+
+.runs-sec { margin: 14px 0; min-width: 0; }
+.runs-sec-title { margin: 0 0 6px; font-size: 0.85rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.runs-summary { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.runs-verdict { margin: 0 0 8px; }
+.runs-vchip { padding: 0 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); font-size: 0.78rem; white-space: nowrap; }
+.runs-vchip-ok { color: var(--accent, #1aff80); border-color: var(--accent, #1aff80); }
+.runs-vchip-warn { color: #ffcc66; border-color: #ffcc66; }
+.runs-vchip-bad { color: #ff6b6b; border-color: #ff6b6b; }
+.runs-failure { margin: 0 0 8px; color: #ff6b6b; overflow-wrap: anywhere; }
+.runs-sub { margin: 0 0 4px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.runs-findings,
+.runs-facts-list { margin: 0 0 8px; padding-left: 20px; }
+.runs-findings li,
+.runs-facts-list li { margin: 0 0 4px; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.runs-cost,
+.runs-factlist { margin: 0; }
+.runs-cost-row,
+.runs-fact { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0 0 6px; }
+.runs-cost-row dt,
+.runs-fact dt { flex: 0 0 9em; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.runs-cost-row dd,
+.runs-fact dd { flex: 1 1 12em; display: flex; flex-direction: column; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.runs-cost-val { font-weight: 600; }
+
+.runs-acts { margin: 0 0 6px; padding: 0; list-style: none; }
+.runs-act { margin: 0 0 8px; padding-left: 8px; border-left: 2px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.runs-act-text { display: block; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.runs-fold { margin: 10px 0; }
+.runs-fold-sum { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }

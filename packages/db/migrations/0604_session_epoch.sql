@@ -1,0 +1,51 @@
+-- D#37 WS-C1, criterion 8: "a 'sign out everywhere' action invalidates
+-- every session of the user server-side (e.g. a per-user session
+-- epoch)." packages/core/src/auth/session.ts embeds an `epoch` number in
+-- every signed session JWT; this column is the live value a caller reads
+-- at sign-in time (to embed) and re-checks later (to detect a session
+-- signed before the last "sign out everywhere" bump). session.ts itself
+-- stays DB-free (see its file header) -- only identity.ts touches this
+-- column, and only via withPlatformOps, the same as every other users
+-- write in this file (sec-criteria A5: identity lifecycle is
+-- platform_ops-only).
+ALTER TABLE users ADD COLUMN session_epoch integer NOT NULL DEFAULT 0;
+
+-- D#37 WS-C1 criterion 3 (correction C8, posted against D#37 by the Team
+-- Lead): "/api/cloud/auth/me and /api/profile ... with a session ->
+-- username (GitHub login) ... an opaque id (never a DB id and never 1)
+-- and storage_ns." The GitHub login handle (a person's actual @handle,
+-- distinct from `name`, the free-text display name GitHub also returns)
+-- was never captured anywhere in the identity model before this --
+-- nullable because an existing row, signed in before this migration
+-- ran, has no login on file until its next sign-in re-populates it
+-- (identity.ts's findOrCreateUserByGithub now writes it on every
+-- lookup, not only on first insert -- see that file for why).
+ALTER TABLE users ADD COLUMN github_login text;
+
+-- Migration numbering (D#94 R1, merge-monotonic): every new file sorts
+-- strictly after main's newest at merge time, re-checked at every
+-- rebase, numbered as one global four-digit sequence continuing from
+-- the current maximum -- per-epic hundred ranges are retired for new
+-- files. main's newest was 0600_api_core.sql when this PR opened;
+-- 0601-0603 are reserved for PRs #92, #93 and #85 respectively. This
+-- file takes 0604, the next free number, per the Team Lead's
+-- assignment. Re-checked at each rebase onto main; still free as of the
+-- last one.
+--
+-- D#94's INHERIT-window note (closed for good at 0200_partners.sql, R1's
+-- own side effect) does not apply here: this migration only ADDs
+-- COLUMNs on `users`, a table 0001_core.sql created with no `OWNER TO`
+-- -- it is owned by the migration-running role itself, never
+-- platform_ops (only specific FUNCTIONS in this codebase get `OWNER TO
+-- platform_ops`, e.g. has_open_invitation). `ALTER TABLE ... ADD COLUMN`
+-- needs only the ALTER privilege the table's own owner already has, so
+-- this file replaces or transfers ownership of nothing platform_ops
+-- owns and needs no #92-style INHERIT bracket. Flagged in the PR body
+-- and a standalone PR comment per the Team Lead's instruction, in case
+-- that reasoning should be double-checked.
+--
+-- No new grant is needed for either column: platform_ops already holds
+-- `GRANT SELECT, INSERT, UPDATE, DELETE ON users TO platform_ops`
+-- table-wide (0001_core.sql:534), which covers both new columns
+-- automatically. app_user's grant on `users` stays SELECT-only
+-- (0001_core.sql:533) and is unchanged by this migration.

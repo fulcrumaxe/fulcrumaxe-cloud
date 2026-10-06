@@ -1,0 +1,5 @@
+{
+  "id": "budget-billing",
+  "entry": "budget-billing-app.js",
+  "styles": ["budget-billing-app.css"]
+}

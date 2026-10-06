@@ -1,0 +1,62 @@
+{
+  "id": "ubuntu-gnome",
+  "name": "Yaru+",
+  "tokens": {
+    "bg-base":          "#1e1e1e",
+    "bg-surface":       "#242424",
+    "bg-elevated":      "#2d2d2d",
+    "bg-overlay":       "rgba(30, 30, 30, 0.9)",
+    "text-primary":     "rgba(255, 255, 255, 0.9)",
+    "text-secondary":   "rgba(255, 255, 255, 0.6)",
+    "text-muted":       "rgba(255, 255, 255, 0.35)",
+    "text-inverse":     "#1e1e1e",
+    "accent":           "#e95420",
+    "accent-bright":    "#f4815e",
+    "accent-rgb":       "233, 84, 32",
+    "accent-secondary": "#772953",
+    "border":           "rgba(255, 255, 255, 0.1)",
+    "border-bright":    "rgba(255, 255, 255, 0.22)",
+    "border-radius":    "12px",
+    "border-radius-sm": "6px",
+    "border-radius-lg": "18px",
+    "shadow-sm":        "0 1px 4px rgba(0,0,0,0.5)",
+    "shadow-md":        "0 4px 16px rgba(0,0,0,0.6)",
+    "shadow-lg":        "0 12px 40px rgba(0,0,0,0.75)",
+    "glow-accent":      "0 0 0 rgba(0,0,0,0)",
+    "glow-bright":      "0 0 0 rgba(0,0,0,0)",
+    "glass-blur":       "12px",
+    "glass-bg":         "rgba(36, 36, 36, 0.8)",
+    "font-mono":        "'Ubuntu Mono', 'Courier New', monospace",
+    "font-display":     "'Ubuntu', 'Cantarell', 'Noto Sans', system-ui, sans-serif",
+    "font-size-base":   "0.9375rem",
+    "line-height":      "1.5",
+    "letter-spacing":   "0em",
+    "anim-duration":    "0.2s",
+    "anim-easing":      "cubic-bezier(0.4, 0, 0.2, 1)",
+    "effect-scanlines": "0",
+    "effect-glow":      "0",
+    "effect-grain":     "0",
+    "effect-crt-curve": "0"
+  },
+  "layout": {
+    "taskbar-position":      "left",
+    "taskbar-style":         "slim-icons",
+    "app-toolbar-placement": "top",
+    "window-chrome":         "adwaita"
+  },
+  "typography": "modern-sans",
+  "data": {
+    "density":           "comfortable",
+    "kpi-view":          "card-grid",
+    "file-manager-view": "icon-grid",
+    "kanban-view":       "board"
+  },
+  "terminal": {
+    "ansi": [
+      "#300a24", "#cc0000", "#4e9a06", "#c4a000",
+      "#3465a4", "#75507b", "#06989a", "#d3d7cf",
+      "#555753", "#ef2929", "#8ae234", "#fce94f",
+      "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"
+    ]
+  }
+}

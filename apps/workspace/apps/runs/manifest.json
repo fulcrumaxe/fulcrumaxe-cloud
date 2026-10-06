@@ -1,0 +1,5 @@
+{
+  "id": "runs",
+  "entry": "runs-app.js",
+  "styles": ["runs-app.css"]
+}

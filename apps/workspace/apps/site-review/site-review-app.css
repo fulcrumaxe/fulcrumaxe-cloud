@@ -1,0 +1,27 @@
+/* D#3 K07b-2: Site review app. Theme variables come from the shell. */
+.sr-app { box-sizing: border-box; height: 100%; overflow: auto; padding: 14px; background: var(--bg-base, #000); color: var(--text-primary, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; line-height: 1.45; }
+.sr-title { margin: 0 0 10px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.sr-open { display: flex; gap: 8px; margin-bottom: 10px; }
+.sr-input { flex: 1; min-width: 0; }
+.sr-input, .sr-btn { box-sizing: border-box; min-height: 32px; padding: 4px 8px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0); color: inherit; font: inherit; }
+.sr-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.sr-input:focus-visible, .sr-btn:focus-visible, .sr-heading:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.sr-status { margin: 0 0 10px; }
+.sr-status:empty { display: none; }
+.sr-heading { margin: 14px 0 6px; font-size: 0.9rem; }
+.sr-list { margin: 0; padding-left: 18px; }
+.sr-claim { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.sr-link { display: block; word-break: break-all; }
+/* D#3 K09b: Site kit plan panel */
+.sr-plan { margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.sr-plan .sr-btn { margin: 0 8px 8px 0; }
+.sr-plan p { margin: 4px 0; }
+/* The picker (sites, versions) and the "Open by id" fallback. Selects fill the window, so a phone never scrolls sideways. */
+.sr-picker { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.sr-picker .sr-input, .sr-picker .sr-btn { width: 100%; }
+.sr-picker p { margin: 0; }
+.sr-label { display: block; margin: 4px 0; }
+.sr-byid { margin-bottom: 10px; }
+.sr-byid summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.sr-byid summary:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.sr-byid .sr-open { margin-bottom: 0; }

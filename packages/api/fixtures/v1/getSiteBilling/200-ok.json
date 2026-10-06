@@ -1,0 +1,9 @@
+{
+  "setup": { "paid": true, "paid_at": "2026-09-30T10:00:00.000Z" },
+  "sync": { "status": "active", "current_period_end": "2026-10-30T10:00:00.000Z", "cancel_at_period_end": false },
+  "prices_provisional": true,
+  "expected_spend": [
+    "Our charges are platform fees only. Model calls run on your own connected key and appear on your own bill.",
+    "A full re-verify: about $55."
+  ]
+}

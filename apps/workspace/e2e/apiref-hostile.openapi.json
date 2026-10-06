@@ -1,0 +1,39 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hostile fixture",
+    "version": "1.0.0",
+    "description": "INFO <script>window.__pwned=1</script> <img src=x onerror=window.__pwned=1> [x](javascript:window.__pwned=1) and [docs](https://example.com/docs)"
+  },
+  "paths": {
+    "/api/v1/hostile/{id}": {
+      "post": {
+        "operationId": "hostileOp",
+        "summary": "SUM <script>window.__pwned=1</script> <img src=x onerror=window.__pwned=1> [x](javascript:window.__pwned=1)",
+        "description": "DESC <script>window.__pwned=1</script> <img src=x onerror=window.__pwned=1> [x](javascript:window.__pwned=1) and [ok](https://example.com/ok)",
+        "security": [{ "session": [] }, { "token": ["hostile:write"] }],
+        "parameters": [
+          { "name": "<script>window.__pwned=1</script>", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "<img src=x onerror=window.__pwned=1>": { "type": "string" },
+                  "kind": { "type": "string", "enum": ["<script>window.__pwned=1</script>", "<img src=x onerror=window.__pwned=1>", "[x](javascript:window.__pwned=1)"] },
+                  "note": { "type": "string", "example": "<img src=x onerror=window.__pwned=1>", "description": "PROP [x](javascript:window.__pwned=1)" }
+                },
+                "required": ["kind"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "RESP <script>window.__pwned=1</script>" } }
+      }
+    }
+  }
+}

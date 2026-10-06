@@ -1,0 +1,33 @@
+{
+  "name": "@fx/webhooks",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#31 API-4a: the sweep -- claims due webhook_deliveries (SKIP LOCKED), fans domain_events out into deliveries, purges old rows, and auto-disables endpoints that have failed for 72h. API-4b adds the SSRF-guarded connector, signing and the real HTTP dispatcher this sweep sends through.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bash scripts/test-pg.sh",
+    "typecheck": "tsc --noEmit",
+    "adoption": "tsx src/adoption.ts"
+  },
+  "dependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "@fx/model-connection": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "standardwebhooks": "1.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

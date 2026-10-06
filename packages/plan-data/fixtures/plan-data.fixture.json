@@ -1,0 +1,79 @@
+{
+  "fixture": true,
+  "plans": {
+    "starter": {
+      "foreground": { "kind": "flat", "usdPerMonth": 1.11 },
+      "background": { "kind": "flat", "usdPerMonth": 2.22 },
+      "repoLimit": 11,
+      "alwaysOnSecurityReviewer": false,
+      "priorityQueue": false,
+      "priceUsdPerMonth": 111.11,
+      "computeCapUsdPerMonth": 3.33,
+      "apiLimits": { "perTokenPerMinute": 1111, "perTenantPerMinute": 2222 },
+      "webhookEndpointLimit": 111,
+      "tokenStreamsPerTenant": 12,
+      "monthlyWorkload": { "features": 1, "smalls": 2 }
+    },
+    "team": {
+      "foreground": { "kind": "flat", "usdPerMonth": 4.44 },
+      "background": { "kind": "flat", "usdPerMonth": 5.55 },
+      "repoLimit": 22,
+      "alwaysOnSecurityReviewer": true,
+      "priorityQueue": false,
+      "priceUsdPerMonth": 222.22,
+      "computeCapUsdPerMonth": 6.66,
+      "apiLimits": { "perTokenPerMinute": 3333, "perTenantPerMinute": 4444 },
+      "webhookEndpointLimit": 222,
+      "tokenStreamsPerTenant": 23,
+      "monthlyWorkload": { "features": 3, "smalls": 4 }
+    },
+    "scale": {
+      "foreground": { "kind": "flat", "usdPerMonth": 7.77 },
+      "background": {
+        "kind": "scaling",
+        "baseUsdPerMonth": 1.01,
+        "perRepoUsdPerMonth": 0.02,
+        "ceilingUsdPerMonth": 9.99
+      },
+      "repoLimit": null,
+      "alwaysOnSecurityReviewer": true,
+      "priorityQueue": true,
+      "priceUsdPerMonth": 333.33,
+      "computeCapUsdPerMonth": 8.88,
+      "apiLimits": { "perTokenPerMinute": 5555, "perTenantPerMinute": 6666 },
+      "webhookEndpointLimit": 333,
+      "tokenStreamsPerTenant": 34,
+      "monthlyWorkload": { "features": 5, "smalls": 6 }
+    }
+  },
+  "pricing": {
+    "fetchedAt": "2000-01-01",
+    "claude": {
+      "haiku-4.5": { "inputUsdPerMTok": 0.01, "outputUsdPerMTok": 0.02, "cacheWriteUsdPerMTok": 0.03, "cacheReadUsdPerMTok": 0.04 },
+      "sonnet-5": { "inputUsdPerMTok": 0.05, "outputUsdPerMTok": 0.06, "cacheWriteUsdPerMTok": 0.07, "cacheReadUsdPerMTok": 0.08 },
+      "opus-5": { "inputUsdPerMTok": 0.09, "outputUsdPerMTok": 0.1, "cacheWriteUsdPerMTok": 0.11, "cacheReadUsdPerMTok": 0.12 }
+    },
+    "openai": {
+      "gpt-5.3-codex": {
+        "inputUsdPerMTok": 0.13,
+        "outputUsdPerMTok": 0.14,
+        "cacheWriteUsdPerMTok": 0,
+        "cacheReadUsdPerMTok": 0.15,
+        "sourceUrl": "https://example.invalid/fixture-pricing",
+        "fetchedAt": "2000-01-01"
+      }
+    },
+    "sandbox": {
+      "cpuUsdPerHour": 0.0001,
+      "memUsdPerGbHour": 0.0002,
+      "dataTransferUsdPerGb": 0.0003
+    }
+  },
+  "medianCostPerRunSeedUsd": { "haiku": 0.7, "sonnet": 0.8, "opus": 0.9 },
+  "caps": {
+    "perSpawnUsd": 1.5,
+    "featureUsd": 2.5,
+    "smallUsd": 3.5,
+    "maxFixRounds": 7
+  }
+}

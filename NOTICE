@@ -1,0 +1,9 @@
+fulcrumaxe cloud
+Copyright (c) 2026 Formal Hosting LLC. All rights reserved.
+
+This product is source-visible and proprietary. See the LICENSE file for the terms.
+
+It includes third-party components, such as the four web fonts in apps/workspace/shell/fonts,
+that stay under their own licences. Their notices and licence texts are in THIRD-PARTY-NOTICES.
+
+The packages/runner-protocol directory has the same licence as the rest of this repository.

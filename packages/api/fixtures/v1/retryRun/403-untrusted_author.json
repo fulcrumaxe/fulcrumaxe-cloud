@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "untrusted_author",
+    "message": "the author of this work item is no longer trusted to have it run",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

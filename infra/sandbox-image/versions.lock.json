@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "image": {
+    "repository": "fx-agent",
+    "digest": "sha256:9de9712871ed8f03e9a63d5d79c0969fbed6b2ee54d921ed874b3ed62863e61d",
+    "built_from_commit": "dc04c92f",
+    "verified_live": "2026-10-03"
+  },
+  "artifacts": {
+    "node": {
+      "version": "24.21.0",
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz",
+      "sha256": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6"
+    },
+    "claude": {
+      "version": "2.1.287",
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.287/linux-x64/claude",
+      "sha256": "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
+    },
+    "codex": {
+      "version": "0.160.0",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "306865417d4ee7a927785852910a527f41e1e159add390ac5ae3accb67d44a13"
+    },
+    "opencode": {
+      "version": "1.18.34",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.34/opencode-linux-x64-baseline.tar.gz",
+      "sha256": "24b0d458d21ef548b2752166303defcf7f4945b049fb4876ab78dfaf86d81b27"
+    }
+  }
+}

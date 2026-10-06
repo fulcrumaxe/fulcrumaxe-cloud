@@ -1,0 +1,7 @@
+{
+  "model_usd_month": 600,
+  "foreground_compute_usd_month": 71,
+  "background_compute_usd_month": 32,
+  "compute_cap_usd_month": 180,
+  "plan": "scale"
+}

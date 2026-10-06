@@ -1,0 +1,27 @@
+{
+  "name": "@fx/reconcile",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "The reconciler framework: one cron tick takes due jobs under an atomic lease, gives each a time and outside-call budget, saves its cursor, and records its result and lap time. Jobs live in src/jobs.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bash scripts/test-pg.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/db": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

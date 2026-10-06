@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "product": "web",
+      "gh_repo_id": 812345678,
+      "install_state": "installed",
+      "app_kind": "team",
+      "full_name": "acme/widgets"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "product": "docs",
+      "gh_repo_id": 812345679,
+      "install_state": "not_installed",
+      "app_kind": null,
+      "full_name": null
+    }
+  ],
+  "next_cursor": null
+}

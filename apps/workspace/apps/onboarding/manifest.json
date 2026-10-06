@@ -1,0 +1,5 @@
+{
+  "id": "onboarding",
+  "entry": "onboarding-app.js",
+  "styles": ["onboarding-app.css"]
+}

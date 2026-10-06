@@ -1,0 +1,3 @@
+{
+  "authorize_url": "https://github.com/login/oauth/authorize?client_id=Iv1.teamclient&redirect_uri=https%3A%2F%2Fapp.example.test%2Fapi%2Fgithub%2Fcreate-repo%2Fcallback&state=eyJhY2NvdW50X2lkIjoiYSJ9.c2ln"
+}

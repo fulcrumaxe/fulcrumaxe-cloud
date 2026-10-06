@@ -1,0 +1,5 @@
+{
+  "id": "roles",
+  "entry": "roles-app.js",
+  "styles": ["roles-app.css"]
+}

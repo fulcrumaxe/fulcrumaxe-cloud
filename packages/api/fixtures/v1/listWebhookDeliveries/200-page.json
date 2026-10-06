@@ -1,0 +1,25 @@
+{
+  "data": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "event_type": "pr.opened",
+      "status": "succeeded",
+      "attempt_count": 1,
+      "last_status_code": 200,
+      "last_error_class": null,
+      "next_attempt_at": "2026-09-18T12:00:00.000Z",
+      "created_at": "2026-09-18T12:00:00.000Z"
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "event_type": "budget.exhausted",
+      "status": "dead",
+      "attempt_count": 7,
+      "last_status_code": null,
+      "last_error_class": "timeout",
+      "next_attempt_at": "2026-09-18T11:00:00.000Z",
+      "created_at": "2026-09-18T10:00:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

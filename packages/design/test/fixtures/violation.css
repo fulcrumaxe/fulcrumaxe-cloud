@@ -1,0 +1,11 @@
+/* Deliberate hardcoded-value violation fixture — never imported by any
+ * component. Exists only so hardcoded-guard.test.ts can prove the scanner
+ * goes red on real violations (D#2 spec amendment pass/fail item 3). */
+.violation-example {
+  color: #ff00ff;
+  background: rgba(10, 20, 30, 0.5);
+  padding: 13px;
+  margin-top: 2.25rem;
+  border: 1px solid #ff00ff; /* the 1px is allowlisted, the hex is not */
+  margin: 0px; /* the allowlisted 0px */
+}

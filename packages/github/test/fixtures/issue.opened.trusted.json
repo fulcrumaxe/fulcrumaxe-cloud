@@ -1,0 +1,1 @@
+{"action":"opened","issue":{"number":7,"title":"Something is broken","body":"steps to reproduce...","user":{"login":"acme-owner"},"author_association":"OWNER"},"installation":{"id":4242},"repository":{"id":9001,"full_name":"acme-corp/widgets","default_branch":"main"}}

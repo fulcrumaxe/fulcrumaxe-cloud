@@ -1,0 +1,35 @@
+-- D#2605 H06: code-review fix round -- move the platform_ops GRANT on
+-- account_members out of the already-applied 0001_core.sql and into its
+-- own migration.
+--
+-- 0001_core.sql merged (and is already applied) without a table-level
+-- GRANT for platform_ops on account_members, even though every OTHER
+-- platform_ops_full_access policy in that file (accounts, partners,
+-- users, ledger, audit_log) is paired with a matching GRANT. A POLICY
+-- only governs which ROWS a role sees once it already has table-level
+-- privilege; with no GRANT at all, platform_ops gets "permission denied
+-- for table account_members" on every statement regardless of the
+-- unconditional USING(true)/WITH CHECK(true) already defined there.
+-- platform_ops needs this to insert the founding owner's membership row
+-- at sign-up (there is no invitation to satisfy app_user's
+-- invited_only_insert policy for a brand-new account's first member) and
+-- to list a user's memberships across accounts at sign-in
+-- (createAccountForNewOwner / listMemberships in
+-- packages/core/src/auth/identity.ts).
+--
+-- This was first fixed by editing 0001_core.sql directly, in-place. That
+-- is wrong: schema_migrations only records (filename, applied_at) with no
+-- content checksum, so the migration runner treats a filename it has
+-- already seen as done and never re-diffs its contents. Any database
+-- that already ran 0001_core.sql -- i.e. everywhere migrations have been
+-- run since 0001_core.sql merged -- would keep skipping it forever, and
+-- the GRANT added in-place would never reach that database, silently.
+-- A brand-new database (every test run in this repo builds one from
+-- scratch) has never "already applied" 0001_core.sql, so that class of
+-- bug is invisible to a fresh-database test suite by construction.
+--
+-- Fix: revert the 0001_core.sql edit and add the exact same GRANT here
+-- instead, as its own migration. GRANT is idempotent, so this is a
+-- minimal, safe addition on top of anything already applied -- it needs
+-- no guard and no DO block.
+GRANT SELECT, INSERT, UPDATE, DELETE ON account_members TO platform_ops;

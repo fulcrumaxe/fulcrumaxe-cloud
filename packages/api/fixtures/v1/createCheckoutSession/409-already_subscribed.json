@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "already_subscribed",
+    "message": "this account already has a subscription",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

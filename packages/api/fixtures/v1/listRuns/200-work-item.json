@@ -1,0 +1,41 @@
+{
+  "data": [
+    {
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      "work_item_id": "22222222-2222-4222-8222-222222222222",
+      "parent_run_id": null,
+      "role": "build",
+      "status": "running",
+      "usd": 0.4,
+      "tokens_in": 5000,
+      "tokens_out": 900,
+      "created_at": "2026-09-18T12:30:00.000Z",
+      "updated_at": "2026-09-18T12:31:00.000Z"
+    },
+    {
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+      "work_item_id": "22222222-2222-4222-8222-222222222222",
+      "parent_run_id": null,
+      "role": "code-reviewer",
+      "status": "failed",
+      "usd": 0.12,
+      "tokens_in": 3000,
+      "tokens_out": 400,
+      "created_at": "2026-09-18T12:20:00.000Z",
+      "updated_at": "2026-09-18T12:25:00.000Z"
+    },
+    {
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+      "work_item_id": "22222222-2222-4222-8222-222222222222",
+      "parent_run_id": null,
+      "role": "build",
+      "status": "failed",
+      "usd": 1.25,
+      "tokens_in": 12000,
+      "tokens_out": 3400,
+      "created_at": "2026-09-18T12:00:00.000Z",
+      "updated_at": "2026-09-18T12:05:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

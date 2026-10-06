@@ -1,0 +1,37 @@
+{
+  "preview": {
+    "preview_id": "55555555-5555-4555-8555-555555555555",
+    "state": "void",
+    "repo_id": "66666666-6666-4666-8666-666666666666",
+    "created_at": "2026-09-21T14:00:00.000Z",
+    "started_at": null,
+    "finished_at": null,
+    "result": null,
+    "void_reason": "preview_unavailable",
+    "run_status": null
+  },
+  "progress": {
+    "server_time": "2026-09-21T14:00:30.000Z",
+    "outcome": "void",
+    "reason": "preview_unavailable",
+    "slow": false,
+    "slot_freed": false,
+    "elapsed_seconds": null,
+    "repo_name": "acme/widgets",
+    "stages": [
+      {"id": "queued", "status": "failed", "at": "2026-09-21T14:00:00.000Z"},
+      {"id": "sandbox", "status": "pending", "at": null},
+      {"id": "clone", "status": "pending", "at": null},
+      {"id": "read", "status": "pending", "at": null},
+      {"id": "plan", "status": "pending", "at": null},
+      {"id": "write", "status": "pending", "at": null},
+      {"id": "done", "status": "pending", "at": null}
+    ],
+    "feed": [],
+    "numbers": {
+      "files_read": 0,
+      "compute": {"usd": 0.0, "basis": "none", "cap_usd": 1},
+      "model": {"whose": "customer", "usd": 0.0}
+    }
+  }
+}

@@ -1,0 +1,3 @@
+{"seq":1,"kind":"run.created","at":"2026-09-18T10:00:00.000Z","payload":{"role":"build"}}
+{"seq":2,"kind":"agent.output","at":"2026-09-18T10:00:04.512Z","payload":{"text":"Reading the failing test."}}
+{"seq":3,"kind":"run.status_changed","at":"2026-09-18T10:03:41.090Z","payload":{"from":"running","to":"succeeded"}}

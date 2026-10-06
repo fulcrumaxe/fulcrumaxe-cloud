@@ -1,0 +1,98 @@
+# apps/workspace/import/allowlist.txt
+#
+# Patterns are relative to the anchor `crates/fulc-shell/assets/` inside the
+# source tar (import.mjs strips that prefix before matching), and to the
+# root of apps/workspace/shell/ once extracted (checks.mjs matches directly).
+#
+# Glob syntax: `*` matches within one path segment; `**` matches across
+# segments, including zero. Blank lines and lines starting with `#` are
+# ignored.
+#
+# WS-A2 (D#37): extended from the WS-A1 baseline against the real jpos tree
+# at commit 3d641544cc394649304cf1cb71b6860f44c44afb. `core/**`, `sdk/**`,
+# `runtime/**` and `apps/themes/**` are written as one pattern per real
+# extension rather than a blanket `dir/**`, because every one of those
+# directories also contains `*.js.map` files in the real tree, and
+# rules.mjs's PATH_SECRET_RE flags any `.map` path as secret-shaped
+# regardless of allowlist status -- a blanket `**` there would select the
+# .map files too and import.mjs would refuse the whole import before
+# writing anything (assertNoSecretShapedEntries runs on every selected
+# entry, before any write). `apps/activation/**` and `fonts/**` have no
+# `.map` siblings in the real tree, so the blanket form stays safe there.
+
+index.html
+script.js
+style.css
+rain.js
+keybindings.js
+keybindings.css
+# core/*.js enumerated (not a blanket core/*.js) to explicitly exclude
+# core/automerge-bootstrap.js -- D#37 Correction C5: checks.mjs's
+# path-automerge rule stays strict and is not touched; WS-B will remove
+# the file's references, and a later task can re-add the file if needed.
+core/app-registry.js
+core/boot.js
+core/branding-applier.js
+core/channel-switcher.js
+core/cloud-login.js
+core/command-registry.js
+core/context-menu.js
+core/crdt-sync-client.js
+core/cursor-overlay.js
+core/desktop.js
+core/dom-util.js
+core/entitlements.js
+core/feature-gate.js
+core/fulc-global-aliases.js
+core/heritage-shell.js
+core/hot-corners.js
+core/modals.js
+core/monitor-manager.js
+core/notifications.js
+core/onboarding-mode.js
+core/overlays.js
+core/preferences-store.js
+core/preferences.js
+core/presence.js
+core/screen-saver.js
+core/storage-key-migration.js
+core/subscription-gate.js
+core/system-tray.js
+core/taskbar-keyboard.js
+core/taskbar.js
+core/theme-effects.js
+core/theme-layout.js
+core/theme-manager.js
+core/tray-update-indicator.js
+core/update-notification.js
+core/upgrade-modal.js
+core/window-manager.js
+core/workspace-actions.js
+core/*.css
+core/themes/*.json
+sdk/**.js
+sdk/**.ts
+runtime/**.js
+fonts/**
+apps/themes/**.js
+apps/themes/**.css
+apps/activation/**
+
+# WS-F1/F2 reuse inputs only (D#37 WS-A2 criterion 1) -- exact files, not
+# whole app directories. kanban-agent-actions.js, agents-profiles.js,
+# agents-terminal-bridge.js, agents-spawn-wizard.js and
+# apps/agents/schemas/** are local-executor-only and deliberately NOT
+# allowlisted, per the Spec. adapter-claude.js and agents-output.js contain
+# "Claude Code" today; they are imported unchanged because they are reuse
+# inputs, not referenced by index.html (so they do not ship), and WS-F2
+# removes the strings before they do.
+apps/kanban/kanban-board.js
+apps/kanban/kanban-card.js
+apps/kanban/kanban-filter.js
+apps/kanban/kanban-views.js
+apps/kanban/kanban-column-config.js
+apps/agents/agents-stream.js
+apps/agents/agents-conversation.js
+apps/agents/agents-output.js
+apps/agents/agents-markdown.js
+apps/agents/adapters/adapter-claude.js

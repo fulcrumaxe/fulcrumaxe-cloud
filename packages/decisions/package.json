@@ -1,0 +1,22 @@
+{
+  "name": "@fx/decisions",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "The decision policy layer catalogue (D#7 DP1): the decision-type catalogue, the Cautious/Balanced/Autonomous presets as data, and decide() -- the pure, total resolver the orchestrator calls to turn a decision request into a disposition.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@fx/partners",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#2607 partner layer: the reseller/affiliate feature code. Each subfolder under src/ is one later P-task's file scope; this package itself is scaffolded by P01 so no later task has to touch a shared package file.",
+  "exports": {
+    "./*": "./src/*/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

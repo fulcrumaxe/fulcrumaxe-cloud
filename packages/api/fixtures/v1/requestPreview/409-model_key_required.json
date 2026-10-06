@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "model_key_required",
+    "message": "a working model connection is required",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

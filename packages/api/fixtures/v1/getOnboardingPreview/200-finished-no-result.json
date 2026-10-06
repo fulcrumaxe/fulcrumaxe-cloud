@@ -1,0 +1,42 @@
+{
+  "preview": {
+    "preview_id": "55555555-5555-4555-8555-555555555555",
+    "state": "finished",
+    "repo_id": "66666666-6666-4666-8666-666666666666",
+    "created_at": "2026-09-21T14:00:00.000Z",
+    "started_at": "2026-09-21T14:01:00.000Z",
+    "finished_at": "2026-09-21T14:05:00.000Z",
+    "result": null,
+    "void_reason": null,
+    "run_status": "failed"
+  },
+  "progress": {
+    "server_time": "2026-09-21T14:05:30.000Z",
+    "outcome": "failed",
+    "reason": "failed",
+    "slow": false,
+    "slot_freed": false,
+    "elapsed_seconds": 300,
+    "repo_name": "acme/widgets",
+    "stages": [
+      {"id": "queued", "status": "done", "at": "2026-09-21T14:00:00.000Z"},
+      {"id": "sandbox", "status": "done", "at": "2026-09-21T14:01:00.000Z"},
+      {"id": "clone", "status": "done", "at": "2026-09-21T14:01:20.000Z"},
+      {"id": "read", "status": "failed", "at": "2026-09-21T14:01:40.000Z"},
+      {"id": "plan", "status": "pending", "at": null},
+      {"id": "write", "status": "pending", "at": null},
+      {"id": "done", "status": "pending", "at": null}
+    ],
+    "feed": [
+      {"seq": 2, "at": "2026-09-21T14:01:00.000Z", "text": "The run started"},
+      {"seq": 5, "at": "2026-09-21T14:01:40.000Z", "text": "Repository cloned"},
+      {"seq": 7, "at": "2026-09-21T14:02:00.000Z", "text": "Reading README.md"},
+      {"seq": 8, "at": "2026-09-21T14:02:05.000Z", "text": "Reading src/server.ts"}
+    ],
+    "numbers": {
+      "files_read": 2,
+      "compute": {"usd": 0.0125, "basis": "recorded", "cap_usd": 1},
+      "model": {"whose": "customer", "usd": 0.0}
+    }
+  }
+}

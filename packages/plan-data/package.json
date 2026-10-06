@@ -1,0 +1,29 @@
+{
+  "name": "@fx/plan-data",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "Loads and validates the plan, pricing and cap data from the FX_PLAN_DATA setting. Fails closed: missing or invalid data is an error, never a default.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts",
+    "./fixture": "./fixtures/plan-data.fixture.json",
+    "./fixture-scaled": "./fixtures/plan-data.scaled.fixture.json"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

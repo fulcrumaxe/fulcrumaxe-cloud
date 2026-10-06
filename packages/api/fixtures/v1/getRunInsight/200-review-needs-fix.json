@@ -1,0 +1,61 @@
+{
+  "server_time": "2026-10-03T10:30:00.000Z",
+  "run": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "role": "code-reviewer",
+    "status": "succeeded",
+    "runtime": "production",
+    "execution_mode": "sandbox",
+    "model": "sonnet-5",
+    "head_sha": "9b708c17e4a1d2f3a4b5c6d7e8f901234567abcd",
+    "created_at": "2026-10-03T10:00:00.000Z",
+    "started_at": "2026-10-03T10:00:20.000Z",
+    "ended_at": "2026-10-03T10:12:50.000Z"
+  },
+  "work_item": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "stage": "pr_opened",
+    "issue_number": 42,
+    "repo": { "owner": "acme", "name": "docs" }
+  },
+  "pr_number": 57,
+  "failure_reason": null,
+  "outcome": {
+    "summary": "The change reads each run's outcome from the envelope.\nTwo problems need a fix before merge.",
+    "verdict": "needs-fix",
+    "findings": [
+      "The verdict chip is not announced to screen readers.",
+      "A run with no findings shows an empty list."
+    ],
+    "findings_truncated": false,
+    "branch": null
+  },
+  "cost": {
+    "model": { "usd": 1.2345, "source": "customer_anthropic", "tokens_in": 182000, "tokens_out": 9400 },
+    "compute": { "usd": 0.0412, "source": "sandbox" }
+  },
+  "lines": [
+    { "at": "2026-10-03T10:01:00.000Z", "text": "Reading apps/workspace/apps/runs/runs-app.js" },
+    { "at": "2026-10-03T10:03:00.000Z", "text": "Ran tests: pnpm --filter @fx/workspace test" },
+    { "at": "2026-10-03T10:05:00.000Z", "text": "Ran: git diff --stat origin/main" }
+  ],
+  "lines_truncated": false,
+  "limits": {
+    "max_run_minutes": 60,
+    "max_model_calls": 300,
+    "per_run_usd": 40,
+    "max_turns": 100,
+    "silence_minutes": 15,
+    "max_extensions": 2,
+    "max_resumes": 2,
+    "auto_resume": true
+  },
+  "parent": {
+    "id": "33333333-3333-4333-8333-333333333333",
+    "role": "code-reviewer",
+    "status": "failed",
+    "created_at": "2026-10-03T09:40:00.000Z"
+  },
+  "escalated_from": null,
+  "children": []
+}

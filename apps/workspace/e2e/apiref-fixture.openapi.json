@@ -1,0 +1,164 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fixture API",
+    "version": "9.9.9",
+    "description": "A small document in the shape the API package emits once each operation names its token scope. See [the docs](https://example.com/docs)."
+  },
+  "paths": {
+    "/api/v1/account": {
+      "get": {
+        "operationId": "getAccount",
+        "summary": "The caller's own account",
+        "security": [{ "session": [] }, { "token": [] }],
+        "responses": {
+          "200": { "description": "The account", "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string", "format": "uuid" } }, "required": ["id"] } } } },
+          "401": { "description": "Error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/v1/account/settings": {
+      "patch": {
+        "operationId": "updateAccountSettings",
+        "summary": "Set account settings (session only)",
+        "description": "Writes one audit row.",
+        "security": [{ "session": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "share": { "type": "boolean" } }, "required": ["share"] } } } },
+        "responses": { "200": { "description": "Saved" }, "403": { "description": "Error" } }
+      }
+    },
+    "/api/v1/runs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelRun",
+        "summary": "Ask for a run to be cancelled",
+        "description": "Cancels the run at its next safe point.",
+        "security": [{ "session": [] }, { "token": ["runs:cancel"] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" }, "description": "The run." },
+          { "name": "reason", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "202": { "description": "Cancellation requested", "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "type": "string" } } } } } },
+          "404": { "description": "No such run", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "The run already finished" }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/cancel": {
+      "post": {
+        "operationId": "cancelWorkItem",
+        "summary": "Ask for a work item's runs to be cancelled",
+        "security": [{ "session": [] }, { "token": ["work-items:write"] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "202": { "description": "Requested" } }
+      }
+    },
+    "/api/v1/tokens/{id}": {
+      "delete": {
+        "operationId": "revokeToken",
+        "summary": "Revoke a token",
+        "security": [{ "session": [] }, { "token": [] }],
+        "x-fx-token-self-only": true,
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Revoked" } }
+      }
+    },
+    "/api/v1/webhook-endpoints": {
+      "get": {
+        "operationId": "listWebhookEndpoints",
+        "summary": "List webhook endpoints",
+        "security": [{ "session": [] }, { "token": ["webhooks:read"] }],
+        "responses": { "200": { "description": "A page" } }
+      },
+      "post": {
+        "operationId": "createWebhookEndpoint",
+        "summary": "Register a new webhook endpoint",
+        "security": [{ "session": [] }, { "token": ["webhooks:write"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": { "type": "string" },
+                  "event_types": { "type": "array", "items": { "type": "string", "enum": ["pr.opened", "budget.exhausted", "endpoint.test"] } }
+                },
+                "required": ["url", "event_types"]
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/api/v1/webhook-endpoints/{id}/test": {
+      "post": {
+        "operationId": "testWebhookEndpoint",
+        "summary": "Send a test event",
+        "security": [{ "session": [] }, { "token": ["webhooks:write"] }],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Delivered" } }
+      }
+    },
+    "/api/v1/graph": {
+      "post": {
+        "operationId": "putGraph",
+        "summary": "Store a graph",
+        "security": [{ "session": [] }, { "token": ["graph:write"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "root": { "$ref": "#/components/schemas/Node" },
+                  "deep": { "$ref": "#/components/schemas/D1" },
+                  "mood": { "type": "string", "enum": ["it's a \"quoted\" $HOME `id` \\ value"] },
+                  "count": { "type": "integer" },
+                  "tags": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["mood", "count", "tags"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Stored" } }
+      }
+    },
+    "/api/v1/bad/$(id)": {
+      "get": { "operationId": "badSubst", "summary": "Substitution path", "security": [{ "session": [] }, { "token": ["read"] }], "responses": { "200": { "description": "ok" } } }
+    },
+    "/api/v1/bad/`id`": {
+      "get": { "operationId": "badTick", "summary": "Backtick path", "security": [{ "session": [] }, { "token": ["read"] }], "responses": { "200": { "description": "ok" } } }
+    },
+    "/api/v1/bad/\"quoted\"": {
+      "get": { "operationId": "badQuote", "summary": "Quote path", "security": [{ "session": [] }, { "token": ["read"] }], "responses": { "200": { "description": "ok" } } }
+    },
+    "/api/v1/bad path": {
+      "get": { "operationId": "badSpace", "summary": "Space path", "security": [{ "session": [] }, { "token": ["read"] }], "responses": { "200": { "description": "ok" } } }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "object", "properties": { "code": { "type": "string" }, "message": { "type": "string" } } } }
+      },
+      "Node": {
+        "type": "object",
+        "properties": { "label": { "type": "string" }, "children": { "type": "array", "items": { "$ref": "#/components/schemas/Node" } } }
+      },
+      "D1": { "type": "object", "properties": { "d1": { "$ref": "#/components/schemas/D2" } } },
+      "D2": { "type": "object", "properties": { "d2": { "$ref": "#/components/schemas/D3" } } },
+      "D3": { "type": "object", "properties": { "d3": { "$ref": "#/components/schemas/D4" } } },
+      "D4": { "type": "object", "properties": { "d4": { "$ref": "#/components/schemas/D5" } } },
+      "D5": { "type": "object", "properties": { "d5": { "$ref": "#/components/schemas/D6" } } },
+      "D6": { "type": "object", "properties": { "d6": { "$ref": "#/components/schemas/D7" } } },
+      "D7": { "type": "object", "properties": { "d7": { "$ref": "#/components/schemas/D8" } } },
+      "D8": { "type": "object", "properties": { "bottom": { "type": "string" } } }
+    }
+  }
+}

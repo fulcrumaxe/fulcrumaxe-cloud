@@ -1,0 +1,37 @@
+-- D#2 H21: PR #55 fix round 3, R1. Grants platform_ops SELECT on exactly
+-- one more column: model_connections.key_nonce.
+--
+-- WHY. recordInitialValidation() and test() (packages/model-connection/src/
+-- validate.ts) both used to take the model_connections row's `FOR UPDATE`
+-- lock as platform_ops and THEN, still holding that lock open, borrow a
+-- SEPARATE connection from the app_user pool (withTenant) to re-read
+-- key_fingerprint (recordInitialValidation) or the key material itself
+-- (test()). Under pool pressure that is a genuine deadlock: enough
+-- concurrent callers each hold their own platform_ops row lock while
+-- waiting on an app_user pool slot, and every app_user connection in the
+-- pool is in turn blocked on ONE of those same row locks -- nobody can make
+-- progress. Fix round 3's R1 removes that lock-then-borrow shape from both
+-- functions; see validate.ts's header comments for the restructured
+-- control flow.
+--
+-- recordInitialValidation's re-check no longer needs the app_user pool at
+-- all: instead of re-reading key_fingerprint through withTenant, it now
+-- reads key_nonce through the SAME platform_ops connection that already
+-- holds the row lock. key_nonce is a GCM nonce (packages/model-connection/
+-- src/crypto.ts's seal()) -- 12 random bytes generated fresh on every
+-- seal(), so equal to the byte for the exact ciphertext this connection
+-- wrote and never repeated across a rotation. It carries no information
+-- about the key it encrypts (a nonce is not a MAC or a KDF output of the
+-- plaintext) so, unlike key_ciphertext/wrapped_dek, granting SELECT on it
+-- does not give platform_ops the ability to identify or compare key
+-- material -- the exact boundary 0003_spend_security_fixes.sql's own
+-- round-5 finding 1 fix drew this column-scoped grant to protect.
+--
+-- W1 (weaker finding, same fix round): key_fingerprint is a 4-hex-character
+-- (16-bit) truncated HMAC, meant for DISPLAY only (D#31 criterion 4) --
+-- round-5's own security review already narrowed platform_ops's grant to
+-- exclude it for exactly that reason (16 bits collides far too often to
+-- gate a security-relevant "is this still the same key" check on). The
+-- rotation re-check in validate.ts now compares key_nonce end-to-end
+-- instead of key_fingerprint, closing that gap.
+GRANT SELECT (key_nonce) ON model_connections TO platform_ops;

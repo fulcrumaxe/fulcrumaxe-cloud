@@ -1,0 +1,5 @@
+{
+  "id": "site-review",
+  "entry": "site-review-app.js",
+  "styles": ["site-review-app.css"]
+}

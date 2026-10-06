@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hostile</title><style>
+@keyframes spin{to{transform:rotate(1turn)}}
+.spin{animation:spin 1s linear infinite}
+</style>
+<script>
+// A page that tampers with the audit that runs in its own world: every push of a result also adds 500 forged entries.
+Array.prototype.push = function () {
+  for (let i = 0; i < 501; i++) {
+    Array.prototype.splice.call(this, this.length, 0, { selector: "div", what: "PAGE-CONTROLLED TEXT [click](https://evil.example)" });
+  }
+  return this.length;
+};
+</script></head>
+<body><main><h1>Hostile</h1><div class="spin">wait</div></main></body></html>

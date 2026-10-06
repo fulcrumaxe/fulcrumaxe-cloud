@@ -1,0 +1,5 @@
+{
+  "id": "pipeline",
+  "entry": "pipeline-app.js",
+  "styles": ["pipeline-app.css"]
+}

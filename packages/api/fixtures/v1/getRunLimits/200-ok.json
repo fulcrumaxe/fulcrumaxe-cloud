@@ -1,0 +1,90 @@
+{
+  "default": {
+    "role": "default",
+    "stored": {
+      "auto_resume": false,
+      "max_run_minutes": 120,
+      "max_model_calls": null,
+      "per_run_usd": null,
+      "max_turns": null,
+      "silence_minutes": null,
+      "max_extensions": null,
+      "max_resumes": null
+    },
+    "resolved": {
+      "auto_resume": false,
+      "max_run_minutes": 120,
+      "max_model_calls": 300,
+      "per_run_usd": 40,
+      "max_turns": 100,
+      "silence_minutes": 15,
+      "max_extensions": 2,
+      "max_resumes": 2
+    }
+  },
+  "roles": [
+    {
+      "role": "executor",
+      "stored": {
+        "auto_resume": null,
+        "max_run_minutes": null,
+        "max_model_calls": null,
+        "per_run_usd": 75.5,
+        "max_turns": null,
+        "silence_minutes": null,
+        "max_extensions": null,
+        "max_resumes": null
+      },
+      "resolved": {
+        "auto_resume": false,
+        "max_run_minutes": 120,
+        "max_model_calls": 300,
+        "per_run_usd": 75.5,
+        "max_turns": 100,
+        "silence_minutes": 15,
+        "max_extensions": 2,
+        "max_resumes": 2
+      }
+    }
+  ],
+  "bounds": {
+    "max_run_minutes": {
+      "default": 60,
+      "floor": 5,
+      "ceiling": 240
+    },
+    "max_model_calls": {
+      "default": 300,
+      "floor": 20,
+      "ceiling": 1500
+    },
+    "per_run_usd": {
+      "default": 40,
+      "floor": 1,
+      "ceiling": 200
+    },
+    "max_turns": {
+      "default": 100,
+      "floor": 10,
+      "ceiling": 500
+    },
+    "silence_minutes": {
+      "default": 15,
+      "floor": 11,
+      "ceiling": 30
+    },
+    "max_extensions": {
+      "default": 2,
+      "floor": 0,
+      "ceiling": 4
+    },
+    "max_resumes": {
+      "default": 2,
+      "floor": 0,
+      "ceiling": 5
+    },
+    "auto_resume": {
+      "default": true
+    }
+  }
+}

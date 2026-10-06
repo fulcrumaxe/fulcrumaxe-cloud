@@ -1,0 +1,101 @@
+/* D#37 WS-F4a/F4b: Roles app. Theme variables come from the shell;
+   the fallbacks only matter if a theme leaves one out. */
+
+.roles-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.roles-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.roles-title { margin: 0; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.roles-status { margin: 0 0 10px; }
+.roles-status:empty { display: none; }
+.roles-error { color: #ff6b6b; }
+.roles-note { margin: 0 0 10px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.roles-note:empty { display: none; }
+
+.roles-repo,
+.roles-mode {
+  box-sizing: border-box;
+  min-height: 32px;
+  padding: 4px 8px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+}
+.roles-repo:focus-visible,
+.roles-spend:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.roles-mode:disabled { opacity: 0.7; cursor: not-allowed; }
+.roles-model { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.roles-model-select { max-width: 100%; }
+.roles-row[aria-busy="true"] { opacity: 0.8; }
+.roles-row-error { grid-column: 1 / -1; margin: 0; color: #ff6b6b; }
+
+.roles-list { list-style: none; margin: 0; padding: 0; }
+.roles-row {
+  display: grid;
+  grid-template-columns: minmax(10ch, 1.2fr) 10ch minmax(12ch, 1.5fr) minmax(16ch, 2fr);
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+}
+.roles-name { font-weight: 600; overflow-wrap: anywhere; }
+.roles-floor,
+.roles-spend { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+
+/* Narrow windows and phones: one role per row, its parts stacked. */
+@container (max-width: 640px) {
+  .roles-row { grid-template-columns: 1fr; gap: 4px; padding: 10px 0; }
+  .roles-mode { justify-self: start; min-width: 10ch; }
+}
+@media (pointer: coarse) {
+  .roles-repo,
+  .roles-mode { min-height: 44px; }
+}
+
+/* WS-F4c: the Run limits view and the tabs that switch to it. */
+.roles-tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.roles-tab, .rl-btn, .rl-input {
+  box-sizing: border-box; min-height: 32px; padding: 4px 10px; font: inherit; color: var(--text-primary, #1aff80);
+  background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0);
+}
+.roles-tab { cursor: pointer; }
+.roles-tab[aria-selected="true"] { font-weight: 600; border-bottom-color: var(--bg-surface, #0a0a0a); }
+.roles-tab:focus-visible, .rl-btn:focus-visible, .rl-input:focus-visible, .rl-inherit input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.rl-intro, .rl-status, .rl-note { margin: 0 0 10px; }
+.rl-status:empty, .rl-note:empty { display: none; }
+.rl-note, .rl-hint, .rl-source { color: var(--text-primary, #1aff80); }
+.rl-bad, .rl-field-error, .rl-form-error { color: #ff6b6b; }
+.rl-list { list-style: none; margin: 0; padding: 0; }
+.rl-row { display: grid; grid-template-columns: minmax(12ch, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.rl-name { font-weight: 600; }
+.rl-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
+.rl-fact dt, .rl-fact dd { display: inline; margin: 0; }
+.rl-fact dt::after { content: ": "; }
+.rl-what { margin-top: 14px; }
+.rl-h { margin: 0 0 6px; font-size: 0.9rem; }
+.rl-editing .rl-intro, .rl-editing .rl-what { display: none; }
+.rl-group { margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.rl-field { display: grid; grid-template-columns: minmax(16ch, 1fr) 14ch auto; gap: 2px 10px; align-items: center; padding: 4px 0; }
+.rl-hint, .rl-field-error { grid-column: 1 / -1; margin: 0; font-size: 0.8rem; }
+.rl-field-error[hidden], .rl-form-error[hidden], .rl-changed[hidden] { display: none; }
+.rl-actions { display: flex; gap: 8px; }
+.rl-btn { cursor: pointer; }
+/* Phones: a row keeps run time and spend per run; the form is one column, full width. */
+@container (max-width: 640px) {
+  .rl-fact-2 { display: none; }
+  .rl-field { grid-template-columns: 1fr auto; }
+  .rl-field .rl-label { grid-column: 1 / -1; }
+}
+@media (pointer: coarse) { .roles-tab, .rl-btn, .rl-input { min-height: 44px; } }

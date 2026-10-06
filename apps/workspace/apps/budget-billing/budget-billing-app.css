@@ -1,0 +1,115 @@
+/* D#37 WS-F6: Budget & Billing app. Theme variables come from the shell; the fallbacks only matter if a theme leaves one out. */
+
+.bb-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+/* The ring uses the bright accent: Modern Flat's plain accent is under 3:1 on its backgrounds, the bright one is over it in every theme. */
+.bb-app:focus-visible { outline: 2px solid var(--accent-bright, var(--accent, #1aff80)); outline-offset: -2px; }
+.bb-heading { margin: 18px 0 6px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.bb-title { margin: 0 0 8px; font-size: 0.95rem; letter-spacing: 0.04em; font-weight: 600; }
+.bb-muted { margin: 4px 0; font-size: 0.8rem; overflow-wrap: anywhere; }
+.bb-muted:empty { margin: 0; }
+
+.bb-notice { margin: 0; }
+.bb-notice-on {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+.bb-notice-error { border-color: #ff6b6b; border-left-width: 6px; }
+
+.bb-banner {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+.bb-banner p { margin: 0 0 8px; }
+.bb-banner > :last-child { margin-bottom: 0; }
+.bb-banner-error { border-color: #ff6b6b; }
+
+.bb-card {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+
+.bb-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 10px; margin-top: 8px; }
+.bb-grid .bb-card { margin: 0; }
+
+.bb-facts { margin: 0 0 8px; display: grid; gap: 4px; }
+.bb-row { display: grid; grid-template-columns: 7rem 1fr; gap: 10px; align-items: baseline; }
+.bb-label { display: block; margin: 0; font-weight: 600; }
+.bb-value { margin: 0; overflow-wrap: anywhere; }
+
+.bb-pill { padding: 1px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.bb-pill-active { border-color: var(--accent, #1aff80); }
+.bb-pill-past_due, .bb-pill-paused, .bb-pill-model_key_broken, .bb-pill-cancelled { border-color: #ff6b6b; border-width: 2px; }
+
+.bb-form { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.bb-form .bb-label { margin-bottom: 4px; }
+.bb-inline { display: flex; flex-wrap: wrap; gap: 8px; }
+.bb-field-error { margin: 6px 0 0; padding-left: 8px; border-left: 6px solid #ff6b6b; font-weight: 600; }
+.bb-field-error:empty { display: none; }
+
+.bb-input {
+  box-sizing: border-box;
+  min-height: 32px;
+  width: 12rem;
+  max-width: 100%;
+  padding: 4px 8px;
+  background: var(--bg-base, #000);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+}
+.bb-input:focus-visible, .bb-btn:focus-visible, .bb-switch input:focus-visible { outline: 2px solid var(--accent-bright, var(--accent, #1aff80)); outline-offset: 2px; }
+
+.bb-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+  cursor: pointer;
+}
+.bb-btn:hover:not(:disabled) { border-color: var(--accent, #1aff80); }
+.bb-btn:disabled { opacity: 0.55; cursor: default; }
+.bb-btn-primary { border-color: var(--accent, #1aff80); }
+
+.bb-plans { list-style: none; margin: 8px 0 12px; padding: 0; display: grid; gap: 10px; }
+.bb-plan {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+
+.bb-switch { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; }
+.bb-switch input { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: var(--accent, #1aff80); }
+
+/* Phone and other narrow windows: 44 px touch targets, stacked rows. */
+@container (max-width: 560px) {
+  .bb-btn, .bb-input { min-height: 44px; }
+  .bb-input { width: 100%; }
+  .bb-switch { min-height: 44px; }
+  .bb-switch input { width: 1.5rem; height: 1.5rem; }
+  .bb-row { grid-template-columns: 1fr; gap: 0; }
+}

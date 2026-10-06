@@ -1,0 +1,146 @@
+/* ── Keybindings Settings Overlay ────────────────────────────────────── */
+
+#keybindings-overlay {
+    z-index: 1100;
+}
+
+.keybindings-container {
+    width: 600px;
+    max-width: 90vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    border: 2px solid var(--theme-primary);
+    background: rgba(0, 0, 0, 0.97);
+    box-shadow: 0 0 30px rgba(var(--theme-rgb), 0.4);
+    animation: slideIn 0.2s ease-out;
+}
+
+.keybindings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    background: var(--theme-primary);
+    color: #000;
+    font-weight: bold;
+    letter-spacing: 1px;
+    font-size: 0.85rem;
+}
+
+.keybindings-close {
+    background: none;
+    border: none;
+    color: #000;
+    font-size: 1.1rem;
+    cursor: pointer;
+    font-weight: bold;
+    padding: 0 0.25rem;
+}
+
+.keybindings-close:hover {
+    opacity: 0.7;
+}
+
+.keybindings-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem 0;
+}
+
+.keybindings-row {
+    display: flex;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.1);
+    gap: 0.75rem;
+}
+
+.keybindings-row:hover {
+    background: rgba(var(--theme-rgb), 0.05);
+}
+
+.keybindings-action {
+    flex: 1;
+    font-size: 0.85rem;
+    color: var(--theme-primary);
+    letter-spacing: 0.5px;
+}
+
+.keybindings-key-btn {
+    min-width: 120px;
+    padding: 0.3rem 0.6rem;
+    background: rgba(var(--theme-rgb), 0.1);
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.8rem;
+    font-weight: bold;
+    text-align: center;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+}
+
+.keybindings-key-btn:hover {
+    background: rgba(var(--theme-rgb), 0.2);
+    border-color: var(--theme-primary);
+}
+
+.keybindings-key-btn.listening {
+    background: rgba(var(--theme-rgb), 0.3);
+    border-color: var(--theme-bright);
+    box-shadow: 0 0 8px rgba(var(--theme-rgb), 0.4);
+    animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.keybindings-reset-btn {
+    background: none;
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    padding: 0.2rem 0.4rem;
+    cursor: pointer;
+    opacity: 0.5;
+}
+
+.keybindings-reset-btn:hover {
+    opacity: 1;
+    border-color: var(--theme-primary);
+}
+
+.keybindings-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid rgba(var(--theme-rgb), 0.3);
+    background: rgba(var(--theme-rgb), 0.05);
+}
+
+.keybindings-hint {
+    font-size: 0.75rem;
+    color: var(--theme-primary);
+    opacity: 0.6;
+}
+
+.keybindings-reset-all {
+    background: none;
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.75rem;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+}
+
+.keybindings-reset-all:hover {
+    background: rgba(var(--theme-rgb), 0.15);
+    border-color: var(--theme-primary);
+}

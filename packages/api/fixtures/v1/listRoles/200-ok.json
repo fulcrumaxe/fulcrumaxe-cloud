@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "role": "build",
+      "mode": "auto",
+      "allowed_modes": ["off", "suggest", "auto"],
+      "model": null,
+      "model_floor": null,
+      "allowed_models": ["haiku-4.5", "sonnet-5", "opus-5"],
+      "expected_spend": {
+        "text": "expected spend on your model bill: $12/month",
+        "monthly_usd": 12,
+        "runs_per_month": 20,
+        "median_cost_per_run_usd": 0.6,
+        "median_source": "seed",
+        "caveat": "This is an estimate based on the selected model. Not every run carried full token counts when it was seeded, so it may read low."
+      }
+    },
+    {
+      "role": "code-reviewer",
+      "mode": "suggest",
+      "allowed_modes": ["off", "suggest"],
+      "model": "opus-5",
+      "model_floor": null,
+      "allowed_models": ["haiku-4.5", "sonnet-5", "opus-5"],
+      "expected_spend": {
+        "text": "expected spend on your model bill: $4.5/month",
+        "monthly_usd": 4.5,
+        "runs_per_month": 30,
+        "median_cost_per_run_usd": 0.15,
+        "median_source": "ledger",
+        "caveat": "This is an estimate based on the selected model. Not every run carried full token counts when it was seeded, so it may read low."
+      }
+    }
+  ]
+}

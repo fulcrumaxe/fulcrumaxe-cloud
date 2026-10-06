@@ -1,0 +1,5 @@
+{
+  "id": "fp-fixture",
+  "entry": "main.tsx",
+  "styles": ["fixture.css"]
+}

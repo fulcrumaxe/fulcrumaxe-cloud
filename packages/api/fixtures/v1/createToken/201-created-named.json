@@ -1,0 +1,9 @@
+{
+  "id": "33333333-3333-4333-8333-333333333333",
+  "token": "fxat_RrhvEgGnNN50JpTWqcfs9mEaTkBAmZPZbet1cL42l6R0QhkSf",
+  "display_hint": "fxat_...hkSf",
+  "name": "CI deploy bot é 漢字 😀",
+  "scopes": ["read", "runs:cancel"],
+  "expires_at": "2026-12-17T12:00:00.000Z",
+  "created_at": "2026-09-18T12:00:00.000Z"
+}

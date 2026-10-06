@@ -1,0 +1,938 @@
+/* ════════════════════════════════════════════════
+   ORCHARD HERITAGE SHELL
+   All rules scoped to body[data-heritage="orchard"]
+   ════════════════════════════════════════════════ */
+
+/* ─── Kill CRT DNA ─── */
+body[data-heritage="orchard"] #rain-bg,
+body[data-heritage="orchard"] .crt-overlay,
+body[data-heritage="orchard"] .scanlines,
+body[data-heritage="orchard"] .glow-layer { display: none !important; }
+
+/* ─── Kill CRT borders on desktop container ─── */
+body[data-heritage="orchard"] #desktop-screen {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* ─── Hide desktop icons — dock replaces them ─── */
+body[data-heritage="orchard"] #desktop-surface { visibility: hidden; }
+
+/* ─── Body / desktop padding for fixed bars ─── */
+body[data-heritage="orchard"] { padding-top: 40px; }
+body[data-heritage="orchard"] #desktop-screen { padding-bottom: 100px; }
+
+/* ─── Shift windows container so titlebars are never hidden under the menu bar ───
+   bottom: #desktop-screen sits 40px low (the body's padding-top) and is 100vh tall, so the dock (fixed, bottom 12px,
+   76px tall) starts 128px above the screen's bottom; 136px leaves an 8px gap, so a maximized window ends above the dock
+   (owner report 2026-10-04: at 112px the dock overlapped the window by 16px).
+   top: in the same 40px-low frame the menu bar (fixed, 41px) ends at 1px, so 1px puts a window's titlebar right under
+   it; the old 40px counted the body padding twice and left a 39px empty band. */
+body[data-heritage="orchard"] #windows-container {
+  top: 1px !important;
+  bottom: 136px !important;
+}
+
+/* ════════════════════════════════════════════════
+   TYPOGRAPHY — kill monospace + uppercase everywhere
+   except terminal window content
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content * {
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Arial', sans-serif !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+
+/* Preserve monospace where it makes semantic sense (code, pre) */
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content code,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content pre,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content .code,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .window-content [class*="code"] {
+  font-family: ui-monospace, 'SF Mono', 'Menlo', monospace !important;
+}
+
+/* ════════════════════════════════════════════════
+   GLOBAL APP CHROME — buttons, inputs, selects
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) button:not(.window-btn),
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .btn,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) [class*="-btn"]:not(.window-btn) {
+  border-radius: 6px !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif !important;
+  font-size: 0.8125rem !important;
+  font-weight: 500 !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+  background: rgba(255,255,255,0.08) !important;
+  color: rgba(255,255,255,0.85) !important;
+  padding: 4px 10px !important;
+  cursor: pointer !important;
+  transition: background 0.12s !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) button:not(.window-btn):hover,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .btn:hover {
+  background: rgba(255,255,255,0.14) !important;
+}
+
+/* Primary / accent buttons */
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) .btn-primary,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) [class*="primary"] button {
+  background: var(--accent, #007AFF) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+}
+
+/* Inputs & selects */
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) input:not([type="checkbox"]):not([type="radio"]),
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) select,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) textarea {
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif !important;
+  font-size: 0.8125rem !important;
+  background: rgba(255,255,255,0.06) !important;
+  border: 1px solid rgba(255,255,255,0.14) !important;
+  border-radius: 6px !important;
+  color: rgba(255,255,255,0.85) !important;
+  padding: 4px 8px !important;
+  outline: none !important;
+  box-shadow: none !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) input:focus,
+body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) select:focus {
+  border-color: var(--accent, #007AFF) !important;
+  background: rgba(255,255,255,0.09) !important;
+}
+
+/* Scrollbars
+   Owner report 2026-10-03: the old 6px / 20%-white bar was too small to grab
+   with a mouse (e.g. the Pipeline board's sideways scroll). On fine pointers
+   (mouse/trackpad) the bar is now 14px with a thumb that is about 3.8:1
+   against the window background, a visible track, and hover/active states.
+   Touch (coarse pointer) keeps the platform's own scrollbars, so phone mode
+   is unchanged. Terminal windows stay excluded by the selector. */
+@media (pointer: fine) {
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar {
+    width: 14px !important;
+    height: 14px !important;
+  }
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar-track {
+    background: rgba(255,255,255,0.07) !important;
+    border-radius: 7px !important;
+  }
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar-corner {
+    background: transparent !important;
+  }
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.4) !important;
+    border: 3px solid transparent !important;
+    background-clip: padding-box !important;
+    border-radius: 7px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar-thumb:hover {
+    background: var(--accent, #007AFF) !important;
+    background-clip: padding-box !important;
+  }
+  body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) ::-webkit-scrollbar-thumb:active {
+    background: color-mix(in srgb, var(--accent, #007AFF) 70%, white) !important;
+    background-clip: padding-box !important;
+  }
+}
+
+/* Standard properties for Firefox. Chromium 121+ honours these too, and
+   when it does it ignores the ::-webkit-scrollbar rules above (no hover
+   state, no 14px), so they apply only where the WebKit pseudo is missing. */
+@supports not selector(::-webkit-scrollbar) {
+  @media (pointer: fine) {
+    body[data-heritage="orchard"] :is(.fulc-window:not([data-app-id="terminal"]), .fulc-window-clone:not([data-preview-of="terminal"])) * {
+      scrollbar-width: auto !important;
+      scrollbar-color: rgba(255,255,255,0.4) rgba(255,255,255,0.07) !important;
+    }
+  }
+}
+
+/* ════════════════════════════════════════════════
+   KANBAN overrides
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] .kanban-column-header {
+  font-size: 0.75rem !important;
+  font-weight: 600 !important;
+  color: rgba(255,255,255,0.5) !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;  /* column headers ok in caps at small size */
+}
+
+body[data-heritage="orchard"] .kanban-card {
+  background: rgba(44,44,46,0.9) !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+}
+body[data-heritage="orchard"] .kanban-card:hover {
+  border-color: rgba(255,255,255,0.15) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4) !important;
+}
+
+body[data-heritage="orchard"] .kanban-card-title {
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  color: rgba(255,255,255,0.88) !important;
+  line-height: 1.4 !important;
+}
+
+/* Tags / pills */
+body[data-heritage="orchard"] .kanban-tag,
+body[data-heritage="orchard"] .task-tag,
+body[data-heritage="orchard"] [class*="-tag"],
+body[data-heritage="orchard"] [class*="-badge"],
+body[data-heritage="orchard"] [class*="-pill"] {
+  background: rgba(255,255,255,0.08) !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+  border-radius: 4px !important;
+  color: rgba(255,255,255,0.65) !important;
+  font-size: 0.6875rem !important;
+  font-weight: 500 !important;
+  padding: 1px 6px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.03em !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
+/* Kanban toolbar tabs */
+body[data-heritage="orchard"] .kanban-view-tab,
+body[data-heritage="orchard"] [class*="view-tab"] {
+  border-radius: 5px !important;
+  font-size: 0.75rem !important;
+  font-weight: 500 !important;
+  color: rgba(255,255,255,0.55) !important;
+  border: none !important;
+  background: transparent !important;
+  padding: 3px 10px !important;
+  text-shadow: none !important;
+}
+body[data-heritage="orchard"] .kanban-view-tab.active,
+body[data-heritage="orchard"] [class*="view-tab"].active {
+  background: rgba(255,255,255,0.1) !important;
+  color: rgba(255,255,255,0.9) !important;
+}
+
+/* ════════════════════════════════════════════════
+   TOP MENU BAR
+   ════════════════════════════════════════════════ */
+
+#orchard-menubar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 40px;
+  background: rgba(28, 28, 30, 0.92);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 9999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 0.8125rem;
+  color: rgba(255,255,255,0.87);
+  user-select: none;
+}
+.orchard-mb-left,
+.orchard-mb-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.orchard-mb-logo {
+  display: flex;
+  align-items: center;
+  opacity: 0.85;
+}
+.orchard-mb-appname { font-weight: 600; font-size: 0.875rem; }
+.orchard-mb-item {
+  cursor: default;
+  opacity: 0.75;
+  font-size: 0.8125rem;
+  transition: opacity 0.1s;
+}
+.orchard-mb-item:hover { opacity: 1; }
+
+/* ════════════════════════════════════════════════
+   DOCK
+   ════════════════════════════════════════════════ */
+
+#orchard-dock {
+  position: fixed;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9998;
+  display: flex;
+  justify-content: center;
+}
+.orchard-dock-inner {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  background: rgba(40, 40, 42, 0.76);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+/* Narrow screens: more apps than fit side by side scroll sideways from the first icon instead of being clipped on both
+   sides by the centring. Items keep their size. */
+@media (max-width: 600px) {
+  #orchard-dock { max-width: 100vw; }
+  .orchard-dock-inner { max-width: 100%; box-sizing: border-box; overflow-x: auto; justify-content: flex-start; }
+  .orchard-dock-item { flex: none; }
+}
+.orchard-dock-item {
+  /* A native <button> for app and folder items (D#37 WS-W3); reset the UA look. */
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  cursor: pointer;
+  will-change: transform;
+}
+.orchard-dock-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.07);
+  transition: background 0.1s;
+  overflow: hidden;
+}
+.orchard-dock-item:hover .orchard-dock-icon { background: rgba(255,255,255,0.12); }
+.orchard-dock-item:focus-visible { outline: 2px solid rgba(255,255,255,0.85); outline-offset: 2px; border-radius: 14px; }
+/* Window on another workspace (D#37 WS-W3): dimmed icon plus the shared numbered badge. */
+.orchard-dock-item-elsewhere .orchard-dock-icon { opacity: 0.6; }
+.orchard-dock-item-elsewhere .ws-elsewhere-badge { top: -4px; right: -4px; background: #0a84ff; color: #fff; }
+.orchard-dock-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.orchard-dock-label {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(28,28,30,0.92);
+  color: rgba(255,255,255,0.88);
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.orchard-dock-item:hover .orchard-dock-label { opacity: 1; }
+
+.orchard-dock-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.55);
+  margin-top: 4px;
+  opacity: 0;
+  box-sizing: border-box;
+  transition: opacity 0.18s, width 0.18s, height 0.18s, background 0.18s,
+              border-color 0.18s, box-shadow 0.18s, border-radius 0.18s;
+}
+.orchard-dock-item.running .orchard-dock-dot { opacity: 1; }
+/* Active (focused) running app — bright pill */
+.orchard-dock-item.running.active .orchard-dock-dot {
+  width: 16px;
+  height: 4px;
+  border-radius: 2.5px;
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 0 6px rgba(255,255,255,0.40);
+}
+/* All windows minimized — hollow ring */
+.orchard-dock-item.running.minimized .orchard-dock-dot {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+  border: 1.5px solid rgba(255,255,255,0.55);
+  box-shadow: none;
+  border-radius: 50%;
+}
+
+@keyframes orchard-bounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30%       { transform: translateY(-18px) scale(1.05); }
+  60%       { transform: translateY(-6px) scale(1.02); }
+}
+.orchard-bounce .orchard-dock-icon {
+  animation: orchard-bounce 0.7s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+/* Attention bounce — triggered by OrchardDock.requestAttention(appId) */
+@keyframes orchard-attention {
+  0%, 100% { transform: translateY(0) scale(1); }
+  15%, 45%, 75% { transform: translateY(-14px) scale(1.04); }
+  30%, 60%, 90% { transform: translateY(0) scale(1); }
+}
+.orchard-attention .orchard-dock-icon {
+  animation: orchard-attention 1.3s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+/* ════════════════════════════════════════════════
+   DOCK — dividers, running non-pinned, folders,
+   minimized zone, drag/drop
+   ════════════════════════════════════════════════ */
+
+/* Vertical divider between pinned and running-non-pinned / minimized */
+.orchard-dock-divider {
+  width: 1px;
+  align-self: center;
+  height: 36px;
+  background: rgba(255,255,255,0.12);
+  margin: 0 6px;
+}
+
+/* Running non-pinned apps section sits right of the running divider. No
+   per-element styles needed — they are normal dock items. */
+
+/* ── Folders ── */
+.orchard-dock-folder .orchard-dock-folder-icon {
+  background: rgba(255,255,255,0.10);
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.orchard-dock-folder .orchard-dock-folder-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.orchard-dock-folder-grid {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 3px;
+}
+.orchard-dock-folder-mini {
+  background: rgba(255,255,255,0.12);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: rgba(255,255,255,0.85);
+  overflow: hidden;
+}
+.orchard-dock-folder-mini svg {
+  width: 14px;
+  height: 14px;
+}
+.orchard-dock-folder-mini.empty {
+  background: rgba(255,255,255,0.04);
+}
+
+/* ── Launchpad-style folder expansion ── */
+.orchard-dock-expand {
+  position: fixed;
+  inset: 0;
+  z-index: 9997;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 112px; /* sits above the dock */
+  background: rgba(0,0,0,0.38);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  opacity: 0;
+  transition: opacity 0.16s ease-out;
+}
+.orchard-dock-expand.open { opacity: 1; }
+.orchard-dock-expand.closing { opacity: 0; }
+
+.orchard-dock-expand-panel {
+  background: rgba(40, 40, 42, 0.82);
+  border: 1px solid rgba(255,255,255,0.12);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border-radius: 22px;
+  padding: 22px 28px 20px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.7);
+  transform: translateY(20px) scale(0.96);
+  transition: transform 0.18s cubic-bezier(0.2, 0.9, 0.25, 1);
+  max-width: 90vw;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.orchard-dock-expand.open .orchard-dock-expand-panel {
+  transform: translateY(0) scale(1);
+}
+.orchard-dock-expand-title {
+  color: rgba(255,255,255,0.85);
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-align: center;
+  margin-bottom: 14px;
+  letter-spacing: -0.01em;
+}
+.orchard-dock-expand-grid {
+  display: grid;
+  gap: 14px 18px;
+  justify-content: center;
+}
+.orchard-dock-expand-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+  width: 88px;
+}
+.orchard-dock-expand-item:hover { background: rgba(255,255,255,0.1); }
+.orchard-dock-expand-icon {
+  width: 56px !important;
+  height: 56px !important;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.9rem;
+}
+.orchard-dock-expand-icon svg {
+  width: 34px;
+  height: 34px;
+}
+.orchard-dock-expand-label {
+  color: rgba(255,255,255,0.85);
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-align: center;
+  max-width: 80px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Minimized-window zone ── */
+.orchard-dock-minimized-zone {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.orchard-dock-min-item {
+  position: relative;
+}
+.orchard-dock-min-frame {
+  width: 60px;
+  height: 44px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  transition: border-color 0.12s, background 0.12s;
+}
+.orchard-dock-min-item:hover .orchard-dock-min-frame {
+  border-color: rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.10);
+}
+.orchard-dock-min-clone {
+  /* sized inline with width/height from capture; transform scales into
+     the 60×44 frame. Positioned absolutely at top-left of the frame. */
+}
+.orchard-dock-min-frame.orchard-dock-min-fallback {
+  font-size: 1.4rem;
+  color: rgba(255,255,255,0.85);
+}
+.orchard-dock-min-frame.orchard-dock-min-fallback svg {
+  width: 26px;
+  height: 26px;
+}
+
+/* ── Drag / drop indicators ── */
+.orchard-dock-item.dragging {
+  opacity: 0.35;
+}
+.orchard-dock-item.drag-over-merge .orchard-dock-icon {
+  box-shadow: 0 0 0 2px rgba(0,122,255,0.85), 0 0 10px rgba(0,122,255,0.5);
+  background: rgba(0,122,255,0.18);
+}
+.orchard-dock-item.drag-over-before::before,
+.orchard-dock-item.drag-over-after::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 2px;
+  background: rgba(0,122,255,0.9);
+  box-shadow: 0 0 6px rgba(0,122,255,0.5);
+}
+.orchard-dock-item.drag-over-before::before { left: -4px; }
+.orchard-dock-item.drag-over-after::after { right: -4px; }
+
+/* ════════════════════════════════════════════════
+   WINDOW FRAME
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone) {
+  border-radius: 12px !important;
+  overflow: hidden !important;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) !important;
+  border: none !important;
+  outline: none !important;
+}
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone).active {
+  box-shadow: 0 28px 72px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.10) !important;
+}
+
+/* Titlebar */
+body[data-heritage="orchard"] .window-titlebar {
+  height: 32px !important;
+  background: rgba(44, 44, 46, 0.95) !important;
+  border-bottom: 1px solid rgba(255,255,255,0.07) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+  padding: 0 !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+body[data-heritage="orchard"] .window-titlebar-icon { display: none !important; }
+body[data-heritage="orchard"] .window-title {
+  font-size: 0.8125rem !important;
+  font-weight: 500 !important;
+  color: rgba(255,255,255,0.85) !important;
+  letter-spacing: -0.01em !important;
+  pointer-events: none !important;
+  text-transform: none !important;
+  text-shadow: none !important;
+}
+
+/* Traffic lights */
+body[data-heritage="orchard"] .window-controls {
+  position: absolute !important;
+  /* 13px, not 10: the first dot's 24px circle then clears the NW resize corner. */
+  left: 13px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  display: flex !important;
+  /* 12px dots, 24px between centres: SC 2.5.8's spacing exception. */
+  gap: 12px !important;
+  align-items: center !important;
+}
+body[data-heritage="orchard"] .window-btn {
+  width: 12px !important;
+  height: 12px !important;
+  border-radius: 50% !important;
+  border: none !important;
+  cursor: pointer !important;
+  font-size: 0 !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+  min-width: 0 !important;
+  line-height: 1 !important;
+  transition: filter 0.1s !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+body[data-heritage="orchard"] .window-btn:hover { filter: brightness(1.2) !important; }
+
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone).active .window-close    { background: #ff5f57 !important; }
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone).active .window-minimize { background: #febc2e !important; }
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone).active .window-maximize { background: #28c840 !important; }
+
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone):not(.active) .window-close,
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone):not(.active) .window-minimize,
+body[data-heritage="orchard"] :is(.fulc-window, .fulc-window-clone):not(.active) .window-maximize { background: #3a3a3c !important; }
+
+/* ════════════════════════════════════════════════
+   CONTEXT MENUS
+   Targets the real class names used by core/context-menu.js:
+   .fulc-context-menu, .fulc-ctx-item, .fulc-ctx-divider
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] .fulc-context-menu {
+  border-radius: 10px !important;
+  background: rgba(44, 44, 46, 0.94) !important;
+  backdrop-filter: blur(20px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(160%) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  box-shadow: 0 10px 32px rgba(0,0,0,0.65) !important;
+  padding: 4px !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif !important;
+  font-size: 0.8125rem !important;
+  min-width: 200px !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item {
+  border-radius: 5px !important;
+  padding: 5px 12px !important;
+  font-size: 0.8125rem !important;
+  font-weight: 400 !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  color: rgba(255,255,255,0.88) !important;
+  transition: background 0.08s;
+}
+body[data-heritage="orchard"] .fulc-ctx-item:hover,
+body[data-heritage="orchard"] .fulc-ctx-item.kb-active {
+  background: var(--accent, #007AFF) !important;
+  color: #fff !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item.disabled {
+  color: rgba(255,255,255,0.45) !important;
+  opacity: 1 !important;
+  font-size: 0.75rem !important;
+  font-weight: 500 !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item.disabled:hover {
+  background: transparent !important;
+  color: rgba(255,255,255,0.45) !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item.danger {
+  color: rgba(255,255,255,0.88) !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item.danger:hover,
+body[data-heritage="orchard"] .fulc-ctx-item.danger.kb-active {
+  background: #ff4141 !important;
+  color: #fff !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item .submenu-arrow {
+  font-size: 0.7rem !important;
+  opacity: 0.55 !important;
+  margin-left: 12px !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-item .shortcut-hint {
+  font-size: 0.7rem !important;
+  opacity: 0.45 !important;
+  margin-left: 20px !important;
+}
+body[data-heritage="orchard"] .fulc-ctx-divider {
+  margin: 4px 6px !important;
+  background: rgba(255,255,255,0.1) !important;
+}
+
+/* ════════════════════════════════════════════════
+   DESKTOP BACKGROUND — subtle depth gradient
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] {
+  background: radial-gradient(ellipse at 60% 40%, #1c1c2e 0%, #0f0f0f 80%) !important;
+}
+
+/* ════════════════════════════════════════════════
+   KANBAN — deep re-skin
+   ════════════════════════════════════════════════ */
+
+/* Column background — rounded glass, no harsh borders */
+body[data-heritage="orchard"] .kanban-column {
+  border: none !important;
+  background: rgba(255,255,255,0.035) !important;
+  border-radius: 10px !important;
+}
+
+/* Column header accent bar — remove it */
+body[data-heritage="orchard"] .kanban-column-header-bar {
+  background: transparent !important;
+}
+
+/* + Add button — pill/ghost style */
+body[data-heritage="orchard"] .kanban-add-btn {
+  border-radius: 20px !important;
+  border: 1px dashed rgba(255,255,255,0.15) !important;
+  background: transparent !important;
+  color: rgba(255,255,255,0.4) !important;
+  font-size: 0.8rem !important;
+}
+body[data-heritage="orchard"] .kanban-add-btn:hover {
+  border-color: rgba(255,255,255,0.3) !important;
+  color: rgba(255,255,255,0.7) !important;
+  background: rgba(255,255,255,0.04) !important;
+}
+
+/* "VIEW: BOARD" label */
+body[data-heritage="orchard"] .kanban-view-label {
+  color: rgba(255,255,255,0.4) !important;
+  font-size: 0.75rem !important;
+  text-transform: none !important;
+}
+
+/* Drag ghost — no green */
+body[data-heritage="orchard"] .kanban-card.dragging {
+  opacity: 0.5 !important;
+  border-color: rgba(255,255,255,0.12) !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
+}
+
+/* ════════════════════════════════════════════════
+   AGENTS — deep re-skin
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] .agent-card {
+  border-radius: 8px !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  background: rgba(255,255,255,0.04) !important;
+}
+body[data-heritage="orchard"] .agent-card.selected {
+  border-color: var(--accent, #007AFF) !important;
+  background: rgba(0,122,255,0.08) !important;
+}
+
+/* Status badges — system palette, no retro green borders */
+body[data-heritage="orchard"] .agent-status-badge {
+  border-radius: 10px !important;
+  font-size: 0.7rem !important;
+  padding: 2px 8px !important;
+  border: none !important;
+  background: rgba(255,255,255,0.1) !important;
+  color: rgba(255,255,255,0.7) !important;
+  text-shadow: none !important;
+  box-shadow: none !important;
+}
+body[data-heritage="orchard"] .agent-status-badge.agent-status-running,
+body[data-heritage="orchard"] .agent-status-running {
+  background: rgba(52,199,89,0.2) !important;
+  color: #34c759 !important;
+}
+body[data-heritage="orchard"] .agent-status-badge.agent-status-idle,
+body[data-heritage="orchard"] .agent-status-idle {
+  background: rgba(255,255,255,0.08) !important;
+  color: rgba(255,255,255,0.45) !important;
+}
+
+/* ════════════════════════════════════════════════
+   FILE MANAGER — deep re-skin
+   ════════════════════════════════════════════════ */
+
+/* Grid view — blue selection highlight */
+body[data-heritage="orchard"] .fm-grid-selected {
+  background: rgba(0,122,255,0.2) !important;
+  border-color: rgba(0,122,255,0.4) !important;
+}
+
+/* Miller columns — blue selection */
+body[data-heritage="orchard"] .fm-miller-row.selected {
+  background: rgba(0,122,255,0.2) !important;
+  color: rgba(255,255,255,0.9) !important;
+}
+
+/* List row selection */
+body[data-heritage="orchard"] .fm-selected {
+  background: rgba(0,122,255,0.2) !important;
+}
+
+/* Breadcrumb */
+body[data-heritage="orchard"] .fm-breadcrumb {
+  font-size: 0.8125rem !important;
+  color: rgba(255,255,255,0.55) !important;
+}
+body[data-heritage="orchard"] .fm-breadcrumb-sep {
+  opacity: 0.3 !important;
+}
+
+/* ════════════════════════════════════════════════
+   THEMES APP — clean, rounded cards
+   ════════════════════════════════════════════════ */
+
+body[data-heritage="orchard"] .themes-gallery {
+  gap: 12px !important;
+}
+body[data-heritage="orchard"] .theme-card {
+  border-radius: 10px !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  overflow: hidden !important;
+}
+body[data-heritage="orchard"] .theme-card:hover {
+  border-color: rgba(255,255,255,0.18) !important;
+}
+body[data-heritage="orchard"] .theme-card--active {
+  border-color: var(--accent, #007AFF) !important;
+}
+body[data-heritage="orchard"] .theme-card-apply {
+  border-radius: 6px !important;
+}
+
+/* ════════════════════════════════════════════════
+   WORKSPACE SWITCHER (D#37 WS-W2) — menu bar, before the clock
+   ════════════════════════════════════════════════ */
+#orchard-workspaces {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.orchard-ws-btn {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  opacity: 0.6;
+  cursor: default;
+  transition: opacity 0.1s, background 0.1s;
+}
+.orchard-ws-btn:hover { opacity: 1; }
+.orchard-ws-btn[aria-current="true"] {
+  opacity: 1;
+  background: rgba(255,255,255,0.18);
+}
+.orchard-ws-btn:focus-visible {
+  outline: 2px solid rgba(255,255,255,0.85);
+  outline-offset: 1px;
+}
+/* Workspaces are a no-op on phones (WS-E criterion 1): no switcher. */
+html.fulc-phone-mode #orchard-workspaces { display: none; }

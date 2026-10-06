@@ -1,0 +1,78 @@
+-- D#81 fix round (security review MUST-FIX, defense in depth). Originally
+-- numbered 0012 (the next free core slot when this migration was
+-- written). Renamed to 0601 in fix round 3 per D#94's migration-order
+-- rule R1 (SPEC_READY): every NEW migration must sort after main's
+-- newest file, which at rename time was 0600_api_core.sql. Content is
+-- unchanged apart from this header and the filename itself -- it already
+-- ran after 0200 under its old number, so its bracket (see below) was
+-- already complete and needs no further change for the rename.
+--
+-- Pins model_connections_guard_write()'s search_path so a same-named
+-- function planted in `public` cannot be picked ahead of the pg_catalog
+-- built-in it calls -- for the layer of the attack that a pinned
+-- search_path actually closes. See 0200_partners.sql's own comment (the
+-- REVOKE CREATE ON SCHEMA public FROM platform_ops right after its last
+-- OWNER TO platform_ops statement) for the real fix, and
+-- docs/ops/hosted-postgres.md for the full writeup of why this migration
+-- is defense in depth, not the primary fix, on its own.
+--
+-- model_connections_guard_write() (0003_spend_security_fixes.sql:150) is
+-- LANGUAGE plpgsql, SECURITY INVOKER (the default -- not DEFINER), has no
+-- SET search_path, and calls
+-- `pg_has_role(current_user, 'platform_ops', 'USAGE')` with untyped string
+-- literals for its 2nd/3rd arguments. Two distinct exposures follow from
+-- that:
+--
+-- 1. An invoker-rights function with no search_path pin inherits whatever
+--    search_path the CALLING SESSION has set at the moment it's invoked.
+--    A caller that runs `SET search_path = public, pg_catalog` before an
+--    ordinary INSERT/UPDATE on model_connections can make an
+--    EXACT-signature shadow (`public.pg_has_role(name, name, text)`, the
+--    same three types pg_catalog's own 3-arg overload takes) win a tie
+--    that would otherwise go to pg_catalog by search_path order. Pinning
+--    `SET search_path = pg_catalog, public, pg_temp` on the FUNCTION
+--    itself overrides whatever the calling session set, so pg_catalog
+--    keeps winning that tie regardless -- see
+--    test/model-connections-guard-write-search-path.test.ts for the
+--    reproduction, run with and without the session doing that SET.
+--
+-- 2. The reviewer's actual reproduction planted
+--    `public.pg_has_role(name, text, text)` -- NOT an exact signature
+--    match, but a BETTER match for the two untyped-literal arguments
+--    ('platform_ops', 'USAGE') than pg_catalog's `(name, name, text)`
+--    overload, because Postgres prefers an unknown-literal-to-text cast
+--    over an unknown-literal-to-name cast. This wins REGARDLESS of
+--    search_path order -- it is not a tie, so there is nothing for a pin
+--    to break in pg_catalog's favor. A pinned search_path does not stop
+--    it, because `public` is still ON that search_path (searched second,
+--    but still searched) and a genuinely better-matching overload doesn't
+--    need to win a schema-order tie at all. THIS is why the REVOKE in
+--    0200_partners.sql, not this pin, is the actual fix for the
+--    reviewer's own reproduction: it stops platform_ops from creating the
+--    shadow function in the first place, so exposure 2 never gets a
+--    chance to matter regardless of search_path.
+--
+-- 0003_spend_security_fixes.sql is an already-applied migration with no
+-- scoped exception for in-place edits (unlike 0001_core.sql/
+-- 0200_partners.sql, which decision 5 / Correction C1 carve out
+-- specifically) -- so this fix ships as its own new migration rather than
+-- editing 0003.
+--
+-- No GRANT/REVOKE CREATE bracket needed here (see the per-file bracket
+-- rule in docs/ops/hosted-postgres.md for a migration that DOES need one):
+-- model_connections_guard_write() is owned by the migration role itself
+-- (0003 never transfers it to platform_ops), so ALTER FUNCTION ... SET
+-- only needs the ordinary ownership every migration role already has --
+-- it never touches a platform_ops-owned object.
+--
+-- `pg_catalog, public, pg_temp` (not just `pg_catalog` alone): keeps any
+-- OTHER unqualified reference this function's body might gain in a future
+-- edit resolving through the normal schema, with pg_catalog searched
+-- first and winning ties -- the same shape has_open_invitation() and
+-- partner_suspend_account() already use elsewhere in this chain (both
+-- `SET search_path = public, pg_temp` there specifically because they're
+-- SECURITY DEFINER and need to see their own schema's tables under an
+-- explicit, non-caller-controlled path; this one is SECURITY INVOKER and
+-- pg_catalog needs to come first precisely because IT'S the thing being
+-- shadowed).
+ALTER FUNCTION model_connections_guard_write() SET search_path = pg_catalog, public, pg_temp;

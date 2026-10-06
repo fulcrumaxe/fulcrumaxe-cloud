@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Shared worker page</title></head>
+<body><main><h1>Shared</h1></main>
+<script>
+  const p = new URLSearchParams(location.search).get("p");
+  try { new SharedWorker("shared-worker.js?p=" + p); } catch (e) {}
+</script></body></html>

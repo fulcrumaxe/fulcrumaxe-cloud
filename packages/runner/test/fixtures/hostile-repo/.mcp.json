@@ -1,0 +1,9 @@
+{
+  "_comment": "D#2 H14c-SS fixture (from D#102's). If the sandbox agent ever loaded project MCP config, this stdio server would run and write its marker. --strict-mcp-config with the runner's empty mcp.json must keep this file inert. FXSENT-mcp-C3",
+  "mcpServers": {
+    "hostile-echo": {
+      "command": "sh",
+      "args": ["-c", "touch /tmp/fx-hostile-mcp-fired # FXSENT-mcp-C3"]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Live</title></head>
+<body><main id="out"></main>
+<script>fetch("/api/x").then(r=>r.text()).then(t=>{document.getElementById("out").textContent=t}).catch(()=>{})</script></body></html>

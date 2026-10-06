@@ -1,0 +1,156 @@
+{
+  "stage": "pr_opened",
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": 57,
+  "auto_merge": true,
+  "comments": [
+    {
+      "role": "technical-architect",
+      "body": "Round 1. The change fits the existing route layer.\nNo new table is needed.",
+      "created_at": "2026-10-03T09:10:00.000Z"
+    },
+    {
+      "role": "product-owner",
+      "body": "Round 1. The owner can see what each agent did.",
+      "created_at": "2026-10-03T09:11:00.000Z"
+    },
+    {
+      "role": "security-expert",
+      "body": "Round 1. Commands must never carry a token.",
+      "created_at": "2026-10-03T09:12:00.000Z"
+    },
+    {
+      "role": "technical-architect",
+      "body": "Challenge. Cap every list.",
+      "created_at": "2026-10-03T09:20:00.000Z"
+    },
+    {
+      "role": "security-expert",
+      "body": "Challenge. Keep model text as plain text.",
+      "created_at": "2026-10-03T09:21:00.000Z"
+    }
+  ],
+  "comments_truncated": false,
+  "spec": {
+    "version": 2,
+    "body": "## Spec (Acceptance)\n1. The detail panel lists every agent run.\n2. Text is shown as plain text."
+  },
+  "runs": [
+    {
+      "id": "66666666-6666-4666-8666-000000000001",
+      "role": "project-manager",
+      "status": "succeeded",
+      "usd": 0.12,
+      "created_at": "2026-10-03T09:00:00.000Z",
+      "summary": "Triaged as a feature and wrote the Spec.",
+      "lines": [
+        {
+          "at": "2026-10-03T09:00:05.000Z",
+          "text": "The run started"
+        },
+        {
+          "at": "2026-10-03T09:00:30.000Z",
+          "text": "Reading docs/guide.md"
+        }
+      ]
+    },
+    {
+      "id": "66666666-6666-4666-8666-000000000002",
+      "role": "technical-architect",
+      "status": "succeeded",
+      "usd": 0.2,
+      "created_at": "2026-10-03T09:10:00.000Z",
+      "summary": null,
+      "lines": []
+    },
+    {
+      "id": "66666666-6666-4666-8666-000000000003",
+      "role": "product-owner",
+      "status": "succeeded",
+      "usd": 0.15,
+      "created_at": "2026-10-03T09:11:00.000Z",
+      "summary": null,
+      "lines": []
+    },
+    {
+      "id": "66666666-6666-4666-8666-000000000004",
+      "role": "security-expert",
+      "status": "succeeded",
+      "usd": 0.1,
+      "created_at": "2026-10-03T09:12:00.000Z",
+      "summary": null,
+      "lines": []
+    },
+    {
+      "id": "66666666-6666-4666-8666-000000000005",
+      "role": "executor",
+      "status": "succeeded",
+      "usd": 1.4,
+      "created_at": "2026-10-03T09:30:00.000Z",
+      "summary": "Added the activity route and the panel. Tests pass.",
+      "lines": [
+        {
+          "at": "2026-10-03T09:30:10.000Z",
+          "text": "Repository cloned"
+        },
+        {
+          "at": "2026-10-03T09:31:00.000Z",
+          "text": "Reading packages/api/src/routes/index.ts"
+        },
+        {
+          "at": "2026-10-03T09:40:00.000Z",
+          "text": "Ran tests: pnpm vitest run"
+        },
+        {
+          "at": "2026-10-03T09:41:00.000Z",
+          "text": "Writing up the result"
+        }
+      ]
+    },
+    {
+      "id": "66666666-6666-4666-8666-000000000006",
+      "role": "code-reviewer",
+      "status": "running",
+      "usd": null,
+      "created_at": "2026-10-03T10:00:00.000Z",
+      "summary": null,
+      "lines": [
+        {
+          "at": "2026-10-03T10:00:05.000Z",
+          "text": "The run started"
+        },
+        {
+          "at": "2026-10-03T10:00:40.000Z",
+          "text": "Looking through packages/api"
+        },
+        {
+          "at": "2026-10-03T10:01:10.000Z",
+          "text": "Ran: git diff origin/main --stat"
+        },
+        {
+          "at": "2026-10-03T10:01:30.000Z",
+          "text": "Running a command"
+        }
+      ]
+    }
+  ],
+  "runs_truncated": false,
+  "steps": [
+    {
+      "kind": "continue_work_item",
+      "state": "done",
+      "code": null,
+      "result": "started",
+      "reasons": [],
+      "at": "2026-10-03T09:29:00.000Z",
+      "finished_at": "2026-10-03T09:29:05.000Z"
+    }
+  ],
+  "notice": null,
+  "actions": [],
+  "close_on_github": true
+}

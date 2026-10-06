@@ -1,0 +1,10 @@
+{
+  "id": "11111111-1111-4111-8111-111111111111",
+  "plan": "starter",
+  "status": "active",
+  "partner_billed": false,
+  "share_public_figures": false,
+  "cancel_at_period_end": false,
+  "current_period_end": "2026-10-01T00:00:00.000Z",
+  "model_source": "own_key"
+}

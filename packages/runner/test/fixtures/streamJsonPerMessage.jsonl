@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","session_id":"s-pm","note":"Follows the SDK 0.3.273 type shape; to be re-recorded from the pinned CLI in H18. Three model messages of two content blocks each: the blocks of one message share message.id and repeat or grow its usage."}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_A","role":"assistant","content":[{"type":"text","text":"a1"}],"usage":{"input_tokens":1000000,"output_tokens":10}}}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_A","role":"assistant","content":[{"type":"tool_use","id":"tA","name":"Read","input":{}}],"usage":{"input_tokens":1000000,"output_tokens":200000}}}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_B","role":"assistant","content":[{"type":"text","text":"b1"}],"usage":{"input_tokens":2000000,"output_tokens":50}}}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_B","role":"assistant","content":[{"type":"tool_use","id":"tB","name":"Read","input":{}}],"usage":{"input_tokens":2000000,"output_tokens":300000}}}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_C","role":"assistant","content":[{"type":"text","text":"c1"}],"usage":{"input_tokens":500000,"output_tokens":100}}}
+{"type":"assistant","session_id":"s-pm","message":{"id":"msg_C","role":"assistant","content":[{"type":"tool_use","id":"tC","name":"Read","input":{}}],"usage":{"input_tokens":500000,"output_tokens":400000}}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"s-pm","result":"done"}

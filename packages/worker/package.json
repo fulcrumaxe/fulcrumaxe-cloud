@@ -1,0 +1,40 @@
+{
+  "name": "@fx/worker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#2 H14c-3-1: the pipeline worker's composition root as a library -- database pools and their startup guards, the one real Vercel sandbox port, the production execution-target registry. The only module that reads the runner login. Not a deployment: apps/web routes call the factory.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "@fx/github": "workspace:*",
+    "@fx/model-connection": "workspace:*",
+    "@fx/model-router": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "@fx/roles": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/spend": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "@vercel/oidc": "3.2.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
+    "@fx/runner-cloud": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

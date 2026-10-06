@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "validation_failed",
+    "message": "request failed validation",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  },
+  "details": [{ "path": "compute_cap_usd_month", "code": "not_settable" }]
+}

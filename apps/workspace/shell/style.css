@@ -1,0 +1,1124 @@
+:root {
+  /* ── Backgrounds ─────────────────── */
+  --bg-base:          #000000;
+  --bg-surface:       #0a0a0a;
+  --bg-elevated:      #111111;
+  --bg-overlay:       rgba(0, 0, 0, 0.85);
+
+  /* ── Text ────────────────────────── */
+  --text-primary:     #1aff80;
+  --text-secondary:   rgba(26, 255, 128, 0.7);
+  --text-muted:       rgba(26, 255, 128, 0.4);
+  --text-inverse:     #000000;
+
+  /* ── Accent ──────────────────────── */
+  --accent:           #1aff80;
+  --accent-bright:    #00FF41;
+  --accent-rgb:       26, 255, 128;
+  --accent-secondary: #00D4FF;
+
+  /* ── Borders ─────────────────────── */
+  --border:           rgba(26, 255, 128, 0.3);
+  --border-bright:    rgba(26, 255, 128, 0.8);
+  --border-radius:    0px;
+  --border-radius-sm: 0px;
+  --border-radius-lg: 0px;
+
+  /* ── Shadows & Elevation ─────────── */
+  --shadow-sm:        0 1px 3px rgba(0,0,0,0.5);
+  --shadow-md:        0 4px 12px rgba(0,0,0,0.6);
+  --shadow-lg:        0 8px 24px rgba(0,0,0,0.8);
+  --glow-accent:      0 0 8px rgba(26, 255, 128, 0.6);
+  --glow-bright:      0 0 16px rgba(26, 255, 128, 0.9);
+
+  /* ── Glass / Overlay ─────────────── */
+  --glass-blur:       0px;
+  --glass-bg:         rgba(0, 0, 0, 0.8);
+
+  /* ── Typography ──────────────────── */
+  --font-mono:        'Courier New', Courier, monospace;
+  --font-display:     'Courier New', Courier, monospace;
+  --font-size-base:   1rem;
+  --line-height:      1.4;
+  --letter-spacing:   0.05em;
+
+  /* ── Motion ──────────────────────── */
+  --anim-duration:    0.15s;
+  --anim-easing:      steps(4);
+
+  /* ── Effects (0=off, 1=full) ─────── */
+  --effect-scanlines: 1;
+  --effect-glow:      1;
+  --effect-grain:     0;
+  --effect-crt-curve: 1;
+
+  /* ── Terminal ANSI Palette ───────── */
+  --term-color-0:   #000000;  /* black */
+  --term-color-1:   #FF4141;  /* red */
+  --term-color-2:   #1aff80;  /* green */
+  --term-color-3:   #FFB000;  /* yellow */
+  --term-color-4:   #00D4FF;  /* blue */
+  --term-color-5:   #FF00FF;  /* magenta */
+  --term-color-6:   #00FFFF;  /* cyan */
+  --term-color-7:   #E0E0E0;  /* white */
+  --term-color-8:   #555555;  /* bright black */
+  --term-color-9:   #FF6B6B;  /* bright red */
+  --term-color-10:  #00FF41;  /* bright green */
+  --term-color-11:  #FFCC00;  /* bright yellow */
+  --term-color-12:  #00EAFF;  /* bright blue */
+  --term-color-13:  #FF80FF;  /* bright magenta */
+  --term-color-14:  #80FFFF;  /* bright cyan */
+  --term-color-15:  #FFFFFF;  /* bright white */
+
+  /* ── Legacy (kept until task-03 migration) ── */
+  --theme-primary:  var(--accent);
+  --theme-bright:   var(--accent-bright);
+  --theme-rgb:      var(--accent-rgb);
+  --flicker-anim:   flicker 0.1s infinite;
+  --crt-curve:      radial-gradient(circle, transparent 60%, rgba(0, 0, 0, 0.4) 100%);
+}
+
+/* ── Theme Definitions ───────────────────────────────────────────── */
+/* D#37 WS-TH1 (C19b criterion 5, technical architect cause 2): keyed off
+   body[data-experience], not body[data-theme]/:not([data-theme]). Every
+   `_applyExperience()` call in theme-manager.js sets `data-experience`
+   unconditionally, for every experience id -- `data-theme` is set only for
+   the five ids theme-manager.js's LEGACY_THEME_MAP still recognizes
+   (classic-crt/cyberpunk/nord/retro-amber/corporate) and is left stale
+   (never cleared) once you switch away from one of those, so keying this
+   rule on it made this block re-assert green over html's real accent for
+   any of the four heritage-fidelity experiences (macos-sonoma,
+   windows-fluent, windows-aero, ubuntu-gnome) the moment they weren't the
+   very first theme a session ever picked -- confirmed live, "Fluent+ html
+   #0078d4, body #1aff80". `body:not([data-experience])` still covers the
+   pre-JS-init default paint, which is the classic-crt token set the :root
+   block above already provides. */
+body[data-experience="classic-crt"], body:not([data-experience]) {
+  --accent:           #1aff80;
+  --accent-bright:    #00FF41;
+  --accent-rgb:       26, 255, 128;
+  --accent-secondary: #00D4FF;
+  --text-primary:     #1aff80;
+  --text-secondary:   rgba(26, 255, 128, 0.7);
+  --text-muted:       rgba(26, 255, 128, 0.4);
+  --border:           rgba(26, 255, 128, 0.3);
+  --border-bright:    rgba(26, 255, 128, 0.8);
+  --glow-accent:      0 0 8px rgba(26, 255, 128, 0.6);
+  --glow-bright:      0 0 16px rgba(26, 255, 128, 0.9);
+  --theme-primary:    var(--accent);
+  --theme-bright:     var(--accent-bright);
+  --theme-rgb:        var(--accent-rgb);
+}
+
+/* D#37 WS-TH1 fix round 1 (PR #163 review, blocking item 1): keyed on the
+   owning experience id too, not data-theme alone. theme-manager.js sets
+   data-theme unconditionally for every legacy-mapped experience but leaves
+   it untouched when applying a non-legacy-mapped one (Fluent+/Cupertino+),
+   and a heritage adapter's restoreDataTheme() can write that stale value
+   back after data-experience has already moved on again -- e.g. Nord
+   (data-theme="blue") -> Fluent+ (data-theme left stale at "blue") ->
+   Classic CRT (data-experience="classic-crt", but crystal's deactivate()
+   restores data-theme to "blue"). Keying this block on
+   data-experience="nord" too means a stale data-theme="blue" left over
+   from Nord can never again match once data-experience has moved to a
+   different experience -- the leak this fixes. Same fix for
+   amber/white/red below. */
+body[data-experience="retro-amber"][data-theme="amber"] {
+  --accent:           #FFB000;
+  --accent-bright:    #FFCC00;
+  --accent-rgb:       255, 176, 0;
+  --accent-secondary: #FF6B00;
+  --text-primary:     #FFB000;
+  --text-secondary:   rgba(255, 176, 0, 0.7);
+  --text-muted:       rgba(255, 176, 0, 0.4);
+  --border:           rgba(255, 176, 0, 0.3);
+  --border-bright:    rgba(255, 176, 0, 0.8);
+  --glow-accent:      0 0 8px rgba(255, 176, 0, 0.6);
+  --glow-bright:      0 0 16px rgba(255, 176, 0, 0.9);
+  --theme-primary:    var(--accent);
+  --theme-bright:     var(--accent-bright);
+  --theme-rgb:        var(--accent-rgb);
+}
+
+body[data-experience="nord"][data-theme="blue"] {
+  --accent:           #00D4FF;
+  --accent-bright:    #00EAFF;
+  --accent-rgb:       0, 212, 255;
+  --accent-secondary: #0080FF;
+  --text-primary:     #00D4FF;
+  --text-secondary:   rgba(0, 212, 255, 0.7);
+  --text-muted:       rgba(0, 212, 255, 0.4);
+  --border:           rgba(0, 212, 255, 0.3);
+  --border-bright:    rgba(0, 212, 255, 0.8);
+  --glow-accent:      0 0 8px rgba(0, 212, 255, 0.6);
+  --glow-bright:      0 0 16px rgba(0, 212, 255, 0.9);
+  --theme-primary:    var(--accent);
+  --theme-bright:     var(--accent-bright);
+  --theme-rgb:        var(--accent-rgb);
+}
+
+body[data-experience="corporate"][data-theme="white"] {
+  --accent:           #E0E0E0;
+  --accent-bright:    #FFFFFF;
+  --accent-rgb:       224, 224, 224;
+  --accent-secondary: #C0C0C0;
+  --text-primary:     #E0E0E0;
+  --text-secondary:   rgba(224, 224, 224, 0.7);
+  --text-muted:       rgba(224, 224, 224, 0.4);
+  --border:           rgba(224, 224, 224, 0.3);
+  --border-bright:    rgba(224, 224, 224, 0.8);
+  --glow-accent:      0 0 8px rgba(224, 224, 224, 0.4);
+  --glow-bright:      0 0 12px rgba(224, 224, 224, 0.6);
+  --theme-primary:    var(--accent);
+  --theme-bright:     var(--accent-bright);
+  --theme-rgb:        var(--accent-rgb);
+}
+
+body[data-experience="cyberpunk"][data-theme="red"] {
+  --accent:           #FF4141;
+  --accent-bright:    #FF6B6B;
+  --accent-rgb:       255, 65, 65;
+  --accent-secondary: #FF8800;
+  --text-primary:     #FF4141;
+  --text-secondary:   rgba(255, 65, 65, 0.7);
+  --text-muted:       rgba(255, 65, 65, 0.4);
+  --border:           rgba(255, 65, 65, 0.3);
+  --border-bright:    rgba(255, 65, 65, 0.8);
+  --glow-accent:      0 0 8px rgba(255, 65, 65, 0.6);
+  --glow-bright:      0 0 16px rgba(255, 65, 65, 0.9);
+  --theme-primary:    var(--accent);
+  --theme-bright:     var(--accent-bright);
+  --theme-rgb:        var(--accent-rgb);
+}
+
+/* ── Font Size Classes ───────────────────────────────────────────── */
+body.font-small { font-size: 0.85rem; }
+body.font-medium { font-size: 1rem; }
+body.font-large { font-size: 1.2rem; }
+
+/* ── CRT Toggle ──────────────────────────────────────────────────── */
+body.crt-disabled .crt-overlay,
+body.crt-disabled .scanlines {
+  display: none !important;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height);
+  letter-spacing: var(--letter-spacing);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+  text-transform: uppercase;
+}
+
+/* Inputs, textareas, and code should preserve real case */
+input, textarea, select, pre, code, .fulc-modal-input,
+.terminal-app, .terminal-app *, .terminal-chrome, .terminal-chrome *,
+.monaco-editor, .monaco-editor *, .monaco-aria-container,
+.context-view, .context-view *, .monaco-hover, .monaco-hover *,
+.xterm, .xterm * {
+  text-transform: none !important;
+}
+
+#rain-bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.1;
+  z-index: -1;
+}
+
+/* CRT Effects */
+.crt-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: var(--crt-curve);
+  pointer-events: none;
+  z-index: 100;
+}
+
+.scanlines {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%,
+    rgba(0, 0, 0, 0.25) 50%
+  ),
+  linear-gradient(
+    90deg,
+    rgba(255, 0, 0, 0.06),
+    rgba(0, 255, 0, 0.02),
+    rgba(0, 0, 255, 0.06)
+  );
+  background-size: 100% 2px, 3px 100%;
+  pointer-events: none;
+  z-index: 101;
+}
+
+/* App Layout */
+.fulc-container {
+  padding: 2rem;
+  height: 90vh;
+  box-sizing: border-box;
+}
+
+.screen {
+  height: 100%;
+  width: 100%;
+  border: 1px solid var(--theme-primary);
+  padding: 1rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  box-shadow: 0 0 10px rgba(var(--theme-rgb), 0.2);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Boot Screen */
+#boot-log {
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+/* Header */
+.header {
+  border-bottom: 2px solid var(--theme-primary);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  display: flex;
+  justify-content: space-between;
+}
+
+/* Terminal Styling */
+.cursor {
+  animation: blink 0.8s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes flicker {
+  0% { opacity: 0.97; }
+  5% { opacity: 0.95; }
+  10% { opacity: 0.9; }
+  15% { opacity: 0.95; }
+  25% { opacity: 0.9; }
+  30% { opacity: 1; }
+  50% { opacity: 0.9; }
+  60% { opacity: 0.95; }
+  85% { opacity: 0.9; }
+  95% { opacity: 0.95; }
+}
+
+/* Dashboard Styles */
+#dashboard {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 1rem;
+  height: 100%;
+  overflow: hidden;
+}
+
+.sidebar {
+  border-right: 1px solid var(--theme-primary);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.main-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-area {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.dashboard-panel {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.status-tab {
+  padding: 1rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+
+.status-tab:hover, .status-tab.active {
+  background: var(--theme-primary);
+  color: #000;
+}
+
+
+#master-input {
+  position: absolute;
+  top: -100px;
+  opacity: 0;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--theme-primary);
+  margin: 1rem 0;
+}
+
+/* Keyboard Navigation Focus */
+.focused {
+    background: var(--theme-primary);
+    color: #000;
+    outline: 2px solid var(--theme-primary);
+    outline-offset: 2px;
+}
+
+/* Admin Panel Styles */
+.admin-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--theme-primary);
+}
+
+.admin-tab-button {
+    padding: 0.75rem 1.5rem;
+    cursor: pointer;
+    border: 1px solid transparent;
+    background-color: transparent;
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    transition: all 0.2s;
+    border-bottom: 2px solid transparent;
+}
+
+.admin-tab-button:hover, .admin-tab-button.active {
+    background-color: var(--theme-primary);
+    color: #000;
+    border-bottom: 2px solid var(--theme-primary);
+}
+
+.admin-tab-content {
+    display: block;
+}
+
+.admin-tab-content.hidden {
+    display: none;
+}
+
+.admin-tab-content ul {
+    margin-left: 1.5rem;
+    line-height: 1.8;
+}
+
+.admin-tab-content li {
+    margin-bottom: 0.5rem;
+}
+
+.admin-form label {
+    display: block;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: var(--theme-primary);
+}
+
+.admin-form .admin-input {
+    width: 80%;
+    padding: 0.5rem;
+    background-color: transparent;
+    border: 1px solid var(--theme-primary);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    text-transform: uppercase;
+}
+
+.admin-form .admin-btn {
+    background-color: var(--theme-primary);
+    color: #000;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    cursor: pointer;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    text-transform: uppercase;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.admin-form .admin-btn:hover, .admin-form .admin-btn.focused {
+    background-color: #000;
+    color: var(--theme-primary);
+    border: 1px solid var(--theme-primary);
+}
+
+/* Overlay Styles */
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--bg-overlay);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    backdrop-filter: blur(2px);
+}
+
+.overlay.hidden {
+    display: none !important;
+}
+
+.overlay-content {
+    border: 2px solid var(--accent);
+    background: rgba(0, 0, 0, 0.95);
+    padding: 2rem;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(var(--theme-rgb), 0.4);
+    animation: slideIn 0.3s ease-out;
+}
+
+.success-content {
+    border-color: var(--theme-bright);
+    box-shadow: 0 0 30px rgba(var(--theme-rgb), 0.6);
+}
+
+.discard-content {
+    border-color: #FF4141;
+    box-shadow: 0 0 30px rgba(255, 65, 65, 0.6);
+}
+
+.overlay-content p {
+    margin: 0 0 1.5rem 0;
+    font-size: 1.2rem;
+    letter-spacing: 2px;
+}
+
+.success-indicator {
+    font-size: 3rem;
+    color: var(--theme-bright);
+    margin-bottom: 1rem;
+    animation: successPulse 0.6s ease-out;
+}
+
+.discard-indicator {
+    font-size: 3rem;
+    color: #FF4141;
+    margin-bottom: 1rem;
+    animation: discardPulse 0.6s ease-out;
+}
+
+.overlay-buttons {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
+
+.overlay-btn {
+    padding: 0.75rem 2rem;
+    border: 2px solid var(--theme-primary);
+    background: transparent;
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.overlay-btn:hover, .overlay-btn.focused {
+    background: var(--theme-primary);
+    color: #000;
+    box-shadow: 0 0 10px rgba(var(--theme-rgb), 0.5);
+}
+
+.overlay-yes-btn {
+    border-color: var(--theme-bright);
+    color: var(--theme-bright);
+}
+
+.overlay-yes-btn:hover {
+    background: var(--theme-bright);
+    color: #000;
+}
+
+.overlay-no-btn {
+    border-color: #FF4141;
+    color: #FF4141;
+}
+
+.overlay-no-btn:hover {
+    background: #FF4141;
+    color: #000;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@keyframes successPulse {
+    0% {
+        transform: scale(0.5);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.1);
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes discardPulse {
+    0% {
+        transform: scale(0.5) rotate(-10deg);
+        opacity: 0;
+    }
+    50% {
+        transform: scale(1.1) rotate(5deg);
+    }
+    100% {
+        transform: scale(1) rotate(0deg);
+        opacity: 1;
+    }
+}
+
+@keyframes fadeOut {
+    from {
+        opacity: 1;
+    }
+    to {
+        opacity: 0;
+    }
+}
+
+/* User Management Styles */
+.user-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.user-row:hover {
+    border-color: var(--theme-primary);
+}
+
+.user-row.selected,
+.user-row.focused {
+    background: var(--theme-primary);
+    color: #000;
+    border-color: var(--theme-primary);
+}
+
+.user-row .user-name {
+    flex: 1;
+}
+
+.user-row .user-role {
+    font-size: 0.8rem;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--theme-primary);
+}
+
+.user-row.selected .user-role,
+.user-row.focused .user-role {
+    border-color: #000;
+}
+
+.admin-role {
+    color: #FFD700;
+    border-color: #FFD700 !important;
+}
+
+.user-row.selected .admin-role,
+.user-row.focused .admin-role {
+    color: #000;
+    border-color: #000 !important;
+    background: #FFD700;
+}
+
+.self-indicator {
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.user-row .user-date {
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.user-row.selected .user-date,
+.user-row.focused .user-date {
+    opacity: 1;
+}
+
+/* User Action Panel */
+.user-action-panel {
+    margin-top: 0.5rem;
+}
+
+.user-action-row {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.user-action-btn {
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+}
+
+.btn-danger {
+    border-color: #FF4141 !important;
+    color: #FF4141 !important;
+}
+
+.btn-danger:hover, .btn-danger.focused {
+    background: #FF4141 !important;
+    color: #000 !important;
+}
+
+/* Profile Form Styles */
+.profile-form {
+    margin-top: 0.5rem;
+}
+
+.profile-form label {
+    display: block;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: var(--theme-primary);
+}
+
+.profile-form .profile-input {
+    width: 80%;
+    padding: 0.5rem;
+    background-color: transparent;
+    border: 1px solid var(--theme-primary);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    text-transform: uppercase;
+}
+
+#reset-password-section {
+    margin-top: 0.75rem;
+}
+
+#reset-password-section label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--theme-primary);
+}
+
+/* Command Area */
+#command-area {
+    border-top: 1px solid var(--theme-primary);
+    display: flex;
+    flex-direction: column;
+    max-height: 50%;
+    min-height: 120px;
+}
+
+#command-output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    min-height: 0;
+}
+
+#command-output p {
+    margin: 0;
+    padding: 1px 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+#command-output .cmd-echo {
+    opacity: 0.6;
+}
+
+#command-output .cmd-error {
+    color: #FF4141;
+}
+
+#command-output .cmd-success {
+    color: var(--theme-bright);
+}
+
+#command-output .cmd-info {
+    color: var(--theme-primary);
+}
+
+#command-output .cmd-table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.25rem 0;
+    font-size: 0.85rem;
+}
+
+#command-output .cmd-table th,
+#command-output .cmd-table td {
+    text-align: left;
+    padding: 0.2rem 0.75rem;
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.2);
+}
+
+#command-output .cmd-table th {
+    border-bottom: 1px solid var(--theme-primary);
+    color: var(--theme-primary);
+}
+
+#command-input-bar {
+    display: flex;
+    align-items: center;
+    border-top: 1px solid rgba(var(--theme-rgb), 0.3);
+    padding: 0.4rem 0.5rem;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.cmd-prompt {
+    color: var(--theme-primary);
+    font-weight: bold;
+    margin-right: 0.25rem;
+    flex-shrink: 0;
+}
+
+#command-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    text-transform: uppercase;
+    outline: none;
+    caret-color: var(--theme-primary);
+}
+
+#command-input::placeholder {
+    color: rgba(var(--theme-rgb), 0.3);
+    text-transform: uppercase;
+}
+
+#command-input.tab-completing {
+    color: rgba(var(--theme-rgb), 0.7);
+}
+
+/* ── Epic 2: Communication Styles ──────────────────────────────────── */
+
+/* Message Badge */
+.msg-badge {
+    display: inline-block;
+    background: #FF4141;
+    color: #000;
+    font-size: 0.7rem;
+    font-weight: bold;
+    padding: 0.1rem 0.4rem;
+    margin-left: 0.3rem;
+    min-width: 1rem;
+    text-align: center;
+    animation: badgePulse 2s ease-in-out infinite;
+}
+
+.msg-badge.hidden {
+    display: none;
+}
+
+@keyframes badgePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Messages Panel */
+.msg-help-list {
+    margin: 1rem 0;
+    padding-left: 0.5rem;
+}
+
+.cmd-hint {
+    font-size: 0.85rem;
+    opacity: 0.8;
+    margin: 0.3rem 0;
+    padding-left: 1rem;
+}
+
+/* Quick Inbox */
+.msg-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.15);
+}
+
+.msg-row.msg-unread {
+    border-left: 3px solid var(--theme-bright);
+}
+
+.msg-row.msg-read {
+    opacity: 0.6;
+    border-left: 3px solid transparent;
+}
+
+.msg-from {
+    flex: 1;
+    font-weight: bold;
+}
+
+.msg-date {
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.msg-status {
+    font-size: 0.75rem;
+    color: var(--theme-bright);
+}
+
+.msg-read .msg-status {
+    color: var(--theme-primary);
+    opacity: 0.5;
+}
+
+/* ── Epic 3: Preference Styles ───────────────────────────────────── */
+
+.pref-selector {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.25rem;
+}
+
+.pref-option {
+    padding: 0.4rem 0.8rem;
+    background: transparent;
+    border: 1px solid var(--theme-primary);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.pref-option:hover,
+.pref-option.focused {
+    background: var(--theme-primary);
+    color: #000;
+}
+
+.pref-option.active {
+    background: var(--theme-primary);
+    color: #000;
+    font-weight: bold;
+}
+
+/* Avatar Display */
+.avatar-art {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    line-height: 1.2;
+    color: var(--theme-primary);
+    margin: 0.5rem 0;
+    white-space: pre;
+    text-transform: none;
+}
+
+.avatar-nav {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+
+.avatar-btn {
+    padding: 0.3rem 0.8rem;
+    font-size: 0.85rem;
+    background: transparent;
+    border: 1px solid var(--theme-primary);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.avatar-btn:hover,
+.avatar-btn.focused {
+    background: var(--theme-primary);
+    color: #000;
+}
+
+#avatar-id {
+    color: var(--theme-primary);
+    font-weight: bold;
+    min-width: 1.5rem;
+    text-align: center;
+}
+
+/* ── App Zone Layout Framework ───────────────────────────────────────────── */
+/* data-toolbar-placement on the app root repositions data-zone="toolbar".   */
+
+/* Left toolbar: 2-column grid, toolbar spans full height of left column */
+[data-toolbar-placement="left"] {
+    display: grid !important;
+    grid-template-columns: auto 1fr;
+}
+[data-toolbar-placement="left"] > [data-zone="toolbar"] {
+    grid-column: 1;
+    grid-row: 1 / span 100;
+    flex-direction: column !important;
+    width: 40px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-right: 1px solid var(--border, #333);
+    border-bottom: none !important;
+}
+[data-toolbar-placement="left"] > :not([data-zone="toolbar"]) {
+    grid-column: 2;
+}
+
+/* Right toolbar */
+[data-toolbar-placement="right"] {
+    display: grid !important;
+    grid-template-columns: 1fr auto;
+}
+[data-toolbar-placement="right"] > [data-zone="toolbar"] {
+    grid-column: 2;
+    grid-row: 1 / span 100;
+    flex-direction: column !important;
+    width: 40px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-left: 1px solid var(--border, #333);
+    border-bottom: none !important;
+}
+[data-toolbar-placement="right"] > :not([data-zone="toolbar"]) {
+    grid-column: 1;
+}
+
+/* Floating toolbar: absolute glass overlay */
+[data-toolbar-placement="floating"] > [data-zone="toolbar"] {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    background: var(--glass-bg, rgba(0, 0, 0, 0.85));
+    backdrop-filter: blur(var(--glass-blur, 8px));
+    border: 1px solid var(--border, #333);
+    border-radius: var(--border-radius, 4px);
+    box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.5));
+    flex-wrap: wrap;
+    max-width: 40px;
+    overflow: hidden;
+}
+
+/* Collapsed toolbar: hidden until toggle clicked */
+[data-toolbar-placement="collapsed"] > [data-zone="toolbar"] {
+    display: none;
+}
+[data-toolbar-placement="collapsed"] > [data-zone="toolbar"].revealed {
+    display: flex;
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    background: var(--glass-bg, rgba(0, 0, 0, 0.85));
+    border: 1px solid var(--border, #333);
+    border-radius: var(--border-radius, 4px);
+}
+
+/* Toggle button injected for floating/collapsed */
+.toolbar-toggle-btn {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 11;
+    background: var(--surface, rgba(0, 0, 0, 0.7));
+    border: 1px solid var(--border, #333);
+    color: var(--text, #ccc);
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 14px;
+    border-radius: var(--border-radius, 4px);
+    line-height: 1;
+}
+
+/* ── Density tokens ──────────────────────────────────────────────────── */
+body[data-density="dense"]       { --density-gap: 2px;  --density-padding: 4px;  }
+body[data-density="compact"]     { --density-gap: 4px;  --density-padding: 6px;  }
+body[data-density="comfortable"] { --density-gap: 8px;  --density-padding: 12px; }
+body[data-density="broadcast"]   { --density-gap: 16px; --density-padding: 24px; }
+
+/* Editor styles moved to editor.css */
+
+/* ── Global <select> dropdown theming (epic-7 task 06b follow-up) ─
+ * Native HTML <select> popups inherit the OS color-scheme by default
+ * — on a dark theme that produces a white-on-white menu the moment
+ * the user clicks the control. `color-scheme: dark` flips the browser-
+ * native chrome (scrollbars, popup background) to dark, and the
+ * explicit `option` rule covers older Chromium revs that don't honor
+ * the property fully.
+ *
+ * Scoped to inputs likely to be themed fulcrumaxe-os controls so we don't
+ * touch native browser-extension/devtools UI. */
+:root, html { color-scheme: dark; }
+body, .fulc-modal-content { color-scheme: dark; }
+select,
+.cd-input,
+.fulc-modal-input,
+.fm-input,
+.tt-input {
+  color-scheme: dark;
+}
+select option,
+select optgroup {
+  background-color: #0a1410;
+  color: var(--text, #00ff88);
+}
+select option:checked,
+select option:hover {
+  background-color: #1a3325;
+  color: var(--text, #00ff88);
+}

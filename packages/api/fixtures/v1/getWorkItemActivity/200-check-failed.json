@@ -1,0 +1,24 @@
+{
+  "stage": "in_progress",
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": {
+    "kind": "check_failed",
+    "reason": "Couldn't check the build right now. Try again in a moment."
+  },
+  "actions": [
+    "close"
+  ],
+  "close_on_github": false
+}

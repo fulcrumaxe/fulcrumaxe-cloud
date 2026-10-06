@@ -1,0 +1,11 @@
+{
+  "started_at": "2026-09-20T08:00:00.000Z",
+  "steps": [
+    { "step": "model_key", "completed_at": null, "skipped": false },
+    { "step": "readonly_app", "completed_at": null, "skipped": false },
+    { "step": "preview", "completed_at": null, "skipped": false },
+    { "step": "pay", "completed_at": null, "skipped": false },
+    { "step": "write_app", "completed_at": null, "skipped": false },
+    { "step": "first_pr", "completed_at": null, "skipped": false }
+  ]
+}

@@ -1,0 +1,88 @@
+/* ── fulcrumaxe-os Presence Avatars ────────────────────────────────────────────────── */
+
+/* Avatar strip in the taskbar tray */
+.presence-avatar-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* Individual avatar pill */
+.presence-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.75);
+  cursor: default;
+  user-select: none;
+  flex-shrink: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.1s ease;
+}
+
+.presence-avatar:hover {
+  transform: scale(1.15);
+  z-index: 10;
+}
+
+.presence-initials {
+  line-height: 1;
+  letter-spacing: -0.5px;
+}
+
+/* Online / away status dot in bottom-right corner of avatar */
+.presence-dot {
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--taskbar-bg, #1a1a1f);
+}
+
+.presence-dot--online {
+  background: #22c55e; /* green */
+}
+
+.presence-dot--away {
+  background: #f59e0b; /* amber */
+}
+
+.presence-dot--offline {
+  background: #6b7280; /* gray */
+}
+
+/* Self status indicator — small colored bar / dot before other avatars */
+.presence-self-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 2px;
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.presence-self-dot--online {
+  background: #22c55e;
+  box-shadow: 0 0 4px #22c55e;
+}
+
+.presence-self-dot--away {
+  background: #f59e0b;
+  box-shadow: 0 0 4px #f59e0b;
+}
+
+.presence-self-dot--offline {
+  background: #6b7280;
+}

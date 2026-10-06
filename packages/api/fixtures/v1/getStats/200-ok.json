@@ -1,0 +1,35 @@
+{
+  "window": {
+    "from": "2026-08-27T00:00:00.000Z",
+    "to": "2026-09-26T00:00:00.000Z",
+    "repo_id": null
+  },
+  "generated_at": "2026-09-26T00:00:00.000Z",
+  "metrics": {
+    "lead_time_minutes": { "p50": 182.5, "p90": 410.2, "mean": 210.4, "n": 12 },
+    "time_to_merge_minutes": { "p50": 96.3, "p90": 240.1, "mean": 110.7, "n": 12 },
+    "spec_to_first_pr_minutes": { "p50": 42.0, "p90": 88.5, "mean": 48.9, "n": 12 },
+    "queue_wait_minutes": { "p50": 5.2, "p90": 20.0, "mean": 7.8, "n": 12 },
+    "review_latency_minutes": { "p50": 18.0, "p90": 45.0, "mean": 22.1, "n": 12 },
+    "fix_rounds": { "p50": 1, "p90": 3, "mean": 1.4, "n": 12 },
+    "first_pass_review_rate": { "value": 0.6667, "numerator": 8, "denominator": 12 },
+    "escalation_rate": { "value": 0.0833, "numerator": 1, "denominator": 12 },
+    "merged_count": { "value": 12 },
+    "open_age_minutes": { "p50": 120.0, "p90": 500.0, "mean": 180.5, "n": 3 },
+    "run_success_rate": {
+      "build": { "value": 0.9, "numerator": 9, "denominator": 10 },
+      "review": { "value": 1, "numerator": 5, "denominator": 5 }
+    },
+    "model_usd_per_merged_pr": { "value": 1.2345, "total": 14.814, "n": 12 },
+    "compute_usd_per_merged_pr": { "value": 0.5, "total": 6.0, "n": 12 },
+    "tokens_per_merged_pr": { "value": 15000, "total": 180000, "n": 12 },
+    "abandoned_usd": { "value": 2.75, "n": 1 },
+    "first_pr_from_install": {
+      "status": "met",
+      "installed_at": "2026-09-01T00:00:00.000Z",
+      "first_pr_at": "2026-09-01T00:32:00.000Z",
+      "minutes": 32.0,
+      "target_minutes": 60
+    }
+  }
+}

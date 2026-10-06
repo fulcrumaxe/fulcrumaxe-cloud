@@ -1,0 +1,974 @@
+/* ── fulcrumaxe-os Window Manager ─────────────────────────────────────────────── */
+
+#windows-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: var(--taskbar-size, 48px);
+    pointer-events: none;
+    z-index: 50;
+}
+
+/* Windows container adjusts to taskbar position */
+body[data-taskbar-position="top"] #windows-container {
+    top: var(--taskbar-size, 48px);
+    bottom: 0;
+}
+
+body[data-taskbar-position="left"] #windows-container {
+    left: var(--taskbar-size, 48px);
+    bottom: 0;
+}
+
+body[data-taskbar-position="right"] #windows-container {
+    right: var(--taskbar-size, 48px);
+    bottom: 0;
+}
+
+body[data-taskbar-style="hidden"] #windows-container {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+
+:is(.fulc-window, .fulc-window-clone) {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(var(--theme-rgb), 0.5);
+    background: rgba(0, 0, 0, 0.93);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4), 0 0 1px rgba(var(--theme-rgb), 0.15);
+    pointer-events: auto;
+    min-width: 300px;
+    min-height: 200px;
+    overflow: visible;
+    transition: left 150ms ease-out, top 150ms ease-out,
+                width 150ms ease-out, height 150ms ease-out,
+                opacity 150ms ease-out, transform 200ms ease-out,
+                box-shadow 200ms ease-out;
+}
+
+:is(.fulc-window, .fulc-window-clone).active {
+    border-color: var(--theme-primary);
+    box-shadow: 0 6px 28px rgba(0, 0, 0, 0.7), 0 0 16px rgba(var(--theme-rgb), 0.2),
+                0 0 1px rgba(var(--theme-rgb), 0.6);
+}
+
+:is(.fulc-window, .fulc-window-clone).minimized {
+    display: none !important;
+}
+
+:is(.fulc-window, .fulc-window-clone).maximized {
+    border: none;
+    box-shadow: none;
+}
+
+:is(.fulc-window, .fulc-window-clone).snapped {
+    border-radius: 0;
+}
+
+:is(.fulc-window, .fulc-window-clone).dragging,
+:is(.fulc-window, .fulc-window-clone).resizing {
+    transition: none !important;
+}
+
+:is(.fulc-window, .fulc-window-clone).dragging {
+    opacity: 0.85;
+}
+
+/* ── Open / Close animations ───────────────────────────────────────── */
+
+:is(.fulc-window, .fulc-window-clone).opening {
+    transform: scale(0.92);
+    opacity: 0;
+}
+
+:is(.fulc-window, .fulc-window-clone).closing {
+    transform: scale(0.95);
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* ── Always on Top indicator ───────────────────────────────────────── */
+
+.wm-pin-indicator {
+    font-size: 0.6rem;
+    opacity: 0.6;
+    margin-left: 6px;
+    color: var(--theme-primary);
+}
+
+/* ── Titlebar ───────────────────────────────────────────────────────── */
+
+.window-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0.6rem;
+    background: rgba(var(--theme-rgb), 0.12);
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.3);
+    cursor: grab;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+:is(.fulc-window, .fulc-window-clone).active .window-titlebar {
+    background: rgba(var(--theme-rgb), 0.2);
+}
+
+:is(.fulc-window, .fulc-window-clone).dragging .window-titlebar {
+    cursor: grabbing;
+}
+
+.window-title {
+    font-size: 0.8rem;
+    font-weight: bold;
+    color: var(--theme-primary);
+    letter-spacing: 1px;
+    opacity: 0.8;
+}
+
+:is(.fulc-window, .fulc-window-clone).active .window-title {
+    opacity: 1;
+}
+
+/* ── Titlebar icon ─────────────────────────────────────────────── */
+
+.window-titlebar-icon {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    font-weight: bold;
+    color: var(--theme-primary);
+    opacity: 0.6;
+    padding: 2px 6px;
+    margin-right: 6px;
+    border: 1px solid rgba(var(--theme-rgb), 0.2);
+    cursor: pointer;
+    user-select: none;
+    line-height: 1;
+}
+
+:is(.fulc-window, .fulc-window-clone).active .window-titlebar-icon {
+    opacity: 0.9;
+    border-color: rgba(var(--theme-rgb), 0.4);
+}
+
+.window-titlebar-icon:hover {
+    background: rgba(var(--theme-rgb), 0.15);
+    border-color: var(--theme-primary);
+}
+
+/* ── Editable title ────────────────────────────────────────────── */
+
+.window-title.editing {
+    outline: 1px solid rgba(var(--theme-rgb), 0.5);
+    outline-offset: 2px;
+    background: rgba(var(--theme-rgb), 0.08);
+    cursor: text;
+    padding: 1px 4px;
+    min-width: 60px;
+}
+
+/* ── Inactive window dimming ───────────────────────────────────── */
+
+:is(.fulc-window, .fulc-window-clone):not(.active):not(.expose-tile):not(.fullscreen) {
+    opacity: 0.92;
+}
+
+:is(.fulc-window, .fulc-window-clone):not(.active):not(.expose-tile):not(.fullscreen) .window-titlebar {
+    background: rgba(var(--theme-rgb), 0.06);
+}
+
+.window-controls {
+    display: flex;
+    gap: 0.3rem;
+}
+
+.window-btn {
+    background: none;
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    width: 22px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.window-btn:hover {
+    background: rgba(var(--theme-rgb), 0.2);
+    border-color: var(--theme-primary);
+}
+
+.window-btn:focus-visible {
+    outline: 2px solid var(--theme-primary);
+    outline-offset: 1px;
+}
+
+.window-close:hover {
+    background: rgba(255, 65, 65, 0.3);
+    border-color: #FF4141;
+    color: #FF4141;
+}
+
+/* ── Content area ───────────────────────────────────────────────────── */
+
+.window-content {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9rem;
+}
+
+/* ── Edge resize hit zones ─────────────────────────────────────────── */
+
+.wm-edge, .wm-corner {
+    position: absolute;
+    z-index: 10;
+    pointer-events: auto;
+}
+
+.wm-edge-n  { top: -3px; left: 12px; right: 12px; height: 6px; cursor: n-resize; }
+.wm-edge-s  { bottom: -3px; left: 12px; right: 12px; height: 6px; cursor: s-resize; }
+.wm-edge-w  { left: -3px; top: 12px; bottom: 12px; width: 6px; cursor: w-resize; }
+.wm-edge-e  { right: -3px; top: 12px; bottom: 12px; width: 6px; cursor: e-resize; }
+
+.wm-corner-nw { top: -3px; left: -3px; width: 12px; height: 12px; cursor: nw-resize; }
+.wm-corner-ne { top: -3px; right: -3px; width: 12px; height: 12px; cursor: ne-resize; }
+.wm-corner-sw { bottom: -3px; left: -3px; width: 12px; height: 12px; cursor: sw-resize; }
+.wm-corner-se { bottom: -3px; right: -3px; width: 12px; height: 12px; cursor: se-resize; }
+
+:is(.fulc-window, .fulc-window-clone).maximized .wm-edge,
+:is(.fulc-window, .fulc-window-clone).maximized .wm-corner {
+    display: none;
+}
+
+/* ── Snap guide ────────────────────────────────────────────────────── */
+
+.wm-snap-guide {
+    position: absolute;
+    background: rgba(var(--theme-rgb), 0.12);
+    border: 2px solid rgba(var(--theme-rgb), 0.4);
+    pointer-events: none;
+    z-index: 9999;
+    transition: all 150ms ease-out;
+    display: none;
+}
+
+.wm-snap-guide.visible {
+    display: block;
+}
+
+/* ── Snap layout picker ────────────────────────────────────────────── */
+
+.wm-snap-picker {
+    position: absolute;
+    z-index: 10001;
+    background: rgba(10, 10, 10, 0.97);
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    padding: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.wm-layout-option {
+    width: 48px;
+    height: 32px;
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    display: flex;
+    cursor: pointer;
+    overflow: hidden;
+}
+
+.wm-layout-option:hover {
+    border-color: var(--theme-primary);
+    background: rgba(var(--theme-rgb), 0.08);
+}
+
+.wm-layout-zone {
+    border-right: 1px solid rgba(var(--theme-rgb), 0.25);
+    height: 100%;
+}
+
+.wm-layout-zone:last-child {
+    border-right: none;
+}
+
+/* horizontal splits */
+.wm-layout-option.horizontal {
+    flex-direction: column;
+}
+
+.wm-layout-option.horizontal .wm-layout-zone {
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.25);
+    width: 100%;
+}
+
+.wm-layout-option.horizontal .wm-layout-zone:last-child {
+    border-bottom: none;
+}
+
+/* ── Window picker (after snap) ────────────────────────────────────── */
+
+.wm-window-picker {
+    position: absolute;
+    z-index: 10001;
+    background: rgba(10, 10, 10, 0.97);
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    min-width: 180px;
+    padding: 4px 0;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.75rem;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.wm-window-pick-item {
+    padding: 6px 16px;
+    color: var(--theme-primary);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.wm-window-pick-item:hover {
+    background: rgba(var(--theme-rgb), 0.15);
+}
+
+/* ── Exposé ──────────────────────────────────────────────────────── */
+
+.wm-expose-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 59999;
+}
+
+:is(.fulc-window, .fulc-window-clone).expose-tile {
+    cursor: pointer !important;
+    transition: left 350ms ease-out, top 350ms ease-out,
+                width 350ms ease-out, height 350ms ease-out,
+                transform 350ms ease-out;
+    border-color: rgba(var(--theme-rgb), 0.3);
+    pointer-events: auto;
+}
+
+:is(.fulc-window, .fulc-window-clone).expose-tile:hover {
+    border-color: var(--theme-primary);
+    box-shadow: 0 0 20px rgba(var(--theme-rgb), 0.4);
+}
+
+:is(.fulc-window, .fulc-window-clone).expose-tile .window-content {
+    pointer-events: none;
+}
+
+:is(.fulc-window, .fulc-window-clone).expose-tile .window-controls {
+    pointer-events: none;
+}
+
+:is(.fulc-window, .fulc-window-clone).expose-tile .wm-edge,
+:is(.fulc-window, .fulc-window-clone).expose-tile .wm-corner {
+    pointer-events: none;
+}
+
+.wm-expose-label {
+    position: absolute;
+    bottom: -24px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    color: var(--theme-primary);
+    letter-spacing: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+/* ── Fullscreen ─────────────────────────────────────────────────── */
+
+:is(.fulc-window, .fulc-window-clone).fullscreen {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 55000 !important;
+    border: none !important;
+    border-radius: 0 !important;
+}
+
+:is(.fulc-window, .fulc-window-clone).fullscreen .window-titlebar {
+    display: none !important; /* beats heritage adapter !important rules */
+}
+
+:is(.fulc-window, .fulc-window-clone).fullscreen .wm-edge,
+:is(.fulc-window, .fulc-window-clone).fullscreen .wm-corner {
+    display: none;
+}
+
+/* Hide heritage chrome (crystal taskbar, orchard menubar+dock) during
+   fullscreen so the focused window truly covers the viewport.
+   Selectors use !important because the heritage CSS itself uses !important. */
+body[data-fullscreen] #crystal-taskbar,
+body[data-fullscreen] #crystal-start-panel,
+body[data-fullscreen] #orchard-menubar,
+body[data-fullscreen] #orchard-dock {
+    display: none !important;
+}
+
+/* ── Alt+Tab Switcher ────────────────────────────────────────────── */
+
+.wm-alttab-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 65000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.wm-alttab-strip {
+    display: flex;
+    gap: 16px;
+    padding: 20px 24px;
+    background: rgba(10, 10, 10, 0.95);
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
+    max-width: 90vw;
+    overflow-x: auto;
+}
+
+.wm-alttab-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    min-width: 160px;
+}
+
+.wm-alttab-item.selected {
+    border-color: var(--theme-primary);
+    background: rgba(var(--theme-rgb), 0.1);
+}
+
+.wm-alttab-item:hover:not(.selected) {
+    border-color: rgba(var(--theme-rgb), 0.3);
+}
+
+.wm-alttab-thumb {
+    overflow: hidden;
+    border: 1px solid rgba(var(--theme-rgb), 0.2);
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.wm-alttab-label {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    color: var(--theme-primary);
+    letter-spacing: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+    text-align: center;
+}
+
+/* ── Window Peek ─────────────────────────────────────────────────── */
+
+:is(.fulc-window, .fulc-window-clone).peek-dimmed {
+    opacity: 0.1 !important;
+    transition: opacity 150ms ease-out;
+}
+
+/* ── Workspace Toast ─────────────────────────────────────────────── */
+
+.wm-workspace-toast {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(10, 10, 10, 0.95);
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1rem;
+    letter-spacing: 2px;
+    padding: 12px 24px;
+    z-index: 70000;
+    pointer-events: none;
+    transition: opacity 300ms ease-out;
+}
+
+.wm-workspace-toast.fade-out {
+    opacity: 0;
+}
+
+/* ── Workspace Overview ──────────────────────────────────────────── */
+
+.wm-workspace-overview {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 65000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.wm-workspace-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 20px;
+    padding: 40px;
+    max-width: 800px;
+    max-height: 600px;
+    width: 80vw;
+    height: 60vh;
+}
+
+.wm-workspace-cell {
+    border: 2px solid rgba(var(--theme-rgb), 0.3);
+    background: rgba(10, 10, 10, 0.9);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+    position: relative;
+    transition: border-color 150ms ease-out, background 150ms ease-out;
+}
+
+.wm-workspace-cell:hover {
+    border-color: var(--theme-primary);
+    background: rgba(var(--theme-rgb), 0.05);
+}
+
+.wm-workspace-cell.active {
+    border-color: var(--theme-primary);
+    box-shadow: 0 0 12px rgba(var(--theme-rgb), 0.3);
+}
+
+.wm-workspace-cell-label {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    color: var(--theme-primary);
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+    opacity: 0.8;
+}
+
+.wm-workspace-cell.active .wm-workspace-cell-label {
+    opacity: 1;
+}
+
+.wm-workspace-cell-preview {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+
+.wm-workspace-mini-window {
+    position: absolute;
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    background: rgba(var(--theme-rgb), 0.08);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.5rem;
+    color: var(--theme-primary);
+    padding: 2px 4px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.wm-workspace-cell-count {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.6rem;
+    color: var(--theme-primary);
+    opacity: 0.5;
+    text-align: right;
+    margin-top: 4px;
+    letter-spacing: 1px;
+}
+
+/* ── Window Chrome Variants ─────────────────────────────────────────── */
+
+body[data-window-chrome="neon-border"] :is(.fulc-window, .fulc-window-clone) {
+    border: 1px solid var(--accent);
+    box-shadow: var(--glow-accent), inset 0 0 1px var(--accent-secondary);
+}
+
+body[data-window-chrome="neon-border"] :is(.fulc-window, .fulc-window-clone).active {
+    box-shadow: var(--glow-bright), inset 0 0 1px var(--accent-secondary);
+}
+
+body[data-window-chrome="rounded"] :is(.fulc-window, .fulc-window-clone) {
+    border-radius: var(--border-radius-lg, 12px);
+    overflow: hidden;
+}
+
+body[data-window-chrome="rounded"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    border-radius: var(--border-radius-lg, 12px) var(--border-radius-lg, 12px) 0 0;
+}
+
+body[data-window-chrome="minimal"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    height: 24px;
+    padding: 0 8px;
+    min-height: 24px;
+}
+
+body[data-window-chrome="minimal"] :is(.fulc-window, .fulc-window-clone) .window-title {
+    font-size: 0.7rem;
+}
+
+body[data-window-chrome="sharp"] :is(.fulc-window, .fulc-window-clone) {
+    border-radius: 0;
+}
+
+body[data-window-chrome="sharp"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    border-radius: 0;
+}
+
+/* macOS traffic-light chrome */
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) {
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-lg);
+}
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    background: var(--bg-elevated);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border-bottom: 1px solid var(--border);
+    justify-content: center;
+    position: relative;
+    border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
+    height: 32px;
+}
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-title {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-controls {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    /* 12px dots, 24px between centres: SC 2.5.8's spacing exception. */
+    gap: 12px;
+    align-items: center;
+}
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-btn {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    font-size: 0;
+    transition: filter 0.1s;
+}
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-btn:hover { filter: brightness(1.2); }
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-btn-close    { background: #ff5f57; }
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-btn-minimize { background: #febc2e; }
+body[data-window-chrome="traffic-light"] :is(.fulc-window, .fulc-window-clone) .window-btn-maximize { background: #28c840; }
+
+/* Windows 11 Fluent chrome */
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) {
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--border);
+}
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+    border-bottom: 1px solid var(--border);
+    height: 32px;
+    padding-left: 12px;
+    border-radius: var(--border-radius) var(--border-radius) 0 0;
+}
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-title {
+    font-size: 0.8125rem;
+    font-weight: 400;
+}
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-controls {
+    margin-left: auto;
+    display: flex;
+    gap: 0;
+    height: 100%;
+}
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-btn {
+    width: 46px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.625rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s;
+}
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-btn:hover { background: rgba(255,255,255,0.08); }
+body[data-window-chrome="fluent"] :is(.fulc-window, .fulc-window-clone) .window-btn-close:hover { background: #c42b1c; color: #fff; }
+
+/* Windows 7 Aero glass chrome */
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) {
+    border: 1px solid rgba(180, 210, 255, 0.3);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.15), var(--shadow-lg);
+    border-radius: var(--border-radius-sm);
+}
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    background: linear-gradient(
+        180deg,
+        rgba(160, 210, 255, 0.22) 0%,
+        rgba(80, 150, 220, 0.14) 40%,
+        rgba(40, 100, 180, 0.12) 100%
+    );
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    border-bottom: 1px solid rgba(180, 210, 255, 0.35);
+    border-top: 1px solid rgba(220, 235, 255, 0.45);
+    height: 30px;
+    padding: 0 4px 0 6px;
+    border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+}
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-title {
+    font-size: 0.8125rem;
+    font-weight: 400;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-controls {
+    margin-left: auto;
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    height: 100%;
+    padding-right: 4px;
+}
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-btn {
+    width: 26px;
+    height: 20px;
+    border-radius: 3px;
+    border: 1px solid rgba(180, 210, 255, 0.3);
+    background: linear-gradient(180deg, rgba(180,210,255,0.2) 0%, rgba(80,140,220,0.2) 100%);
+    backdrop-filter: blur(4px);
+    color: var(--text-primary);
+    font-size: 0.625rem;
+    cursor: pointer;
+    transition: filter 0.1s;
+}
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-btn:hover { filter: brightness(1.3); }
+body[data-window-chrome="aero"] :is(.fulc-window, .fulc-window-clone) .window-btn-close {
+    background: linear-gradient(180deg, #e05c5c 0%, #b01010 100%);
+}
+
+/* GNOME Adwaita chrome */
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) {
+    border-radius: var(--border-radius-lg);
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--border);
+}
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    height: 47px;
+    padding: 0 12px;
+    justify-content: center;
+    position: relative;
+    border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
+}
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-title {
+    font-size: 0.9375rem;
+    font-weight: 500;
+}
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-controls {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn:hover { background: var(--border-bright); }
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn-close:hover   { background: #c01c28; color: #fff; }
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn-maximize:hover { background: var(--accent); color: #fff; }
+/* GNOME button order: close | minimize | maximize (all on left) */
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn-close    { order: 1; }
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn-minimize { order: 2; }
+body[data-window-chrome="adwaita"] :is(.fulc-window, .fulc-window-clone) .window-btn-maximize { order: 3; }
+
+/* ── D#37 WS-E: phone window model ─────────────────────────────────── */
+/* Criterion 1: no free drag/snap chrome on phones -- every window is
+   maximized and stays that way (window-manager.js's toggleMaximize() and
+   setupDrag() already no-op there; this hides the now-inert controls). */
+html.fulc-phone-mode #windows-container .fulc-window {
+    border-radius: 0;
+    box-shadow: none;
+}
+html.fulc-phone-mode #windows-container .fulc-window .wm-edge,
+html.fulc-phone-mode #windows-container .fulc-window .wm-corner,
+html.fulc-phone-mode #windows-container .fulc-window .window-maximize {
+    display: none;
+}
+
+/* Criterion 5 (OPEN OWNER DECISION 1): no backdrop-filter on phones -- a
+   solid translucent titlebar instead, regardless of which window-chrome
+   variant (traffic-light/fluent/adwaita/...) the active theme selects.
+   !important is intentional: this overrides several theme-scoped rules
+   above that are not themselves !important. */
+html.fulc-phone-mode :is(.fulc-window, .fulc-window-clone) .window-titlebar {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: rgba(20, 20, 24, 0.92) !important;
+}
+
+/* Criterion 3: dock tap targets stay >=44x44 CSS px on phones regardless of
+   the theme's own .dock-icon sizing (core/taskbar.css). */
+html.fulc-phone-mode #taskbar button.dock-icon {
+    min-width: 44px;
+    min-height: 44px;
+}
+
+/* Workspaces are no-ops on phones (criterion 1: one maximized window at a
+   time), so the virtual-desktop squares are hidden there. The extra
+   #taskbar in the selector outranks the theme-scoped
+   body[data-taskbar-*] #workspace-indicator rules in core/taskbar.css. */
+html.fulc-phone-mode #taskbar #workspace-indicator {
+    display: none;
+}
+
+/* Menus stay inside the phone viewport: context menus (dock, desktop,
+   titlebar, Orchard dock) are capped to it and scroll if taller. Position
+   clamping lives in core/context-menu.js. */
+html.fulc-phone-mode .fulc-context-menu {
+    max-width: calc(100vw - 8px);
+    max-height: calc(100dvh - 8px);
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+/* The phone switcher trigger only exists to be shown on phones -- see
+   core/taskbar.js's ensureSwitcherButton(). */
+#taskbar-switcher-btn { display: none; }
+html.fulc-phone-mode #taskbar-switcher-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+}
+
+/* ── D#37 WS-E: window switcher (phone Exposé replacement) ─────────── */
+/* Criterion 2: a static icon+title list -- no window DOM, no transform. */
+.wm-switcher-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    z-index: 90000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+}
+.wm-switcher-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+.wm-switcher-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    padding: 8px 16px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+    border-radius: 8px;
+    background: var(--bg-elevated, #1a1a1e);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.wm-switcher-row:focus-visible {
+    outline: 2px solid var(--accent, #1aff80);
+    outline-offset: 2px;
+}
+.wm-switcher-icon {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+}
+.wm-switcher-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Stand-in for a [data-secret-node] or [data-no-preview] node in a preview clone. */
+.wm-preview-mask {
+  box-sizing: border-box;
+  min-height: 1.4em;
+  min-width: 4em;
+  background: rgba(128, 128, 128, 0.35);
+  border-radius: 3px;
+}
+[data-preview-placeholder] {
+  width: 100%;
+  height: 100%;
+  min-height: 3em;
+}

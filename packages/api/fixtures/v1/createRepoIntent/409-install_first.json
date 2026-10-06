@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "install_first",
+    "message": "install the GitHub App on this owner first",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

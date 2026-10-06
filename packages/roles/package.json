@@ -1,0 +1,26 @@
+{
+  "name": "@fx/roles",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "Ported role cards (the engine's .claude/agents/*.md, with script references turned into hosted tool names) plus the manifest and tool registry that bind them.",
+  "main": "src/manifest.ts",
+  "types": "src/manifest.ts",
+  "exports": {
+    ".": "./src/manifest.ts",
+    "./toolsets": "./src/toolsets.ts",
+    "./cards": "./src/cards.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@fx/decisions": "workspace:*",
+    "@types/node": "^24.19.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

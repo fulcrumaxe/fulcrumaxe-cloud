@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "payload_too_large",
+    "message": "body is 70000 UTF-8 bytes, over the 65536-byte limit",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

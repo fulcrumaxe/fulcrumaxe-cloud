@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "author_check_unavailable",
+    "message": "the author's access could not be checked right now",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

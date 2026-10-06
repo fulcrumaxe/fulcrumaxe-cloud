@@ -1,0 +1,4 @@
+.fp-fixture {
+  padding: 16px;
+  font-family: var(--font-mono, monospace);
+}

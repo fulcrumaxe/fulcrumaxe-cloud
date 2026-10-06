@@ -1,0 +1,254 @@
+/* ── fulcrumaxe-os Update Notification Widget (epic-34 task 11) ───────────────── */
+
+.upd-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    border: 1px solid var(--theme-border, #444);
+    border-left-width: 4px;
+    background: var(--theme-bg-alt, #181818);
+    color: var(--theme-fg, #e0e0e0);
+    font-family: var(--theme-font-mono, monospace);
+    font-size: 13px;
+}
+
+.upd-banner-info {
+    border-left-color: #4a90d9;
+}
+.upd-banner-warn {
+    border-left-color: #d49a2a;
+    background: var(--theme-bg-alt, #1a1408);
+}
+.upd-banner-critical {
+    border-left-color: #d04040;
+    background: var(--theme-bg-alt, #1a0c0c);
+    animation: upd-pulse 2s ease-in-out infinite;
+}
+
+@keyframes upd-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(208, 64, 64, 0); }
+    50%      { box-shadow: 0 0 0 2px rgba(208, 64, 64, 0.25); }
+}
+
+.upd-banner-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.upd-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: 0 0 auto;
+    opacity: 0.85;
+}
+.upd-banner-info .upd-dot { color: #4a90d9; }
+.upd-banner-warn .upd-dot { color: #d49a2a; }
+.upd-banner-critical .upd-dot { color: #d04040; }
+
+.upd-banner-title-wrap {
+    flex: 1;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+}
+
+.upd-banner-title {
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.upd-banner-meta {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    opacity: 0.7;
+}
+
+.upd-banner-countdown {
+    font-variant-numeric: tabular-nums;
+    font-weight: bold;
+    color: #d04040;
+    padding: 2px 6px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.upd-banner-summary {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    opacity: 0.92;
+}
+
+.upd-banner-changes {
+    margin: 0;
+    padding: 0 0 0 4px;
+    list-style: none;
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.upd-banner-changes li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.upd-change-tag {
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    padding: 1px 6px;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+    flex: 0 0 auto;
+    opacity: 0.85;
+}
+.upd-change-security { color: #d04040; }
+.upd-change-bugfix   { color: #d49a2a; }
+.upd-change-feature  { color: #4a90d9; }
+.upd-change-perf     { color: #6dbf6d; }
+
+.upd-banner-more {
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.upd-banner-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 4px;
+}
+
+.upd-banner-action,
+.upd-banner-dismiss,
+.upd-banner-notes {
+    padding: 6px 12px;
+    border: 1px solid var(--theme-border, #444);
+    background: transparent;
+    color: var(--theme-fg, #e0e0e0);
+    font-family: inherit;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    text-decoration: none;
+}
+.upd-banner-action {
+    background: var(--theme-accent, #4a90d9);
+    color: #000;
+    border-color: transparent;
+    font-weight: bold;
+}
+.upd-banner-critical .upd-banner-action { background: #d04040; color: #fff; }
+.upd-banner-warn .upd-banner-action { background: #d49a2a; color: #000; }
+.upd-banner-action:hover,
+.upd-banner-dismiss:hover,
+.upd-banner-notes:hover {
+    filter: brightness(1.15);
+}
+
+/* ── Tray badge ───────────────────────────────────────────────────── */
+.upd-tray-badge {
+    /* Native <button> since D#649 PR 3 — same UA form-control reset the tray
+       indicators carry, declared FIRST so this rule's own values still win.
+       `font: inherit` carries only the font-* longhands, so the inherited text
+       properties Chrome's button block also clears are restored explicitly;
+       `unicode-bidi` is not inherited and takes the span's UA value. The badge
+       is a fixed 18x18 box with no border, so `box-sizing: border-box` keeps it
+       exactly 18x18 whichever way the tag defaults. */
+    appearance: none;
+    -webkit-appearance: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    line-height: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    unicode-bidi: isolate;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    margin-right: 4px;
+}
+/* A control you can Tab to but cannot see the focus on is only half reachable.
+   `:focus-visible`, never bare `:focus`. */
+.upd-tray-badge:focus-visible {
+    outline: 2px solid var(--theme-primary, #0f9);
+    outline-offset: 2px;
+}
+.upd-tray-info { background: #4a90d9; color: #000; }
+.upd-tray-warn { background: #d49a2a; color: #000; }
+.upd-tray-critical {
+    background: #d04040;
+    color: #fff;
+    animation: upd-pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Forced-update modal ──────────────────────────────────────────── */
+.upd-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 99999;
+}
+.upd-modal {
+    max-width: 540px;
+    width: calc(100vw - 40px);
+    padding: 24px;
+    background: var(--theme-bg, #0a0a0a);
+    border: 2px solid currentColor;
+    color: var(--theme-fg, #e0e0e0);
+    font-family: var(--theme-font-mono, monospace);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.upd-modal-title { margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.04em; }
+.upd-modal-severity { font-size: 12px; opacity: 0.7; letter-spacing: 0.08em; }
+.upd-modal-summary { margin: 0; font-size: 13px; line-height: 1.5; }
+.upd-modal-countdown { font-size: 14px; font-weight: bold; padding: 6px 10px; border: 1px solid currentColor; align-self: flex-start; }
+.upd-modal-actions { display: flex; gap: 8px; margin-top: 8px; }
+.upd-modal-apply {
+    padding: 10px 18px;
+    background: var(--theme-accent, #4a90d9);
+    color: #000;
+    border: none;
+    font-family: inherit;
+    font-weight: bold;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+.upd-modal-defer {
+    padding: 10px 18px;
+    background: transparent;
+    border: 1px solid var(--theme-border, #444);
+    color: inherit;
+    font-family: inherit;
+    text-transform: uppercase;
+    cursor: pointer;
+}

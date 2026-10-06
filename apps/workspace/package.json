@@ -1,0 +1,20 @@
+{
+  "name": "workspace",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "fulcrumaxe workspace: a modified copy of the fulcrumaxe-os frontend, imported into this repo via a secure importer (D#37 WS-A1).",
+  "scripts": {
+    "test": "vitest run",
+    "build": "node build/build.mjs",
+    "e2e": "node build/build.mjs && playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "^24.19.0",
+    "pg": "^8.13.1",
+    "vitest": "^2.1.8"
+  }
+}

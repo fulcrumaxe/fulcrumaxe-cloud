@@ -1,0 +1,121 @@
+/* ── Entitlement Gating ──────────────────────────────────────────────────── */
+
+/* Lock-icon overlay placed inside gated elements (mode: 'overlay'). */
+.fulc-entitlement-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: inherit;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.fulc-entitlement-overlay:hover {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.fulc-lock-icon {
+  font-size: 1.25em;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* Disabled-mode gated elements. */
+[aria-disabled="true"][data-entitlement-gated] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Locked app icon — desktop + dock. Dimmed graphic; overlay handles the lock badge. */
+.desktop-icon.fulc-entitlement-locked .desktop-icon-graphic,
+.dock-icon.fulc-entitlement-locked .dock-icon-text {
+  opacity: 0.45;
+}
+
+/* ── Upgrade Modal ────────────────────────────────────────────────────────── */
+
+.fulc-upgrade-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fulc-upgrade-modal.hidden {
+  display: none;
+}
+
+.fulc-upgrade-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.fulc-upgrade-modal-content {
+  position: relative;
+  background: #1a1a2e;
+  border: 1px solid #4a4a7a;
+  border-radius: 8px;
+  padding: 24px 28px;
+  max-width: 440px;
+  width: 90%;
+  color: #e0e0e0;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.fulc-upgrade-modal-title {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #f0f0f0;
+}
+
+.fulc-upgrade-modal-body {
+  margin: 0 0 20px;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: #b0b0c0;
+}
+
+.fulc-upgrade-modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.fulc-upgrade-modal-cta,
+.fulc-upgrade-modal-close {
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border: none;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.fulc-upgrade-modal-cta {
+  background: #5c6bc0;
+  color: #fff;
+}
+
+.fulc-upgrade-modal-cta:hover {
+  background: #7986cb;
+}
+
+.fulc-upgrade-modal-close {
+  background: #2a2a3e;
+  color: #b0b0c0;
+  border: 1px solid #4a4a7a;
+}
+
+.fulc-upgrade-modal-close:hover {
+  background: #3a3a5e;
+}

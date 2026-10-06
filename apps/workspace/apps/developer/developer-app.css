@@ -1,0 +1,248 @@
+/* D#37 WS-F7a / WS-F7b: Developer app (tokens and webhooks). Theme variables come from the shell;
+   the fallbacks only matter if a theme leaves one out. */
+
+.dev-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.dev-title {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.dev-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.dev-help { margin: 4px 0 0; font-size: 0.78rem; }
+
+.dev-status { min-height: 0; margin: 0; }
+.dev-status-on {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+.dev-status-error { border-color: #ff6b6b; color: #ff6b6b; }
+
+/* ── header ─────────────────────────────────────────────────────────── */
+
+.dev-header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.dev-header-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.dev-bulk { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ── buttons and inputs ─────────────────────────────────────────────── */
+
+.dev-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+  cursor: pointer;
+}
+.dev-btn:hover:not(:disabled) { border-color: var(--accent, #1aff80); }
+.dev-btn:focus-visible,
+.dev-input:focus-visible,
+.dev-scope input:focus-visible {
+  outline: 2px solid var(--accent, #1aff80);
+  outline-offset: 2px;
+}
+.dev-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.dev-btn-primary { border-color: var(--accent, #1aff80); color: var(--accent, #1aff80); }
+.dev-btn-danger { border-color: #ff6b6b; color: #ff6b6b; }
+
+.dev-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 420px;
+  min-height: 32px;
+  padding: 4px 8px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+}
+
+.dev-banner {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+
+/* ── token table ────────────────────────────────────────────────────── */
+
+.dev-table { width: 100%; border-collapse: collapse; }
+.dev-table th,
+.dev-table td {
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  text-align: left;
+  vertical-align: top;
+}
+.dev-table th { color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-weight: 400; font-size: 0.78rem; }
+.dev-name { overflow-wrap: anywhere; }
+.dev-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.dev-chip {
+  padding: 0 6px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  font-size: 0.75rem;
+}
+.dev-hint { color: var(--text-secondary, rgba(26, 255, 128, 0.7)); }
+.dev-row-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dev-more { margin-top: 12px; }
+.dev-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+
+/* Narrow windows and phones: each token becomes a stacked card. */
+@container (max-width: 640px) {
+  .dev-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .dev-table,
+  .dev-table tbody,
+  .dev-table tr,
+  .dev-table td { display: block; }
+  .dev-table tr {
+    margin-bottom: 10px;
+    border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+    background: var(--bg-surface, #0a0a0a);
+  }
+  .dev-table td {
+    display: grid;
+    grid-template-columns: 6.5rem 1fr;
+    gap: 8px;
+    border-bottom: 0;
+    padding: 5px 10px;
+  }
+  .dev-table td::before {
+    content: attr(data-label);
+    color: var(--text-muted, rgba(26, 255, 128, 0.55));
+    font-size: 0.78rem;
+  }
+  .dev-table td[data-label=""] { grid-template-columns: 1fr; }
+  .dev-table td[data-label=""]::before { content: none; }
+  .dev-btn { min-height: 44px; }
+  .dev-header-top { flex-wrap: wrap; }
+}
+
+/* ── create and reveal (full window: they replace the list) ─────────── */
+
+.dev-panel { display: flex; flex-direction: column; gap: 12px; }
+.dev-form { display: flex; flex-direction: column; gap: 14px; }
+.dev-field { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.dev-fieldset { padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.dev-fieldset legend { padding: 0 4px; }
+.dev-scope { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; cursor: pointer; }
+.dev-scope input { margin-top: 3px; }
+.dev-scope-text { display: flex; flex-direction: column; }
+.dev-scope-id { font-weight: 600; }
+.dev-field-error { margin: 0; color: #ff6b6b; }
+.dev-field-error:empty { display: none; }
+.dev-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.dev-warn {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #ffb000;
+  color: #ffb000;
+}
+.dev-secret {
+  display: block;
+  padding: 10px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--accent, #1aff80);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+/* ── tabs (WS-F7b) ──────────────────────────────────────────────────── */
+
+.dev-shell {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 100%;
+  background: var(--bg-base, #000);
+}
+.dev-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+}
+.dev-tab {
+  min-height: 32px;
+  padding: 4px 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  color: var(--text-muted, rgba(26, 255, 128, 0.55));
+  font: inherit;
+  cursor: pointer;
+}
+.dev-tab[aria-selected="true"] {
+  border-color: var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+  color: var(--accent, #1aff80);
+}
+.dev-tab:focus-visible {
+  outline: 2px solid var(--accent, #1aff80);
+  outline-offset: -2px;
+}
+.dev-tab-note { margin: 0; padding: 0 14px; color: #ffb000; font-size: 0.78rem; font-family: var(--font-mono, monospace); }
+.dev-tab-note:empty { display: none; }
+.dev-tabpanel { flex: 1 1 auto; min-height: 0; }
+.dev-tabpanel[hidden] { display: none; }
+
+.dev-subtitle { margin: 14px 0 8px; font-size: 0.9rem; font-weight: 600; }
+.dev-url { overflow-wrap: anywhere; word-break: break-all; }
+.dev-input-wide { max-width: 560px; }
+.dev-disabled { display: flex; flex-direction: column; gap: 2px; color: #ffb000; }
+
+@media (pointer: coarse) {
+  .dev-tab { min-height: 44px; }
+  .dev-btn { min-height: 44px; }
+  .dev-input { min-height: 44px; }
+}
+
+/* ── API reference tab (WS-F15b) ────────────────────────────────────── */
+
+.dev-ref [hidden] { display: none !important; }
+.dev-ref { overflow-wrap: anywhere; }
+.dev-ref-search { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+.dev-ref-search-input { max-width: none; }
+.dev-ref-group { margin-bottom: 14px; }
+.dev-ref-op { border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); margin-bottom: 6px; }
+.dev-ref-op > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-height: 32px; padding: 6px 10px; cursor: pointer; }
+.dev-ref-op > summary:focus-visible, .dev-ref-schema > summary:focus-visible, .dev-ref-code:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.dev-ref-method { min-width: 3.6rem; font-weight: 600; color: var(--accent, #1aff80); }
+.dev-ref-m-delete { color: #ff6b6b; }
+.dev-ref-sum { flex: 1 1 14rem; color: var(--text-secondary, rgba(26, 255, 128, 0.7)); }
+.dev-ref-detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 4px 10px 10px; border-top: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.dev-ref-detail p, .dev-ref .md p { margin: 0; }
+.dev-ref .md pre { overflow-x: auto; max-width: 100%; }
+.dev-ref-sub { margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.dev-ref-props { margin: 4px 0 0; padding-left: 16px; }
+.dev-ref-type, .dev-ref-req { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.dev-ref-schema > summary { cursor: pointer; }
+.dev-ref-code { box-sizing: border-box; max-width: 100%; margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; overflow-wrap: normal; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.dev-ref-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dev-ref-manage { align-self: flex-start; margin: 2px 6px; }
+.dev-ref-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (pointer: coarse) { .dev-ref-op > summary { min-height: 44px; } }

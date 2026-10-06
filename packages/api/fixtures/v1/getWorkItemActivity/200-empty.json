@@ -1,0 +1,18 @@
+{
+  "stage": "triaged",
+  "repo": null,
+  "issue_number": null,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [
+    "close"
+  ],
+  "close_on_github": false
+}

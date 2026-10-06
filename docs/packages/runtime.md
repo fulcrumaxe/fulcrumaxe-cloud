@@ -1,0 +1,50 @@
+# runtime
+
+`@fx/runtime` is the model/runtime adapter: one `AgentRuntime` interface with three implementations (a local dev runner against the owner's own subscription, a production runner against a Vercel Sandbox and a tenant's brokered key, and a fake runner that replays a recorded fixture at zero model tokens), plus the credential-redaction and env-detection logic that keeps the three from crossing into each other's territory.
+
+Sources:
+- `packages/runtime/src/`
+- `packages/runtime/test/`
+- `packages/runtime/package.json`
+
+## What it does
+
+`AgentRuntime` (`packages/runtime/src/types.ts`) exposes `start`/`stop`/`resume`, each producing or consuming an opaque `AgentHandle`, and normalizes every provider's output into one `NormalizedEvent` shape (`type: "system" | "assistant" | "user" | "result" | "error"`, token usage, cost, and — on the final result event — a parsed `<!-- AGENT_OUTPUT -->` envelope). `selectRuntime` (`packages/runtime/src/select.ts`) is the single place that decides which of the three implementations runs: any `VERCEL*` env var present selects production, `FX_RUNTIME=local` with no Vercel signal selects local, and otherwise — under `VITEST`, `NODE_ENV=test`, or `FX_FORBID_MODEL_CALLS=1` — it falls back to the fake runtime; any other combination throws.
+
+- **Local** (`packages/runtime/src/local/index.ts`, `createLocalRuntime`) drives `@anthropic-ai/claude-agent-sdk` against the owner's own logged-in subscription. `assertLocalRunnerAllowed` (`packages/runtime/src/local/guard.ts`) refuses construction unless `FX_RUNTIME=local` is explicitly set *and* nothing about the process looks deployed.
+- **Production** (`packages/runtime/src/production/index.ts`, `createProductionRuntime`) delegates the actual sandbox lifecycle to caller-supplied `ProductionDeps` (`getConnectionStatus`, `launchSandbox`, `stopSandbox`, `resumeSandbox`) and refuses to start or resume unless the sandbox spec and the tenant's model-connection status both check out.
+- **Fake** (`packages/runtime/src/fake/index.ts`, `createFakeRuntime`) replays one `.jsonl` fixture file (one `NormalizedEvent` per line) per role, resolved by `fixturePathFor(fixtureDir, role, fixtureName)`.
+
+`StartOptions.onEvent` (`packages/runtime/src/types.ts`) may return `void | Promise<void>`; both the local and fake runtimes `await` it before moving on to the next event, since a caller's mid-run kill decision (`@fx/runner`'s `sandboxTarget.ts`) needs a lock-protected Postgres round trip before it can throw to abort a run, and that only lands in time if every implementation waits for it (`#171`).
+
+## Public surface
+
+There is no single `src/index.ts` — consumers import from the specific entry point they need. `packages/runtime/src/types.ts` exports `AgentRuntime`, `AgentHandle`, `StartOptions`, `SandboxSpec`, `NormalizedEvent`, `NormalizedUsage`, `ModelProvider`, `ModelConnectionStatus`, `LocalRunnerRefused`, `SubscriptionCredentialsRefused`. `select.ts` exports `selectRuntime`, `ProductionDepsFactory`, `LocalRuntimeFactory`. `local/index.ts` exports `createLocalRuntime`, `normalizeMessage`, `FX_LOCAL_RUNNER_MARKER`. `local/guard.ts` exports `assertLocalRunnerAllowed`. `production/index.ts` exports `createProductionRuntime`, `ProductionDeps`. `production/guard.ts` exports `assertNoSubscriptionCredentials`, `assertSandboxSpecAllowed`. `fake/index.ts` exports `createFakeRuntime`, `fixturePathFor`, `FakeHandle`. `env-detect.ts` exports `detectDeployedEnvironment`, `hasAnyVercelEnvVar`, `findVercelEnvKey`, `isProductionNodeEnv`, `isLocalRuntimeOptedIn`. `redact.ts` exports `redactSecrets`, `redactShapes`, `redactText`, `redactDeep`, `redactError`, `matchesShape`, and the named pattern-source constants. `envelope.ts` exports `extractAgentOutputEnvelope`.
+
+## How it works
+
+**Deployed-environment detection** (`packages/runtime/src/env-detect.ts`) is one shared heuristic used by both the local guard and `selectRuntime`: `detectDeployedEnvironment` treats any `VERCEL*`-prefixed env var (excluding `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID`/`VERCEL_TOKEN`, which an ordinary `vercel link`'d dev machine also sets) or a production `NODE_ENV` as a sign the process is deployed. Because Vercel's own System Environment Variables are an opt-in project setting, this deny-list check cannot be the only gate — `local/guard.ts` also requires the allow-list signal `FX_RUNTIME=local` to be explicitly set, and checks both the env object a caller passed in and the real `process.env`, so a curated/empty env argument cannot be used to dodge either check.
+
+**Credential redaction** (`packages/runtime/src/redact.ts`) is applied to every event, error message, and error stack a runtime hands back. `redactSecrets` replaces known exact values (env vars captured at construction time); `redactShapes` additionally matches token-shaped substrings anywhere in text against four fixed patterns (`sk-ant-oat…`, `sk-ant-api…`, `sk-ant-admin…`, `vck_…`) regardless of whether the exact value was ever captured. `redactError` preserves the original error's prototype/class while redacting its message, stack, and recursively its `.cause` chain.
+
+**Production guard** (`packages/runtime/src/production/guard.ts`) refuses construction if the orchestrator's own env carries `CLAUDE_CODE_OAUTH_TOKEN` or any value shaped like a subscription token, and refuses a sandbox spec whose `env` map requests a known credential/endpoint-override key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `AI_GATEWAY_API_KEY`, or any `ANTHROPIC_*`/`CLAUDE_CODE_*` key whose name contains `TOKEN`/`KEY`/`SECRET`), carries a credential-shaped value under any key, or declares a `baseUrl` other than the fixed default for its provider (`https://ai-gateway.vercel.sh/claude-code` for `ai_gateway`, `https://api.anthropic.com` for `anthropic`). `resume` runs the identical checks as `start` by stashing the validated `SandboxSpec` onto the returned handle and reading it back.
+
+**Local runner env.** `createLocalRuntime` builds the spawned CLI process's env by copying the parent env and then forcing `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` to `""`, so the CLI falls back to the owner's already-logged-in subscription rather than any key sitting in the orchestrator's own env. `normalizeMessage` maps a raw `@anthropic-ai/claude-agent-sdk` stream-json message onto `NormalizedEvent`, and extracts the trailing `<!-- AGENT_OUTPUT -->` JSON block (`packages/runtime/src/envelope.ts`) from the final result message's text. The `query()` call itself (both the start and resume paths) pins `settingSources: []`, `mcpServers: {}` and `strictMcpConfig: true` as literal options, not spread from config (D#102): a run's working tree can be a PR branch by any author, and the SDK's own defaults otherwise load every filesystem settings source (project/user/local) and any MCP config reachable from that tree, including plugin and on-disk agent frontmatter MCP — which would let anyone who can open a PR shape the run's hooks, tool approvals and MCP servers.
+
+**Bundle isolation.** `select.ts` never statically imports `local/index.ts` (and therefore never the SDK dependency) or `production/index.ts` — both runtimes are supplied to `selectRuntime` as caller-provided factories, so a bundle that only needs `selectRuntime` never pulls either implementation in. `FX_LOCAL_RUNNER_MARKER` exists purely so a bundler that does keep `createLocalRuntime` cannot tree-shake away the one marker string a test greps for to confirm the local runner's entry point is present.
+
+## Data it touches
+
+No direct database access from this package — `SandboxSpec.tenantId` and the caller-supplied `getConnectionStatus`/`launchSandbox`/etc. dependencies are how a caller wires in tenant/model-connection state from elsewhere. See `../data-model.md`.
+
+## Security notes
+
+See `../security.md` for the platform-wide model. This package is the credential boundary between the orchestrator process and a spawned agent process: `assertNoSubscriptionCredentials`/`assertSandboxSpecAllowed` (`packages/runtime/src/production/guard.ts`) and `redactText`/`redactError` (`packages/runtime/src/redact.ts`) both key off the same named pattern sources exported from `redact.ts`, so the guard's refusal shapes and the redaction shapes cannot drift apart independently. For the local runner specifically, `local/index.ts`'s pinned `settingSources: []`/`mcpServers: {}`/`strictMcpConfig: true` (see "How it works" above) is what keeps a hostile working tree's own `.claude/settings.json`/`.mcp.json` from reaching the SDK's hook, tool-approval or MCP-server configuration at all.
+
+## Tests
+
+Run with `pnpm --filter @fx/runtime test` (`vitest run`). `test/bundle-isolation.test.ts` bundles `select.ts` with esbuild and fails if the SDK or the local-runner marker leak into the output. `test/no-local-import-from-web.test.ts` checks that nothing under `apps/web` imports `packages/runtime/src/local`. `test/local-guard.test.ts`, `test/production-guard.test.ts`, `test/redact.test.ts`, `test/select.test.ts`, `test/envelope.test.ts`, `test/fake-runtime.test.ts`, `test/construct-check-script.test.ts`, and `test/smoke-script.test.ts` cover the rest. `test/local-setting-sources.test.ts` is a permanent fixture test: a hostile working tree (`test/fixtures/hostile-repo/`, carrying a `.claude/settings.json` hook plus a `Bash(*)` allow-rule, and a `.mcp.json`) must change neither the recorded SDK options nor observable behavior, and the test is written to fail against the pre-D#102 code. `pnpm --filter @fx/runtime smoke:local` and `construct:local` (`src/local/smoke.ts`, `src/local/construct-check.ts`) are owner-machine-only manual scripts, not part of `pnpm test`.
+
+## Known gaps
+
+Sandbox wiring (a real `@vercel/sandbox`-backed `ProductionDeps` implementation) is completed by `@fx/runner`, not this package — `packages/runtime/src/production/index.ts`'s own header notes this package owns only the construction/start-time refusal rules.

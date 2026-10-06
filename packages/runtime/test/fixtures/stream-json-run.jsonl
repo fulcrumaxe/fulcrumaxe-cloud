@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sess-fixture","model":"sonnet-5"}
+{"type":"assistant","session_id":"sess-fixture","message":{"content":[{"type":"text","text":"Looking at the diff."},{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}
+{"type":"user","session_id":"sess-fixture","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}
+{"type":"assistant","session_id":"sess-fixture","message":{"content":[{"type":"text","text":"Done."}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"sess-fixture","result":"Done.\n<!-- AGENT_OUTPUT -->\n```json\n{\"verdict\":\"pass\"}\n```\n<!-- /AGENT_OUTPUT -->","total_cost_usd":0.25,"usage":{"input_tokens":1200,"output_tokens":300,"cache_creation_input_tokens":10,"cache_read_input_tokens":50}}

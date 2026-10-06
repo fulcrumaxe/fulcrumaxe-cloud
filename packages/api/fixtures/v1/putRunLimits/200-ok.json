@@ -1,0 +1,23 @@
+{
+  "role": "executor",
+  "stored": {
+    "auto_resume": null,
+    "max_run_minutes": null,
+    "max_model_calls": null,
+    "per_run_usd": 75.5,
+    "max_turns": null,
+    "silence_minutes": null,
+    "max_extensions": null,
+    "max_resumes": null
+  },
+  "resolved": {
+    "auto_resume": false,
+    "max_run_minutes": 120,
+    "max_model_calls": 300,
+    "per_run_usd": 75.5,
+    "max_turns": 100,
+    "silence_minutes": 15,
+    "max_extensions": 2,
+    "max_resumes": 2
+  }
+}

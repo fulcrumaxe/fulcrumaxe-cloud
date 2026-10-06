@@ -1,0 +1,6 @@
+{
+  "period_start": "2026-09-01T00:00:00.000Z",
+  "model": { "spent_usd": 12.3456, "reserved_usd": 0.5, "limit_usd": 600 },
+  "foreground_compute": { "spent_usd": 3.25, "reserved_usd": 0, "limit_usd": 50 },
+  "background_compute": { "spent_usd": 8, "reserved_usd": 1.75, "limit_usd": 120 }
+}

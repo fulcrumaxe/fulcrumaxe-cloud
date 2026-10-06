@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fulcrumaxe</title>
+
+    <!-- D#37 WS-D criterion 2: mode, system/mode and branding are always
+         200, anonymous, static JSON (WS-C criterion 2) -- these three
+         preloads are unconditional, discovered by the HTML parser's own
+         preload scanner before any script (module or classic) even
+         starts. auth/me is NOT a static tag here: it 401s for a
+         signed-out visitor, and a preloaded request that 401s logs a
+         console error regardless of what JS does with the response --
+         core/preload-auth.js (right below) adds that fourth preload only
+         when the fx_has_session hint says a session is plausible, the
+         same guard core/boot.js's own checkCloudSession() uses. -->
+    <link rel="preload" href="/api/mode" as="fetch" crossorigin>
+    <link rel="preload" href="/api/system/mode" as="fetch" crossorigin>
+    <link rel="preload" href="/api/branding" as="fetch" crossorigin>
+    <script src="core/preload-auth.js" data-core></script>
+
+    <link rel="stylesheet" href="core/modals.css">
+    <link rel="stylesheet" href="core/notifications.css">
+    <link rel="stylesheet" href="vendor/xterm/xterm.css">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="editor.css">
+    <link rel="stylesheet" href="keybindings.css">
+    <link rel="stylesheet" href="core/context-menu.css">
+    <link rel="stylesheet" href="core/window-manager.css">
+    <link rel="stylesheet" href="core/desktop.css">
+    <link rel="stylesheet" href="core/taskbar.css">
+    <link rel="stylesheet" href="apps/terminal/terminal-app.css">
+    <link rel="stylesheet" href="apps/terminal/terminal-tmux.css">
+    <link rel="stylesheet" href="apps/themes/themes-app.css">
+    <!-- withheld with its app (D#871/876/877): <link rel="stylesheet" href="apps/profile/profile-app.css"> -->
+    <link rel="stylesheet" href="apps/updates/updates-app.css">
+    <link rel="stylesheet" href="apps/feedback/feedback-app.css">
+    <link rel="stylesheet" href="apps/messages/messages-app.css">
+    <!-- withheld with its app (D#871/876/877): <link rel="stylesheet" href="apps/admin/admin-app.css"> -->
+    <link rel="stylesheet" href="apps/activation/activation.css">
+    <link rel="stylesheet" href="apps/entitlement-manager/entitlement-manager.css">
+    <link rel="stylesheet" href="apps/file-manager/file-manager-app.css">
+    <link rel="stylesheet" href="apps/command-builder/command-builder-app.css">
+    <!-- withheld with its app (D#871/876/877): <link rel="stylesheet" href="apps/resource-monitor/resource-monitor-app.css"> -->
+    <link rel="stylesheet" href="apps/baseapp-monitor/baseapp-monitor-app.css">
+    <!-- withheld with its app (D#871/876/877): <link rel="stylesheet" href="apps/storage-manager/storage-manager-app.css"> -->
+    <link rel="stylesheet" href="apps/shortcut-trainer/shortcut-trainer.css">
+    <link rel="stylesheet" href="apps/tutorial/tutorial-engine.css">
+    <link rel="stylesheet" href="apps/tutorial/tutorial-app.css">
+    <link rel="stylesheet" href="apps/package-manager/package-manager-app.css">
+    <link rel="stylesheet" href="apps/kanban/kanban.css">
+    <link rel="stylesheet" href="apps/agents/agents.css">
+    <link rel="stylesheet" href="apps/kpi-dashboard/kpi-dashboard.css">
+    <link rel="stylesheet" href="apps/kpi-dashboard/kpi-dashboard-expansion.css">
+    <link rel="stylesheet" href="apps/vcs/vcs.css">
+    <link rel="stylesheet" href="apps/cloud-deploy/cloud-deploy.css">
+    <link rel="stylesheet" href="apps/cloud-deploy/cd-template-picker.css">
+    <link rel="stylesheet" href="apps/cloud-manage/cloud-manage.css">
+    <link rel="stylesheet" href="apps/cloud-auth-config/cloud-auth-config.css">
+    <link rel="stylesheet" href="apps/cloud-vault/cloud-vault.css">
+    <link rel="stylesheet" href="core/system-tray.css">
+    <link rel="stylesheet" href="core/presence.css">
+    <link rel="stylesheet" href="core/cursor-overlay.css">
+    <link rel="stylesheet" href="core/crdt-sync.css">
+    <link rel="stylesheet" href="core/update-notification.css">
+    <link rel="stylesheet" href="core/channel-switcher.css">
+    <link rel="stylesheet" href="core/entitlements.css">
+    <link rel="stylesheet" href="core/subscription-gate.css">
+    <link rel="stylesheet" href="apps/editor/editor-app.css">
+    <link rel="stylesheet" href="apps/native-launcher/native-launcher-app.css">
+</head>
+<body>
+    <div class="crt-overlay"></div>
+    <div class="scanlines"></div>
+
+    <!-- Rain Background Animation -->
+    <canvas id="rain-bg"></canvas>
+
+    <div id="app" class="jpos-container">
+        <!-- System Bootloader -->
+        <div id="boot-screen" class="screen">
+            <div id="boot-log"></div>
+            <div class="cursor">_</div>
+        </div>
+
+        <!-- Terminal Shell (Login/Signup only) -->
+        <div id="terminal-shell" class="screen hidden">
+            <div class="header">
+                <span class="system-tag" id="dynamic-system-tag">fulcrumaxe cloud</span>
+                <span id="datetime"></span>
+            </div>
+
+            <div id="terminal-output"></div>
+
+            <div id="interaction-layer">
+                <div id="input-prompt" class="hidden">
+                    <span class="prompt">> </span><span id="current-command-display"></span><span class="cursor">_</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Desktop (post-login) -->
+        <div id="desktop-screen" class="screen hidden">
+            <div id="desktop-surface"></div>
+            <div id="windows-container"></div>
+            <div id="taskbar">
+                <div id="dock-pinned"></div>
+                <div class="dock-divider"></div>
+                <div id="dock-open"></div>
+                <div class="dock-divider"></div>
+                <div id="taskbar-tray">
+                    <div id="workspace-indicator"></div>
+                    <span id="taskbar-badge" class="hidden">0</span>
+                    <span id="taskbar-clock"></span>
+                    <span id="taskbar-user"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Overlay -->
+    <div id="confirmation-overlay" class="overlay hidden" tabindex="-1">
+        <div class="overlay-content">
+            <p id="overlay-message">CONFIRM ACTION?</p>
+            <div class="overlay-buttons">
+                <button id="overlay-yes" class="overlay-btn overlay-yes-btn">YES</button>
+                <button id="overlay-no" class="overlay-btn overlay-no-btn">NO</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Success Overlay -->
+    <div id="success-overlay" class="overlay hidden">
+        <div class="overlay-content success-content">
+            <p id="success-message">CHANGES APPLIED</p>
+            <div class="success-indicator">✓</div>
+        </div>
+    </div>
+
+    <!-- Discard Overlay -->
+    <div id="discard-overlay" class="overlay hidden">
+        <div class="overlay-content discard-content">
+            <p id="discard-message">CHANGES DISCARDED</p>
+            <div class="discard-indicator">✕</div>
+        </div>
+    </div>
+
+    <!-- Keybindings Settings Overlay -->
+    <div id="keybindings-overlay" class="overlay hidden" tabindex="-1">
+        <div class="keybindings-container">
+            <div class="keybindings-header">
+                <span>KEYBINDINGS</span>
+                <button class="keybindings-close" id="keybindings-close">&#10005;</button>
+            </div>
+            <div class="keybindings-body" id="keybindings-body"></div>
+            <div class="keybindings-footer">
+                <span class="keybindings-hint">CLICK A KEY TO REBIND — ESC TO CANCEL</span>
+                <button class="keybindings-reset-all" id="keybindings-reset-all">RESET ALL</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Code Editor Overlay -->
+    <div id="editor-overlay" class="overlay hidden">
+        <div class="editor-container">
+            <div class="editor-header">
+                <span class="editor-title">fulcrumaxe-os EDIT</span>
+                <span class="editor-filename" id="editor-filename">UNTITLED</span>
+                <span class="editor-modified hidden" id="editor-modified">[ MODIFIED ]</span>
+                <span class="editor-lang" id="editor-lang">TEXT</span>
+            </div>
+            <div id="editor-find-bar" class="editor-find-bar hidden">
+                <div class="editor-find-row">
+                    <span class="editor-find-label">FIND:</span>
+                    <input type="text" id="editor-find-input" class="editor-find-field" autocomplete="off" spellcheck="false" placeholder="SEARCH...">
+                    <span id="editor-find-count" class="editor-find-count">0/0</span>
+                    <button class="editor-find-btn" id="editor-find-prev" title="Previous">&#9650;</button>
+                    <button class="editor-find-btn" id="editor-find-next" title="Next">&#9660;</button>
+                    <button class="editor-find-btn" id="editor-find-close" title="Close">&#10005;</button>
+                </div>
+                <div class="editor-find-row">
+                    <span class="editor-find-label">REPL:</span>
+                    <input type="text" id="editor-replace-input" class="editor-find-field" autocomplete="off" spellcheck="false" placeholder="REPLACE...">
+                    <button class="editor-find-btn editor-find-btn-wide" id="editor-replace-one">REPLACE</button>
+                    <button class="editor-find-btn editor-find-btn-wide" id="editor-replace-all">ALL</button>
+                </div>
+            </div>
+            <div class="editor-body">
+                <div class="editor-gutter" id="editor-gutter"></div>
+                <textarea id="editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="Start typing..."></textarea>
+            </div>
+            <div class="editor-statusbar">
+                <span id="editor-cursor-pos">LN 1, COL 1</span>
+                <span class="editor-statusbar-sep">|</span>
+                <span id="editor-selection-info"></span>
+                <span class="editor-statusbar-right">
+                    <span id="editor-file-size">0B</span>
+                    <span class="editor-statusbar-sep">|</span>
+                    <span id="editor-line-count">1 LINES</span>
+                </span>
+            </div>
+            <div class="editor-shortcuts"></div>
+        </div>
+    </div>
+
+    <!-- Hidden Input for login flow -->
+    <input type="text" id="master-input" autofocus>
+
+    <!-- Core (order matters). Module scripts are implicitly deferred; classic app
+         scripts below are explicitly deferred so every tag executes in document
+         order after DOM parse. This preserves today's load semantics while core
+         migrates to ESM ahead of apps. -->
+    <!-- Shared frontend utils (D#240 P3.3) — FULCUtil.escapeHtml / apiJson.
+         No DOM/other-core dependencies; must load before any app script
+         that uses it, so it goes first in the core chain. -->
+    <!-- D#922 PR-c: move pre-rename localStorage keys before anything reads
+         storage. A classic script, and the first one on the page, because
+         classic scripts (activation.js) read storage while parsing. -->
+    <script src="core/storage-key-migration.js" data-core></script>
+    <!-- D#922 PR-c: FULCWM / FULCApps / FULC / __FULC_BASEAPP_ID__ accessors. -->
+    <script type="module" src="core/fulc-global-aliases.js" data-core></script>
+    <script type="module" src="core/dom-util.js" data-core></script>
+    <script type="module" src="rain.js" data-core></script>
+    <script type="module" src="crypto.js" data-core></script>
+    <script type="module" src="script.js" data-core></script>
+    <!-- Toast stack (epic-16 task 01). Loaded before modals.js, which imports
+         it for the FULCModals.toast compatibility shim. -->
+    <script type="module" src="core/notifications.js" data-core></script>
+    <script type="module" src="core/modals.js" data-core></script>
+    <script type="module" src="core/overlays.js" data-core></script>
+    <script type="module" src="core/theme-layout.js" data-core></script>
+    <script type="module" src="core/theme-effects.js" data-core></script>
+    <script type="module" src="core/theme-manager.js" data-core></script>
+    <script type="module" src="core/preferences.js" data-core></script>
+    <!-- D#37 WS-L1: the licence-activation module does not belong in cloud
+         (owner ruling). These two tags stay in the imported fork tree
+         unmodified (C19e item 9) but are never shipped: cloud.json's
+         app_modules no longer lists "activation", so profile.mjs's filter
+         drops both apps/activation/* tags from every built index.html,
+         and there is no other profile in this fork that would keep them. -->
+    <script src="apps/activation/activation.js" data-core></script>
+    <!-- Entitlement layer — must load before app-registry and any app code -->
+    <script type="module" src="core/entitlements.js" data-core></script>
+    <script src="apps/activation/activation-app-lock.js" data-core></script>
+    <script type="module" src="core/feature-gate.js" data-core></script>
+    <script type="module" src="core/upgrade-modal.js" data-core></script>
+    <script type="module" src="core/app-registry.js" data-core></script>
+    <script type="module" src="core/update-notification.js" data-core></script>
+    <script type="module" src="core/channel-switcher.js" data-core></script>
+    <script type="module" src="core/cloud-live.js" data-core></script>
+    <script type="module" src="core/heritage-shell.js" data-app="heritage"></script>
+    <script type="module" src="apps/themes/heritage/orchard-icons.js" data-app="heritage"></script>
+    <script type="module" src="apps/themes/heritage/orchard-adapter.js" data-app="heritage"></script>
+    <script type="module" src="apps/themes/heritage/crystal-icons.js" data-app="heritage"></script>
+    <script type="module" src="apps/themes/heritage/crystal-adapter.js" data-app="heritage"></script>
+
+    <!-- Apps (register before window manager opens them) -->
+    <script type="module" src="apps/terminal/terminal-shell.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-render.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-split.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-snippets.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-clipboard.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-search.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-settings.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-record.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-tabs.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-notify.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-power.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-tmux.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-perf.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-a11y.js" data-app="terminal"></script>
+    <script type="module" src="apps/terminal/terminal-app.js?v=2" data-app="terminal"></script>
+    <script type="module" src="apps/themes/themes-preview.js" data-app="themes"></script>
+    <script type="module" src="apps/themes/themes-app.js" data-app="themes"></script>
+    <!-- Withheld from this release (D#871/876/877). The app registry is the sole
+         authority for what exists, so dropping the script tag un-registers the app and
+         every catalog surface (desktop icons, dock pins, `open` completion) hides it via
+         the isRegistered gate in core/app-registry.js. Source is intentionally kept --
+         these are unfinished features, not dead code. Re-enable by un-commenting a line
+         below. Each line is self-contained on purpose: profile_surface.rs drops whole
+         lines by data-app id, so a comment spanning two lines would lose its terminator. -->
+    <!-- D#877 hardcoded user record; edits POST to a stub that discards them: <script type="module" src="apps/profile/profile-app.js" data-app="profile"></script> -->
+    <script type="module" src="apps/updates/updates-app.js" data-app="updates"></script>
+    <script type="module" src="apps/feedback/feedback-app.js" data-app="feedback"></script>
+    <script type="module" src="apps/messages/messages-app.js" data-app="messages"></script>
+    <!-- D#876 implies authority over real accounts; toggle-admin/reset-password/delete all discard silently: <script type="module" src="apps/admin/admin-app.js" data-app="admin"></script> -->
+    <script type="module" src="apps/entitlement-manager/em-app.js" data-app="entitlement-manager"></script>
+    <script type="module" src="apps/file-manager/fm-phase1.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-tree.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-select.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-context-menu.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-preview.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-upload.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-search.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-grid.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-git.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-bridge.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-split.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-tabs.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-quicklook.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-palette.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-batch-rename.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-archive.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-permissions.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-picker.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-bookmarks.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-diff.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-undo.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/file-manager-views.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/fm-session.js" data-app="file-manager"></script>
+    <script type="module" src="apps/file-manager/file-manager-app.js" data-app="file-manager"></script>
+    <script type="module" src="apps/package-manager/pm-search.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-installed.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-detail.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-install-stream.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-tree.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-size.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/pm-unused.js" data-app="package-manager"></script>
+    <script type="module" src="apps/package-manager/package-manager-app.js" data-app="package-manager"></script>
+
+    <!-- Kanban board -->
+    <script type="module" src="apps/kanban/kanban-board.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-card.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-drag.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-filter.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-detail.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-confirm.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-project-modal.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-crdt-status.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-context.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-agent-actions.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-views.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-column-config.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-dependencies.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-dependencies-panel.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-app.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-shared-badge.js" data-app="kanban"></script>
+    <script type="module" src="apps/kanban/kanban-crdt-bind.js" data-app="kanban"></script>
+
+    <!-- Agent monitor -->
+    <script type="module" src="apps/agents/agents-status.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-profiles.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-output.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/adapters/adapter-base.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/adapters/adapter-claude.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/adapters/adapter-generic.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-stream.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-conversation.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-chat.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-sidebar.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-actions.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-model-picker.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-notifications.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-statusbar.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-terminal-bridge.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-config-form.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-cloud-dispatch.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-resume-badge.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-spawn-model.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-spawn-wizard.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-spawn.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-list.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-app.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-shared-badge.js" data-app="agents"></script>
+    <script type="module" src="apps/agents/agents-crdt-bind.js" data-app="agents"></script>
+
+    <!-- Window system -->
+    <script type="module" src="core/context-menu.js" data-core></script>
+    <script type="module" src="core/screen-saver.js" data-core></script>
+    <link rel="stylesheet" href="core/hot-corners.css">
+    <script type="module" src="core/hot-corners.js" data-core></script>
+    <script type="module" src="core/monitor-manager.js" data-core></script>
+    <script type="module" src="core/window-manager.js" data-core></script>
+    <script type="module" src="core/desktop.js" data-core></script>
+    <script type="module" src="core/taskbar-keyboard.js" data-core></script>
+    <script type="module" src="core/taskbar.js" data-core></script>
+    <script type="module" src="core/system-tray.js" data-core></script>
+    <script type="module" src="core/tray-update-indicator.js" data-core></script>
+    <script type="module" src="core/presence.js" data-core></script>
+    <script type="module" src="core/cursor-overlay.js" data-core></script>
+    <script type="module" src="core/automerge-bootstrap.js" data-core></script>
+    <script type="module" src="core/crdt-sync-client.js" data-core></script>
+
+    <!-- Cloud-mode magic-link login UI (epic-7 5h). Classic script so
+         FULCCloudLogin attaches to window before boot.js runs. -->
+    <script src="core/cloud-login.js" data-core></script>
+
+    <!-- D#37 WS-L1: the account-subscription gate shown instead of the
+         desktop when workspace_access isn't "open". Classic script so
+         FULCSubscriptionGate attaches to window before boot.js runs. -->
+    <script src="core/subscription-gate.js" data-core></script>
+
+    <!-- Branding applier: sets CSS custom properties + logo from /api/branding.
+         Must load before boot.js so FULCBrandingApplier is on window when
+         fetchBranding() calls it. Classic script (not module) so the global
+         attaches synchronously. (epic-7 task 11b) -->
+    <script src="core/branding-applier.js" data-core></script>
+
+    <!-- Boot (starts the app, must come after desktop/taskbar) -->
+    <!-- D#37 WS-F9a: its own tag, not an import of boot.js, so an open session's boot is unchanged; sets window.FULCOnboardingMode. -->
+    <script type="module" src="core/onboarding-mode.js" data-core></script>
+    <script type="module" src="core/boot.js" data-core></script>
+
+    <!-- Command system -->
+    <script type="module" src="core/command-registry.js" data-core></script>
+    <script type="module" src="apps/terminal/terminal-commands.js" data-app="terminal"></script>
+    <script type="module" src="apps/fulc-shell/fulc-shell-app.js" data-app="fulc-shell"></script>
+
+    <!-- Command builder (after command-registry) -->
+    <script type="module" src="apps/command-builder/command-builder-app.js" data-app="command-builder"></script>
+    <!-- D#871 every panel is drawn from /api/billing/*, which returns hardcoded constants: <script type="module" src="apps/resource-monitor/resource-monitor-app.js" data-app="resource-monitor"></script> -->
+    <script type="module" src="apps/baseapp-monitor/baseapp-monitor-render.js" data-app="baseapp-monitor"></script>
+    <script type="module" src="apps/baseapp-monitor/baseapp-monitor-app.js" data-app="baseapp-monitor"></script>
+
+    <!-- KPI Dashboard -->
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-charts.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-cards.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-tables.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-schedule.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-insights.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-trajectory.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-workmode.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-gantt.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-momentum.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-drag.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-agents.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-journal.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-predict.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-view-modes.js" data-app="kpi-dashboard"></script>
+    <script type="module" src="apps/kpi-dashboard/kpi-dashboard-app.js" data-app="kpi-dashboard"></script>
+    <!-- D#871 plan/disk panel drawn from /api/billing/*, falling back to hardcoded DEFAULT_PLAN/DEFAULT_DISK: <script type="module" src="apps/storage-manager/storage-manager-app.js" data-app="storage-manager"></script> -->
+    <script type="module" src="apps/shortcut-trainer/shortcut-trainer.js" data-app="shortcut-trainer"></script>
+    <script type="module" src="apps/tutorial/tutorial-engine.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-windows.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-workspaces.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-terminal.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-filemanager.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-filemanager-adv.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-kanban.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-packages.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-lessons-agents.js" data-app="tutorial"></script>
+    <script type="module" src="apps/tutorial/tutorial-app.js" data-app="tutorial"></script>
+
+    <!-- Web Browser -->
+    <link rel="stylesheet" href="apps/browser/browser-app.css">
+    <script type="module" src="apps/browser/browser-tabs.js" data-app="browser"></script>
+    <script type="module" src="apps/browser/browser-nav.js" data-app="browser"></script>
+    <script type="module" src="apps/browser/browser-app.js" data-app="browser"></script>
+
+    <!-- Baseapp Launcher (epic-12 task 04) -->
+    <link rel="stylesheet" href="apps/baseapp-launcher/baseapp-launcher.css">
+    <script type="module" src="apps/baseapp-launcher/bl-types.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-adapter.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-context-menu.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-empty.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-tile.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-toolbar.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-grid.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/bl-keys.js" data-app="baseapp-launcher"></script>
+    <script type="module" src="apps/baseapp-launcher/baseapp-launcher-app.js" data-app="baseapp-launcher"></script>
+
+    <!-- App Store (epic-30 task 03) -->
+    <link rel="stylesheet" href="apps/app-store/app-store.css">
+    <script type="module" src="apps/app-store/app-store-types.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-trust.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-version-check.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-adapter.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-search.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-catalog.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-detail.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-installed.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-keys.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-channel-toggle.js" data-app="app-store"></script>
+    <script type="module" src="apps/app-store/app-store-app.js" data-app="app-store"></script>
+
+    <!-- VCS (epic-23 tasks 26, 27, 28) -->
+    <script type="module" src="apps/vcs/vcs-api.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-blame-view.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-repo-browser.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-dashboard.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-backend-settings.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-settings.js" data-app="vcs"></script>
+    <script type="module" src="apps/vcs/vcs-app.js" data-app="vcs"></script>
+
+    <!-- Cloud Deploy app (epic-7 task 02) -->
+    <script type="module" src="apps/cloud-deploy/cd-types.js" data-app="cloud-deploy"></script>
+    <script type="module" src="apps/cloud-deploy/cd-adapter.js" data-app="cloud-deploy"></script>
+    <script type="module" src="apps/cloud-deploy/cd-credential-form.js" data-app="cloud-deploy"></script>
+    <script type="module" src="apps/cloud-deploy/cd-target-picker.js" data-app="cloud-deploy"></script>
+    <script type="module" src="apps/cloud-deploy/cd-deploy-progress.js" data-app="cloud-deploy"></script>
+    <script type="module" src="apps/cloud-deploy/cloud-deploy-app.js" data-app="cloud-deploy"></script>
+
+    <!-- Cloud Manage app (epic-7 task 03) -->
+    <script type="module" src="apps/cloud-manage/cm-types.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-adapter.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-license-summary.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-reconcile.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-deployments-list.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-deployment-detail.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cm-audit-viewer.js" data-app="cloud-manage"></script>
+    <!-- epic-7 task 11b — branding tab (must load before cloud-manage-app.js) -->
+    <script type="module" src="apps/cloud-manage/cm-branding-tab.js" data-app="cloud-manage"></script>
+    <script type="module" src="apps/cloud-manage/cloud-manage-app.js" data-app="cloud-manage"></script>
+
+    <!-- Cloud vault (epic-7 task 25a) -->
+    <script type="module" src="apps/cloud-vault/cloud-vault-app.js" data-app="cloud-vault"></script>
+
+    <!-- Cloud auth config (epic-7 task 05b) -->
+    <script type="module" src="apps/cloud-auth-config/cac-types.js" data-app="cloud-auth-config"></script>
+    <script type="module" src="apps/cloud-auth-config/cac-adapter.js" data-app="cloud-auth-config"></script>
+    <script type="module" src="apps/cloud-auth-config/cac-email.js" data-app="cloud-auth-config"></script>
+    <script type="module" src="apps/cloud-auth-config/cac-oidc.js" data-app="cloud-auth-config"></script>
+    <script type="module" src="apps/cloud-auth-config/cac-license.js" data-app="cloud-auth-config"></script>
+    <script type="module" src="apps/cloud-auth-config/cloud-auth-config-app.js" data-app="cloud-auth-config"></script>
+
+    <!-- Editor & Keybindings -->
+    <script type="module" src="keybindings.js" data-core></script>
+    <script type="module" src="editor.js" data-core></script>
+
+    <!-- Code Editor app (epic-13 task 01/03) — Monaco is lazy-loaded by the app on first open -->
+    <script type="module" src="apps/editor/editor-types.js" data-app="editor"></script>
+    <script type="module" src="apps/editor/editor-fs.js" data-app="editor"></script>
+    <script type="module" src="apps/editor/editor-app.js" data-app="editor"></script>
+
+    <!-- Native app launcher (Xpra) — local desktop mode only. The desktop icon
+         is mode-gated in core/desktop.js; the module itself is harmless
+         elsewhere because /api/native-apps/catalog returns an empty list when
+         there are no .desktop files. -->
+    <script type="module" src="apps/native-launcher/native-launcher-app.js" data-app="native-launcher"></script>
+
+    <!-- @fulc/sdk — marketplace app SDK (epic-12 task 03).
+         Loaded as the UMD bundle so plain-JS marketplace apps and dynamically
+         injected app scripts both find `window.FULC` synchronously. The ESM
+         build at `sdk/fulc-sdk.js` is consumed directly by TS apps via
+         `import` and is not loaded here. -->
+    <script src="sdk/fulc-sdk.umd.js" data-core></script>
+</body>
+</html>

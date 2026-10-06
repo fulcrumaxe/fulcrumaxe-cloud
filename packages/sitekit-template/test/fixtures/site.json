@@ -1,0 +1,440 @@
+{
+  "site": "widget-kit-internal",
+  "siteNameClaimId": "c-name",
+  "repo": "acme/widget-kit",
+  "repo_sha": "a1b2c3d4e5f6",
+  "domains": [],
+  "pages": [
+    {
+      "slug": "home",
+      "sections": [
+        {
+          "type": "hero",
+          "props": {
+            "titleChrome": "section.hero.title",
+            "ctaChrome": "section.hero.cta",
+            "ctaHref": "/docs",
+            "backgroundImage": "/images/hero-bg.png",
+            "statusClaimId": "c-status",
+            "headlineClaimId": "c-hero-headline",
+            "subheadlineClaimId": "c-hero-sub"
+          }
+        },
+        {
+          "type": "feature-grid",
+          "props": {
+            "titleChrome": "section.features.title",
+            "featureClaimIds": ["c-feat-1", "c-feat-2", "c-feat-3", "c-feat-4", "c-feat-5"]
+          }
+        },
+        {
+          "type": "faq",
+          "props": {
+            "titleChrome": "section.faq.title",
+            "qnaClaimIds": ["c-faq-1", "c-faq-2", "c-faq-3"]
+          }
+        }
+      ]
+    },
+    {
+      "slug": "roadmap",
+      "sections": [
+        {
+          "type": "roadmap-list",
+          "props": {
+            "titleChrome": "section.roadmap.title",
+            "itemClaimIds": ["c-roadmap-1", "c-roadmap-2", "c-roadmap-3"]
+          }
+        },
+        {
+          "type": "changelog",
+          "props": {
+            "titleChrome": "section.changelog.title",
+            "entryClaimIds": ["c-changelog-1", "c-changelog-2", "c-changelog-3"]
+          }
+        }
+      ]
+    },
+    {
+      "slug": "docs",
+      "sections": [
+        {
+          "type": "docs-index",
+          "props": {
+            "titleChrome": "section.docs.title",
+            "docClaimIds": ["c-docs-1", "c-docs-2", "c-docs-3"],
+            "anchor": "docs-index"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "pricing",
+      "sections": [
+        {
+          "type": "pricing-table",
+          "props": {
+            "titleChrome": "section.pricing.title",
+            "leadClaimId": "c-pricing-lead",
+            "planClaimIds": ["c-plan-1", "c-plan-2", "c-plan-3"]
+          }
+        }
+      ]
+    },
+    {
+      "slug": "legal",
+      "sections": [
+        {
+          "type": "legal-page",
+          "props": {
+            "titleChrome": "section.legal.title",
+            "bodyClaimIds": ["c-legal-1", "c-legal-2", "c-legal-3"],
+            "anchor": "privacy"
+          }
+        }
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "id": "c-name",
+      "section": "site/name",
+      "locale": "en",
+      "text": "Widget Kit Pro",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "package.json", "lines": { "start": 2, "end": 2 }, "excerpt": "\"name\": \"widget-kit-pro\"" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-hero-headline",
+      "section": "home/hero",
+      "locale": "en",
+      "text": "Ship a widget catalog without writing a storefront.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "README.md", "lines": { "start": 3, "end": 3 }, "excerpt": "Ship a widget catalog without writing a storefront." }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-hero-sub",
+      "section": "home/hero",
+      "locale": "en",
+      "text": "Every plan below traces back to a file in this repo.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "README.md", "lines": { "start": 4, "end": 4 }, "excerpt": "Every plan below traces back to a file in this repo." }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-status",
+      "section": "home/hero",
+      "locale": "en",
+      "text": "Actively maintained, with weekly releases.",
+      "kind": "status",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "CHANGELOG.md", "lines": { "start": 1, "end": 1 }, "excerpt": "## Weekly release notes" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-feat-1",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Import a product catalog straight from a CSV file.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/import.ts", "lines": { "start": 10, "end": 22 }, "excerpt": "export function importCatalog(csv: string) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-feat-2",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Generate a printable price sheet for every plan.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/pricing.ts", "lines": { "start": 5, "end": 18 }, "excerpt": "export function priceSheet(plans: Plan[]) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-feat-3",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Sync inventory counts every fifteen minutes.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/sync.ts", "lines": { "start": 30, "end": 44 }, "excerpt": "export async function syncInventory() { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-feat-4",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Export orders as a signed webhook payload.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/webhooks.ts", "lines": { "start": 1, "end": 9 }, "excerpt": "export function signPayload(body: string) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-feat-5",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Run entirely on a customer's own database.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/db.ts", "lines": { "start": 1, "end": 12 }, "excerpt": "export function connect(url: string) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-faq-1",
+      "section": "home/faq",
+      "locale": "en",
+      "text": "Does it work offline? Yes, the catalog is cached locally after the first sync.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/faq.md", "lines": { "start": 4, "end": 5 }, "excerpt": "Yes, the catalog is cached locally after the first sync." }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-faq-2",
+      "section": "home/faq",
+      "locale": "en",
+      "text": "Can I self-host it? Yes, the whole stack runs from one Docker image.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/faq.md", "lines": { "start": 8, "end": 9 }, "excerpt": "Yes, the whole stack runs from one Docker image." }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-faq-3",
+      "section": "home/faq",
+      "locale": "en",
+      "text": "Is there a free tier? Yes, up to fifty products at no cost.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/faq.md", "lines": { "start": 12, "end": 13 }, "excerpt": "Yes, up to fifty products at no cost." }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-roadmap-1",
+      "section": "roadmap/roadmap-list",
+      "locale": "en",
+      "text": "Bulk product editing, in progress.",
+      "kind": "status",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "ROADMAP.md", "lines": { "start": 2, "end": 2 }, "excerpt": "- [ ] Bulk product editing" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-roadmap-2",
+      "section": "roadmap/roadmap-list",
+      "locale": "en",
+      "text": "Multi-currency pricing, planned next quarter.",
+      "kind": "status",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "ROADMAP.md", "lines": { "start": 3, "end": 3 }, "excerpt": "- [ ] Multi-currency pricing" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-roadmap-3",
+      "section": "roadmap/roadmap-list",
+      "locale": "en",
+      "text": "Warehouse barcode scanning, shipped last month.",
+      "kind": "status",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "ROADMAP.md", "lines": { "start": 4, "end": 4 }, "excerpt": "- [x] Warehouse barcode scanning" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-changelog-1",
+      "section": "roadmap/changelog",
+      "locale": "en",
+      "text": "v1.4.0 — added CSV import for the product catalog.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "CHANGELOG.md", "lines": { "start": 3, "end": 3 }, "excerpt": "## v1.4.0 - added CSV import" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-changelog-2",
+      "section": "roadmap/changelog",
+      "locale": "en",
+      "text": "v1.3.0 — signed webhook payloads for order export.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "CHANGELOG.md", "lines": { "start": 8, "end": 8 }, "excerpt": "## v1.3.0 - signed webhooks" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-changelog-3",
+      "section": "roadmap/changelog",
+      "locale": "en",
+      "text": "v1.2.0 — fifteen-minute inventory sync.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "CHANGELOG.md", "lines": { "start": 13, "end": 13 }, "excerpt": "## v1.2.0 - faster inventory sync" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-docs-1",
+      "section": "docs/docs-index",
+      "locale": "en",
+      "text": "Getting started: install the command-line tool, connect a database, and import your first product catalog in under five minutes.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/getting-started.md", "lines": { "start": 1, "end": 2 }, "excerpt": "# Getting started" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-docs-2",
+      "section": "docs/docs-index",
+      "locale": "en",
+      "text": "Importing products: the full CSV column reference, including which fields are required and how prices and stock counts are parsed.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/importing.md", "lines": { "start": 1, "end": 2 }, "excerpt": "# Importing products" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-docs-3",
+      "section": "docs/docs-index",
+      "locale": "en",
+      "text": "Webhooks: how to verify the payload signature before trusting an incoming order, and how to safely retry a failed delivery.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "docs/webhooks.md", "lines": { "start": 1, "end": 2 }, "excerpt": "# Webhooks" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-pricing-lead",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Free for open-source projects; paid tiers scale with product count.",
+      "kind": "pricing",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "pricing.json", "lines": { "start": 1, "end": 1 }, "excerpt": "{ \"free\": { \"maxProducts\": 50 } }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-plan-1",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Free — up to 50 products, community support.",
+      "kind": "pricing",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "pricing.json", "lines": { "start": 2, "end": 2 }, "excerpt": "\"free\": { \"products\": 50 }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-plan-2",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Team — unlimited products, email support, attested at $49/mo.",
+      "kind": "pricing",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "pricing.json", "lines": { "start": 3, "end": 3 }, "excerpt": "\"team\": { \"price\": 49 }" }],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-09-17T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-plan-3",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Enterprise — dedicated support and a signed SLA.",
+      "kind": "pricing",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "pricing.json", "lines": { "start": 4, "end": 4 }, "excerpt": "\"enterprise\": { \"sla\": true }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01"
+    },
+    {
+      "id": "c-legal-1",
+      "section": "legal/legal-page",
+      "locale": "en",
+      "text": "This site describes acme/widget-kit, an open-source project; nothing here is a warranty of fitness for a particular purpose.",
+      "kind": "legal",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "LICENSE", "lines": { "start": 1, "end": 3 }, "excerpt": "MIT License" }],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-09-17T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-legal-2",
+      "section": "legal/legal-page",
+      "locale": "en",
+      "text": "The software is distributed under the MIT License; see the LICENSE file in the repository for the full text.",
+      "kind": "legal",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "LICENSE", "lines": { "start": 5, "end": 8 }, "excerpt": "Permission is hereby granted, free of charge..." }],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-09-17T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-legal-3",
+      "section": "legal/legal-page",
+      "locale": "en",
+      "text": "Contact the maintainers through the repository's issue tracker for any legal inquiry.",
+      "kind": "legal",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "CONTRIBUTING.md", "lines": { "start": 20, "end": 21 }, "excerpt": "File legal inquiries as a repository issue." }],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-09-17T12:00:00Z",
+      "verifier_run_id": "run-2026-09-17-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-09-17T12:30:00Z", "version_id": "fixture-v1" }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "no_billing_account",
+    "message": "this account has no billing account yet",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "22222222-2222-4222-8222-222222222222",
+  "repo_id": "44444444-4444-4444-8444-444444444444",
+  "kind": "feature",
+  "issue_number": 42,
+  "stage": "changes_requested",
+  "provenance": "external",
+  "priority": "high",
+  "queue_rank": 2048,
+  "cost_usd": 7.8,
+  "created_at": "2026-09-18T11:00:00.000Z",
+  "updated_at": "2026-09-18T13:30:00.000Z"
+}

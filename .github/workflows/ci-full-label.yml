@@ -1,0 +1,57 @@
+name: CI full label
+
+# Adding the label `ci:full` to a pull request makes CI run in full on the head it already has.
+#
+# This is a separate workflow so that CI itself (ci.yml) does not listen to `labeled`. GitHub cannot filter
+# that trigger by label name; any label event on ci.yml would join CI's concurrency group, cancel the real
+# queued or in-flight run, and cost a full run on the one self-hosted runner. Here the event only starts THIS
+# workflow, whose group is different, and every label other than `ci:full` ends with the job skipped: a skipped
+# job is never given a runner, and this workflow's job and check names are not `check` or `workspace-e2e`, so
+# nothing the merge wrapper reads is touched. Details: docs/ops/ci.md, "Forcing a full run".
+on:
+  pull_request:
+    types: [labeled]
+
+# One group per pull request AND label name. A group runs one workflow at a time and keeps only the newest
+# waiting one, so a shared per-PR group would let some other label (a review gate label re-added a second
+# later) replace a waiting `ci:full` run. Never equal to CI's group (`ci-CI-<branch>`).
+concurrency:
+  group: ci-full-label-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
+  cancel-in-progress: false
+
+# The top-level token is `contents: read`. The one job asks for more for itself: `actions: write` is what
+# `gh run rerun` and `gh run cancel` need; `pull-requests: read` lets the script check that the head is still
+# the one the label event saw. Nothing else is granted.
+permissions:
+  contents: read
+
+jobs:
+  rerun-ci-at-full-scope:
+    # Skipped (no runner) for every label but exactly `ci:full`, and for a pull request from a fork, whose
+    # run could not hold the `actions: write` token this job asks for. Fork pull requests still run CI itself
+    # (ci.yml), on hosted runners; they just cannot be re-run in full through a label. Stands down with CI.
+    if: vars.CI_DISABLED != 'true' && github.event.label.name == 'ci:full' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Hosted-only Nix install
+        if: runner.environment == 'github-hosted'
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      # Re-runs CI's latest run for this head (cancelling it first if it is mid-flight). The re-run is the same
+      # run id, a new attempt, on the same head SHA, so it reports under the same required names.
+      - name: Re-run CI at full scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: nix shell --inputs-from . nixpkgs#gh --command bash scripts/ci/rerun-ci-full.sh

@@ -1,0 +1,431 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # No `labeled` here, on purpose. GitHub cannot filter this trigger by label name, so listing it would make
+  # every label event (the review-gate labels scripts/refresh-gate-label.sh removes and re-adds included) start
+  # a run in this workflow's concurrency group below: it would cancel the real queued or in-flight run and take
+  # a full slot on the one runner. The `ci:full` label is handled by .github/workflows/ci-full-label.yml, which
+  # re-runs this workflow's latest run for the head; the scope step below reads the label from the API.
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Group on head_ref (set for pull_request, unset for push) falling back to
+# ref, so a branch's push run and its PR run collapse into ONE group instead
+# of running in parallel -- push's ref is refs/heads/<branch>, pull_request's
+# is refs/pull/<N>/merge for the same commit, and grouping on plain
+# github.ref does not see those as the same thing. Only cancel in-progress
+# runs on non-main groups: every job now queues on one self-hosted runner, so
+# a superseded PR run is dropped to free it, while main's history keeps a
+# green/red result per commit rather than losing intermediate runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# The job only needs to read the checked-out tree; `check.sh` runs `pnpm install`,
+# which executes arbitrary lockfile lifecycle scripts, so this keeps a malicious
+# postinstall from picking up write credentials it has no reason to need.
+#
+# The top-level token is `contents: read` and nothing else. The two jobs that run the scope steps add
+# `pull-requests: read` for themselves (they read the pull request's current labels to see `ci:full`);
+# `pr-gates` needs nothing more. Read-only everywhere; nothing in this workflow can write to the repository.
+permissions:
+  contents: read
+
+env:
+  # scripts/check.sh's test step already scopes this with `env -u ... FX_FORBID_MODEL_CALLS=1`
+  # for the vitest run specifically; setting it here too means every step in this job runs
+  # under the same guarantee, and no ANTHROPIC_* credential is referenced anywhere in this
+  # workflow (no secrets are read), so none are present for a test to pick up.
+  FX_FORBID_MODEL_CALLS: "1"
+
+# CI SCOPE. A pull request run lints, typechecks and tests only what the change can break: the packages it
+# touches plus everything that depends on them, decided by scripts/ci/affected.mjs from the committed range
+# HEAD^1..HEAD (HEAD is GitHub's merge commit, HEAD^1 the base tip). What forces a full run instead is
+# listed in scripts/ci/full-run-triggers.json and nowhere else. Two inputs force every run to full with no
+# code change: the repository Actions variable CI_FORCE_FULL=true, and the PR label `ci:full` (adding it
+# re-runs the latest run via ci-full-label.yml; a push while it is on runs full too). A push to
+# main always runs the full suite and never consults the classifier. Each run states its scope on its
+# summary page ("CI scope: ..."). Details: docs/ops/ci.md, "Affected-only PR runs".
+#
+# The e2e jobs never skip at job level. A matrix job skipped by its own `if:` reports under the unexpanded
+# name `workspace-e2e (${{ matrix.project }})` and as skipped, so the three named checks would be missing.
+# They always run, and when the change cannot affect the specs they say so in their first step, skip the
+# rest at step level, and finish green under their real names.
+#
+# WHERE JOBS RUN -- the runner guard. Every job uses
+#   runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+# so a PUBLIC repository always gets a GitHub-hosted runner, whatever CI_RUNS_ON says (a public repo's
+# `private` is false, and `false && x` is false, so the `||` falls through to the hosted label). The
+# variable is only honoured on the private repository: there it names the runner, and with it unset the job
+# runs on the owner's machine (`self-hosted`, which has Nix and a persistent store). Set
+# CI_RUNS_ON=ubicloud-standard-2 for Ubicloud, or ubuntu-latest for GitHub-hosted. No hosted CI by accident on
+# a private repo. scripts/ci/ci-workflow.test.mjs evaluates this expression with the real `&&` / `||`
+# semantics and fails on any other `runs-on`.
+#
+# The steps marked "(hosted)" run when the runner is GitHub-hosted OR CI_RUNS_ON names something other than
+# the owner's machine: Ubicloud runners register with GitHub as SELF-HOSTED, so `runner.environment` is
+# 'self-hosted' on them, and `self-hosted` itself (or unset) is our machine, which already has Nix.
+# Job names are the same on either path: `check` is required by .autonomous-team/config.json
+# ci.required_checks, and `workspace-e2e (desktop|phone|tablet)` keep their names.
+#
+# CI_DISABLED. Every job starts with `vars.CI_DISABLED != 'true'`: when that repository variable is the
+# exact string `true`, every job is skipped (no runner is asked for). A skipped check is NOT a pass:
+# scripts/lib/ci-status-check.sh refuses to count `skipped` or `neutral` as green.
+#
+# SECURITY. Fork pull requests run these jobs too, on GitHub-hosted runners only (the guard above), with a
+# read-only token and no secrets. Nothing here reads `secrets.`, there is no `pull_request_target` or
+# `workflow_run` trigger, checkout does not persist credentials, and the pull request's title, body and
+# branch name never appear inside a `run:` block (they reach a step through `env:` or a file only).
+# Owner action, outside this file: keep "Require approval for all outside collaborators" for fork PR
+# workflows on in the repo's Actions settings.
+#
+# CHROMIUM KEEPS ITS SANDBOX. The self-hosted unit permits the user/pid/net
+# namespaces and the chroot/capset syscalls that Chromium's sandbox needs, so the
+# sandbox is ON on every runner and there is no flag to turn it off. That
+# permission lives in the runner's NixOS unit (serviceOverrides in its
+# github-runner.nix) and is owner-managed; if the unit is tightened again, the
+# browser tier and the e2e specs will fail to start Chromium.
+jobs:
+  # The two public-plane gates that look at what a pull request publishes: the PR body may cite only the code
+  # repo (and carries a Discussion reference), and the diff may not add a path the private overlay owns.
+  # Public pull requests only: on the private repo the overlay paths are the whole point. Needs no secrets and
+  # no write access. The body is read from the event file into a file, never put in `env:` (the runner would
+  # print it into the log) and never spliced into the script; the base branch name arrives through `env:`.
+  pr-gates:
+    if: vars.CI_DISABLED != 'true' && github.event_name == 'pull_request' && github.event.repository.private == false
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # The denylist diffs origin/<base>...HEAD, which needs the merge base.
+          fetch-depth: 0
+
+      - name: PR link policy
+        run: |
+          set -euo pipefail
+          body_file="$RUNNER_TEMP/pr-body.txt"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+          PR_BODY_FILE="$body_file" bash scripts/ci/pr-link-policy.sh
+
+      - name: Publish denylist
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash scripts/ci/publish-denylist.sh "origin/${BASE_REF}"
+
+  check:
+    if: vars.CI_DISABLED != 'true'
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    # Backstop so a hung step cannot hold the single runner indefinitely.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # actions/checkout defaults to persisting the GITHUB_TOKEN as a git
+          # credential helper in .git/config. This job never pushes, comments, or
+          # calls the GitHub API (no `secrets.` reference anywhere in this file,
+          # no `gh` call in check.sh), so there is no reason for that credential to
+          # exist on disk at all -- and on a persistent self-hosted machine (unlike
+          # an ephemeral GitHub-hosted VM) a leftover credential sits there for
+          # every later job to potentially find, not just this run.
+          persist-credentials: false
+          # D#94: check-migration-order.sh needs one commit of parent history
+          # to resolve HEAD^1 (the merge/push commit's own base tip) below.
+          # It does not need the repo's full history -- see
+          # packages/db/migrations/README.md for why replay-merge-order.sh
+          # (which does) is a hand-run audit, not a CI step.
+          fetch-depth: 2
+
+      # Hosted-only setup: a fresh GitHub-hosted or Ubicloud VM has no Nix, so
+      # install it and cache the Nix store between runs. Gated on the runner, not
+      # the event: the owner's own machine (CI_RUNS_ON unset) already has Nix and
+      # a persistent store. Every third-party action is pinned by full commit SHA. None of
+      # these steps reads a secret; the cache actions use the runner's own scoped
+      # cache token. Every step carries a timeout-minutes so a hung setup step can
+      # never burn the budget again (7+ minutes stuck on the Nix cache, 10-05).
+      #
+      # The Nix store cache (magic-nix-cache) runs ONLY on real GitHub-hosted
+      # runners. It talks to the GitHub Actions cache service through a local
+      # daemon, and Ubicloud replaces that service with its own, where the action
+      # hangs. Ubicloud runners can report runner.environment == 'github-hosted'
+      # (seen live 10-05), so the gate also excludes CI_RUNS_ON starting with
+      # 'ubicloud'. continue-on-error means a cache problem can never fail CI. On
+      # Ubicloud Nix is installed but its store is not cached; the pnpm and
+      # Playwright caches use actions/cache, which Ubicloud supports transparently.
+      - name: Install Nix (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 10
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Nix store cache (hosted)
+        if: runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+
+      - name: pnpm store cache (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      # Hosted runs only: Ubuntu 24.04 images set
+      # kernel.apparmor_restrict_unprivileged_userns=1, which stops Chromium's
+      # sandbox from creating its namespaces. Turning it off is safe because the
+      # VM is ephemeral and nothing outlives the job. The Chromium sandbox itself
+      # stays ON. Never reached on the self-hosted runner (no sudo sysctl on the
+      # owner's machine).
+      - name: Allow Chromium's user-namespace sandbox (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 5
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns is absent; leaving it alone"
+          fi
+
+      # Rollback safety (docs/ops/runbooks/rollback.md). These three steps run on
+      # whichever runner took the job (the self-hosted one unless CI_RUNS_ON says
+      # otherwise) and read no secrets. HEAD^1 is the base tip on both a pull
+      # request (GitHub's merge commit) and a push to main (squash merge), and
+      # fetch-depth 2 above is enough to see it. None of them may be made
+      # optional (no `if:`, no `continue-on-error`): the wiring test checks.
+      #
+      # 1. Secret scan of the lines this change adds. It is the FIRST step after
+      #    checkout, before any `nix develop` or script from the change runs, so
+      #    nothing the change controls can alter what it reads.
+      #    - It needs only three programs from the runner: bash, git and nix.
+      #      The runner's PATH outside `nix develop` is small (awk was missing on
+      #      the first live run), so everything else (git again, coreutils,
+      #      gitleaks, and the shell that runs the filter) comes from nixpkgs via
+      #      `nix shell`; the wiring test runs this step with only those three on
+      #      PATH. `nix shell` does not run any shellHook.
+      #    - The nixpkgs revision is read from flake.nix and flake.lock of the BASE
+      #      commit (HEAD^1), not from the checkout, so a change that edits
+      #      flake.lock cannot swap in a different gitleaks or shell for its own
+      #      scan. The bump takes effect for the scan once it is on main.
+      #    - `--text --no-textconv` make git print added lines even for files
+      #      marked binary or -diff in a .gitattributes the change brings.
+      #    - gitleaks runs from a scratch directory with its config variables
+      #      unset, so a .gitleaks.toml or .gitleaksignore in the change is never
+      #      read.
+      #    - Fail closed: an added line that reaches gitleaks as 0 bytes fails the
+      #      step. Findings are redacted. A deliberate fake can carry
+      #      `gitleaks:allow`.
+      - name: Secret scan of the change
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse HEAD^1)"
+          cd "${RUNNER_TEMP:?}"
+          IFS= read -r -d '' scan <<'SCAN' || true
+          unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          git -C "${GITHUB_WORKSPACE:?}" diff -U0 --text --no-textconv --no-color --no-ext-diff --diff-filter=d HEAD^1 HEAD > "$work/change.diff"
+          added=0
+          inhdr=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              'diff --git '*) inhdr=1 ;;
+              '@@'*) inhdr=0 ;;
+              '+'*)
+                if [ "$inhdr" = 0 ]; then
+                  printf '%s\n' "${line:1}"
+                  added=$((added + 1))
+                fi
+                ;;
+            esac
+          done < "$work/change.diff" > "$work/added.txt"
+          cd "$work"
+          rc=0
+          gitleaks stdin --no-banner --redact < added.txt 2> log || rc=$?
+          cat log >&2
+          if [ "$added" -gt 0 ] && [[ "$(< log)" == *"scanned ~0 bytes"* ]]; then
+            echo "secret scan: gitleaks scanned 0 bytes of $added added line(s)" >&2
+            exit 1
+          fi
+          exit "$rc"
+          SCAN
+          nix shell nixpkgs#bash nixpkgs#git nixpkgs#coreutils nixpkgs#gitleaks \
+            --inputs-from "git+file://${GITHUB_WORKSPACE:?}?rev=${base}&shallow=1" \
+            --command bash -euo pipefail -c "$scan"
+
+      # 2. A new migration may not remove or reshape anything the previous deploy
+      #    still uses, unless it carries a contract-phase marker.
+      - name: Migration compatibility lint
+        env:
+          MIGRATION_ORDER_BASE: HEAD^1
+        run: nix develop .#ci --command node scripts/ci/check-migration-compat.mjs
+
+      # 3. The lint's own tests, and the wiring of the secret scan above. The same step runs the scope
+      #    classifier's tests and the tests that read this workflow.
+      - name: Migration lint and secret scan tests
+        run: nix develop .#ci --command node --test scripts/ci/check-migration-compat.test.mjs scripts/ci/affected.test.mjs scripts/ci/ci-workflow.test.mjs scripts/ci/licence.test.mjs
+
+      # 4. How much to run (pull requests only). Exports FX_CHECK_AFFECTED for "Run checks" when the answer
+      #    is `affected`, and CI_SCOPE_RUNNER_PROTOCOL for the Node 22 step. CI_FORCE_FULL and the
+      #    `ci:full` label are the two inputs that force `full`. The label is read from the API at this moment
+      #    (read-only token, passed as environment data), never from the event payload: a re-run replays the
+      #    payload as it was when the run started. If the read fails the answer is `full`.
+      - name: CI scope
+        if: github.event_name == 'pull_request'
+        env:
+          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+          CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
+
+      - name: CI scope (push to main)
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "CI scope: full (push to main)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # node, pnpm and postgresql (initdb/pg_ctl/createdb) all come from flake.nix's
+      # `ci` devShell (D#507: lean, no Python tooling, so a fresh runner fetches it
+      # all from the public cache). It is built from the same shared package list as
+      # the `default` shell a developer runs locally, so it cannot drift from it. packages/db's own vitest globalSetup provisions and tears down its own
+      # throwaway Postgres cluster; nothing else needs configuring here.
+      - name: Run checks
+        env:
+          # The browser tier runs on every event, push included, with Chromium's
+          # sandbox on. check.sh still refuses FX_BROWSER_TIER=skip on pull_request.
+          # D#94: HEAD is GitHub's synthetic merge commit on pull_request
+          # (HEAD^1 is the base tip it merged onto) and the previous main on
+          # push (merges here are squash merges, so HEAD^1 is simply the
+          # prior main commit) -- either way HEAD^1 is "the base at merge
+          # time", which is what check-migration-order.sh's R1 check needs.
+          MIGRATION_ORDER_BASE: HEAD^1
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then unset FX_CHECK_AFFECTED; fi
+          nix develop .#ci --command bash scripts/check.sh
+
+      # The runner protocol package is installed on customers' machines, where the supported minimum is Node
+      # 22.22.2, while this repository builds and tests on Node 24. This step runs that package's own tests under
+      # Node 22 so the minimum stays true. It takes seconds on the machine the job is already on: no new job, no
+      # matrix, no hosted runner.
+      #   - Node 22 comes from the flake's own locked nixpkgs. The step fails if it is older than 22.22.2.
+      #   - It uses the dependencies "Run checks" just installed, and starts vitest's entry file with that `node`
+      #     directly, not through pnpm, so the root `engines.node >= 24` check is not involved.
+      - name: Runner protocol tests on Node 22
+        if: github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false'
+        run: |
+          set -euo pipefail
+          nix shell --inputs-from . nixpkgs#nodejs_22 --command node --version
+          nix shell --inputs-from . nixpkgs#nodejs_22 --command node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 22 || (minor === 22 && patch < 2)) { console.error("need Node 22.22.2 or newer, got " + process.versions.node); process.exit(1); }'
+          cd packages/runner-protocol
+          nix shell --inputs-from ../.. nixpkgs#nodejs_22 --command node node_modules/vitest/vitest.mjs run
+
+  # The workspace shell's Playwright specs (apps/workspace/e2e, all three
+  # projects). check.sh does not run them, so a broken spec reached main
+  # unseen. Pull requests only. A separate job so it runs beside `check`
+  # rather than after it (on the single self-hosted runner they queue in turn).
+  workspace-e2e:
+    # Explicit so the check name stays `workspace-e2e (<project>)`.
+    name: workspace-e2e (${{ matrix.project }})
+    if: vars.CI_DISABLED != 'true' && github.event_name == 'pull_request'
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 40
+    # One job per Playwright project, kept so the required check names stay
+    # `workspace-e2e (desktop|phone|tablet)` (owner-configured). The fixture-server
+    # ports are picked per job at run time (see the "Pick free e2e ports" step), so
+    # two runners on one machine, or a local e2e run on the 4319 default, cannot
+    # collide.
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop, phone, tablet]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # HEAD^1 is the base tip (GitHub's merge commit), as in the check job; two commits is enough.
+          fetch-depth: 2
+
+      # Hosted runs only, and needed by the scope step below (it runs under nix develop). On the
+      # self-hosted runner this is skipped and the scope step is the first one to run.
+      - name: Install Nix (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 10
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      # Decides whether the specs can be affected by this change (same classifier, same inputs as the
+      # check job). When they cannot, this step prints the skip line and every later step is guarded on
+      # CI_SCOPE_E2E, so the job still ends `success` under its real name. Do not turn this into a job-level
+      # `if:`: see CI SCOPE at the top of this file.
+      - name: E2E scope (${{ matrix.project }})
+        env:
+          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+          CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github --e2e-step
+
+      - name: Nix store cache (hosted)
+        if: env.CI_SCOPE_E2E == 'true' && runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+
+      - name: pnpm store cache (hosted)
+        if: env.CI_SCOPE_E2E == 'true' && (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Allow Chromium's user-namespace sandbox (hosted)
+        if: env.CI_SCOPE_E2E == 'true' && (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 5
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns is absent; leaving it alone"
+          fi
+
+      # Bind port 0 twice at once (so the two differ) to get two free ports, then
+      # hand them to playwright.config.ts through E2E_PORT / E2E_FIRST_PARTY_PORT.
+      # There is a small window between releasing them here and the webServer
+      # binding them; it is far narrower than a fixed port shared across runners.
+      - name: Pick free e2e ports (${{ matrix.project }})
+        if: env.CI_SCOPE_E2E == 'true'
+        env:
+          E2E_PROJECT: ${{ matrix.project }}
+        run: |
+          nix develop .#ci --command node -e '
+            const net = require("net");
+            const open = () => new Promise((res) => {
+              const s = net.createServer();
+              s.listen(0, "127.0.0.1", () => res(s));
+            });
+            Promise.all([open(), open()]).then((ss) => {
+              const [a, b] = ss.map((s) => s.address().port);
+              require("fs").appendFileSync(process.env.GITHUB_ENV, `E2E_PORT=${a}\nE2E_FIRST_PARTY_PORT=${b}\n`);
+              console.log(`e2e ports for ${process.env.E2E_PROJECT}: E2E_PORT=${a} E2E_FIRST_PARTY_PORT=${b}`);
+              ss.forEach((s) => s.close());
+            });
+          '
+
+      # `pnpm --filter workspace e2e` builds dist/ and then runs playwright; the
+      # browsers come from the flake's PLAYWRIGHT_BROWSERS_PATH. CI=true makes
+      # playwright.config.ts retry once and forbid `.only`; a test that needed
+      # its retry is listed as flaky in the summary instead of failing.
+      - name: Run workspace e2e (${{ matrix.project }})
+        if: env.CI_SCOPE_E2E == 'true'
+        env:
+          E2E_PROJECT: ${{ matrix.project }}
+        run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm --filter workspace e2e --project="$E2E_PROJECT"'

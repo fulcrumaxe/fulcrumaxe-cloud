@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "validation_failed",
+    "message": "request failed validation",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  },
+  "details": [
+    {
+      "path": "",
+      "code": "custom"
+    }
+  ]
+}

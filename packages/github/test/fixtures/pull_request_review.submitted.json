@@ -1,0 +1,1 @@
+{"action":"submitted","review":{"state":"approved","user":{"login":"acme-owner"},"author_association":"OWNER"},"pull_request":{"number":42},"installation":{"id":4242},"repository":{"id":9001,"full_name":"acme-corp/widgets","default_branch":"main"}}

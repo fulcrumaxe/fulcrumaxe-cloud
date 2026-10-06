@@ -1,0 +1,70 @@
+/* D#37 WS-F3: Repos app. Theme variables come from the shell; the fallbacks only matter if a theme leaves one out. */
+.repos-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.repos-title { margin: 0; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.repos-subtitle { margin: 0 0 8px; font-size: 0.9rem; }
+.repos-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.repos-error { margin: 6px 0 0; color: #ff6b6b; }
+.repos-head { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.repos-install, .repos-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.repos-note { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.repos-note:empty { display: none; }
+
+.repos-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.repos-btn:hover:not(:disabled) { border-color: var(--accent, #1aff80); }
+.repos-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.repos-btn:focus-visible, .repos-open:focus-visible, .repos-toggle input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+
+/* One column on a phone; list and settings side by side once the window is wide. */
+.repos-body { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@container (min-width: 640px) {
+  .repos-body { grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.2fr); align-items: start; }
+}
+
+.repos-rows { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.repos-row { border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.repos-open {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.repos-open[aria-pressed="true"] { border-left: 3px solid var(--accent, #1aff80); }
+.repos-name { overflow-wrap: anywhere; }
+.repos-state { flex: none; font-size: 0.78rem; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.repos-readonly { margin: 0; padding: 0 10px 8px; font-size: 0.78rem; }
+
+.repos-toggle { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 10px; }
+.repos-toggle input { flex: none; width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--accent, #1aff80); }
+.repos-toggle span { display: flex; flex-direction: column; }
+.repos-confirm { margin: 0 0 10px; padding: 8px 10px; border: 1px solid #ff6b6b; }
+.repos-actions { margin-top: 8px; }

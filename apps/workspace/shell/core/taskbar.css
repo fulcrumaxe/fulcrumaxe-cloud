@@ -1,0 +1,486 @@
+/* ── fulcrumaxe-os Dock Hybrid Taskbar ────────────────────────────────────────── */
+
+:root {
+    --taskbar-size: 48px;
+}
+
+#taskbar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: var(--taskbar-size);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.92);
+    border-top: 1px solid rgba(var(--theme-rgb), 0.4);
+    z-index: 500;
+    padding: 0 12px;
+    gap: 4px;
+}
+
+/* ── Dock sections ──────────────────────────────────────────────────── */
+
+#dock-pinned, #dock-open {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.dock-divider {
+    width: 1px;
+    height: 24px;
+    background: rgba(var(--theme-rgb), 0.2);
+    margin: 0 6px;
+    flex-shrink: 0;
+}
+
+/* ── Dock icons ─────────────────────────────────────────────────────── */
+
+.dock-icon {
+    /* `.dock-icon` is a native <button> since D#649. The UA button styling has
+       to be reset or the dock changes appearance — and every reset below is
+       declared FIRST so the rule's own values (and the :hover/.active rules)
+       still win. AC7 is the check that this stayed byte-identical. */
+    appearance: none;
+    -webkit-appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    line-height: inherit;
+    text-align: inherit;
+    /* `font: inherit` carries the font-* longhands and NOTHING ELSE. Chrome's
+       UA form-control block also sets text-transform, letter-spacing,
+       word-spacing, text-indent, text-shadow and text-align on button, and
+       those are inherited properties the div was picking up from #taskbar.
+       Measured against an identically-classed div injected as a sibling in the
+       same parent, three of them actually differed here:
+         text-transform  button none    vs div uppercase
+         letter-spacing  button normal  vs div 0.8px
+         unicode-bidi    button normal  vs div isolate
+       `inherit` rather than a literal `uppercase`, because the div never
+       hardcoded a value — it inherited one, and a literal would silently stop
+       tracking #taskbar if that ever changes. unicode-bidi is NOT an inherited
+       property, so it takes the div's UA value explicitly. */
+    text-transform: inherit;
+    letter-spacing: inherit;
+    unicode-bidi: isolate;
+    /* Chrome's UA gives <button> border-box. `.dock-icon` has no border or
+       padding so nothing moves either way today, but a future padding value
+       would land differently on the two — and "byte-identical" has to be a
+       property of the rule, not a coincidence of its current values. */
+    box-sizing: content-box;
+    position: relative;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: transform 100ms ease-out, background 100ms ease-out;
+}
+
+.dock-icon:hover {
+    background: rgba(var(--theme-rgb), 0.15);
+}
+
+.dock-icon.active {
+    background: rgba(var(--theme-rgb), 0.2);
+}
+
+/* A control you can Tab to but cannot see the focus on is only half reachable.
+   `:focus-visible` and never bare `:focus` — the latter flashes an outline on
+   every mouse click, which is how these rules get deleted again. */
+.dock-icon:focus-visible {
+    outline: 2px solid var(--theme-primary);
+    outline-offset: 2px;
+}
+
+.dock-icon-text {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.85rem;
+    font-weight: bold;
+    color: var(--theme-primary);
+    letter-spacing: 0.5px;
+    user-select: none;
+    line-height: 1;
+}
+
+/* Dim icon text when app is not running (pinned but closed) */
+.dock-icon.pinned:not(.running) .dock-icon-text {
+    opacity: 0.4;
+}
+
+/* ── Dot indicator ──────────────────────────────────────────────────── */
+
+.dock-dot {
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: transparent;
+    transition: background 150ms ease-out;
+}
+
+/* Running app: solid dot */
+.dock-icon.running .dock-dot {
+    background: var(--theme-primary);
+}
+
+/* Minimized: dimmed dot */
+.dock-icon.minimized-dot .dock-dot {
+    opacity: 0.4;
+}
+
+/* Active app: brighter/larger dot */
+.dock-icon.active .dock-dot {
+    width: 6px;
+    height: 6px;
+    bottom: 1px;
+    box-shadow: 0 0 4px rgba(var(--theme-rgb), 0.5);
+}
+
+/* ── Tray section ───────────────────────────────────────────────────── */
+
+#taskbar-tray {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding-left: 8px;
+    border-left: 1px solid rgba(var(--theme-rgb), 0.2);
+    margin-left: auto;
+}
+
+#taskbar-clock {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.75rem;
+    color: var(--theme-primary);
+    letter-spacing: 1px;
+}
+
+#taskbar-user {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    color: var(--theme-primary);
+    opacity: 0.7;
+    letter-spacing: 0.5px;
+}
+
+#taskbar-badge {
+    background: var(--theme-primary);
+    color: #000;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.65rem;
+    font-weight: bold;
+    padding: 0.1rem 0.35rem;
+    min-width: 1rem;
+    text-align: center;
+}
+
+#taskbar-badge.hidden {
+    display: none;
+}
+
+/* ── Workspace indicator ────────────────────────────────────────── */
+
+#workspace-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 8px;
+    border-right: 1px solid rgba(var(--theme-rgb), 0.2);
+    margin-right: 4px;
+}
+
+.workspace-dot {
+    /* Native <button> since D#649 — same reset as `.dock-icon`, plus
+       `box-sizing: content-box`: the dot is 8x8 with a 1px border, and a
+       button's border-box default would render it 8x8 OUTSIDE the border
+       instead of 10x10, shrinking every dot by 2px. */
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    /* Same UA form-control block as `.dock-icon` above. Measured against an
+       identically-classed span in the same parent, this element differs on a
+       DIFFERENT third property — text-align, which `.dock-icon` already sets:
+         text-transform  button none    vs span uppercase
+         letter-spacing  button normal  vs span 0.8px
+         text-align      button center  vs span start
+       All three are inert while the dot has no text content, which is exactly
+       why they are written down: a caret or a number added here later would
+       land differently and nothing would connect it to this change. */
+    text-transform: inherit;
+    letter-spacing: inherit;
+    text-align: inherit;
+    box-sizing: content-box;
+    width: 8px;
+    height: 8px;
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    background: transparent;
+    cursor: pointer;
+    transition: background 150ms ease-out, border-color 150ms ease-out;
+}
+
+.workspace-dot:hover {
+    border-color: var(--theme-primary);
+    background: rgba(var(--theme-rgb), 0.15);
+}
+
+.workspace-dot.active {
+    background: var(--theme-primary);
+    border-color: var(--theme-primary);
+    box-shadow: 0 0 4px rgba(var(--theme-rgb), 0.5);
+}
+
+.workspace-dot:focus-visible {
+    outline: 2px solid var(--theme-primary);
+    outline-offset: 2px;
+}
+
+/* ── Tooltip ────────────────────────────────────────────────────────── */
+
+.dock-tooltip {
+    position: fixed;
+    z-index: 10001;
+    background: rgba(10, 10, 10, 0.95);
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    color: var(--theme-primary);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    white-space: nowrap;
+    pointer-events: none;
+    letter-spacing: 0.5px;
+}
+
+/* ── Hover preview ──────────────────────────────────────────────────── */
+
+.dock-preview {
+    position: fixed;
+    z-index: 10002;
+    overflow: hidden;
+    border: 1px solid rgba(var(--theme-rgb), 0.4);
+    background: rgba(0, 0, 0, 0.95);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+
+/* ── Taskbar Position Variants ───────────────────────────────────────── */
+
+body[data-taskbar-position="bottom"] #taskbar {
+    bottom: 0; top: auto; left: 0; right: 0;
+    width: 100%; height: var(--taskbar-size);
+    flex-direction: row;
+    border-top: 1px solid rgba(var(--theme-rgb), 0.4);
+    border-left: none;
+}
+
+body[data-taskbar-position="top"] #taskbar {
+    top: 0; bottom: auto; left: 0; right: 0;
+    width: 100%; height: var(--taskbar-size);
+    flex-direction: row;
+    border-bottom: 1px solid rgba(var(--theme-rgb), 0.4);
+    border-top: none;
+    border-left: none;
+}
+
+body[data-taskbar-position="left"] #taskbar {
+    left: 0; right: auto; top: 0; bottom: 0;
+    height: 100%; width: var(--taskbar-size);
+    flex-direction: column;
+    border-right: 1px solid rgba(var(--theme-rgb), 0.4);
+    border-top: none;
+    border-left: none;
+    padding: 8px 0;
+    justify-content: flex-start;
+}
+
+body[data-taskbar-position="right"] #taskbar {
+    right: 0; left: auto; top: 0; bottom: 0;
+    height: 100%; width: var(--taskbar-size);
+    flex-direction: column;
+    border-left: 1px solid rgba(var(--theme-rgb), 0.4);
+    border-top: none;
+    padding: 8px 0;
+    justify-content: flex-start;
+}
+
+/* Vertical taskbars stack the pinned and open dock sections. Left as rows they
+   centre a row wider than the 48px bar, so the first icons land off-screen
+   and cannot be clicked. */
+body[data-taskbar-position="left"] #dock-pinned,
+body[data-taskbar-position="left"] #dock-open,
+body[data-taskbar-position="right"] #dock-pinned,
+body[data-taskbar-position="right"] #dock-open {
+    flex-direction: column;
+}
+
+body[data-taskbar-position="left"] .dock-divider,
+body[data-taskbar-position="right"] .dock-divider {
+    width: 24px;
+    height: 1px;
+    margin: 6px 0;
+}
+
+/* Tray hides on vertical taskbars (no space) */
+body[data-taskbar-position="left"] #taskbar-tray,
+body[data-taskbar-position="right"] #taskbar-tray {
+    display: none;
+}
+
+/* Workspace indicator rotates for vertical */
+body[data-taskbar-position="left"] #workspace-indicator,
+body[data-taskbar-position="right"] #workspace-indicator {
+    flex-direction: column;
+    padding: 0;
+    border-right: none;
+    border-top: 1px solid rgba(var(--theme-rgb), 0.2);
+    margin: 4px 0;
+    padding-top: 4px;
+}
+
+/* ── Taskbar Style Variants ──────────────────────────────────────────── */
+
+/* Floating dock (bottom only) */
+body[data-taskbar-style="dock"] #taskbar {
+    border-radius: 16px;
+    margin: 0 auto 8px;
+    width: auto;
+    max-width: 600px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--glass-bg, rgba(10, 10, 10, 0.85));
+    backdrop-filter: blur(var(--glass-blur, 0px));
+    box-shadow: var(--shadow-lg), var(--glow-accent);
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+}
+
+/* Windows 11-style: dock items centered on the bar */
+body[data-taskbar-style="center-dock"] #taskbar {
+    position: relative;
+}
+body[data-taskbar-style="center-dock"] #taskbar-apps {
+    justify-content: center;
+    flex: 1;
+}
+body[data-taskbar-style="center-dock"] #taskbar-tray {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+/* Slim icons — hide tray labels, enlarge icons slightly */
+body[data-taskbar-style="slim-icons"] #taskbar {
+    --taskbar-size: 56px;
+}
+
+body[data-taskbar-style="slim-icons"] #taskbar-tray,
+body[data-taskbar-style="slim-icons"] #workspace-indicator {
+    display: none;
+}
+
+/* Hidden / auto-show */
+body[data-taskbar-position="bottom"][data-taskbar-style="hidden"] #taskbar {
+    opacity: 0;
+    transform: translateY(100%);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+    pointer-events: none;
+}
+
+body[data-taskbar-position="top"][data-taskbar-style="hidden"] #taskbar {
+    opacity: 0;
+    transform: translateY(-100%);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+    pointer-events: none;
+}
+
+body[data-taskbar-position="left"][data-taskbar-style="hidden"] #taskbar {
+    opacity: 0;
+    transform: translateX(-100%);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+    pointer-events: none;
+}
+
+body[data-taskbar-position="right"][data-taskbar-style="hidden"] #taskbar {
+    opacity: 0;
+    transform: translateX(100%);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+    pointer-events: none;
+}
+
+body[data-taskbar-style="hidden"]:hover #taskbar,
+body[data-taskbar-style="hidden"][data-taskbar-reveal] #taskbar {
+    opacity: 1;
+    transform: translate(0, 0);
+    pointer-events: auto;
+}
+
+/* ── Window on another workspace (D#37 WS-W3) ───────────────────────── */
+/* Shared by the CRT dock, Orchard and Crystal: a small numbered badge in the
+   entry's top-right corner, and the CRT icon text dimmed a little. The parent is
+   position: relative in all three shells. No marker is ever added on a phone;
+   the rule below is belt and braces. */
+.ws-elsewhere-badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 7px;
+    background: var(--theme-primary, #fff);
+    color: #000;
+    font: bold 10px/14px 'Courier New', Courier, monospace;
+    text-align: center;
+    pointer-events: none;
+}
+.dock-icon-elsewhere .dock-icon-text { opacity: 0.6; }
+html.fulc-phone-mode .ws-elsewhere-badge { display: none; }
+
+/* ── Phone dock overflow (D#37) ──────────────────────────────────────
+   The dock is a centred flex row. Centring a row wider than the viewport
+   pushes its overflow off BOTH edges, and the left half cannot be reached
+   by scrolling (negative x). On phones the dock therefore scrolls sideways
+   instead: `safe center` centres while everything fits and falls back to
+   start alignment as soon as it does not, so no icon ever sits at x < 0.
+   Phone only; desktop and tablet keep the rules above untouched. */
+html.fulc-phone-mode #taskbar {
+    /* The base rule is width:100% + 24px padding on a content-box, i.e. 24px
+       wider than the screen, which alone clips the last icon on the right. */
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-y: hidden;
+    justify-content: safe center;
+    overscroll-behavior-x: contain;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+}
+
+html.fulc-phone-mode #taskbar::-webkit-scrollbar {
+    display: none;
+}
+
+html.fulc-phone-mode #dock-pinned,
+html.fulc-phone-mode #dock-open,
+html.fulc-phone-mode #taskbar-tray {
+    flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html.fulc-phone-mode #taskbar {
+        scroll-behavior: auto;
+    }
+}

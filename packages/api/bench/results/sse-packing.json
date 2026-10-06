@@ -1,0 +1,105 @@
+{
+  "description": "D#31 API-5 criterion 11: SSE packing benchmark. The 10-stream run is gated; other counts are reported.",
+  "runs": {
+    "10": {
+      "streams": 10,
+      "run_streams": 5,
+      "account_streams": 5,
+      "minutes": 9,
+      "events_per_second_per_stream": 1,
+      "gated": true,
+      "peak_rss_mb": 164.2,
+      "peak_rss_hwm_mb": 163.2,
+      "baseline_rss_mb": 160.8,
+      "cpu_seconds": 3.53,
+      "p50_latency_ms": 1284,
+      "p95_latency_ms": 1941,
+      "max_latency_ms": 2057,
+      "expected_events": 5400,
+      "received_events": 5400,
+      "dropped_events": 0,
+      "out_of_order_events": 0,
+      "reconnects": 0,
+      "writer_errors": 0,
+      "thresholds": {
+        "peak_rss_mb_lt": 2048,
+        "p95_latency_ms_lte": 3000,
+        "p95_latency_ms_fallback_lte": 4000,
+        "dropped_events_eq": 0
+      },
+      "p95_bar_applied": "p95<=3s",
+      "settle_ms": 1000,
+      "fx_events_settle_ms_env": null,
+      "pass": true,
+      "environment": {
+        "node": "v22.23.2",
+        "cpus": 12,
+        "cpu_model": "AMD Ryzen 5 7600 6-Core Processor",
+        "total_mem_gb": 14.7,
+        "platform": "linux 6.18.53",
+        "server": "next start (production build), one process",
+        "database": "local PostgreSQL, app_user / platform_ops pools",
+        "poll_intervals_ms": {
+          "active": 2000,
+          "idle": 10000,
+          "run": 2000
+        },
+        "settle_ms": 1000,
+        "fx_events_settle_ms_env": null
+      },
+      "generated_at": "2026-09-29T06:28:41.158Z",
+      "leases_while_open": 10,
+      "leases_after_disconnect": 0
+    },
+    "50": {
+      "streams": 50,
+      "run_streams": 25,
+      "account_streams": 25,
+      "minutes": 3,
+      "events_per_second_per_stream": 1,
+      "gated": false,
+      "peak_rss_mb": 173.7,
+      "peak_rss_hwm_mb": 172.4,
+      "baseline_rss_mb": 170.9,
+      "cpu_seconds": 2.41,
+      "p50_latency_ms": 1084,
+      "p95_latency_ms": 1976,
+      "max_latency_ms": 2003,
+      "expected_events": 9000,
+      "received_events": 9000,
+      "dropped_events": 0,
+      "out_of_order_events": 0,
+      "reconnects": 0,
+      "writer_errors": 0,
+      "thresholds": {
+        "peak_rss_mb_lt": 2048,
+        "p95_latency_ms_lte": 3000,
+        "p95_latency_ms_fallback_lte": 4000,
+        "dropped_events_eq": 0
+      },
+      "p95_bar_applied": "p95<=3s",
+      "settle_ms": 1000,
+      "fx_events_settle_ms_env": null,
+      "pass": true,
+      "environment": {
+        "node": "v22.23.2",
+        "cpus": 12,
+        "cpu_model": "AMD Ryzen 5 7600 6-Core Processor",
+        "total_mem_gb": 14.7,
+        "platform": "linux 6.18.53",
+        "server": "next start (production build), one process",
+        "database": "local PostgreSQL, app_user / platform_ops pools",
+        "poll_intervals_ms": {
+          "active": 2000,
+          "idle": 10000,
+          "run": 2000
+        },
+        "settle_ms": 1000,
+        "fx_events_settle_ms_env": null
+      },
+      "generated_at": "2026-09-29T06:31:58.961Z",
+      "leases_while_open": 50,
+      "leases_after_disconnect": 0
+    }
+  }
+}

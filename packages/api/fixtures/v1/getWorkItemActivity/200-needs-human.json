@@ -1,0 +1,36 @@
+{
+  "stage": "needs_human",
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [
+    {
+      "id": "66666666-6666-4666-8666-000000000012",
+      "role": "executor",
+      "status": "succeeded",
+      "usd": 0.9,
+      "created_at": "2026-10-03T09:30:00.000Z",
+      "summary": "The Spec asks for a file that cannot exist, so I opened no pull request.",
+      "lines": []
+    }
+  ],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": {
+    "kind": "needs_human",
+    "reason": "The Spec asks for a file that cannot exist, so I opened no pull request.\n<img src=x onerror=alert(1)>"
+  },
+  "actions": [
+    "build_again",
+    "back_to_discussion",
+    "close"
+  ],
+  "close_on_github": false
+}

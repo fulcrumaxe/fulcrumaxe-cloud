@@ -1,0 +1,137 @@
+/* ── fulcrumaxe-os Desktop ────────────────────────────────────────────────────── */
+
+#desktop-screen {
+    position: relative;
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+}
+
+#desktop-surface {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: calc(100vh - 48px);
+    z-index: 10;
+    /* No padding, flex, or gap — icons use absolute positioning now */
+}
+
+#desktop-surface.wallpaper-active {
+    /* CSS wallpapers apply directly to the surface */
+}
+
+.desktop-icon {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border: 1px solid transparent;
+    user-select: none;
+    transition: left 150ms ease-out, top 150ms ease-out;
+
+    /* D#649 PR 2: the icon is a native <button> now, so it arrives carrying
+       Chrome's form-control UA block. These are the properties PR 1 MEASURED
+       as clobbered by a div->button swap (TAG_SWAP_KNOWN_CLOBBERED in
+       scripts/mobile-verify/keyboard-reach.mjs) plus the box and paint
+       properties a UA button brings with it. `font: inherit` alone is not
+       enough — it carries only the font-* longhands, so text-transform and
+       letter-spacing still reset to none/normal and the labels stop
+       inheriting body's uppercase.
+
+       box-sizing is content-box, not border-box: the div it replaces was
+       content-box (index.html loads no global reset), and the inline
+       width/height are 100px against a 1px border, so border-box would shrink
+       every icon by 2px. */
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    box-sizing: content-box;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+    font: inherit;
+    color: inherit;
+    text-align: center;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    word-spacing: inherit;
+    text-indent: 0;
+    unicode-bidi: inherit;
+    white-space: normal;
+}
+
+/* Keyboard focus is reachable for the first time here, so it has to be
+   visible. :focus-visible only — a mouse click must not draw a ring. */
+.desktop-icon:focus-visible {
+    outline: 2px solid var(--theme-primary);
+    outline-offset: 2px;
+}
+
+.desktop-icon:hover {
+    background: rgba(var(--theme-rgb), 0.08);
+    border-color: rgba(var(--theme-rgb), 0.15);
+}
+
+.desktop-icon.selected {
+    background: rgba(var(--theme-rgb), 0.15);
+    border-color: rgba(var(--theme-rgb), 0.4);
+}
+
+.desktop-icon.dragging {
+    opacity: 0.7;
+    cursor: grabbing;
+}
+
+.desktop-icon-graphic {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 1.6rem;
+    font-weight: bold;
+    color: var(--theme-primary);
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(var(--theme-rgb), 0.3);
+    background: rgba(var(--theme-rgb), 0.05);
+    margin-bottom: 0.3rem;
+}
+
+.desktop-icon.selected .desktop-icon-graphic {
+    border-color: var(--theme-primary);
+    background: rgba(var(--theme-rgb), 0.12);
+    box-shadow: 0 0 8px rgba(var(--theme-rgb), 0.2);
+}
+
+.desktop-icon-label {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.65rem;
+    color: var(--theme-primary);
+    text-align: center;
+    letter-spacing: 0.5px;
+    word-break: break-word;
+    max-width: 80px;
+}
+
+.desktop-drop-indicator {
+    position: absolute;
+    width: 100px;
+    height: 100px;
+    border: 2px dashed rgba(var(--theme-rgb), 0.3);
+    background: rgba(var(--theme-rgb), 0.05);
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+}
+
+.desktop-selection-rect {
+    position: fixed;
+    border: 1px solid rgba(var(--theme-rgb), 0.5);
+    background: rgba(var(--theme-rgb), 0.08);
+    pointer-events: none;
+    z-index: 15;
+    display: none;
+}

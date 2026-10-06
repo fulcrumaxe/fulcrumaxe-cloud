@@ -1,0 +1,48 @@
+{
+  "name": "web",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "prebuild": "node scripts/copy-workspace.mjs && node --experimental-strip-types scripts/check-env-manifest.mjs && node --experimental-strip-types scripts/migrate-on-build.mjs",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
+    "@fx/api": "workspace:*",
+    "@fx/billing": "workspace:*",
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "@fx/design": "workspace:*",
+    "@fx/gh-policy": "workspace:*",
+    "@fx/github": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "@fx/pipeline": "workspace:*",
+    "@fx/plan-data": "workspace:*",
+    "@fx/reconcile": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/runner-cloud": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "@fx/webhooks": "workspace:*",
+    "@fx/worker": "workspace:*",
+    "@vercel/functions": "^3.9.9",
+    "jose": "^6.0.0",
+    "next": "^15.1.0",
+    "pg": "^8.13.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "workflow": "^4.8.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

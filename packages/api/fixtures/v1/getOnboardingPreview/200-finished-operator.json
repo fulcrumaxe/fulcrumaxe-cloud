@@ -1,0 +1,58 @@
+{
+  "preview": {
+    "preview_id": "55555555-5555-4555-8555-555555555555",
+    "state": "finished",
+    "repo_id": "66666666-6666-4666-8666-666666666666",
+    "created_at": "2026-09-21T14:00:00.000Z",
+    "started_at": "2026-09-21T14:01:00.000Z",
+    "finished_at": "2026-09-21T14:09:00.000Z",
+    "result": {
+      "issues": [
+        {"number": 12, "title": "Crash when the config file is empty", "category": "bug", "expected_model_usd": 1.4},
+        {
+          "number": 31,
+          "title": "Add a dark theme <img src=x onerror=alert(1)>",
+          "category": "feature",
+          "expected_model_usd": 3.2
+        },
+        {"number": 47, "title": "Document the release steps", "category": "doc", "expected_model_usd": 0.6}
+      ],
+      "sample_spec": {"issue_number": 12, "body": "Acceptance: an empty config file loads the defaults and logs a warning."}
+    },
+    "void_reason": null,
+    "run_status": "succeeded"
+  },
+  "progress": {
+    "server_time": "2026-09-21T14:09:30.000Z",
+    "outcome": "finished",
+    "reason": null,
+    "slow": false,
+    "slot_freed": false,
+    "elapsed_seconds": 540,
+    "repo_name": "acme/widgets",
+    "stages": [
+      {"id": "queued", "status": "done", "at": "2026-09-21T14:00:00.000Z"},
+      {"id": "sandbox", "status": "done", "at": "2026-09-21T14:01:00.000Z"},
+      {"id": "clone", "status": "done", "at": "2026-09-21T14:01:20.000Z"},
+      {"id": "read", "status": "done", "at": "2026-09-21T14:01:40.000Z"},
+      {"id": "plan", "status": "done", "at": "2026-09-21T14:02:50.000Z"},
+      {"id": "write", "status": "done", "at": "2026-09-21T14:08:30.000Z"},
+      {"id": "done", "status": "done", "at": "2026-09-21T14:09:00.000Z"}
+    ],
+    "feed": [
+      {"seq": 2, "at": "2026-09-21T14:01:00.000Z", "text": "The run started"},
+      {"seq": 5, "at": "2026-09-21T14:01:40.000Z", "text": "Repository cloned"},
+      {"seq": 7, "at": "2026-09-21T14:02:00.000Z", "text": "Reading README.md"},
+      {"seq": 8, "at": "2026-09-21T14:02:05.000Z", "text": "Reading src/server.ts"},
+      {"seq": 9, "at": "2026-09-21T14:02:12.000Z", "text": "Searching for 'login'"},
+      {"seq": 10, "at": "2026-09-21T14:02:30.000Z", "text": "Looking through packages/api"},
+      {"seq": 11, "at": "2026-09-21T14:02:41.000Z", "text": "Running the tests"},
+      {"seq": 12, "at": "2026-09-21T14:02:50.000Z", "text": "The agent sent its first message"}
+    ],
+    "numbers": {
+      "files_read": 14,
+      "compute": {"usd": 0.0188, "basis": "recorded", "cap_usd": 1},
+      "model": {"whose": "operator", "usd": null}
+    }
+  }
+}

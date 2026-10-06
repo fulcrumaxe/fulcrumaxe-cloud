@@ -1,0 +1,33 @@
+-- D#71 DS-2: grant app_user UPDATE on work_items.discussion_id.
+--
+-- DS-1's migration (0618_discussions.sql) added three columns to
+-- work_items -- discussion_id, parent_id, title -- so that a discussion's
+-- root work item can be linked back to it. But 0613_work_items_
+-- provenance_set_once.sql had already REVOKEd app_user's table-wide
+-- UPDATE on work_items and replaced it with a column-scoped GRANT built
+-- from information_schema AT THAT MIGRATION'S OWN RUN TIME (every column
+-- except provenance, as of 0613) -- a one-time snapshot, not a live view.
+-- Three columns added five migrations later by 0618 are therefore outside
+-- that snapshot and carry NO UPDATE grant for app_user at all: confirmed
+-- directly against a database with every migration through 0618 applied
+-- (`UPDATE work_items SET discussion_id = ...` as app_user fails with
+-- 42501 insufficient_privilege, packages/db/test/helpers/pgErrors.ts's
+-- own "missing column grant" shape).
+--
+-- DS-2's own createDiscussion() needs exactly this: the root work item is
+-- inserted first (discussion_id NULL, since the discussion doesn't exist
+-- yet), the discussions row is inserted next (its NOT NULL
+-- root_work_item_id can finally point at the work item), and only then
+-- can the work item be updated to point back -- the two rows have a
+-- mutual reference and one side must be created before the other, so an
+-- UPDATE after the fact is the only way to close the loop. Scoped to
+-- exactly the one column this PR's code writes: parent_id (ING-1, post-
+-- launch) and title (set once, at INSERT, never updated by this PR) need
+-- no grant added here -- a future task that needs to update either adds
+-- its own column to a GRANT then, per the same "grant exactly what the
+-- writer needs" discipline 0613 and DS-1 itself already follow.
+--
+-- Numbering: origin/main's newest migration is 0627_webhooks.sql. Open
+-- PRs #179 and #186 hold 0628 and 0629 (re-checked at push time), so this
+-- file takes 0630.
+GRANT UPDATE (discussion_id) ON work_items TO app_user;

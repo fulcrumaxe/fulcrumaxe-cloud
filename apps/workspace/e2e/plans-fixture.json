@@ -1,0 +1,35 @@
+{
+  "plans": [
+    {
+      "id": "starter",
+      "price_usd_month": 129,
+      "repo_limit": 2,
+      "always_on_security_reviewer": false,
+      "priority_queue": false,
+      "compute_cap_usd_month": 23,
+      "foreground_compute_usd_month": 17,
+      "background_compute": { "kind": "flat", "usd_month": 9 }
+    },
+    {
+      "id": "team",
+      "price_usd_month": 399,
+      "repo_limit": 6,
+      "always_on_security_reviewer": true,
+      "priority_queue": false,
+      "compute_cap_usd_month": 67,
+      "foreground_compute_usd_month": 44,
+      "background_compute": { "kind": "flat", "usd_month": 41 }
+    },
+    {
+      "id": "scale",
+      "price_usd_month": 1299,
+      "repo_limit": null,
+      "always_on_security_reviewer": true,
+      "priority_queue": true,
+      "compute_cap_usd_month": 180,
+      "foreground_compute_usd_month": 71,
+      "background_compute": { "kind": "scaling", "base_usd_month": 18, "per_repo_usd_month": 7, "ceiling_usd_month": 450 }
+    }
+  ],
+  "viewer": { "is_owner": false, "partner_billed": false }
+}

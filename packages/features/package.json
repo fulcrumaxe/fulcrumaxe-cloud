@@ -1,0 +1,22 @@
+{
+  "name": "@fx/features",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#8 R2: the feature exposure catalogue, the emergency floor, and the classification inventory test -- code, not a table, shaped like packages/roles/src/manifest.ts and D#7's decision catalogue (packages/decisions/src/catalogue.ts).",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@fx/runtime": "workspace:*",
+    "@fx/sitekit-claims": "workspace:*",
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

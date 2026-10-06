@@ -1,0 +1,16 @@
+{
+  "role": "security-reviewer",
+  "mode": "suggest",
+  "allowed_modes": ["off", "suggest"],
+  "model": "opus-5",
+  "model_floor": "sonnet-5",
+  "allowed_models": ["sonnet-5", "opus-5"],
+  "expected_spend": {
+    "text": "expected spend on your model bill: $6/month",
+    "monthly_usd": 6,
+    "runs_per_month": 12,
+    "median_cost_per_run_usd": 0.5,
+    "median_source": "seed",
+    "caveat": "This is an estimate based on the selected model. Not every run carried full token counts when it was seeded, so it may read low."
+  }
+}

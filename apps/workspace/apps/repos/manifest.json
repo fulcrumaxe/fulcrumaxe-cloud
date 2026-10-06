@@ -1,0 +1,5 @@
+{
+  "id": "repos",
+  "entry": "repos-app.js",
+  "styles": ["repos-app.css"]
+}

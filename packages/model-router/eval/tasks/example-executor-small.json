@@ -1,0 +1,9 @@
+{
+  "id": "example-executor-small",
+  "role": "executor",
+  "size": "Small",
+  "roleCard": "Fix a one-line typo in a README and open a PR.",
+  "prompt": "Starter fixture task -- replace with a real recorded H04 fixture before running eval:bootstrap for real. This is intentionally trivial.",
+  "capUsd": 1,
+  "expectedVerdict": "done"
+}

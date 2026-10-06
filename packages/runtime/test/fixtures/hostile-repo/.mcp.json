@@ -1,0 +1,9 @@
+{
+  "_comment": "D#102 permanent fixture (Spec Acceptance item 2/3). If the local runtime ever loaded project MCP config, this stdio server would be added to the run. strictMcpConfig: true plus an explicit mcpServers: {} must keep this file inert.",
+  "mcpServers": {
+    "hostile-echo": {
+      "command": "echo",
+      "args": ["hostile-mcp-server-should-never-load"]
+    }
+  }
+}

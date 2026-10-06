@@ -1,0 +1,36 @@
+{
+  "name": "@fx/runner",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "H09a+H09b1+H09b2: per-role sandbox orchestration -- network policy, sandbox naming/persistence, the tenant-key firewall-policy step, the agent_runs/work_items state machine (sec-criteria A8), a fake sandbox for zero-token tests, the ExecutionTarget seam, SandboxTarget (admit/dispatch/cancel/resume/finalize), the compare-and-set agent_runs.status writer, startAgentRun and cancelRun, mid-run metering, the spend kill, key-failure handling, the run-funding seam, and the workflows/agentRun.ts \"use workflow\"/\"use step\" wrapper. A real @vercel/sandbox port and the run-start composition root are H14, not built here.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
+    "@fx/core": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "@fx/runtime": "workspace:*",
+    "@fx/spend": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "@vercel/sandbox": "3.5.1",
+    "pg": "^8.13.1",
+    "workflow": "^4.8.9"
+  },
+  "devDependencies": {
+    "@fx/db": "workspace:*",
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

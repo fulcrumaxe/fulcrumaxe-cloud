@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "github_app_not_configured",
+    "message": "the GitHub App install is not configured",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  }
+}

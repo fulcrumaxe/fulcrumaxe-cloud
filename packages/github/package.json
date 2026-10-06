@@ -1,0 +1,34 @@
+{
+  "name": "@fx/github",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#2 H13a: GitHub App webhook intake -- HMAC verification, the 8-event mapping to work_items/run triggers through the H07 gate, and the recordStage/C7/C25 orchestration a verified webhook drives.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/core": "workspace:*",
+    "@fx/db": "workspace:*",
+    "@fx/gh-policy": "workspace:*",
+    "@fx/net-guard": "workspace:*",
+    "@fx/runner": "workspace:*",
+    "@fx/telemetry": "workspace:*",
+    "@fx/trust": "workspace:*",
+    "jose": "^6.0.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
