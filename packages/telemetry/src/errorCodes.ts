@@ -28,6 +28,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "checkout_in_progress",
   "cross_site_refused",
   "endpoint_limit_reached",
+  "environment_failed",
   "escalate",
   "external_requires_human",
   "github_app_not_configured",

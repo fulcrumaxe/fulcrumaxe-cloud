@@ -6,6 +6,14 @@ export type EnvSource = 'repo' | 'proposal' | 'preset';
 /** The compute budgets a build can draw on (OD-7, C12; `emergency` per the D#8 amendment). */
 export type EnvBuildBudget = 'foreground_compute' | 'background_compute' | 'emergency';
 
+/**
+ * The states of a build (migration 0738). `running` is the only open state; the other three close the row:
+ * `succeeded` (image built), `failed` (a step failed; `failingStep` names it) and `killed` (the dollar or time cap, C12).
+ */
+export type EnvBuildStatus = 'running' | 'succeeded' | 'failed' | 'killed';
+export const ENV_BUILD_STATUSES: readonly EnvBuildStatus[] = ['running', 'succeeded', 'failed', 'killed'];
+export const ENV_BUILD_FINAL_STATUSES: readonly EnvBuildStatus[] = ['succeeded', 'failed', 'killed'];
+
 export const ENV_SOURCES: readonly EnvSource[] = ['repo', 'proposal', 'preset'];
 export const ENV_BUILD_BUDGETS: readonly EnvBuildBudget[] = ['foreground_compute', 'background_compute', 'emergency'];
 
@@ -28,7 +36,7 @@ export interface EnvBuildRow {
   id: string;
   account_id: string;
   env_version_id: string;
-  status: string;
+  status: EnvBuildStatus;
   failing_step: string | null;
   log_ref: string | null;
   started_at: Date;
@@ -38,7 +46,7 @@ export interface EnvBuildRow {
 }
 
 export type EnvErrorCode =
-  'env_bad_version_id' | 'env_bad_digest' | 'env_bad_source' | 'env_bad_budget' | 'env_missing_spec' | 'env_missing_status';
+  'env_bad_version_id' | 'env_bad_digest' | 'env_bad_source' | 'env_bad_budget' | 'env_missing_spec' | 'env_bad_status';
 
 /** Thrown before any query is sent; branch on `code`. */
 export class EnvInputError extends Error {
@@ -85,7 +93,8 @@ export async function getEnvVersion(client: PoolClient, repoId: string, envVersi
 
 export interface NewEnvBuild {
   envVersionId: string;
-  status: string;
+  /** Only `running` opens a build; a finished one is written by `finishEnvBuild`. */
+  status: 'running';
   budget: EnvBuildBudget;
 }
 
@@ -93,7 +102,7 @@ export interface NewEnvBuild {
 export async function startEnvBuild(client: PoolClient, input: NewEnvBuild): Promise<EnvBuildRow> {
   if (!ENV_VERSION_ID.test(input.envVersionId)) throw new EnvInputError('env_bad_version_id');
   if (!ENV_BUILD_BUDGETS.includes(input.budget)) throw new EnvInputError('env_bad_budget');
-  if (input.status === '') throw new EnvInputError('env_missing_status');
+  if (input.status !== 'running') throw new EnvInputError('env_bad_status');
   const { rows } = await client.query<EnvBuildRow>(
     `INSERT INTO env_builds (account_id, env_version_id, status, budget)
      VALUES (NULLIF(current_setting('app.account_id', true), '')::uuid, $1, $2, $3)
@@ -103,15 +112,19 @@ export async function startEnvBuild(client: PoolClient, input: NewEnvBuild): Pro
   return rows[0]!;
 }
 
-/** Closes a build row with its outcome; null when the row is not in this account. */
+/**
+ * Closes a build row with its outcome. A build closes once: the update is limited to rows with no `finished_at`, so a
+ * second finish changes nothing and returns null, exactly as a row outside this account does. The caller treats null
+ * as "nothing to do" (a no-op, not an error): the first finish already recorded the outcome.
+ */
 export async function finishEnvBuild(client: PoolClient, buildId: string,
-  outcome: { status: string; failingStep?: string | null; logRef?: string | null; costUsd: number },
+  outcome: { status: Exclude<EnvBuildStatus, 'running'>; failingStep?: string | null; logRef?: string | null; costUsd: number },
 ): Promise<EnvBuildRow | null> {
-  if (outcome.status === '') throw new EnvInputError('env_missing_status');
+  if (!ENV_BUILD_FINAL_STATUSES.includes(outcome.status)) throw new EnvInputError('env_bad_status');
   const { rows } = await client.query<EnvBuildRow>(
     `UPDATE env_builds
         SET status = $2, failing_step = $3, log_ref = $4, cost_usd = $5, finished_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND finished_at IS NULL
       RETURNING *`,
     [buildId, outcome.status, outcome.failingStep ?? null, outcome.logRef ?? null, outcome.costUsd],
   );
