@@ -44,6 +44,25 @@ export const QUEUE_TTL_MS = 15 * 60 * 1000;
 /** What an admit refusal with an unrecognised reason is recorded as. */
 export const ADMIT_REFUSED_FALLBACK = "admit_refused";
 
+/**
+ * D#5 E9: what the environment step decided for this run. Structurally what `@fx/env-orchestration`'s
+ * `ensureEnvironment` returns; declared here so this package does not depend on it. `error` is an environment failure:
+ * it ends the start before anything is written (C14).
+ */
+export type RunEnvironment =
+  | { kind: "none" }
+  | { kind: "ready"; envVersionId: string; imageDigest: string }
+  | { kind: "error"; file: string; step: string; message: string };
+
+/** The environment step failed, so no run exists: no row, no event, no reservation, no sandbox (D#5 C14). */
+export class EnvironmentFailedError extends Error {
+  readonly code = "environment_failed";
+  constructor(readonly file: string, readonly step: string, message: string) {
+    super(message);
+    this.name = "EnvironmentFailedError";
+  }
+}
+
 export interface StartAgentRunInput {
   accountId: string;
   /** `repos.id` -- `startAgentRun` reads `repos.execution_mode` from this
@@ -95,6 +114,12 @@ export interface StartAgentRunInput {
    * (slow) launch that follows. Never awaited and never allowed to throw into the start.
    */
   afterAdmit?: () => void;
+  /**
+   * D#5 E9: resolves the run's environment (the caller binds `ensureEnvironment`). Called before anything is written;
+   * an `error` throws `EnvironmentFailedError`, and a `ready` result's version and image digest are recorded on the run
+   * row at insert, before the run starts. Absent, or `none`, the run starts as it always did.
+   */
+  ensureEnv?: () => Promise<RunEnvironment>;
 }
 
 export type StartAgentRunResult =
@@ -276,6 +301,10 @@ export async function startAgentRun(
   // let alone reserve money, that then has to be unwound).
   resolvePayer({ accountId: input.accountId, funding: input.funding });
 
+  // D#5 E9 (C14): the environment is resolved before the run row exists, so its failure leaves no run and no events.
+  const env = input.ensureEnv ? await input.ensureEnv() : undefined;
+  if (env?.kind === "error") throw new EnvironmentFailedError(env.file, env.step, env.message);
+
   // C10 pass/fail 1: "the run goes `pending -> refused_spend`" -- the row
   // must exist (as `pending`) before `admit` runs, since `reserve()`
   // inserts a `spend_reservations` row that foreign-keys to it.
@@ -295,6 +324,7 @@ export async function startAgentRun(
     // D#6 C12 A1: the target says what its runs are (a sandbox writes `production`, a runner writes `runner`).
     runtime: target.runtime,
     initiatedBy: input.initiatedBy,
+    ...(env?.kind === "ready" ? { envVersionId: env.envVersionId, imageDigest: env.imageDigest } : {}),
     headSha: input.headSha,
     executionMode: mode,
     dispatchRepoId: input.repoId,

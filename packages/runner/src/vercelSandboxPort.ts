@@ -386,6 +386,12 @@ function isComplete(usage: SandboxSessionUsage): boolean {
 export function sdkNetworkPolicy(rules: readonly NetworkPolicyRule[]): NetworkPolicy {
   if (rules.length === 0) return "deny-all";
   const allow: Record<string, SdkNetworkPolicyRule[]> = {};
+  // A host is allowed by exactly one rule. An environment rule for `github.com` or `api.github.com` (or a repeat of the
+  // model host) must never replace the proxy forwarding or the key injection, so a clash refuses the whole policy,
+  // whichever rule came first.
+  const claim = (host: string): void => {
+    if (Object.hasOwn(allow, host)) throw new Error("createVercelSandboxPort: two network rules name the same host");
+  };
   for (const rule of rules) {
     if (rule.purpose === "github_proxy") {
       // SDK 3.5.1 network-policy.d.ts: `forwardURL` (HTTPS, no query or fragment, cannot carry headers or a
@@ -393,9 +399,13 @@ export function sdkNetworkPolicy(rules: readonly NetworkPolicyRule[]): NetworkPo
       // proxy. Vercel's forwarder adds `vercel-sandbox-oidc-token` (aud = this URL) and the `vercel-forwarded-*`
       // headers; the proxy host itself gets NO allow rule, only GitHub's two hosts, exact.
       const forwardURL = githubForwardUrlForHost(rule.host);
-      for (const githubHost of GITHUB_FORWARDED_HOSTS) allow[githubHost] = [{ forwardURL }];
+      for (const githubHost of GITHUB_FORWARDED_HOSTS) {
+        claim(githubHost);
+        allow[githubHost] = [{ forwardURL }];
+      }
       continue;
     }
+    claim(rule.host);
     if (rule.purpose !== "model") {
       allow[rule.host] = [];
       continue;

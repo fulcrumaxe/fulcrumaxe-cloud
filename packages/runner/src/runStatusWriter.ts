@@ -56,6 +56,9 @@ export interface InsertAgentRunParams {
   /** D#6 R3a: the member who started the run. Written by `agent_run_create` only, which refuses a user who is not a
    * member of the account; no later write can change it (0714). */
   initiatedBy?: string | null;
+  /** D#5 E9: the environment the run uses, written at insert only. Both or neither (the definer refuses half a record). */
+  envVersionId?: string | null;
+  imageDigest?: string | null;
   /** Pass/fail 17 / correction C11: written only here, at INSERT time.
    * Nothing in this package ever UPDATEs it. */
   headSha?: string | null;
@@ -295,7 +298,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
       }
       await client.query(
         `SELECT agent_run_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::text, $7::text,
-                                $8::text, $9::uuid, $10::bigint, NULL::uuid, $11::jsonb, $12::text, $13::uuid)`,
+                                $8::text, $9::uuid, $10::bigint, NULL::uuid, $11::jsonb, $12::text, $13::uuid, $14::text, $15::text)`,
         [
           id,
           params.accountId,
@@ -310,6 +313,8 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
           JSON.stringify(frozen.value),
           frozen.digest,
           params.initiatedBy ?? null,
+          params.envVersionId ?? null,
+          params.imageDigest ?? null,
         ],
       );
       if (params.inCreateTransaction) await params.inCreateTransaction(client, id);

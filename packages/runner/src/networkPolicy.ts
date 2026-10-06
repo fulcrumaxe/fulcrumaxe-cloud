@@ -57,7 +57,8 @@ export const INSTALL_PHASE_REGISTRY_ALLOWLIST: readonly string[] = Object.freeze
   "npm.pkg.github.com",
 ]);
 
-export type NetworkPolicyPurpose = "model" | "github_proxy" | "package_registry";
+/** `github_download` and `customer_domain` are the environment's (D#5 E6): exact hosts only, never carrying a header. */
+export type NetworkPolicyPurpose = "model" | "github_proxy" | "package_registry" | "github_download" | "customer_domain";
 
 export interface NetworkPolicyRule {
   /** Exact host this rule allows -- never a wildcard, never a pattern. */

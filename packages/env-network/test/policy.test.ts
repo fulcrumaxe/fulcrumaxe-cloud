@@ -129,8 +129,8 @@ describe("criterion 6: tenant isolation", () => {
 describe("emitted shape matches packages/runner's NetworkPolicyRule (type-level, no runtime import)", () => {
   type Eq<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
   const sameFields: Eq<Omit<NetworkRule, "purpose">, Omit<RunnerRule, "purpose" | "authValue">> = true;
-  // The runner's purposes are model, github_proxy and package_registry; ours swaps the last for customer_domain.
-  const samePurposes: Eq<Exclude<NetworkPurpose, "customer_domain" | "github_download">, Exclude<RunnerRule["purpose"], "package_registry">> = true;
+  // The runner's purposes are ours plus package_registry (its install-phase registries).
+  const samePurposes: Eq<NetworkPurpose, Exclude<RunnerRule["purpose"], "package_registry">> = true;
   it("has the same fields and the same platform purposes", () => {
     expect([sameFields, samePurposes]).toEqual([true, true]);
   });

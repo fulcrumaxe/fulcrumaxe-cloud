@@ -54,7 +54,7 @@ describe('environment tables (D#5 E5a)', () => {
         [r.accountId, r.repoId, hex('d'), digest('b'), digest('c')],
       );
       await admin.query(
-        `INSERT INTO env_builds (account_id, env_version_id, status, budget) VALUES ($1, $2, 'succeeded', 'foreground_compute')`,
+        `INSERT INTO env_builds (account_id, env_version_id, status, budget, finished_at) VALUES ($1, $2, 'succeeded', 'foreground_compute', now())`,
         [r.accountId, hex('d')],
       );
     }
@@ -188,9 +188,10 @@ describe('environment tables (D#5 E5a)', () => {
     });
 
     it('are shape-checked, and no app_user write path reaches them', async () => {
-      await expect(admin.query(`UPDATE agent_runs SET image_digest = 'node:26' WHERE id = $1`, [A.runId])).rejects.toMatchObject({
-        code: PG_ERROR.CHECK_VIOLATION,
-      });
+      // An INSERT: since 0738 the columns are write-once, so an UPDATE is refused by the trigger before the CHECK is reached.
+      await expect(
+        admin.query(`INSERT INTO agent_runs (account_id, role, runtime, status, image_digest) VALUES ($1, 'code-reviewer', 'production', 'pending', 'node:26')`, [A.accountId]),
+      ).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
       await withTenant(appPool, A.accountId, async (client) => {
         for (const col of ['env_version_id', 'image_digest']) {
           await client.query('SAVEPOINT s1');
