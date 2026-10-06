@@ -12,6 +12,10 @@ Sources:
 - `apps/live-e2e/src/targets.ts`
 - `apps/live-e2e/src/needs.ts`
 - `apps/live-e2e/src/plan.ts`
+- `apps/live-e2e/src/routing.ts`
+- `apps/live-e2e/src/ledger.ts`
+- `apps/live-e2e/src/affected.ts`
+- `apps/live-e2e/routing-ledger.json`
 - `apps/live-e2e/src/cli.ts`
 - `apps/live-e2e/src/report.ts`
 - `apps/live-e2e/src/scrub.ts`
@@ -37,7 +41,7 @@ non-zero with `EMPTY-SELECTION`.
 - A pack's `pack.json` has a closed set of keys and a closed set of needs.
   A `@ui` pack must list all three device projects; `model_spend` is allowed
   only on tier `full`.
-- Selection is a union of the tier, the named packs and (later) changed-file
+- Selection is a union of the tier, the named packs and changed-file
   routing, narrowed by `--tag`. A model-spending pack runs only for the
   `dispatch` and `weekly` triggers.
 - A target file carries no destructive switch; its loader rejects any key
@@ -49,6 +53,31 @@ non-zero with `EMPTY-SELECTION`.
   present), `stripe-test` (a restricted test-mode key, never a live one) and
   `host-capacity` (load under 18 and at least 4 GiB available). A need that
   needs the network is not evaluated yet and counts as unmet.
+
+## Changed-files routing
+
+`plan --changed-from <base>..<head>` diffs the two commits and adds packs; it
+never removes one the tier or a name already selected, and never adds a `full`
+pack.
+
+- Each changed file selects every pack whose `paths` glob matches it, and
+  `plan.json` records every (file, pack, glob) match under `routing`.
+- A file that no selectable pack claims selects every pack at or below
+  `standard`, unless `apps/live-e2e/routing-ledger.json` exempts it. A ledger
+  entry is a glob (at least two directory levels deep, or one file) plus a
+  written reason; a test fails when an entry matches no tracked file or matches
+  a file a pack now claims.
+- Documentation and team-state paths select nothing. That list, and the glob
+  matcher, are read from `scripts/ci/affected.mjs` and
+  `scripts/ci/full-run-triggers.json` (the CI scope classifier); routing keeps
+  no copy of either. The classifier's other lists answer a different question
+  (which CI packages to test) and are not used.
+- Anything routing cannot judge (an unresolvable commit, a git error, a shallow
+  clone, an unreadable ledger or classifier) selects every pack at or below
+  `standard` and says why in `routing_fallback`.
+- Both refs are validated (a hex commit id or a plain ref name) before git is
+  run, and git is run with an argument list, never a shell. A malformed range is
+  a usage error (exit 2).
 
 ## Report and scrub
 
@@ -126,5 +155,4 @@ Redaction before writing (`writeReport`, `writeScrubbed`) is separate: the
 report and any log the runner writes are redacted first and refused if a
 secret survives.
 
-Later tasks add changed-files routing, the
-Playwright config, the `run` command and the packs' specs.
+Later tasks add the Playwright config, the `run` command and the packs' specs.

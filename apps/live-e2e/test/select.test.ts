@@ -145,7 +145,7 @@ describe("cli: argument parsing", () => {
   });
 
   it("does not accept flags owned by later tasks, nor a way to force past a guard", () => {
-    for (const flag of ["--changed-from", "--budget-usd", "--force", "--allow-destructive"]) {
+    for (const flag of ["--budget-usd", "--force", "--allow-destructive"]) {
       expect(() => parseArgs(["plan", "--target", "staging", flag, "x"]), flag).toThrow("unknown argument");
     }
     expect(() => parseArgs(["run", "--target", "staging"])).toThrow("not available yet");

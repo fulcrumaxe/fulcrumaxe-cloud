@@ -5,6 +5,7 @@
 import type { Pack, Tier } from "./manifest.js";
 import { firstUnmetNeed, type NeedsContext } from "./needs.js";
 import { select, triggerRule, type SelectInput, type Trigger } from "./select.js";
+import type { RouteRecord, RoutingResult } from "./routing.js";
 import { targetGuard, type Target } from "./targets.js";
 
 export type PackOutcome =
@@ -25,13 +26,19 @@ export interface Plan {
   selected: { id: string; tier: Tier; projects: string[]; est_usd: number; est_sandbox_min: number }[];
   skipped: { id: string; need: string }[];
   refused: { id: string; reason: string; named: boolean }[];
-  /** Per-file routing records: filled by changed-files routing (T4); empty until then. */
-  routing: unknown[];
+  /** The validated `--changed-from` range, or null when routing was not asked for. */
+  changed_from: string | null;
+  /** Per-file routing records (every (file, pack, glob) match); empty without `--changed-from` or on a fallback. */
+  routing: RouteRecord[];
+  /** Why routing fell back to every pack at or below standard; null when it judged every file. */
+  routing_fallback: string | null;
   estimated_cost_usd: number;
 }
 
-export interface PlanInput extends SelectInput {
+export interface PlanInput extends Omit<SelectInput, "routed"> {
   target: Target;
+  /** The outcome of changed-files routing, when `--changed-from` was given. */
+  routing?: RoutingResult;
   trigger?: Trigger;
   needs: NeedsContext;
 }
@@ -47,7 +54,7 @@ function decide(pack: Pack, named: boolean, input: PlanInput): PackOutcome {
 }
 
 export function buildPlan(input: PlanInput): Plan {
-  const selection = select(input);
+  const selection = select({ ...input, ...(input.routing !== undefined ? { routed: input.routing.packs } : {}) });
   const outcomes = selection.packs.map((p) => decide(p, selection.named.has(p.id), input));
   const byId = new Map(selection.packs.map((p) => [p.id, p]));
   const selected: Plan["selected"] = [];
@@ -80,7 +87,9 @@ export function buildPlan(input: PlanInput): Plan {
     selected,
     skipped,
     refused,
-    routing: [],
+    changed_from: input.routing?.changed_from ?? null,
+    routing: input.routing?.files ?? [],
+    routing_fallback: input.routing?.fallback ?? null,
     estimated_cost_usd: selected.reduce((sum, s) => sum + s.est_usd, 0),
   };
 }
