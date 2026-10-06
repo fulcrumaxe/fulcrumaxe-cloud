@@ -1,12 +1,12 @@
 /**
  * Turns a selection into a plan: for each selected pack, the first guard that objects decides its outcome.
- * Order: layer 1 (target guard), trigger rule, needs. Pure; `cli.ts` writes the result as plan.json.
+ * Order: layer 1 (target guard), trigger rule, needs, layer 2 (deployment identity, T5). Pure; `cli.ts` writes the result as plan.json.
  */
 import type { Pack, Tier } from "./manifest.js";
 import { firstUnmetNeed, type NeedsContext } from "./needs.js";
 import { select, triggerRule, type SelectInput, type Trigger } from "./select.js";
 import type { RouteRecord, RoutingResult } from "./routing.js";
-import { targetGuard, type Target } from "./targets.js";
+import { isProdSafe, targetGuard, type Target } from "./targets.js";
 
 export type PackOutcome =
   | { id: string; outcome: "RUN"; named: boolean }
@@ -41,6 +41,11 @@ export interface PlanInput extends Omit<SelectInput, "routed"> {
   routing?: RoutingResult;
   trigger?: Trigger;
   needs: NeedsContext;
+  /**
+   * The layer-2 refusal reason (`identityGuard`), when the origin was asked who it is; null when it answered as
+   * staging; absent when nothing was asked (`plan` is offline). Applied to every pack that is not prod-safe.
+   */
+  layer2?: string | null;
 }
 
 function decide(pack: Pack, named: boolean, input: PlanInput): PackOutcome {
@@ -50,6 +55,7 @@ function decide(pack: Pack, named: boolean, input: PlanInput): PackOutcome {
   if (trig !== null) return { id: pack.id, outcome: "REFUSED", reason: trig, named };
   const need = firstUnmetNeed(pack, input.target, input.needs);
   if (need !== null) return { id: pack.id, outcome: "SKIPPED-NEED", need, named };
+  if (input.layer2 != null && !isProdSafe(pack)) return { id: pack.id, outcome: "REFUSED", reason: input.layer2, named };
   return { id: pack.id, outcome: "RUN", named };
 }
 

@@ -1,7 +1,7 @@
 // platform pack, rows P1-P3: the shell index, its immutable assets and the static contract routes.
 // Runs on every device project; the browser boot is the part that differs per device.
 import { expect, test } from "../../fixtures/bypass.js";
-import { EXPECTED_BODIES, EXPECTED_SHELL_HEADERS, IMMUTABLE_CACHE_CONTROL, shellAssetPaths } from "./expected.js";
+import { EXPECTED_BODIES, EXPECTED_SHELL_HEADERS, healthViolations, IMMUTABLE_CACHE_CONTROL, shellAssetPaths } from "./expected.js";
 
 test.describe("P1 shell index", () => {
   test("/ answers 200 text/html, no-cache, with the exact security headers", async ({ api }) => {
@@ -43,13 +43,10 @@ test.describe("P3 contract routes", () => {
     });
   }
 
-  test("/api/health answers ok with a config verdict and no setting names", async ({ api }) => {
+  test("/api/health answers ok with a config verdict, no setting names and the deployment's identity", async ({ api, target }) => {
     const res = await api.get("/api/health");
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
-    const body = JSON.parse(res.body) as Record<string, unknown>;
-    expect(body).toMatchObject({ ok: true, config: "ok" });
-    expect(["ok", "missing"]).toContain(body.planData);
-    expect(Object.keys(body).sort()).toEqual(["config", "ok", "planData"]);
+    expect(healthViolations(JSON.parse(res.body), target)).toEqual([]);
   });
 });

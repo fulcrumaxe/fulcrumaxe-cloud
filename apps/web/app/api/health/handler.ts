@@ -19,6 +19,11 @@ import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../.
  * which required settings are missing or invalid, by name and a fixed reason
  * code, and which optional features are off. Never a value. With CRON_SECRET
  * unset nobody gets the detail (fail closed).
+ *
+ * Every caller also gets `deploy_env` (FX_DEPLOY_ENV, or null when unset). Only when that is "staging" does the
+ * body also carry `project_id` (VERCEL_PROJECT_ID) and `commit` (VERCEL_GIT_COMMIT_SHA, or null): the live-test
+ * runner compares them before it runs anything that is not safe on production. Any other deployment, production
+ * included, discloses neither.
  */
 
 function isOperator(authHeader: string | null, secret: string | undefined): boolean {
@@ -39,9 +44,18 @@ function detail(report: EnvReport) {
   };
 }
 
+const orNull = (value: string | undefined): string | null => (value === undefined || value === "" ? null : value);
+
+/** The deployment's self-description. The Vercel project id and commit are given to staging only. */
+function identity(env: EnvLike) {
+  const deploy_env = orNull(env.FX_DEPLOY_ENV);
+  if (deploy_env !== "staging") return { deploy_env };
+  return { deploy_env, project_id: orNull(env.VERCEL_PROJECT_ID), commit: orNull(env.VERCEL_GIT_COMMIT_SHA) };
+}
+
 export function healthResponse(env: EnvLike, authHeader: string | null): NextResponse {
   const report = evaluateEnv(ENV_MANIFEST, env, deployKindOf(env));
-  const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus() };
+  const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
   if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report) }, init);
   return NextResponse.json(body, init);

@@ -9,11 +9,14 @@
  * destructive switch of any kind: the loader rejects every key outside it, so adding `allow_destructive`
  * (or anything else) to `production.json` fails the load, naming the key.
  *
+ * Layer 2 (`identityGuard`, T5) asks the origin who it is before any pack that is not prod-safe runs.
+ *
  * Layer 1 (`targetGuard`) refuses, on the production target, any pack that is destructive or does not list
  * production. Nothing in a target file or a flag lifts it; there is no `--force`.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createClient } from "./client.js";
 import { TARGET_NAMES, type Pack, type TargetName } from "./manifest.js";
 
 export interface Target {
@@ -148,4 +151,47 @@ export function targetGuard(pack: Pack, target: Target): string | null {
   }
   if (!pack.targets.includes(target.name)) return `not-listed-for-${target.name}`;
   return null;
+}
+
+/** A pack that may run against production: it lists production and changes nothing there. */
+export function isProdSafe(pack: Pack): boolean {
+  return !pack.destructive && pack.targets.includes("production");
+}
+
+/** What `/api/health` says about the deployment it is running as (T5). Every field is untrusted until compared. */
+export interface DeploymentIdentity {
+  deploy_env?: unknown;
+  project_id?: unknown;
+}
+
+/**
+ * Layer 2: runs before every pack that is not prod-safe. Returns the REFUSED reason, or null when the origin
+ * answered as the staging deployment: `deploy_env` is "staging" AND `project_id` equals the staging target
+ * file's project id. A mis-set FX_DEPLOY_ENV alone cannot pass, because Vercel sets the project id itself.
+ * `identity` is null when the origin could not be read; a missing or non-string field fails closed.
+ */
+export function identityGuard(identity: DeploymentIdentity | null, staging: Target): string | null {
+  if (staging.name !== "staging") return "layer2-not-staging-target";
+  if (identity === null) return "layer2-identity-unreadable";
+  if (identity.deploy_env !== "staging") return "layer2-deploy-env-not-staging";
+  if (typeof identity.project_id !== "string" || identity.project_id === "") return "layer2-project-id-missing";
+  if (identity.project_id !== staging.project_id) return "layer2-project-id-mismatch";
+  return null;
+}
+
+/** Reads `/api/health` from the target's exact origin. Any failure, or a body that is not a JSON object, is null. */
+export async function readDeploymentIdentity(target: Target, bypassSecret: string | undefined, fetchImpl?: typeof fetch): Promise<DeploymentIdentity | null> {
+  try {
+    const client = createClient({ origin: target.origin, bypassSecret, ...(fetchImpl !== undefined ? { fetchImpl } : {}) });
+    // Redirects are never followed: the identity must come from the configured origin itself, and any 3xx
+    // falls through the status check below (fail closed).
+    const res = await client.get("/api/health", { redirect: "manual" });
+    if (res.status !== 200 && res.status !== 503) return null;
+    const body: unknown = JSON.parse(res.body);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+    const { deploy_env, project_id } = body as DeploymentIdentity;
+    return { deploy_env, project_id };
+  } catch {
+    return null;
+  }
 }

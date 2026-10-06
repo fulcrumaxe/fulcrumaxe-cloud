@@ -24,7 +24,7 @@ describe("GET /api/health", () => {
   it("answers 200 for a complete production environment, with no detail for an anonymous caller", async () => {
     const res = await call(completeEnv("production"));
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok" });
+    expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: null });
     expect(res.cache).toBe("no-store");
   });
 
@@ -35,7 +35,7 @@ describe("GET /api/health", () => {
       resetPlanDataCache();
       const res = await call(completeEnv("production"));
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ok: true, config: "ok", planData: "missing" });
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "missing", deploy_env: null });
       expect(JSON.stringify(res.body)).not.toContain("FX_PLAN_DATA");
     } finally {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
@@ -48,7 +48,7 @@ describe("GET /api/health", () => {
     delete env.FX_CURSOR_KEY_V1;
     const res = await call(env);
     expect(res.status).toBe(503);
-    expect(res.body).toEqual({ ok: false, config: "incomplete", planData: "ok" });
+    expect(res.body).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
     expect(JSON.stringify(res.body)).not.toContain("FX_CURSOR_KEY");
   });
 
@@ -56,7 +56,7 @@ describe("GET /api/health", () => {
     const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
     delete env.FX_CURSOR_KEY_V1;
     for (const auth of [bearer("wrong"), bearer(""), OPERATOR_SECRET, `Basic ${OPERATOR_SECRET}`, bearer(`${OPERATOR_SECRET}x`)]) {
-      expect((await call(env, auth)).body, auth).toEqual({ ok: false, config: "incomplete", planData: "ok" });
+      expect((await call(env, auth)).body, auth).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
     }
   });
 
@@ -118,12 +118,59 @@ describe("GET /api/health", () => {
     expect(res.body.missing).toEqual(expect.arrayContaining(["FX_CURSOR_KEY_V1", "FX_SESSION_SECRET"]));
   });
 
+  describe("deployment identity", () => {
+    const ids = { VERCEL_PROJECT_ID: "prj_StagingAbc123", VERCEL_GIT_COMMIT_SHA: "0123456789abcdef0123456789abcdef01234567" };
+
+    it("on staging gives deploy_env, project_id and commit, to an anonymous caller too", async () => {
+      const res = await call({ ...completeEnv("staging"), FX_DEPLOY_ENV: "staging", ...ids });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, commit: ids.VERCEL_GIT_COMMIT_SHA });
+    });
+
+    it("on staging reports a field Vercel did not set as null, so a reader can fail closed", async () => {
+      const res = await call({ ...completeEnv("staging"), FX_DEPLOY_ENV: "staging" });
+      expect(res.body).toMatchObject({ deploy_env: "staging", project_id: null, commit: null });
+    });
+
+    it("on production gives deploy_env only: no project id and no commit, even when the platform sets them", async () => {
+      const res = await call({ ...completeEnv("production"), FX_DEPLOY_ENV: "production", ...ids });
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: "production" });
+      const text = JSON.stringify(res.body);
+      expect(text).not.toContain(ids.VERCEL_PROJECT_ID);
+      expect(text).not.toContain(ids.VERCEL_GIT_COMMIT_SHA);
+    });
+
+    it("anywhere else (unset, blank, another value, wrong case) gives no project id or commit, and the operator detail does not add them", async () => {
+      for (const value of [undefined, "", "local", "Staging", "staging "]) {
+        const env: Env = { ...completeEnv("production"), CRON_SECRET: OPERATOR_SECRET, FX_DEPLOY_ENV: value, ...ids };
+        for (const auth of [null, bearer(OPERATOR_SECRET)]) {
+          const body = (await call(env, auth)).body;
+          expect(body, String(value)).not.toHaveProperty("project_id");
+          expect(body, String(value)).not.toHaveProperty("commit");
+          expect(body.deploy_env, String(value)).toBe(value === undefined || value === "" ? null : value);
+        }
+      }
+    });
+
+    it("the operator on staging gets the identity next to the detail", async () => {
+      const res = await call({ ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET, FX_DEPLOY_ENV: "staging", ...ids }, bearer(OPERATOR_SECRET));
+      expect(res.body).toMatchObject({ deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, deploy_kind: "staging" });
+    });
+
+    it("the route reads the three variables from the live environment", async () => {
+      for (const [key, value] of Object.entries({ ...completeEnv("staging"), FX_DEPLOY_ENV: "staging", ...ids })) vi.stubEnv(key, value);
+      expect(await GET(new NextRequest("https://example.test/api/health")).json()).toMatchObject({ deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, commit: ids.VERCEL_GIT_COMMIT_SHA });
+      vi.stubEnv("FX_DEPLOY_ENV", "production");
+      expect(Object.keys((await GET(new NextRequest("https://example.test/api/health")).json()) as Record<string, unknown>).sort()).toEqual(["config", "deploy_env", "ok", "planData"]);
+    });
+  });
+
   it("the route reads the live environment and the Authorization header", async () => {
     for (const [key, value] of Object.entries({ ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET })) vi.stubEnv(key, value);
     vi.stubEnv("FX_CURSOR_KEY_V1", "");
     const anonymous = GET(new NextRequest("https://example.test/api/health"));
     expect(anonymous.status).toBe(503);
-    expect(await anonymous.json()).toEqual({ ok: false, config: "incomplete", planData: "ok" });
+    expect(await anonymous.json()).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
     const operator = GET(new NextRequest("https://example.test/api/health", { headers: { authorization: bearer(OPERATOR_SECRET) } }));
     expect(await operator.json()).toMatchObject({ missing: ["FX_CURSOR_KEY_V1"] });
   });
