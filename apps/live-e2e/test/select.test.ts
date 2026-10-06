@@ -148,7 +148,8 @@ describe("cli: argument parsing", () => {
     for (const flag of ["--budget-usd", "--force", "--allow-destructive"]) {
       expect(() => parseArgs(["plan", "--target", "staging", flag, "x"]), flag).toThrow("unknown argument");
     }
-    expect(() => parseArgs(["run", "--target", "staging"])).toThrow("not available yet");
+    expect(() => parseArgs(["run", "--target", "staging", "--force", "x"])).toThrow("unknown argument");
+    expect(parseArgs(["run", "--target", "staging"]).command).toBe("run");
   });
 
   it("splits comma lists and repeated --pack", () => {

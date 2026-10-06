@@ -20,6 +20,9 @@ export interface Target {
   name: TargetName;
   /** Exact origin, https only: the only thing a request's origin is ever compared against. */
   origin: string;
+  /** The NAMES of the two variables above, so a child process can be handed exactly those and nothing else. */
+  origin_env: string;
+  project_id_env: string;
   /** The expected Vercel project id (not a secret). Layer 2 (T5) compares it with the deployment's own. */
   project_id: string;
   /** Whether the deployment sits behind Vercel Deployment Protection. */
@@ -107,6 +110,8 @@ export function parseTarget(raw: unknown, name: string, envSource: EnvSource = p
   return {
     name: name as TargetName,
     origin: origin as string,
+    origin_env: raw.origin_env as string,
+    project_id_env: raw.project_id_env as string,
     project_id: projectId as string,
     protected: raw.protected as boolean,
     env: raw.env as string[],

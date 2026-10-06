@@ -1,5 +1,6 @@
 /**
- * The `live-e2e` command line. Commands: `plan` and `scrub` (the upload gate); `run` arrives with T1b.
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack) and
+ * `scrub` (the upload gate).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -18,13 +19,14 @@ import { loadPacks, ManifestError, TIERS, type Tier } from "./manifest.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
+import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
 import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
 import { loadTarget, TargetError } from "./targets.js";
 
 export interface Args {
-  command: "plan";
+  command: "plan" | "run";
   target: string;
   tier?: Tier;
   packs: string[];
@@ -45,8 +47,7 @@ const VALUE_FLAGS = ["--target", "--tier", "--pack", "--tag", "--trigger", "--ch
 
 export function parseArgs(argv: string[]): Args {
   const [command, ...rest] = argv;
-  if (command === "run") throw new UsageError("`run` is not available yet (it lands with T1b); use `plan`");
-  if (command !== "plan") throw new UsageError("usage: live-e2e plan --target <staging|production> [--tier t] [--pack a,b] [--tag @x] [--changed-from base..head] [--trigger t] [--out file]");
+  if (command !== "plan" && command !== "run") throw new UsageError("usage: live-e2e plan|run --target <staging|production> [--tier t] [--pack a,b] [--tag @x] [--changed-from base..head] [--trigger t] [--out file]");
   const seen = new Map<string, string[]>();
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i] as string;
@@ -71,7 +72,7 @@ export function parseArgs(argv: string[]): Args {
   const tag = one("--tag");
   if (tag !== undefined && !tag.startsWith("@")) throw new UsageError(`--tag must start with "@"`);
   const packs = (seen.get("--pack") ?? []).flatMap((v) => v.split(",")).filter((v) => v.length > 0);
-  const args: Args = { command: "plan", target, packs };
+  const args: Args = { command, target, packs };
   if (tier !== undefined) args.tier = tier as Tier;
   if (tag !== undefined) args.tag = tag;
   if (trigger !== undefined) args.trigger = trigger as Trigger;
@@ -94,6 +95,9 @@ export interface Io {
   root: string;
   /** The git checkout `--changed-from` diffs in. Defaults to two levels above `root` (apps/live-e2e). */
   repoRoot?: string;
+  /** Test seams for `run`: the Playwright runner and the path of its CLI. */
+  exec?: Executor;
+  cli?: string;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
@@ -228,7 +232,18 @@ export async function main(argv: string[], io: Io): Promise<number> {
     io.stdout(`plan written to ${outFile}`);
     const namedRefusals = plan.refused.filter((r) => r.named);
     for (const r of namedRefusals) io.stderr(`REFUSED ${r.reason} (pack ${r.id})`);
-    return namedRefusals.length > 0 ? 1 : 0;
+    let failed = false;
+    if (args.command === "run") {
+      const outDir = dirname(outFile);
+      const invocations = buildInvocations(plan, packs, target, { root: io.root, env: io.env, outDir, ...(io.cli ? { cli: io.cli } : {}) });
+      const maskFile = io.env[MASK_FILE_ENV];
+      const registry = new MaskRegistry({ emit: () => undefined, ...(maskFile ? { file: maskFile } : {}) });
+      const ctx = { registry, env: io.env, declaredEnvNames: target.env };
+      const exec = io.exec ?? spawnExecutor(io.root);
+      failed = (await runPlan(plan, invocations, exec, ctx, outDir, Date.now, io.stdout)).failed;
+      io.stdout(`results written to ${outDir}`);
+    }
+    return namedRefusals.length > 0 || failed ? 1 : 0;
   } catch (err) {
     if (err instanceof EmptySelectionError) {
       io.stderr(err.message);
