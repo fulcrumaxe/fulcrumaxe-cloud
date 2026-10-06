@@ -21,7 +21,7 @@ describe('reportSyncFailure', () => {
     const { lines, events } = capture();
     const err = await atStage('mint_token', Promise.reject(new InstallationTokenError('mint_failed'))).catch((e) => e);
     reportSyncFailure(err, '/api/github/webhook');
-    expect(events).toEqual([{ service: 'web', route: '/api/:id/:id', stage: 'mint_token', code: 'mint_failed' }]);
+    expect(events).toEqual([{ service: 'web', route: '/api/github/webhook', stage: 'mint_token', code: 'mint_failed' }]);
     expect(JSON.parse(lines[0]!)).toMatchObject({ event: 'error.reported', stage: 'mint_token', error_name: 'InstallationTokenError', error_code: 'mint_failed' });
   });
 

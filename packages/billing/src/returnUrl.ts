@@ -45,6 +45,7 @@ export function buildValidatedReturnUrl(path: string, appOrigin: string): string
   try {
     base = new URL(appOrigin);
   } catch {
+    // fx-swallow-ok: an unparsable base URL is a refusal (null), not a failure
     return null;
   }
   if (base.protocol !== 'https:') return null;
@@ -53,6 +54,7 @@ export function buildValidatedReturnUrl(path: string, appOrigin: string): string
   try {
     resolved = new URL(path, base);
   } catch {
+    // fx-swallow-ok: an unparsable return URL is a refusal (null), not a failure
     return null;
   }
   if (resolved.protocol !== 'https:' || resolved.origin !== base.origin) return null;

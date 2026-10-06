@@ -19,6 +19,7 @@
   "dependencies": {
     "@fx/core": "workspace:*",
     "@fx/spend": "workspace:*",
+    "@fx/telemetry": "workspace:*",
     "pg": "^8.13.1",
     "stripe": "^17.4.0"
   },

@@ -6,6 +6,7 @@ import { SESSION_COOKIE_NAME, signSession } from "@fx/core/src/auth/session";
 import { mintInstallState } from "@fx/api/src/github/installUrl.js";
 import { RateLimitedError } from "@fx/api/src/errors.js";
 import type { InstallOutcome } from "@fx/github";
+import { captureReports } from "../../../../../../test/captureReports";
 import { installCallbackHandler, type InstallCallbackDeps } from "./handler";
 
 /** D#2 H17a: the route layer only. The recording and the GitHub checks are in packages/github's tests. */
@@ -118,7 +119,10 @@ describe("GET /api/github/install/{kind}/callback", () => {
 
   it("a recorder that throws is a plain failed, and nothing is echoed or logged", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
+    const reports = captureReports();
     const res = await call("team", q(state()), {}, deps(new Error("boom 987654 SECRETCODE")).d);
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/github/install/:id/callback", stage: "github.install", code: "other" }]);
+    expect(reports.everything()).not.toMatch(/boom|987654|SECRETCODE/);
     expect(res.headers.get("location")).toBe("/?install=failed");
     expect(`${res.headers.get("location")}${await res.text()}`).not.toMatch(/987654|SECRETCODE/);
     // The one permitted line is the fixed outcome note: the kind and the outcome word, nothing from the error.
@@ -153,18 +157,23 @@ describe("GET /api/github/install/{kind}/callback", () => {
       const limitSession = vi.fn(async () => {
         throw new RateLimitedError(7);
       });
+      const reports = captureReports();
       const res = await call("team", q(state()), {}, { ...d, limitSession });
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe("/?install=rate_limited");
+      expect(reports.classes).toEqual([]);
       expect(limitSession).toHaveBeenCalledWith({ accountId, userId });
       expect(complete).not.toHaveBeenCalled();
     });
 
     it("a limiter that cannot run is failed, never an unlimited pass", async () => {
       const { d, complete } = deps("ok");
-      const res = await call("team", q(state()), {}, { ...d, limitSession: async () => { throw new Error("db down"); } });
+      const reports = captureReports();
+      const res = await call("team", q(state()), {}, { ...d, limitSession: async () => { throw new Error("db down FAKE-h1b-db-password"); } });
       expect(res.headers.get("location")).toBe("/?install=failed");
       expect(complete).not.toHaveBeenCalled();
+      expect(reports.classes).toEqual([{ service: "test", route: "/api/github/install/:id/callback", stage: "github.install.limit", code: "other" }]);
+      expect(reports.everything()).not.toContain("FAKE-h1b-db-password");
     });
 
     it("a visit inside the cap goes through, and a bad state is refused before it is counted", async () => {

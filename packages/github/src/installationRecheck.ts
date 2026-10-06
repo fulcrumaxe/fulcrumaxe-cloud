@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { mintAppJwt } from "./installationToken.js";
 
 /**
@@ -28,7 +29,8 @@ export const recheckInstallationActive: InstallationRecheck = async (input) => {
     if (res.status !== 200) return false;
     const body = (await res.json()) as { id?: unknown; app_id?: unknown; suspended_at?: unknown } | null;
     return body?.id === input.ghInstallationId && String(body.app_id) === input.appId && body.suspended_at === null;
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.recheck_installation" });
     return false;
   }
 };

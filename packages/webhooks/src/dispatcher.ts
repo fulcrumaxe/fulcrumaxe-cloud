@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { HostLookup } from '@fx/net-guard';
@@ -96,7 +97,8 @@ async function buildAndSend(
   let secrets: string[];
   try {
     secrets = activeSecrets(endpoint, kekSource, now);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "webhooks.kek" });
     // Criterion 4: "with FX_WEBHOOK_KEK_V1 unset, it fails closed" -- a
     // missing/invalid KEK never reaches connector.ts at all.
     return { ok: false, errorClass: 'kek_unavailable' };
@@ -205,7 +207,8 @@ export function createDeliverySender(pool: Pool, opts: DispatcherOpts = {}): Del
           return { ok: false, errorClass: 'event_expired' };
         }
         return await buildAndSend(endpoint, delivery.eventId, delivery.eventType, payload, opts);
-      } catch {
+      } catch (err) {
+        reportError(err, { stage: "webhooks.send" });
         return { ok: false, errorClass: 'internal_error' };
       }
     },

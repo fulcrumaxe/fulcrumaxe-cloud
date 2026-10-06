@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { PoolClient } from 'pg';
 import type Stripe from 'stripe';
 import { planFor, type PlanId } from '@fx/spend';
@@ -383,7 +384,8 @@ export async function closeAccount(ctx: BillingCtx, input: CloseAccountInput): P
   if (subscriptionToCancel.id !== null) {
     try {
       await input.stripe.subscriptions.cancel(subscriptionToCancel.id);
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "billing.cancel_subscription" });
       return STRIPE_UNAVAILABLE_RESULT;
     }
   }
@@ -479,7 +481,8 @@ export async function getBillingPortalUrl(
     }
     const session = await create();
     return { ok: true, url: session.url };
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.portal_session" });
     return STRIPE_UNAVAILABLE_RESULT;
   }
 }
@@ -593,7 +596,8 @@ export async function createCheckoutSession(
     });
     if (!session.url) return STRIPE_UNAVAILABLE_RESULT;
     return { ok: true, url: session.url };
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.checkout_session" });
     return STRIPE_UNAVAILABLE_RESULT;
   }
 }

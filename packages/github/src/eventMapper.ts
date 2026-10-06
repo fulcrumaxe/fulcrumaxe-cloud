@@ -1,3 +1,4 @@
+import { reportSyncFailure } from './syncFailureTag.js';
 import type { Pool, PoolClient } from 'pg';
 import {
   canCreateWork,
@@ -789,6 +790,7 @@ export async function handleGithubWebhookEvent(
     try {
       await deps.syncRepos(result.installationId);
     } catch (err) {
+      reportSyncFailure(err, "/api/github/webhook");
       (deps.warn ?? console.warn)(`github repo sync failed (${syncFailureTag(err)}); the next event retries`);
     }
   }

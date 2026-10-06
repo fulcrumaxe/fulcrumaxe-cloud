@@ -1,3 +1,4 @@
+import { reportSyncFailure } from "./syncFailureTag.js";
 import type { Pool } from "pg";
 import { withPlatformOps } from "@fx/core/src/tenancy/withPlatformOps.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
@@ -257,6 +258,7 @@ export async function syncClaimedInstallation(
     const num = (v: unknown) => (typeof v === "number" && Number.isInteger(v) ? v : "?");
     console.info(`github repo sync: ${String(r.status ?? "none").replace(/[^a-z_]/g, "")} ${String(r.reason ?? "").replace(/[^a-z_]/g, "")} inserted=${num(r.inserted)} updated=${num(r.updated)} repointed=${num(r.repointed)} detached=${num(r.detached)} skipped_invalid=${num(r.skippedInvalid)} (${kind})`);
   } catch (err) {
+    reportSyncFailure(err, "/");
     (deps.warn ?? console.warn)(`github repo sync failed (${syncFailureTag(err)}); the next event retries`);
   }
 }

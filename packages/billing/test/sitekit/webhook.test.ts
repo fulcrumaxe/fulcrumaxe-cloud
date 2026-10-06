@@ -8,6 +8,7 @@ import type { SitekitPriceMap } from '../../src/sitekit/priceMap.js';
 import { seedAccount } from '../helpers/seed.js';
 import { NO_REFUNDS_POLICY_VERSION } from '../../src/subscriptionSync.js';
 import { fakeStripe, fakeSubscription, rawInvoicePaid, rawSubscriptionEvent, signTestPayload } from '../helpers/stripeFixtures.js';
+import { captureReports } from '../helpers/captureReports.js';
 
 const SECRET = 'whsec_SITEKIT_TEST_ONLY';
 const HOSTED: PriceMap = new Map([['price_starter_test', 'starter']]);
@@ -157,6 +158,50 @@ describe('D#3 K09a site-kit webhook routing (real Postgres, fake Stripe, no netw
       const res = await deliver(rawSession({ sessionId: await session(f, 'setup'), accountId: f.accountId, customer: f.cus, paymentIntent: 'pi_x' }));
       expect(res).toEqual({ status: 500, body: { error: 'unknown_price' } });
       expect(await ent(f.siteId)).toBeUndefined();
+    });
+  });
+
+  describe('failures reach the error reporter as coded classes, with nothing from the error', () => {
+    const SECRET_TEXT = 'No such thing: cus_h1b_leak; request-id req_h1b_leak; sk_test_FAKE_h1b_webhook_secret';
+    const LEAKS = /cus_h1b_leak|req_h1b_leak|sk_test_FAKE_h1b_webhook_secret/;
+
+    it('a failed line-item read is 503 and reported under its own stage', async () => {
+      const f = await seed();
+      listLineItems.mockRejectedValueOnce(new Error(SECRET_TEXT));
+      const reports = captureReports();
+      const res = await deliver(rawSession({ sessionId: await session(f, 'setup'), accountId: f.accountId, customer: f.cus, paymentIntent: 'pi_li' }));
+      expect(res).toEqual({ status: 503, body: { error: 'stripe_unavailable' } });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/api/stripe/webhook', stage: 'billing.sitekit.line_items', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(LEAKS);
+    });
+
+    it('a failed duplicate-subscription cancel is 503 and reported under its own stage', async () => {
+      const f = await seed(true);
+      const first = `sub_${randomUUID()}`;
+      const second = `sub_${randomUUID()}`;
+      subFetches(first, f.cus!);
+      subFetches(second, f.cus!);
+      await deliver(rawSession({ sessionId: await session(f, 'sync'), accountId: f.accountId, customer: f.cus, subscription: first }));
+      cancel().mockRejectedValueOnce(new Error(SECRET_TEXT));
+      const reports = captureReports();
+      const res = await deliver(rawSession({ sessionId: await session(f, 'sync'), accountId: f.accountId, customer: f.cus, subscription: second }));
+      expect(res).toEqual({ status: 503, body: { error: 'stripe_unavailable' } });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/api/stripe/webhook', stage: 'billing.sitekit.cancel_duplicate', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(LEAKS);
+    });
+
+    it('a failed subscription fetch is 503 and reported under its own stage', async () => {
+      const f = await seed(true);
+      const sub = `sub_${randomUUID()}`;
+      subFetches(sub, f.cus!);
+      await deliver(rawSession({ sessionId: await session(f, 'sync'), accountId: f.accountId, customer: f.cus, subscription: sub }));
+      fake.set(new Error(SECRET_TEXT), sub);
+      const reports = captureReports();
+      const res = await deliver(rawSubscriptionEvent('customer.subscription.updated', { eventId: `evt_${randomUUID()}`, subscriptionId: sub, stripeCustomerId: f.cus! }));
+      expect(res).toEqual({ status: 503, body: { error: 'stripe_unavailable' } });
+      expect(reports.classes).toHaveLength(1);
+      expect(reports.classes[0]!.stage).toBe('billing.sitekit.fetch');
+      expect(reports.everything()).not.toMatch(LEAKS);
     });
   });
 
@@ -504,8 +549,14 @@ describe('D#3 K09a site-kit webhook routing (real Postgres, fake Stripe, no netw
       process.env.STRIPE_PRICE_ID_SITEKIT_SYNC = 'price_starter_test';
       try {
         const f = await seed(true);
+        const reports = captureReports();
         const res = await deliver(rawInvoicePaid({ eventId: `evt_${randomUUID()}`, stripeCustomerId: f.cus! }), { ...deps, sitekitPriceMap: undefined });
         expect(res).toEqual({ status: 500, body: { error: 'price_map_invalid' } });
+        // The setting mistake is reported by a fixed stage and code; the price ids are not in it.
+        expect(reports.classes).toHaveLength(1);
+        expect(reports.classes[0]).toMatchObject({ route: '/api/stripe/webhook', code: 'other' });
+        expect(reports.classes[0]!.stage).toBe('billing.sitekit.price_map');
+        expect(reports.everything()).not.toContain('price_starter_test');
       } finally {
         delete process.env.STRIPE_PRICE_ID_SITEKIT_SYNC;
       }

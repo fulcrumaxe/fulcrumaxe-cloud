@@ -5,9 +5,10 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool, reserve, planFor } from '@fx/spend';
 import { createPool as createBillingPool } from '../src/pg.js';
 import { handleStripeWebhookRequest, type StripeWebhookDeps } from '../src/webhook.js';
-import { NO_REFUNDS_POLICY_VERSION } from '../src/subscriptionSync.js';
+import { NO_REFUNDS_POLICY_VERSION, syncSubscriptionEvent } from '../src/subscriptionSync.js';
 import type { PriceMap } from '../src/priceMap.js';
 import { seedAccount } from './helpers/seed.js';
+import { captureReports } from './helpers/captureReports.js';
 import {
   fakeStripe,
   type FakeSubscriptionOptions,
@@ -124,13 +125,41 @@ describe('D#69 B2 subscription sync (real Postgres, fake Stripe, no network)', (
     });
   });
 
+  describe('H1b: an ambiguous price setting is reported by stage, without the price id', () => {
+    it('refuses the event with a server error and names no price id in the report', async () => {
+      const a = await seed();
+      const saved = [process.env.STRIPE_PRICE_ID_STARTER, process.env.STRIPE_PRICE_ID_SCALE];
+      process.env.STRIPE_PRICE_ID_STARTER = 'price_dup_h1b_fake';
+      process.env.STRIPE_PRICE_ID_SCALE = 'price_dup_h1b_fake';
+      try {
+        const reports = captureReports();
+        const event = JSON.parse(paid(a)) as Parameters<typeof syncSubscriptionEvent>[0];
+        const res = await syncSubscriptionEvent(event, { ...deps, priceMap: undefined });
+        expect(res).toEqual({ status: 500, body: { error: 'price_map_invalid' } });
+        expect(reports.classes).toEqual([{ service: 'test', route: '/api/stripe/webhook', stage: 'billing.price_map', code: 'other' }]);
+        expect(reports.everything()).not.toContain('price_dup_h1b_fake');
+      } finally {
+        for (const [key, value] of [['STRIPE_PRICE_ID_STARTER', saved[0]], ['STRIPE_PRICE_ID_SCALE', saved[1]]] as const) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  });
+
   describe('B6/B7 fetch failure and unparseable subscriptions', () => {
     it('a failed fetch is 503 with no writes; redelivery after recovery applies', async () => {
       const a = await seed();
       fake.set(new Error('Stripe is down: sk_test_leak'), a.sub);
       const payload = failed(a);
+      const reports = captureReports();
       const res = await deliver(payload);
       expect(res).toEqual({ status: 503, body: { error: 'stripe_unavailable' } });
+      // Reported as one coded class; the error text (a fake secret) is nowhere in it.
+      expect(reports.classes).toHaveLength(1);
+      expect(reports.classes[0]).toMatchObject({ route: '/api/stripe/webhook', code: 'other' });
+      expect(reports.classes[0]!.stage).toBe('billing.fetch_subscription');
+      expect(reports.everything()).not.toContain('sk_test_leak');
       expect(await ledger(a.accountId)).toBe(0);
       expect((await row(a.accountId)).past_due_since).toBeNull();
       fetches(a, { status: 'past_due' });
@@ -343,8 +372,11 @@ describe('D#69 B2 subscription sync (real Postgres, fake Stripe, no network)', (
     it('a failed cancel answers 503 with the flag kept, and the retry cancels without a second flag', async () => {
       const a = await twoCheckouts();
       const payload = checkout(a, { subscriptionId: 'sub_c' });
-      (fake.stripe.subscriptions.cancel as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('secret request internals'));
+      (fake.stripe.subscriptions.cancel as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('secret request internals sk_test_FAKE_h1b_dup_secret'));
+      const reports = captureReports();
       expect(await deliver(payload)).toEqual({ status: 503, body: { error: 'stripe_unavailable' } });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/api/stripe/webhook', stage: 'billing.cancel_duplicate', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/secret request internals|sk_test_FAKE_h1b_dup_secret/);
       expect(await flags(a.accountId)).toHaveLength(1);
       expect((await deliver(payload)).body).toMatchObject({ duplicate_canceled: true });
       expect(await flags(a.accountId)).toHaveLength(1);

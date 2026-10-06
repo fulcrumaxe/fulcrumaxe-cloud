@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { PoolClient } from 'pg';
 import type Stripe from 'stripe';
 import { planFor } from '@fx/spend';
@@ -95,7 +96,8 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
   let priceMap: PriceMap;
   try {
     priceMap = deps.priceMap ?? buildPriceMap();
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.price_map", route: "/api/stripe/webhook" });
     // One price id under two plans: refuse rather than guess a plan.
     return respond(500, { error: 'price_map_invalid' });
   }
@@ -107,7 +109,8 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
   let subscription: Stripe.Subscription;
   try {
     subscription = await deps.stripe.subscriptions.retrieve(subscriptionId);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.fetch_subscription", route: "/api/stripe/webhook" });
     // The SDK error can carry request internals: never forwarded.
     return respond(503, { error: 'stripe_unavailable' });
   }
@@ -355,7 +358,8 @@ async function cancelDuplicate(
   try {
     await deps.stripe.subscriptions.cancel(d.duplicateId, {}, { idempotencyKey: `duplicate-subscription-cancel:${d.duplicateId}` });
     return true;
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.cancel_duplicate", route: "/api/stripe/webhook" });
     // The SDK error can carry request internals: never forwarded.
     return false;
   }

@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { AppKind } from "./appCredentials.js";
 
 /**
@@ -73,7 +74,8 @@ export async function verifyUserInstallation(input: VerifyUserInstallationInput)
       if (list.length < PER_PAGE) return null;
     }
     return null;
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.user_installations" });
     return null;
   }
 }

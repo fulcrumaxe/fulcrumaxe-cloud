@@ -27,7 +27,7 @@ describe("reportError: the stdout line", () => {
       service: "web",
       event: "error.reported",
       stage: "sync",
-      route: "/api/:id/:id",
+      route: "/api/github/webhook",
       error_name: "Error",
       error_code: "other",
     });

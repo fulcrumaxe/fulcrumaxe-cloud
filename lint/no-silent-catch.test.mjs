@@ -66,6 +66,7 @@ describe("no-silent-catch: what passes", () => {
   it("a catch that calls reportError, bare or as a member", () => {
     expect(flagged("try { f(); } catch (err) { reportError(err, { stage: 'x' }); }")).toBe(0);
     expect(flagged("try { f(); } catch (err) { telemetry.reportError(err, { stage: 'x' }); }")).toBe(0);
+    expect(flagged("try { f(); } catch (err) { reportSyncFailure(err, '/'); }")).toBe(0);
   });
 
   it("a catch that calls error or warn on a logger", () => {

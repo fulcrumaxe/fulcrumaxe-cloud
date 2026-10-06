@@ -9,6 +9,7 @@ import { createDeliverySender, sendTestEvent, type WebhookEndpointSecretMaterial
 import { envWebhookKekSource, sealWebhookSecret, openWebhookSecret, generateWebhookSecret, type KekSource } from '../src/secrets.js';
 import { seedDomainEvent } from './helpers/seed.js';
 import { startTestReceiver, type TestReceiver } from './helpers/receiver.js';
+import { captureReports } from './helpers/captureReports.js';
 
 const TEST_KEK = Buffer.alloc(32, 7).toString('base64');
 
@@ -196,6 +197,41 @@ describe('dispatcher (D#31 API-4b)', () => {
 
     expect(outcome).toEqual({ ok: false, errorClass: 'kek_unavailable' });
     expect(receiver.requests.length).toBe(requestsBefore); // no network call was made
+  });
+
+  it('H1b: a missing or unusable KEK is reported as a coded class, with no key material in it', async () => {
+    const endpoint = await seedRealEndpoint(receiver.url);
+    const eventId = await seedDomainEvent(admin, refs.accountId, 'pr.opened', {});
+    const FAKE_KEK = 'FAKE-h1b-kek-material-0123456789abcdef';
+    const reports = captureReports();
+
+    for (const env of [{}, { FX_WEBHOOK_KEK_V1: FAKE_KEK, FX_WEBHOOK_KEK_CURRENT_VERSION: '1' }]) {
+      const sender = createDeliverySender(platformOpsPool, { kekSource: envWebhookKekSource(env), lookup: receiver.lookup });
+      const outcome = await sender.send({ id: randomUUID(), accountId: refs.accountId, endpointId: endpoint.id, eventId, eventType: 'pr.opened', attemptCount: 0 });
+      expect(outcome).toEqual({ ok: false, errorClass: 'kek_unavailable' });
+    }
+    expect(reports.classes).toHaveLength(2);
+    for (const c of reports.classes) expect(c).toMatchObject({ service: 'test', route: '/', stage: 'webhooks.kek' });
+    expect(reports.everything()).not.toContain(FAKE_KEK);
+  });
+
+  it('H1b: an unexpected failure while sending is internal_error, reported by its code only', async () => {
+    const FAKE_URL = 'postgres://app:FAKE-h1b-db-password@db.internal.example/fx';
+    const reports = captureReports();
+    const brokenPool = {
+      connect: async () => {
+        const err = new Error(`connect ECONNREFUSED ${FAKE_URL}`) as Error & { code: string };
+        err.code = 'ECONNREFUSED';
+        throw err;
+      },
+    } as unknown as Pool;
+    const sender = createDeliverySender(brokenPool, { kekSource: testKekSource(), lookup: receiver.lookup });
+    const outcome = await sender.send({ id: randomUUID(), accountId: refs.accountId, endpointId: randomUUID(), eventId: randomUUID(), eventType: 'pr.opened', attemptCount: 0 });
+
+    expect(outcome).toEqual({ ok: false, errorClass: 'internal_error' });
+    // The errno code is on the allowlist and is kept; the message (which carries the password) is not.
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'webhooks.send', code: 'ECONNREFUSED' }]);
+    expect(reports.everything()).not.toMatch(/FAKE-h1b-db-password|db\.internal\.example/);
   });
 
   it('criterion 4: a ciphertext copied onto another endpoint row fails to decrypt (AAD binding)', () => {

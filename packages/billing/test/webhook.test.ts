@@ -5,6 +5,7 @@ import { createPool } from '../src/pg.js';
 import { handleStripeWebhookRequest, type StripeWebhookDeps } from '../src/webhook.js';
 import type { PriceMap } from '../src/priceMap.js';
 import { seedAccount } from './helpers/seed.js';
+import { captureReports } from './helpers/captureReports.js';
 import {
   fakeStripe,
   rawCheckoutSessionCompleted,
@@ -66,8 +67,12 @@ describe('H10 Stripe webhook (real Postgres, no network)', () => {
         plan: 'starter',
       });
       const signedWithWrongSecret = signTestPayload(payload, 'whsec_a_totally_different_secret');
+      const reports = captureReports();
       const res = await handleStripeWebhookRequest(payload, signedWithWrongSecret, deps);
       expect(res.status).toBe(400);
+      // Reported as a coded class: no secret (either one), no signature and no payload in it.
+      expect(reports.classes).toEqual([{ service: 'test', route: '/api/stripe/webhook', stage: 'billing.verify_signature', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/whsec_|evt_2|cus_2|v1=/);
     });
 
     it('rejects a payload that was tampered with after signing', async () => {

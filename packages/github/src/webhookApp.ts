@@ -28,6 +28,7 @@ export function selectWebhookApp(credentials: AppCredentialsSource, targetIdHead
     try {
       creds = credentials(kind);
     } catch {
+      // fx-swallow-ok: an app kind whose credentials are not configured cannot match this delivery; the next kind is tried
       continue;
     }
     if (creds.appId === targetIdHeader) return { kind, webhookSecret: creds.webhookSecret };

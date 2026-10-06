@@ -6,7 +6,11 @@ const TRACE_ID = /^[0-9a-f]{32}$/i;
 const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 /** The literal path segments of the route table; any other segment is replaced by `:id`. Adopters add theirs. */
-export const ROUTE_LITERALS: ReadonlySet<string> = new Set(["api", "v1", "runs", "events"]);
+export const ROUTE_LITERALS: ReadonlySet<string> = new Set([
+  "api", "v1", "runs", "events",
+  // H1b: the github, stripe, webhook and api-sweep routes.
+  "github", "stripe", "webhook", "install", "callback", "create-repo", "cron", "api-sweep",
+]);
 
 const MAX_ROUTE_SEGMENTS = 16;
 

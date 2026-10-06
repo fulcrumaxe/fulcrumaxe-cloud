@@ -105,6 +105,7 @@ function parseKind(kind: AppKind, env: Record<string, string | undefined>): Pars
         createPrivateKey(privateKeyPem);
         parses = true;
       } catch {
+        // fx-swallow-ok: the key not parsing is the finding itself: it is recorded below as pem_unparseable
         parses = false;
       }
     }

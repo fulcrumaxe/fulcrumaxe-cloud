@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import type { Product } from "@fx/gh-policy";
 import type { ResolvedSandboxRun, SandboxRunResolver } from "./proxyDecision.js";
 
@@ -92,9 +93,9 @@ export function createRunResolver(ghProxyPool: Pool): SandboxRunResolver {
     try {
       rows = (await ghProxyPool.query<ResolverRow>(RESOLVE_QUERY, [sandboxName])).rows;
     } catch (err) {
-      // Any DB error denies (H13c-4). Logged server-side only -- never
-      // surfaced to the sandbox that gets the generic 403.
-      console.error("runResolver: db error resolving sandbox run", err);
+      // Any DB error denies (H13c-4). Reported server-side only (a coded class, never the error's text) --
+      // never surfaced to the sandbox that gets the generic 403.
+      reportError(err, { stage: "github.run_resolve" });
       return null;
     }
 

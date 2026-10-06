@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { Pool, PoolClient } from "pg";
 import { withPlatformOps } from "@fx/core/src/tenancy/withPlatformOps.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
@@ -83,7 +84,8 @@ export async function bindClaim(
   let creds;
   try {
     creds = deps.appCredentials(claim.kind);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.install.credentials" });
     return "failed";
   }
   // Eligibility, then the live recheck (an HTTP call, so outside any
@@ -141,7 +143,8 @@ export async function completeInstall(deps: CompleteInstallDeps, input: Complete
   let appId: string;
   try {
     appId = deps.appCredentials(input.kind).appId;
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.install.credentials" });
     return "failed";
   }
   const ghUserId = await verifyUserInstallation({

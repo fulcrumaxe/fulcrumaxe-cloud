@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
-import { completeInstall, type InstallOutcome } from '../src/installCallback.js';
+import { bindClaim, completeInstall, type InstallOutcome } from '../src/installCallback.js';
 import { recordInstallationLifecycle } from '../src/installerRecord.js';
 import type { AppKind } from '../src/appCredentials.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 import { pagedListing, strictGithubFetch } from './helpers/strictGithub.js';
+import { captureReports } from './helpers/captureReports.js';
 
 /**
  * D#2 H17e against real Postgres: the installer rule (C57). GitHub is faked;
@@ -236,6 +237,44 @@ describe('installer rule (D#2 H17e)', () => {
     expect(await pendingCount(gh)).toBe(0);
     await deliver(h.recheck, 'team', created(gh, INSTALLER)); // replay
     expect(await audits(who.accountId)).toHaveLength(1);
+  });
+
+  it('H1b: a pending claim whose bind throws is reported as a coded class, binds nothing and keeps the claim for the next callback', async () => {
+    const h = harness();
+    const gh = ++nextGh;
+    const who = await seed();
+    expect(await callback(who, INSTALLER, gh, h.recheck)).toBe('pending');
+
+    const reports = captureReports();
+    const exploding = vi.fn(async () => {
+      throw Object.assign(new Error('recheck failed for ghs_FAKE_h1b_installer_token at https://api.github.com/app/installations/1'), { code: 'ECONNRESET' });
+    });
+    await deliver(exploding, 'team', created(gh, INSTALLER));
+
+    expect(await bound(gh)).toEqual([]);
+    expect(await pendingCount(gh)).toBe(1);
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.bind_pending_claim', code: 'ECONNRESET' }]);
+    expect(reports.everything()).not.toMatch(/ghs_FAKE_h1b_installer_token|api\.github\.com/);
+  });
+
+  it('H1b: an App whose credentials cannot be read fails the bind and is reported by stage only', async () => {
+    const h = harness();
+    const gh = ++nextGh;
+    const who = await seed();
+    const reports = captureReports();
+    const outcome = await bindClaim(
+      {
+        platformOpsPool,
+        appCredentials: () => {
+          throw new Error('GITHUB_APP_TEAM_PRIVATE_KEY missing: -----BEGIN FAKE h1b KEY-----');
+        },
+        recheck: h.recheck,
+      },
+      { kind: 'team', accountId: who.accountId, userId: who.userId, ghInstallationId: gh, installerGhUserId: INSTALLER, path: 'callback' },
+    );
+    expect(outcome).toBe('failed');
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.install.credentials', code: 'other' }]);
+    expect(reports.everything()).not.toMatch(/PRIVATE_KEY|FAKE h1b KEY/);
   });
 
   it('R3: a pending claim by someone who is not the installer never binds, and cannot displace the installer\'s own', async () => {
