@@ -319,6 +319,34 @@ export class PreviewInstallLimitReachedError extends ApiError {
   }
 }
 
+/** D#483 S3: a plan import is already running for the repository. */
+export class ImportRunningApiError extends ApiError {
+  constructor() {
+    super(409, "import_running", "an import is already running for this repository");
+  }
+}
+
+/** D#483 S3: the repository is not connected to a GitHub App installation any more (or has never been). */
+export class RepoNotConnectedApiError extends ApiError {
+  constructor() {
+    super(409, "repo_not_connected", "this repository isn't connected any more");
+  }
+}
+
+/** D#483 S3: a repository that was never imported has no latest import. */
+export class NeverImportedError extends ApiError {
+  constructor() {
+    super(404, "never_imported", "this repository has never been imported");
+  }
+}
+
+/** D#483 S3: the import cannot run here (no GitHub reader is registered). Nothing was written. */
+export class PlanImportUnavailableError extends ApiError {
+  constructor() {
+    super(503, "plan_import_unavailable", "plan import is not available right now");
+  }
+}
+
 /** D#31 API-4b criterion 10: the endpoint past the plan's limit
  * -> 409 `endpoint_limit_reached`. */
 export class EndpointLimitReachedError extends ApiError {

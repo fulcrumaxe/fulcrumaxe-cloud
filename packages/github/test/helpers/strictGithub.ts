@@ -38,6 +38,8 @@ export interface GhRequest {
   method: string;
   /** Path only, no query. */
   path: string;
+  /** The raw query string without the `?`, when the server saw one. */
+  query?: string;
   /** Header names lower-cased. */
   headers: Record<string, string>;
   body: string;

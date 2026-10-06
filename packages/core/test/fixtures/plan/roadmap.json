@@ -1,0 +1,256 @@
+{
+ "version": 3,
+ "repo": "example/widgets",
+ "generated": "2026-01-01",
+ "frozen_baseline": true,
+ "milestones": {
+  "alpha": {
+   "definition": "Alpha: the first usable slice of the made-up Widget service. More words follow.",
+   "tasks": [
+    "D#9001:A1",
+    "D#9001:A2",
+    "D#9001:A3",
+    "D#9001:A4",
+    "D#9001:A5",
+    "D#9001:A6",
+    "D#9001:A7",
+    "D#9001:A7a",
+    "D#9001:A7b"
+   ],
+   "merged_prs": [
+    1,
+    2,
+    3,
+    4,
+    7
+   ]
+  },
+  "beta": {
+   "definition": "Beta: the Widget service gains exports and retries. More words follow.",
+   "tasks": [
+    "D#9002:B1",
+    "D#9002:B2",
+    "D#9002:B3",
+    "D#9002:B4",
+    "D#9002:B5",
+    "D#9002:B6"
+   ],
+   "merged_prs": [
+    10,
+    11
+   ]
+  },
+  "gamma": {
+   "definition": "Gamma: the Widget service is ready for general use. More words follow.",
+   "tasks": [
+    "D#9003:C1",
+    "D#9003:C2",
+    "D#9003:C3",
+    "D#9003:C4",
+    "D#9004"
+   ],
+   "merged_prs": [
+    20,
+    22
+   ]
+  }
+ },
+ "task_status": {
+  "D#9001:A1": {
+   "milestone": "alpha",
+   "status": "done",
+   "prs": [
+    1
+   ],
+   "planned_prs": 1
+  },
+  "D#9001:A2": {
+   "milestone": "alpha",
+   "status": "done",
+   "prs": [
+    2,
+    3
+   ],
+   "planned_prs": 2
+  },
+  "D#9001:A3": {
+   "milestone": "alpha",
+   "status": "partial",
+   "prs": [
+    4
+   ],
+   "planned_prs": 2,
+   "open_prs": [
+    5
+   ]
+  },
+  "D#9001:A4": {
+   "milestone": "alpha",
+   "status": "open",
+   "prs": [],
+   "planned_prs": 1,
+   "open_prs": [
+    6
+   ]
+  },
+  "D#9001:A5": {
+   "milestone": "alpha",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9001:A6": {
+   "milestone": "alpha",
+   "status": "pending_spec",
+   "prs": [],
+   "planned_prs": 0
+  },
+  "D#9001:A7": {
+   "milestone": "alpha",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 0,
+   "split_into": [
+    "D#9001:A7a",
+    "D#9001:A7b"
+   ]
+  },
+  "D#9001:A7a": {
+   "milestone": "alpha",
+   "status": "done",
+   "prs": [
+    7
+   ],
+   "planned_prs": 1,
+   "parent": "D#9001:A7"
+  },
+  "D#9001:A7b": {
+   "milestone": "alpha",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 1,
+   "parent": "D#9001:A7"
+  },
+  "D#9002:B1": {
+   "milestone": "beta",
+   "status": "done",
+   "prs": [
+    10
+   ],
+   "planned_prs": 1
+  },
+  "D#9002:B2": {
+   "milestone": "beta",
+   "status": "done",
+   "prs": [
+    11
+   ],
+   "planned_prs": 1
+  },
+  "D#9002:B3": {
+   "milestone": "beta",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9002:B4": {
+   "milestone": "beta",
+   "status": "open",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9002:B5": {
+   "milestone": "beta",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9002:B6": {
+   "milestone": "beta",
+   "status": "not_started",
+   "prs": [
+    14
+   ],
+   "planned_prs": 1
+  },
+  "D#9003:C1": {
+   "milestone": "gamma",
+   "status": "not_started",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9003:C2": {
+   "milestone": "gamma",
+   "status": "open",
+   "prs": [],
+   "planned_prs": 1
+  },
+  "D#9003:C3": {
+   "milestone": "gamma",
+   "status": "done",
+   "prs": [
+    20
+   ],
+   "planned_prs": 1
+  },
+  "D#9003:C4": {
+   "milestone": "gamma",
+   "status": "open",
+   "prs": [],
+   "planned_prs": 1,
+   "open_prs": [
+    21
+   ]
+  },
+  "D#9004": {
+   "milestone": "gamma",
+   "status": "done",
+   "prs": [
+    22
+   ],
+   "planned_prs": 1
+  }
+ },
+ "refreshed": {
+  "max_merged_pr": 40
+ },
+ "counting_rule": "A made-up counting rule for this fixture: a task is done when its planned pull requests are merged.",
+ "importer_check": {
+  "rule": "Reference-line rule: a merged PR counts for a task only when it declares it completes the task.",
+  "tasks_where_importer_would_differ_from_this_file": [
+   {
+    "task": "D#9002:B4",
+    "file_status": "open",
+    "importer_status": "done",
+    "reference_line_prs": [
+     12
+    ]
+   },
+   {
+    "task": "D#9002:B5",
+    "file_status": "not_started",
+    "importer_status": "done",
+    "reference_line_prs": [
+     13
+    ]
+   },
+   {
+    "task": "D#9003:C1",
+    "file_status": "not_started",
+    "importer_status": "done",
+    "reference_line_prs": [
+     30
+    ]
+   },
+   {
+    "task": "D#9003:C2",
+    "file_status": "open",
+    "importer_status": "done",
+    "reference_line_prs": [
+     31
+    ]
+   }
+  ],
+  "note": "Each listed task is named by a merged PR only as a dependency or a follow-up."
+ }
+}

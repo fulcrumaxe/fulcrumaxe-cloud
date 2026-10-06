@@ -23,6 +23,7 @@ import { runEventsExportRoutes } from "./runEventsExport.js";
 import { commentRoutes, discussionRoutes } from "./discussions.js";
 import { siteRoutes } from "./sites.js";
 import { sitekitBillingRoutes } from "./sitekitBilling.js";
+import { planRoutes } from "./plan.js";
 
 /**
  * The one array every other piece of API-1 reads from: the catch-all's
@@ -70,6 +71,7 @@ export const ROUTES: RouteEntry[] = [
   ...commentRoutes,
   ...siteRoutes,
   ...sitekitBillingRoutes,
+  ...planRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`

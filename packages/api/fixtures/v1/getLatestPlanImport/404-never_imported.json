@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "never_imported",
+    "message": "this repository has never been imported",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

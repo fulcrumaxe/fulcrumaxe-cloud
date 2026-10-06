@@ -14521,6 +14521,1045 @@
           }
         }
       }
+    },
+    "/api/v1/repos/{id}/plan-imports": {
+      "post": {
+        "operationId": "startPlanImport",
+        "summary": "Import the repository's existing plan, read-only",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. Starts an import of the repository's roadmap file (read from its default branch: `.fulcrumaxe/roadmap.json`, then `.autonomous-team/roadmap.json`, then `roadmap.json`) through the read-only GitHub App. The import only ever reads GitHub (GET requests and read-only GraphQL, with a token whose permissions are checked to be read-only), writes only the plan tables and the inbox of proposals, and starts no work and no agent run. Answers 202 `{ import_id, action_id, state }` at once (`action_id` is null: the live build runs the import in the request, not as a queued action); read the outcome with `GET /api/v1/repos/{id}/plan-imports/latest`. One import runs at a time per repository. Limits: 6 starts per repository per hour and 20 per account per hour, answered 429 `rate_limited` with `Retry-After`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Import the repository's existing plan, read-only",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "import_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "action_id": {
+                      "type": "null"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "running"
+                    }
+                  },
+                  "required": [
+                    "import_id",
+                    "action_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` (a token) or `insufficient_role` (below admin).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: the repository does not exist in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `import_running` (an import is already running for this repository) or `repo_not_connected` (the GitHub App is not installed on it any more).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: too many imports in the last hour; `Retry-After` says how long to wait.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `plan_import_unavailable`: no GitHub reader is registered. Nothing was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/plan-imports/latest": {
+      "get": {
+        "operationId": "getLatestPlanImport",
+        "summary": "The repository's newest plan import",
+        "description": "The newest import of any state, with its level, source file and commit, counts, whether it stopped at a bound (`truncated`), the error code and detail of a failed one, `max_merged_pr`, and the evidence of what it asked GitHub: `github_requests` (method, path, status) and the `token_permissions` GitHub reported for the minted token. 404 `never_imported` when the repository has no import yet.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repository's newest plan import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "repo_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "running",
+                        "succeeded",
+                        "failed"
+                      ]
+                    },
+                    "level": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source_path": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "source_sha": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "counts": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {}
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "error_code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "error_detail": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "max_merged_pr": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "github_requests": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "method": {
+                                "type": "string"
+                              },
+                              "path": {
+                                "type": "string"
+                              },
+                              "status": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "method",
+                              "path",
+                              "status"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "token_permissions": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "started_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "finished_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "state",
+                    "level",
+                    "source_path",
+                    "source_sha",
+                    "counts",
+                    "truncated",
+                    "error_code",
+                    "error_detail",
+                    "max_merged_pr",
+                    "github_requests",
+                    "token_permissions",
+                    "started_at",
+                    "finished_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found` (the repository does not exist in this account) or `never_imported`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/plan": {
+      "get": {
+        "operationId": "getRepoPlan",
+        "summary": "The repository's imported plan: milestones and tasks",
+        "description": "`milestones` lists each milestone with `tasks`, `done` and `remaining`, derived from the task rows on every read (the counts stored on an import are that import's own historical stamp). `tasks` is one page (`milestone`, `status` = `done` or `remaining`, `cursor`, `limit` up to 100) of the tasks, ordered by key; `next_cursor` is null on the last page. `?format=full` answers every task in one response (with `next_cursor` null), for the dogfood comparison; it is capped at 5000 tasks, and `tasks_truncated` is true when the cap cut tasks off. `imported_from` is the newest import that succeeded, which the rows came from; `latest_import` is the newest of any state, so a failed re-import is visible while the previous data stays.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "milestone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "done",
+                "remaining"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,3}$"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "const": "full"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The repository's imported plan: milestones and tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "latest_import": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "repo_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "queued",
+                                "running",
+                                "succeeded",
+                                "failed"
+                              ]
+                            },
+                            "level": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "source_path": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "source_sha": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "counts": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string"
+                              },
+                              "additionalProperties": {}
+                            },
+                            "truncated": {
+                              "type": "boolean"
+                            },
+                            "error_code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "error_detail": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "max_merged_pr": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "github_requests": {
+                              "anyOf": [
+                                {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "method": {
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      },
+                                      "status": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": [
+                                      "method",
+                                      "path",
+                                      "status"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "token_permissions": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "propertyNames": {
+                                    "type": "string"
+                                  },
+                                  "additionalProperties": {
+                                    "type": "string"
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "started_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "finished_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "repo_id",
+                            "state",
+                            "level",
+                            "source_path",
+                            "source_sha",
+                            "counts",
+                            "truncated",
+                            "error_code",
+                            "error_detail",
+                            "max_merged_pr",
+                            "github_requests",
+                            "token_permissions",
+                            "started_at",
+                            "finished_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "imported_from": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "repo_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "queued",
+                                "running",
+                                "succeeded",
+                                "failed"
+                              ]
+                            },
+                            "level": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "source_path": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "source_sha": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "counts": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string"
+                              },
+                              "additionalProperties": {}
+                            },
+                            "truncated": {
+                              "type": "boolean"
+                            },
+                            "error_code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "error_detail": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "max_merged_pr": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "github_requests": {
+                              "anyOf": [
+                                {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "method": {
+                                        "type": "string"
+                                      },
+                                      "path": {
+                                        "type": "string"
+                                      },
+                                      "status": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      }
+                                    },
+                                    "required": [
+                                      "method",
+                                      "path",
+                                      "status"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "token_permissions": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "propertyNames": {
+                                    "type": "string"
+                                  },
+                                  "additionalProperties": {
+                                    "type": "string"
+                                  }
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "started_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "finished_at": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "repo_id",
+                            "state",
+                            "level",
+                            "source_path",
+                            "source_sha",
+                            "counts",
+                            "truncated",
+                            "error_code",
+                            "error_detail",
+                            "max_merged_pr",
+                            "github_requests",
+                            "token_permissions",
+                            "started_at",
+                            "finished_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "milestones": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "position": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "tasks": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "done": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "remaining": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "title",
+                          "position",
+                          "tasks",
+                          "done",
+                          "remaining"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "totals": {
+                      "type": "object",
+                      "properties": {
+                        "tasks": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "done": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "remaining": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "tasks",
+                        "done",
+                        "remaining"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "tasks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "task_key": {
+                            "type": "string"
+                          },
+                          "milestone_key": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "done",
+                              "partial",
+                              "open",
+                              "not_started",
+                              "pending_spec"
+                            ]
+                          },
+                          "planned_prs": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "merged_prs": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "open_prs": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "owner_process": {
+                            "type": "string",
+                            "enum": [
+                              "product",
+                              "internal_loop"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "task_key",
+                          "milestone_key",
+                          "title",
+                          "status",
+                          "planned_prs",
+                          "merged_prs",
+                          "open_prs",
+                          "owner_process"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "tasks_truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "latest_import",
+                    "imported_from",
+                    "milestones",
+                    "totals",
+                    "tasks",
+                    "next_cursor",
+                    "tasks_truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: the repository does not exist in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
