@@ -63,7 +63,7 @@ function toNormalizedUsage(usage: {
 
 /** Map one raw stream-json message onto our normalized event shape. */
 export function normalizeMessage(
-  opts: Pick<StartOptions, "runId" | "role">,
+  opts: Pick<StartOptions, "runId" | "role"> & { backend?: string },
   message: Record<string, unknown>,
   seq: number,
   /** The repository root inside the sandbox; tool paths under it are reported relative to it, any other absolute path is dropped. */
@@ -78,6 +78,7 @@ export function normalizeMessage(
     type: "system",
     ts,
     sessionId,
+    ...(opts.backend !== undefined && { backend: opts.backend }),
   };
 
   if (message.type === "assistant") {

@@ -11,13 +11,14 @@ import {
   DispatchAbortedError,
   DispatchFailedError,
   EXECUTOR_ROLE,
+  DEFAULT_BACKEND,
   type DispatchResult,
   type ExecutionRun,
   type ExecutionTargetRegistry,
   type RunStatus,
   type StartAgentRunInput,
 } from "@fx/runner";
-import { lookupOwnedExecutorSession } from "./resumeOwnership.js";
+import { ResumeBackendError, lookupOwnedExecutorSession } from "./resumeOwnership.js";
 
 /**
  * D#2 H14a, criterion 2 (H09.9's "real caller", per the split ruling and
@@ -111,9 +112,12 @@ export async function resumeAgentRun(
   // BEFORE anything is written or any target method is called -- a
   // foreign/absent session throws ForeignSessionError here and nothing
   // downstream ever runs.
-  const { sessionId } = await withTenant(pool, input.accountId, (client) =>
+  const { sessionId, backend: storedBackend } = await withTenant(pool, input.accountId, (client) =>
     lookupOwnedExecutorSession(client, { accountId: input.accountId, workItemId }),
   );
+
+  // D#221 R1b: the round continues on the backend the session was started on, or not at all. Checked before any write.
+  if ((input.backend ?? DEFAULT_BACKEND) !== storedBackend) throw new ResumeBackendError("different");
 
   const mode = await readExecutionMode(pool, input.accountId, input.repoId);
   const target = resolveExecutionTarget(mode, registry);
@@ -134,7 +138,7 @@ export async function resumeAgentRun(
     idempotency: input.idempotency,
   });
 
-  const run: ExecutionRun = buildExecutionRun(id, input);
+  const run: ExecutionRun = buildExecutionRun(id, { ...input, backend: storedBackend });
 
   const admitClient = await pool.connect();
   admitClient.release();

@@ -1,0 +1,5 @@
+{"type":"assistant","session_id":"sess-p1","message":{"id":"msg_A","content":[{"type":"text","text":"a1"}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","session_id":"sess-p1","message":{"id":"msg_A","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","session_id":"sess-p1","message":{"id":"msg_A","content":[{"type":"text","text":"a3"}],"usage":{"input_tokens":80,"output_tokens":20}}}
+{"type":"assistant","session_id":"sess-p1","message":{"id":"msg_B","content":[{"type":"text","text":"b1"}],"usage":{"input_tokens":200,"output_tokens":5}}}
+{"type":"assistant","session_id":"sess-p1","message":{"id":"msg_B","content":[{"type":"text","text":"b2"}],"usage":{"input_tokens":200,"output_tokens":5}}}

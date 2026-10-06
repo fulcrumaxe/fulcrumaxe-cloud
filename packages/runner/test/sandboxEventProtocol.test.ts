@@ -285,7 +285,7 @@ describe("EV-MAP: the port maps like the local runtime", () => {
     vi.setSystemTime(new Date("2026-09-29T00:00:00Z"));
     const lines = readFileSync(path.join(here, "..", "..", "runtime", "test", "fixtures", "stream-json-run.jsonl"), "utf8").trim().split("\n");
     const { normalizeMessage } = await import("@fx/runtime/src/local/index.js");
-    const expected = lines.map((l, i) => normalizeMessage({ runId: "run-1", role: "reviewer" }, JSON.parse(l), i));
+    const expected = lines.map((l, i) => normalizeMessage({ runId: "run-1", role: "reviewer", backend: "claude-code" }, JSON.parse(l), i));
     const { delivered, last } = await run(lines);
     expect(delivered).toEqual(expected);
     expect(last).toEqual(expected[4]);

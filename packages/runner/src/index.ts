@@ -15,6 +15,7 @@ export * from "./executionTarget.js";
 export * from "./runLimitDecision.js";
 export * from "./sandboxRuntime.js";
 export { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";
+export { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 export * from "./agentConfig.js";
 export * from "./targets/sandboxTarget.js";
 export * from "./targets/runnerTarget.js";

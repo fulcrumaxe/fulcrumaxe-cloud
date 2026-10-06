@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":100000}}}
+{"type":"assistant","message":{"id":"msg_forged","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":50000000}}}

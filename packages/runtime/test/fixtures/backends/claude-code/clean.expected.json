@@ -1,0 +1,12 @@
+{
+  "types": ["system", "assistant", "user", "assistant", "result"],
+  "messageIds": [null, "msg_1", null, "msg_2", null],
+  "sessionId": "sess-c1",
+  "toolUses": [{ "id": "t1", "tool": "read", "path": "a.ts" }],
+  "agentOutput": { "verdict": "pass" },
+  "costUsd": 0.25,
+  "meteredTotal": { "inputTokens": 2200, "outputTokens": 340, "cacheWriteTokens": 10, "cacheReadTokens": 50 },
+  "perId": {
+    "meteredTotal": { "inputTokens": 300, "outputTokens": 55, "cacheWriteTokens": 0, "cacheReadTokens": 0 }
+  }
+}

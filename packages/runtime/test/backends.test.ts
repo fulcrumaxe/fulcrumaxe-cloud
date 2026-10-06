@@ -151,6 +151,15 @@ describe("D#221 R1a: the pin check script, run by a real sh against real files",
       expect(verifyPin(claude({ cliSha256: sha(content) }), r.status ?? undefined, String(r.stdout))).toBe("cliVersion");
     }));
 
+  it("a genuine binary whose --version itself exits 4 ends as 5 (cliVersion), never as 4 (cliDigest)", () =>
+    withBinary(({ real, bin, run }) => {
+      const content = '#!/bin/sh\necho "2.1.287"\nexit 4\n';
+      install(real, bin, content);
+      const r = run(sha(content));
+      expect(r.status).toBe(PIN_EXIT_OTHER);
+      expect(verifyPin(claude({ cliSha256: sha(content) }), r.status ?? undefined, String(r.stdout))).toBe("cliVersion");
+    }));
+
   it("a missing CLI exits 5 (not 4)", () =>
     withBinary(({ bin }) => {
       const r = spawnSync("sh", ["-c", PIN_CHECK_SCRIPT, PIN_CHECK_NAME, "fx-no-such-cli", SHA], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
