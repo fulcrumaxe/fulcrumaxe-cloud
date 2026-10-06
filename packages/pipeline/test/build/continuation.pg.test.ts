@@ -8,7 +8,8 @@ import { startAgentRun, writeRunStatus, type StartAgentRunInput } from "@fx/runn
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
-import { AUTO_CONTINUE_HASH, continueLockPoolMax, continuationKey, continueAfterLimit, continueAfterLimitLocked, continueLockPoolCount, continueWorkItem, continueWorkItemLocked, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
+import { AUTO_CONTINUE_HASH, continueLockPoolMax, continuationKey, continueAfterLimit, continueLockPoolCount, continueWorkItem, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
+import { continueAfterLimitLocked, continueWorkItemLocked } from "../../src/build/continuationTesting.js";
 import { createFakeExecutionTarget } from "./helpers/fakeExecutionTarget.js";
 import { seedAccount, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";

@@ -305,7 +305,7 @@ let lockPoolMax = clampLockPoolMax(process.env.FX_CONTINUE_LOCK_POOL_MAX);
 /** How many lock pools are tracked right now; for tests. */
 export const continueLockPoolCount = (): number => allLockPools.size;
 
-export const continueLockPoolMax =(): number => lockPoolMax;
+export const continueLockPoolMax = (): number => lockPoolMax;
 
 /** Resizes the lock pools (and closes the existing ones); for composition roots and tests. */
 export async function setContinueLockPoolMax(max: number): Promise<void> {
@@ -393,7 +393,7 @@ export async function continueAfterLimit(
   return (await withWorkItemLock(pool, accountId, known.workItemId, () => continueAfterLimitLocked(pool, registry, input))) ?? { outcome: "busy" };
 }
 
-/** Exported for tests: the decision without the lock, to reproduce a lock lost before the child row is written. */
+/** Test-only: reached through `@fx/pipeline/testing/continuation`, never the barrel. The decision without the lock, to reproduce a lock lost before the child row is written. */
 export async function continueAfterLimitLocked(
   pool: Pool,
   registry: ExecutionTargetRegistry,
@@ -448,7 +448,7 @@ export async function continueWorkItem(ctx: ContinueWorkItemCtx, input: Continue
   return (await withWorkItemLock(ctx.pool, input.accountId, input.workItemId, () => continueWorkItemLocked(ctx, input))) ?? { outcome: "busy" };
 }
 
-/** Exported for tests, like `continueAfterLimitLocked`. */
+/** Test-only, like `continueAfterLimitLocked`. */
 export async function continueWorkItemLocked(ctx: ContinueWorkItemCtx, input: ContinueWorkItemInput): Promise<ContinueAfterLimitResult> {
   const { accountId } = input;
   const at = input.at ?? new Date();

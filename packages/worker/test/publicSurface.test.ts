@@ -169,6 +169,25 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     await second.close();
     expect(closes).toEqual(["w1", "w2"]);
   });
+
+  it("a rejected close() is not remembered: the next close() tries again, and a success is then final", async () => {
+    let attempts = 0;
+    mocks.createWorkerPools.mockImplementation(async () => ({
+      runnerPool: poolA,
+      platformOpsPool: poolB,
+      close: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("end failed");
+      },
+    }));
+    const worker = await createWorker(OPTIONS);
+    await expect(worker.close()).rejects.toThrow("end failed");
+    expect(attempts).toBe(1);
+    await expect(worker.close()).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    await worker.close();
+    expect(attempts).toBe(2);
+  });
 });
 
 describe("H14c-3-3a-3: who may call followTimeoutBody (it writes timed_out and stops a sandbox)", () => {

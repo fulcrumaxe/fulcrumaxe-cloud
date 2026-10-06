@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import * as publicSurface from "../src/index.js";
 import * as poolsModule from "../src/pools.js";
-import { PROVISIONERS, RUNNER_LOGIN_NAME, countScannedFiles, provisionerViolation, scanRunnerLoginReaders } from "./support/scanRunnerLoginReaders.js";
+import { PROVISIONERS, RUNNER_LOGIN_NAME, countScannedFiles, provisionerViolation, scanModes, scanRunnerLoginReaders } from "./support/scanRunnerLoginReaders.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const NAME = RUNNER_LOGIN_NAME;
@@ -17,6 +17,8 @@ describe("CARRY-8: pools.ts is the only reader of the runner-login variable", ()
   it("the real repo is clean: no source anywhere (test and tests directories included) reads it, spells it out, or imports the worker's internals", () => {
     // A floor, so a scan that lists no files (it once did, in a worktree) cannot pass as clean.
     expect(countScannedFiles(REPO_ROOT)).toBeGreaterThan(FILE_FLOOR);
+    // And it listed through git, which leaves untracked build output out; a directory walk would include it.
+    expect(scanModes(REPO_ROOT)).toEqual({ apps: "git", packages: "git", sites: "git", scripts: "git" });
     expect(scanRunnerLoginReaders(REPO_ROOT)).toEqual([]);
   });
 

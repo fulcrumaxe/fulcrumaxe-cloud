@@ -338,9 +338,15 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         advanceCancel,
         // Once only; and it forgets the instance only while that is still this one,
         // so a stale close() after a rebuild neither clears nor closes the newer worker.
+        // A rejected close is not kept: the next call tries again. That is safe because the
+        // pools' own close settles every pool end and so does not reject on a second `end()`.
         close: () => {
           if (instance === mine) instance = undefined;
-          return (closing ??= close());
+          closing ??= close().catch((err: unknown) => {
+            closing = undefined;
+            throw err;
+          });
+          return closing;
         },
       };
     },

@@ -9,7 +9,8 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./plan/runnerContract": "./src/plan/runnerContract.ts"
+    "./plan/runnerContract": "./src/plan/runnerContract.ts",
+    "./testing/continuation": "./src/build/continuationTesting.ts"
   },
   "scripts": {
     "test": "vitest run",
