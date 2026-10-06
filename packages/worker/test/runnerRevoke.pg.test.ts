@@ -17,7 +17,6 @@ describe("revoking a runner fails its leases through the worker [pg]", () => {
   let admin: PoolClient;
   let writerPool: Pool;
   let appPool: Pool;
-  let opsPool: Pool;
   let facade: RunnerLeaseFacade;
   const ORIGIN = "https://runner.example.test";
 
@@ -26,15 +25,14 @@ describe("revoking a runner fails its leases through the worker [pg]", () => {
     admin = await adminPool.connect();
     writerPool = createPool(process.env.WORKER_DATABASE_URL_RUN_WRITER!);
     appPool = createPool(process.env.WORKER_DATABASE_URL_APP_USER!);
-    opsPool = createPool(process.env.WORKER_DATABASE_URL_PLATFORM_OPS!);
     facade = createRunnerLeaseFacade(writerPool);
   });
   afterAll(async () => {
     admin.release();
-    await Promise.all([adminPool, writerPool, appPool, opsPool].map((p) => p.end()));
+    await Promise.all([adminPool, writerPool, appPool].map((p) => p.end()));
   });
 
-  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, platformOpsPool: opsPool, origin: ORIGIN, failRunnerLeases: (input) => facade.failRunnerLeases(input) });
+  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: (input) => facade.failRunnerLeases(input) });
   async function run(f: F2Fixture, runnerId: string, status: string): Promise<string> {
     const id = randomUUID();
     await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, runner_id) VALUES ($1, $2, 'executor', 'runner', $3, $4)`, [id, f.accountId, status, runnerId]);

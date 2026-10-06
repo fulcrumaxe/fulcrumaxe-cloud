@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { MAX_CREATED_SKEW_SECONDS } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 
 /** The framework-free request and response the runner handlers speak. apps/web adapts `Request` and `NextResponse` to these. */
@@ -52,17 +53,23 @@ export async function toResponse(run: () => Promise<RunnerHttpResponse>): Promis
 export const MAX_BODY_BYTES = 256 * 1024;
 /** A runner key older than this must be re-registered (criterion 6). */
 export const MAX_KEY_AGE_DAYS = 90;
-/** How long a seen nonce is remembered. The signature's own `created` window is +/- 60 s, so 2 minutes covers every replay. */
-export const NONCE_WINDOW_SECONDS = 120;
+/**
+ * How long a seen nonce is remembered, derived from the signature's own skew bound. A signature stays acceptable from
+ * `created - skew` to `created + skew`, so a request first seen at the early edge can be replayed for twice the skew;
+ * add a minute for the second the clock is read in and for clock steps. 180 with the current bound. The database
+ * refuses anything shorter than 180 (migration 0724), so lowering the bound cannot quietly shorten the memory below it.
+ */
+export const NONCE_RETENTION_SECONDS = 2 * MAX_CREATED_SKEW_SECONDS + 60;
 /** The protocol version this cloud speaks. A `hello` below `current - 1` gets 426 (criterion 10). */
 export const CURRENT_PROTOCOL_VERSION = 1;
 
 /** What the handlers need from the outside. Everything that varies in tests is here. */
 export interface RunnerCloudDeps {
-  /** The web tier's login. Tenant work, and the SECURITY DEFINER functions of 0712. */
+  /**
+   * The web tier's login: tenant work and every SECURITY DEFINER function (0712, 0724). This package never holds the
+   * platform_ops login; a test scans the source to keep it that way.
+   */
   appUserPool: Pool;
-  /** The platform_ops login: the lookups that happen before a tenant is known, and the few writes app_user has no grant for. */
-  platformOpsPool: Pool;
   /** The configured public origin (FX_APP_ORIGIN). The only source of the URL a signature is checked against. */
   origin: string | undefined;
   /** The worker's lease-fail method, or null while no worker is configured. Called after a revoke has committed. */

@@ -89,7 +89,6 @@ describe("a runner-signed request is not a session (every route outside api/runn
 describe("the runner routes' edge", () => {
   const deps = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps => ({
     appUserPool: { query: () => Promise.reject(new Error("no query expected")) } as never,
-    platformOpsPool: { query: () => Promise.reject(new Error("no query expected")), connect: () => Promise.reject(new Error("no connect expected")) } as never,
     origin: ORIGIN,
     failRunnerLeases: null,
     ...over,

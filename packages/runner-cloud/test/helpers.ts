@@ -53,7 +53,7 @@ export async function harness(): Promise<Harness> {
     adminPool,
     appPool,
     opsPool,
-    deps: (over = {}) => ({ appUserPool: appPool, platformOpsPool: opsPool, origin: ORIGIN, failRunnerLeases: null, ...over }),
+    deps: (over = {}) => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, ...over }),
     close: async () => {
       admin.release();
       await Promise.all([adminPool.end(), appPool.end(), opsPool.end()]);

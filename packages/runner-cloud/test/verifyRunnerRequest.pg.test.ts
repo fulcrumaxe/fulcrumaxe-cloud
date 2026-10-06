@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { signRequest } from "@fulcrumaxe/runner-protocol";
+import { MAX_CREATED_SKEW_SECONDS, signRequest } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { MAX_BODY_BYTES, RunnerHttpError, verifyRunnerRequest, withRunnerSession, type RunnerHttpRequest } from "../src/index.js";
+import { MAX_BODY_BYTES, NONCE_RETENTION_SECONDS, RunnerHttpError, verifyRunnerRequest, withRunnerSession, type RunnerHttpRequest } from "../src/index.js";
 import { ORIGIN, harness, newKey, registerKey, signed, type Harness, type TestKey } from "./helpers.js";
 
 const PATH = "/api/runner/hello";
@@ -79,7 +79,7 @@ describe("verifyRunnerRequest [pg]", () => {
   it("answers 413 to an oversize body before any key lookup or signature work", async () => {
     let lookups = 0;
     const deps = withClock();
-    const spy = { ...deps, platformOpsPool: { query: () => { lookups++; throw new Error("no lookup expected"); }, connect: () => { lookups++; throw new Error("no connect expected"); } } as unknown as typeof deps.platformOpsPool };
+    const spy = { ...deps, appUserPool: { query: () => { lookups++; throw new Error("no lookup expected"); }, connect: () => { lookups++; throw new Error("no connect expected"); } } as unknown as typeof deps.appUserPool };
     const big: RunnerHttpRequest = { method: "POST", headers: {}, body: Buffer.alloc(MAX_BODY_BYTES + 1) };
     expect(await statusOf(() => verify(big, "none", spy))).toBe(413);
     expect(lookups).toBe(0);
@@ -95,7 +95,7 @@ describe("verifyRunnerRequest [pg]", () => {
     expect(await statusOf(() => verify(signed(k, PATH, {}, { created: nowSeconds + 61 })))).toBe(401);
   });
 
-  it("rejects a reused nonce on a once-only endpoint, remembers only verified requests, and prunes after 2 minutes", async () => {
+  it("rejects a reused nonce on a once-only endpoint, remembers only verified requests, and prunes only after the retention window", async () => {
     const k = await runner();
     const nonce = "A".repeat(22);
     expect(await statusOf(() => verify(signed(k, PATH, {}, { created: nowSeconds, nonce }), "once"))).toBe("ok");
@@ -109,12 +109,31 @@ describe("verifyRunnerRequest [pg]", () => {
     expect(await statusOf(() => verify({ ...forged, body: Buffer.from("{}x") }, "once"))).toBe(401);
     const stored = (n: string) => h.admin.query("SELECT 1 FROM runner_request_nonces WHERE runner_id = $1 AND nonce = $2", [k.id, n]);
     expect((await stored("D".repeat(22))).rowCount).toBe(0);
-    // Rows older than the 2 minute window are pruned by the next once-only request; fresh ones stay.
-    await h.admin.query(`UPDATE runner_request_nonces SET seen_at = now() - interval '121 seconds' WHERE runner_id = $1 AND nonce = $2`, [k.id, nonce]);
-    await h.admin.query(`UPDATE runner_request_nonces SET seen_at = now() - interval '119 seconds' WHERE runner_id = $1 AND nonce = $2`, [k.id, "B".repeat(22)]);
+    // Rows older than the retention window (180 s) are pruned by the next once-only request; younger ones stay, including
+    // one that is already past the old 2 minute window.
+    await h.admin.query(`UPDATE runner_request_nonces SET seen_at = now() - make_interval(secs => $3) WHERE runner_id = $1 AND nonce = $2`, [k.id, nonce, NONCE_RETENTION_SECONDS + 1]);
+    await h.admin.query(`UPDATE runner_request_nonces SET seen_at = now() - make_interval(secs => $3) WHERE runner_id = $1 AND nonce = $2`, [k.id, "B".repeat(22), NONCE_RETENTION_SECONDS - 1]);
     expect(await statusOf(() => verify(signed(k, PATH, {}, { created: nowSeconds, nonce: "E".repeat(22) }), "once"))).toBe("ok");
     expect((await stored(nonce)).rowCount).toBe(0);
     expect((await stored("B".repeat(22))).rowCount).toBe(1);
+  });
+
+  it("keeps a nonce for as long as its signature can still verify, so a replay at the very edge of the window is refused", async () => {
+    // The widest gap: a request first seen at the earliest moment it verifies (created - 60 s) and replayed at the last
+    // (created + 60 s, plus the second the verifier floors the clock to).
+    expect(NONCE_RETENTION_SECONDS).toBe(2 * MAX_CREATED_SKEW_SECONDS + 60);
+    expect(NONCE_RETENTION_SECONDS).toBeGreaterThanOrEqual(180);
+    const k = await runner();
+    const nonce = "W".repeat(22);
+    const created = nowSeconds;
+    const req = signed(k, PATH, {}, { created, nonce });
+    const at = (offsetSeconds: number) => h.deps({ now: () => new Date((created + offsetSeconds) * 1000) });
+    expect(await statusOf(() => verify(req, "once", at(-MAX_CREATED_SKEW_SECONDS)))).toBe("ok");
+    // 120.9 s later by the database's clock: the replay's signature still verifies (floor(created + 60.9) = created + 60).
+    await h.admin.query(`UPDATE runner_request_nonces SET seen_at = now() - interval '120.9 seconds' WHERE runner_id = $1 AND nonce = $2`, [k.id, nonce]);
+    expect(await statusOf(() => verify(req, "once", h.deps({ now: () => new Date((created + MAX_CREATED_SKEW_SECONDS + 0.9) * 1000) })))).toBe(409);
+    // One second past the signature's window the replay is refused as stale whatever the nonce table holds.
+    expect(await statusOf(() => verify(req, "once", at(MAX_CREATED_SKEW_SECONDS + 1)))).toBe(401);
   });
 
   it("refuses a revoked runner on its very next request", async () => {

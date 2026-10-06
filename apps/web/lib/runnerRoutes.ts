@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, toResponse } from "@fx/runner-cloud";
 import type { FailRunnerLeases, RunnerCloudDeps, RunnerHttpRequest, RunnerHttpResponse, SessionPrincipal } from "@fx/runner-cloud";
@@ -20,7 +21,7 @@ const failRunnerLeases: FailRunnerLeases = async (input) => {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, platformOpsPool: auth.platformOpsPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */
@@ -67,10 +68,11 @@ export async function handleRunnerRequest(
 export async function handleSessionRequest(
   req: NextRequest,
   run: (deps: RunnerCloudDeps, principal: SessionPrincipal, body: unknown) => Promise<RunnerHttpResponse>,
-  options: { json: boolean; deps?: () => RunnerCloudDeps } = { json: false },
+  options: { json: boolean; deps?: () => RunnerCloudDeps; sessionPool?: () => Pool } = { json: false },
 ): Promise<NextResponse> {
   const deps = (options.deps ?? runnerDeps)();
-  const resolved = await resolveActiveSession(req, { platformOpsPool: deps.platformOpsPool });
+  // The session guard is the one thing here that needs the platform_ops login (it reads the session epoch); the runner code never sees it.
+  const resolved = await resolveActiveSession(req, { platformOpsPool: (options.sessionPool ?? (() => defaultAuthDeps().platformOpsPool))() });
   if (!resolved) return send(errorResponse(new RunnerHttpError(401, "unauthorized", "sign in required")));
   const body = options.json ? await req.json().catch(() => null) : null;
   const res = await toResponse(() => run(deps, { accountId: resolved.session.accountId, userId: resolved.session.userId }, body));

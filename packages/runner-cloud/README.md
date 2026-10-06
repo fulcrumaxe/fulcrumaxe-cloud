@@ -26,9 +26,11 @@ the repository to keep it that way.
 ## Replay model
 
 - **Skew window.** `created` must be within 60 seconds of the cloud's clock, either side.
-- **Nonce.** For endpoints that are not idempotent (rotate here, claim in R2b) each `(runner, nonce)` is kept for 2 minutes
-  and a second use is 409 `nonce_reused`; the next once-only request deletes older rows. The 2 minutes cover the whole
-  `created` range. A request that fails verification stores nothing. Hello, revoke, heartbeat and event writes store no
+- **Nonce.** For endpoints that are not idempotent (rotate here, claim in R2b) each `(runner, nonce)` is kept for
+  `NONCE_RETENTION_SECONDS` (180: twice the skew bound plus a minute, derived from it in `http.ts`) and a second use is 409
+  `nonce_reused`; the next once-only request deletes older rows. A signature verifies from `created - 60` to `created + 60`,
+  so a request can be replayed for up to 121 seconds after it was first seen; the retention must outlast that, and the
+  database refuses a value under 180. A request that fails verification stores nothing. Hello, revoke, heartbeat and event writes store no
   nonce: they are idempotent by state, by `(run_id, seq)` or by lease generation.
 - **Register.** No runner row exists yet for a nonce to belong to. The code is single use (`runner_register` marks it used
   in the insert's transaction) and the key is unique, so a replay is 409 `key_registered`.
@@ -40,11 +42,16 @@ the repository to keep it that way.
 
 ## Database access
 
-`app_user` stays SELECT-only on `runners` (0711); writes go through 0712's definers, which take the account from the
-tenant session. Four things have no definer and use the `platform_ops` login that `apps/web` already holds for identity
-work, each as one statement scoped by id and account: the lookup of a runner by key and of a code by hash (both happen
-before the tenant is known), the nonce insert and prune, the registration-code insert (after the caller's owner/admin role
-was read under their own tenant context), and `hello`'s version columns. R2a adds no migration.
+This package never holds the `platform_ops` login (a test scans the source). `app_user` stays SELECT-only on `runners`
+(0711); every write goes through a definer owned by `platform_ops` and executable by `app_user` alone:
+
+- 0712 (identity): `runner_register`, `runner_rotate_key`, `runner_revoke`, `runner_self_revoke`, which take the account
+  from the tenant session and, for rotate and self-revoke, the runner from `app.runner_id`.
+- 0724 (the lookups and writes that used to run as `platform_ops`): `runner_lookup_by_jkt` and `runner_jkt_registered`
+  (key to runner, before any tenant is known), `runner_code_account` (code hash to account), `runner_nonce_record` (prune
+  and insert), `runner_registration_code_create` (owner or admin from the session) and `runner_hello_record` (the runner
+  from `app.runner_id`). Each refuses a `platform_ops` login, and a trigger on the three tables refuses a direct
+  `platform_ops` statement. Statements nested in another trigger (the demotion revoke, an account cascade) still run.
 
 ## After a revoke, and operations
 
