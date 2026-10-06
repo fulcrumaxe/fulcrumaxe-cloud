@@ -30,3 +30,22 @@ export {
   type StripeSubscriptionsDeps,
   type SubscriptionsReader,
 } from './jobs/stripeSubscriptions.js';
+export {
+  createGithubInstallationsJob,
+  GITHUB_INSTALLATIONS_JOB,
+  GITHUB_CALLS_PER_RUN,
+  BREAKER_MAX_DETACHES,
+  BREAKER_MAX_SHARE,
+  INSTALLATION_KINDS,
+  type GithubInstallationsDeps,
+  type InstallationChange,
+  type InstallationKind,
+} from './jobs/githubInstallations.js';
+export {
+  createGithubAppApi,
+  GithubTransportError,
+  GITHUB_API_HOST,
+  type GithubAppApi,
+  type GithubAppResponse,
+  type GithubTransport,
+} from './githubAppApi.js';
