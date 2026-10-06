@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { OAUTH_ENV_NAMES, verifyUserInstallation } from "../src/userInstallations.js";
 import { completeInstall } from "../src/installCallback.js";
 import { pagedListing, strictGithubFetch } from "./helpers/strictGithub.js";
+import { captureReports } from "./helpers/captureReports.js";
 
 /** D#2 H17a: the user-token verification, against a fake GitHub. No database. */
 const ENV = {
@@ -46,6 +47,30 @@ describe("verifyUserInstallation (H17a criterion 3)", () => {
   it("reads later pages", async () => {
     const full = Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, app_id: 7 }));
     expect(await verify(github([full, [{ id: 42, app_id: 7 }]]).fetchImpl)).toBe(USER_ID);
+  });
+
+  it("reports a failed verification as a coded class, with nothing from the error", async () => {
+    const reports = captureReports();
+    const throwing = (async () => {
+      throw Object.assign(new Error("net down ghu_FAKE_h1b_user_token team-client-secret"), { code: "ETIMEDOUT" });
+    }) as unknown as typeof fetch;
+    expect(await verify(throwing)).toBe(null);
+    expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "github.user_installations", code: "ETIMEDOUT" }]);
+    expect(reports.everything()).not.toMatch(/ghu_FAKE_h1b_user_token|team-client-secret/);
+  });
+
+  it("reports an App whose credentials cannot be read, and still answers failed", async () => {
+    const reports = captureReports();
+    const appCredentials = () => {
+      throw new Error("GITHUB_APP_TEAM_PRIVATE_KEY=-----BEGIN FAKE h1b KEY-----");
+    };
+    const outcome = await completeInstall(
+      { platformOpsPool: {} as Pool, appCredentials, env: ENV, fetchImpl: (async () => new Response("no", { status: 502 })) as unknown as typeof fetch },
+      { kind: "team", accountId: "a", userId: "u", installationId: "42", code: "c0de" },
+    );
+    expect(outcome).toBe("failed");
+    expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "github.install.credentials", code: "other" }]);
+    expect(reports.everything()).not.toMatch(/PRIVATE_KEY|FAKE h1b KEY/);
   });
 
   it("refuses when the code exchange returns no token, and when GitHub errors", async () => {

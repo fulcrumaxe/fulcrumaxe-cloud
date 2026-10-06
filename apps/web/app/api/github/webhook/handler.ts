@@ -169,6 +169,7 @@ export async function githubWebhookHandler(
   try {
     payload = JSON.parse(rawBody);
   } catch {
+    // fx-swallow-ok: a body that is not JSON is the sender's mistake and is answered 400; the signature was already verified
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 

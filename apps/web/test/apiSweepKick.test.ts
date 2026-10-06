@@ -7,11 +7,13 @@ import {
   KICK_COOLDOWN_MS,
   KICK_DELAY_MS,
   apiSweepKickerFromEnv,
+  apiSweepKickHeader,
   apiSweepKickKey,
   createApiSweepKicker,
   type SweepSummary,
 } from "@fx/webhooks";
 import { apiSweepKickHandler } from "../app/api/cron/api-sweep/handler";
+import { captureReports } from "./captureReports";
 
 /**
  * D#454 H3c: the api-sweep kick sender talking to the kick handler over a real HTTP connection (Node's fetch and
@@ -62,6 +64,29 @@ afterEach(() => {
   statuses.length = 0;
   scheduled.length = 0;
   swept = 0;
+});
+
+describe("a kicked sweep that fails", () => {
+  it("is reported as a coded class after the 202, with nothing from the error", async () => {
+    const reports = captureReports();
+    const work: Array<Promise<unknown>> = [];
+    const body = API_SWEEP_KICK_BODY;
+    const t = Math.floor(Date.now() / 1000);
+    const sig = apiSweepKickHeader(KEY, t);
+    const request = new Request(url, { method: "POST", headers: { [API_SWEEP_KICK_HEADER]: sig }, body });
+    const res = await apiSweepKickHandler(
+      request,
+      { cronSecret: CRON_SECRET, schedule: (w) => work.push(w), sweepDeps: () => ({ cronSecret: "", platformOpsPool: {} as never, sender: { send: async () => ({ ok: true, statusCode: 200 }) } }) },
+      async () => {
+        throw new Error("sweep failed: FAKE-h1b-db-password");
+      },
+      async () => null,
+    );
+    expect(res.status).toBe(202);
+    await Promise.all(work);
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/cron/api-sweep", stage: "cron.api_sweep.kick", code: "other" }]);
+    expect(reports.everything()).not.toContain("FAKE-h1b-db-password");
+  });
 });
 
 describe("the api-sweep kick over a real connection", () => {

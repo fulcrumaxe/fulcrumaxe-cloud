@@ -8,6 +8,7 @@ import { handleStripeWebhookRequest } from '../../src/webhook.js';
 import type { StripeLike } from '../../src/stripeClient.js';
 import { seedAccountWithMember, type SeededTenant } from '../helpers/seed.js';
 import { fakeStripe, signTestPayload } from '../helpers/stripeFixtures.js';
+import { captureReports } from '../helpers/captureReports.js';
 
 const ORIGIN = 'https://app.example';
 const SETUP_PRICE = 'price_sk_setup_1';
@@ -184,14 +185,20 @@ describe('D#3 K09b site-kit checkout and cancel services (real Postgres, fake St
   it('price_not_configured when the site-kit price env is unset', async () => {
     const f = await seed();
     delete process.env.STRIPE_PRICE_ID_SITEKIT_SYNC;
+    const reports = captureReports();
     expect(await checkout(f, 'sync')).toEqual({ ok: false, reason: 'price_not_configured' });
     expect(create).not.toHaveBeenCalled();
+    // A missing setting is a setup mistake worth seeing: one coded class, naming no variable value.
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.sitekit.price', code: 'other' }]);
   });
 
   it('a Stripe failure, or a session without a url, is stripe_unavailable and stores no row', async () => {
     const f = await seed();
-    create.mockRejectedValueOnce(new Error('boom cus_leak'));
+    const reports = captureReports();
+    create.mockRejectedValueOnce(new Error('boom cus_leak sk_test_FAKE_h1b_sitekit_secret'));
     expect(await checkout(f, 'setup')).toEqual({ ok: false, reason: 'stripe_unavailable' });
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.sitekit.checkout', code: 'other' }]);
+    expect(reports.everything()).not.toMatch(/cus_leak|sk_test_FAKE_h1b_sitekit_secret/);
     create.mockResolvedValueOnce({ id: 'cs_x', url: null });
     expect(await checkout(f, 'setup')).toEqual({ ok: false, reason: 'stripe_unavailable' });
     expect(await rows(f.siteId)).toHaveLength(0);
@@ -272,6 +279,19 @@ describe('D#3 K09b site-kit checkout and cancel services (real Postgres, fake St
       expect(expire).not.toHaveBeenCalled();
       expect(states.get(open)).toBe('open');
       expect(await rows(f.siteId)).toHaveLength(2);
+    });
+
+    it.each([
+      ['retrieve', () => retrieve.mockRejectedValueOnce(new Error('No such session: cs_leak sk_test_FAKE_h1b_close_secret'))],
+      ['expire', () => expire.mockRejectedValueOnce(new Error('boom cs_leak sk_test_FAKE_h1b_close_secret'))],
+    ])('a failed %s is reported as one coded class with nothing from the error', async (_name, arrange) => {
+      const f = await seed();
+      await earlier(f, 'setup', 'open');
+      const reports = captureReports();
+      arrange();
+      expect(await checkout(f, 'setup')).toEqual({ ok: false, reason: 'stripe_unavailable' });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.sitekit.close_earlier', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/cs_leak|sk_test_FAKE_h1b_close_secret/);
     });
 
     it('an expired session is skipped', async () => {
@@ -433,8 +453,11 @@ describe('D#3 K09b site-kit checkout and cancel services (real Postgres, fake St
     it('a Stripe failure is stripe_unavailable', async () => {
       const f = await seed();
       await entitle(f, 'sync_subscription_id, sync_status', [`sub_${f.siteId}`, 'active']);
-      update.mockRejectedValueOnce(new Error('No such subscription: sub_live'));
+      const reports = captureReports();
+      update.mockRejectedValueOnce(new Error('No such subscription: sub_live sk_test_FAKE_h1b_cancel_secret'));
       expect(await cancelSitekitSync(ctx(f), { siteId: f.siteId, stripe, appPool })).toEqual({ ok: false, reason: 'stripe_unavailable' });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.sitekit.cancel_sync', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/sub_live|sk_test_FAKE_h1b_cancel_secret/);
     });
   });
 

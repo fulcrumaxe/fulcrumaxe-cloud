@@ -85,6 +85,7 @@ export async function deliver(req: DeliverRequest): Promise<ConnectorOutcome> {
     try {
       url = new URL(req.url);
     } catch {
+      // fx-swallow-ok: an unparsable URL is recorded on the delivery as errorClass invalid_url
       return { ok: false, errorClass: 'invalid_url' };
     }
     if (url.protocol !== 'https:') {
@@ -94,6 +95,7 @@ export async function deliver(req: DeliverRequest): Promise<ConnectorOutcome> {
     try {
       url = validateWebhookUrlSyntax(req.url);
     } catch (err) {
+      // fx-swallow-ok: recorded on the delivery as its errorClass
       return { ok: false, errorClass: err instanceof InvalidWebhookUrlError ? err.reasonClass : 'invalid_url' };
     }
   }
@@ -109,12 +111,14 @@ export async function deliver(req: DeliverRequest): Promise<ConnectorOutcome> {
         return { ok: false, errorClass: 'dns_failed' };
       }
     } catch {
+      // fx-swallow-ok: recorded on the delivery as errorClass dns_failed
       return { ok: false, errorClass: 'dns_failed' };
     }
   } else {
     try {
       addresses = await resolveDeliveryAddresses(url.hostname);
     } catch (err) {
+      // fx-swallow-ok: recorded on the delivery as its errorClass
       return { ok: false, errorClass: err instanceof InvalidWebhookUrlError ? err.reasonClass : 'dns_failed' };
     }
   }

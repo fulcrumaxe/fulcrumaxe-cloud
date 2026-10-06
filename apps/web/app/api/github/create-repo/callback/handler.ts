@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { appUserPool, platformOpsPool } from "@fx/api/src/sse/pools.js";
@@ -54,6 +55,7 @@ function githubUrl(raw: string | undefined): string | null {
     const u = new URL(raw);
     return u.protocol === "https:" && u.hostname === "github.com" && u.port === "" && !u.username && !u.password ? u.href : null;
   } catch {
+    // fx-swallow-ok: an address that does not parse as a URL is simply not shown; nothing fails
     return null;
   }
 }
@@ -90,6 +92,8 @@ export async function createRepoCallbackHandler(req: NextRequest, deps?: CreateR
   try {
     await d.limitSession?.({ accountId: session.accountId, userId: session.userId });
   } catch (err) {
+    // A refusal by the limiter is the answer; any other failure means the limiter could not run.
+    if (!(err instanceof RateLimitedError)) reportError(err, { stage: "github.create_repo.limit", route: req.nextUrl.pathname });
     return redirect({ outcome: err instanceof RateLimitedError ? "rate_limited" : "failed" }, refreshedToken);
   }
 
@@ -97,7 +101,8 @@ export async function createRepoCallbackHandler(req: NextRequest, deps?: CreateR
   try {
     const deps2: CreateRepoDeps = { ...buildRepoSyncDeps(d), env: d.env };
     result = await (d.create ?? createCustomerRepo)(deps2, { accountId: session.accountId, userId: session.userId, code, state });
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.create_repo", route: req.nextUrl.pathname });
     result = { outcome: "failed" };
   }
   return redirect(result, refreshedToken);

@@ -18,6 +18,7 @@
   "dependencies": {
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/telemetry": "workspace:*",
     "pg": "^8.13.1"
   },
   "devDependencies": {

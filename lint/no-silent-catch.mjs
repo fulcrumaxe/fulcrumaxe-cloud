@@ -34,7 +34,8 @@ function nameOf(node) {
 /** A call that reports: reportError(...), x.reportError(...), logger.error(...), this.log.warn(...). */
 export function isReportingCall(call) {
   const callee = call.callee;
-  if (callee.type === "Identifier") return callee.name === "reportError";
+  // reportSyncFailure (packages/github) is reportError with the sync stage and code read off the error.
+  if (callee.type === "Identifier") return callee.name === "reportError" || callee.name === "reportSyncFailure";
   if (callee.type !== "MemberExpression" || callee.computed || callee.property.type !== "Identifier") return false;
   if (callee.property.name === "reportError") return true;
   if (callee.property.name !== "error" && callee.property.name !== "warn") return false;

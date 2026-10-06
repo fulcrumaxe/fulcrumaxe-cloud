@@ -18,6 +18,7 @@ import {
 import { readAccountStatus } from '../src/accountStatus.js';
 import type { BillingCtx } from '../src/types.js';
 import { seedAccount, seedAccountWithMember } from './helpers/seed.js';
+import { captureReports } from './helpers/captureReports.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
 import {
   fakeStripe as fetchingStripe,
@@ -818,13 +819,17 @@ describe('H10 account lifecycle (real Postgres)', () => {
     });
 
     it('a Stripe failure leaves the account open and forwards nothing', async () => {
+      const reports = captureReports();
       const { accountId, userId } = await billed('active');
       const { stripe } = cancelling(async () => {
-        throw new Error('No such subscription: sub_close; request-id req_777');
+        throw new Error('No such subscription: sub_close; request-id req_777 sk_test_FAKE_h1b_close_secret');
       });
       const result = await closeAccount(ctxFor({ accountId, userId }), { accountId, stripe });
       expect(result).toEqual({ ok: false, reason: 'stripe_unavailable' });
       expect(JSON.stringify(result)).not.toContain('req_777');
+      // Reported as one coded class; nothing from the error text reaches stdout or the stored class.
+      expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.cancel_subscription', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/req_777|sub_close|sk_test_FAKE_h1b_close_secret/);
       expect((await status(accountId)).deleted_at).toBeNull();
     });
 
@@ -1024,11 +1029,15 @@ describe('H10 account lifecycle (real Postgres)', () => {
       it('when both attempts fail the result is the fixed unavailable answer, with nothing from Stripe in it', async () => {
         const { accountId, userId } = await seedAccountWithMember(admin, 'owner', { status: 'active', stripeCustomerId: 'cus_flow_4' });
         await admin.query('UPDATE accounts SET stripe_subscription_id = $2 WHERE id = $1', [accountId, 'sub_flow_4']);
+        const reports = captureReports();
         const stripe = portalStripe(async () => {
-          throw new Error('boom sub_flow_4');
+          throw new Error('boom sub_flow_4 sk_test_FAKE_h1b_portal_secret');
         });
         const result = await getBillingPortalUrl(ctxFor({ accountId, userId }), { accountId, stripe, returnUrl: '/billing', flow: 'subscription_update' });
         expect(result).toEqual({ ok: false, reason: 'stripe_unavailable' });
+        // The plan-change attempt is a marked fallback; only the final failure is reported.
+        expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.portal_session', code: 'other' }]);
+        expect(reports.everything()).not.toMatch(/sub_flow_4|sk_test_FAKE_h1b_portal_secret/);
       });
     });
 
@@ -1068,10 +1077,14 @@ describe('H10 account lifecycle (real Postgres)', () => {
         },
       });
 
+      const reports = captureReports();
       const result = await getBillingPortalUrl(ctxFor({ accountId, userId }), { accountId, stripe, returnUrl: '/billing' });
       expect(result).toEqual({ ok: false, reason: 'stripe_unavailable' });
       expect(JSON.stringify(result)).not.toContain('cus_internal_detail');
       expect(JSON.stringify(result)).not.toContain('req_123');
+      expect(reports.classes).toHaveLength(1);
+      expect(reports.classes[0]).toMatchObject({ stage: 'billing.portal_session' });
+      expect(reports.everything()).not.toMatch(/cus_internal_detail|req_123/);
     });
   });
 
@@ -1174,12 +1187,13 @@ describe('H10 account lifecycle (real Postgres)', () => {
         checkout: {
           sessions: {
             create: async () => {
-              throw new Error('No such price: price_test_internal; request-id req_999');
+              throw new Error('No such price: price_test_internal; request-id req_999 sk_test_FAKE_h1b_checkout_secret');
             },
           },
         },
       });
 
+      const reports = captureReports();
       const result = await createCheckoutSession(ctxFor({ accountId, userId }), {
         accountId,
         plan: 'starter',
@@ -1188,6 +1202,8 @@ describe('H10 account lifecycle (real Postgres)', () => {
         stripe,
       });
       expect(result).toEqual({ ok: false, reason: 'stripe_unavailable' });
+      expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'billing.checkout_session', code: 'other' }]);
+      expect(reports.everything()).not.toMatch(/price_test_internal|req_999|sk_test_FAKE_h1b_checkout_secret/);
     });
 
     it('security-review fix round 3 (PR #53, MUST 5, secprobe R-P7): refuses a closed account, and Stripe is never called', async () => {

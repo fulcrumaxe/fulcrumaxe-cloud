@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import {
   decide,
   parseTarget,
@@ -369,6 +370,7 @@ function parseJsonObject(rawBody: Uint8Array): ParsedJsonBody {
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
   } catch {
+    // fx-swallow-ok: a body that cannot be read is the caller's problem and is denied as unparsable
     return { ok: false, reason: "unparsable" };
   }
   if (text.length === 0) return { ok: false, reason: "unparsable" };
@@ -376,6 +378,7 @@ function parseJsonObject(rawBody: Uint8Array): ParsedJsonBody {
   try {
     parsed = JSON.parse(text);
   } catch {
+    // fx-swallow-ok: a body that is not JSON is the caller's problem and is denied as unparsable
     return { ok: false, reason: "unparsable" };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -384,7 +387,8 @@ function parseJsonObject(rawBody: Uint8Array): ParsedJsonBody {
   let duplicate: boolean;
   try {
     duplicate = hasDuplicateJsonKey(text);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.proxy_scan" });
     // The scanner disagreeing with JSON.parse's own success would be a bug
     // in the scanner, not a real ambiguity in the request -- fail closed
     // rather than risk silently accepting bytes it couldn't actually walk.
@@ -566,6 +570,8 @@ export async function decideProxyRequest(
       now: deps.now,
     });
   } catch (err) {
+    // A read-only installation is a deliberate policy answer (403 below), not a failure.
+    if (!(err instanceof InstallationNotWritableError)) reportError(err, { stage: "github.proxy_mint" });
     // D#2 C28 §3 item 8: a mint TIMEOUT specifically is an upstream
     // availability failure, not a policy denial -- 502, like the route's
     // existing resolveUpstream-failure response, not the generic 403 every

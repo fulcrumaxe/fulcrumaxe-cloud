@@ -6,6 +6,7 @@ import { createRunResolver } from '../src/runResolver.js';
 import { decideProxyRequest, type ProxyDecisionDeps } from '../src/proxyDecision.js';
 import { InstallationTokenCache, type AccessTokenRequester } from '../src/installationToken.js';
 import { ensureGhProxyTestLogin } from './helpers/ghProxyLogin.js';
+import { captureReports } from './helpers/captureReports.js';
 import { seedAccountWithRepo, seedAgentRun, setRepoGithubNames, type SeedRefs } from './helpers/seed.js';
 
 /**
@@ -276,10 +277,22 @@ describe('createRunResolver (D#2 H13c, C27)', () => {
     const deadPool = createPool(ghProxyUrl);
     await deadPool.end();
     const resolver = createRunResolver(deadPool);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const reports = captureReports();
     expect(await resolver(`sbx-doesnt-matter-${randomUUID()}`)).toBeNull();
-    expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
+    // The failure is reported as one coded class (it used to be a console.error carrying the error object).
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.run_resolve', code: 'other' }]);
+  });
+
+  it('H1b: a database error is reported by its SQLSTATE only, never its text', async () => {
+    const reports = captureReports();
+    const failing = {
+      query: async () => {
+        throw Object.assign(new Error('password authentication failed for user "ghproxy" FAKE-h1b-db-password'), { code: '28P01' });
+      },
+    } as unknown as Pool;
+    expect(await createRunResolver(failing)(`sbx-${randomUUID()}`)).toBeNull();
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.run_resolve', code: '28P01' }]);
+    expect(reports.everything()).not.toMatch(/FAKE-h1b-db-password|ghproxy/);
   });
 
   describe('H13c-5: decideProxyRequest end to end with the real resolver, real fixture data', () => {

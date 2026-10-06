@@ -243,6 +243,9 @@ importers:
       '@fx/spend':
         specifier: workspace:*
         version: link:../spend
+      '@fx/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       pg:
         specifier: ^8.13.1
         version: 8.23.0
@@ -594,6 +597,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       pg:
         specifier: ^8.13.1
         version: 8.23.0
@@ -1055,6 +1061,9 @@ importers:
       '@fx/net-guard':
         specifier: workspace:*
         version: link:../net-guard
+      '@fx/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       pg:
         specifier: ^8.13.1
         version: 8.23.0

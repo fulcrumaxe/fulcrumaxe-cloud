@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { CREATE_LIMIT_PER_DAY, CREATE_LIMIT_PER_HOUR, descriptionHash, verifyCreateRepoState, type CreateRepoClaims } from "@fx/core/src/github/createRepoState.js";
 import { withPlatformOps } from "@fx/core/src/tenancy/withPlatformOps.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -182,7 +183,8 @@ async function attempt(deps: CreateRepoDeps, input: CreateRepoInput, claims: Cre
       connected = await withTenant(deps.appUserPool, input.accountId, async (client) =>
         (await client.query("SELECT 1 FROM repos WHERE account_id = $1 AND gh_repo_id = $2 AND installation_id = $3", [input.accountId, ghRepoId, rec.id])).rowCount === 1,
       );
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "github.create_repo.sync" });
       connected = false;
     }
   }
@@ -208,12 +210,13 @@ export async function createCustomerRepo(deps: CreateRepoDeps, input: CreateRepo
   let result: Attempted;
   try {
     result = await attempt(deps, input, claims, valid.value.description);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.create_repo" });
     result = { outcome: "failed" };
   }
   const { uncounted, ...publicResult } = result;
   if (!uncounted && result.outcome !== "ok" && result.outcome !== "created_not_connected" && result.outcome !== "rate_limited") {
-    await audit(deps, input.accountId, "github.repo_create_refused", { outcome: result.outcome }).catch(() => undefined);
+    await audit(deps, input.accountId, "github.repo_create_refused", { outcome: result.outcome }).catch((err: unknown) => reportError(err, { stage: "github.create_repo.audit" }));
   }
   return publicResult;
 }

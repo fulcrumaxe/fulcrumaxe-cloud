@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { withPlatformOps } from "@fx/core/src/tenancy/withPlatformOps.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
@@ -112,7 +113,8 @@ export async function recordInstallationLifecycle(deps: InstallerRecordDeps, kin
         // Both kinds list repos: the read-only install feeds the free preview's repo picker.
         if (kind === "team" || kind === "team_readonly") await syncClaimedInstallation(deps, kind, ghInstallationId);
       }
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "github.bind_pending_claim" });
       // The user's next callback binds directly.
     }
   }

@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
 import { pagedListing, strictGithubFetch } from './helpers/strictGithub.js';
+import { captureReports } from './helpers/captureReports.js';
 import {
   InstallationTokenCache,
   createCustomerRepo,
@@ -134,6 +135,64 @@ describe('createCustomerRepo (D#2 RC-1a)', () => {
     expect(h.reqs.filter((r) => r.method === 'PUT' || r.method === 'DELETE' || r.url.includes('/user/installations/'))).toEqual([]);
     expect(JSON.stringify(res)).not.toContain('boom');
     expect(JSON.stringify(res)).not.toContain('secondary');
+  });
+
+  it('H1b: a sync step that throws after the repo was created is reported as a coded class and ends created_not_connected', async () => {
+    const s = await setup();
+    const h = harness(s);
+    const reports = captureReports();
+    h.deps.requester = async () => {
+      throw Object.assign(new Error('mint down for acme/widgets: ghs_FAKE_h1b_sync_token'), { code: 'ECONNRESET' });
+    };
+    const res = await run(h, s);
+    expect(res.outcome).toBe('created_not_connected');
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.create_repo.sync', code: 'other' }]);
+    expect(reports.everything()).not.toMatch(/acme|widgets|ghs_FAKE_h1b_sync_token/);
+  });
+
+  it('H1b: a refusal whose audit row cannot be written still answers refused, and the write failure is reported by SQLSTATE only', async () => {
+    const s = await setup();
+    const h = harness(s, { create: { status: 403, body: { message: 'Forbidden' } } });
+    const reports = captureReports();
+    const failingAudit = {
+      connect: async () => {
+        const client = await platformOpsPool.connect();
+        // A proxy, so the pooled connection itself is never altered for the next test.
+        return new Proxy(client, {
+          get: (target, prop) => {
+            if (prop !== 'query') {
+              const v = Reflect.get(target, prop) as unknown;
+              return typeof v === 'function' ? v.bind(target) : v;
+            }
+            return (...a: unknown[]) =>
+              typeof a[0] === 'string' && a[0].includes('audit_write_system') && JSON.stringify(a[1]).includes('github.repo_create_refused')
+                ? Promise.reject(Object.assign(new Error('audit write failed FAKE-h1b-audit-secret'), { code: '57P01' }))
+                : (target.query as (...x: unknown[]) => Promise<unknown>)(...a);
+          },
+        });
+      },
+    } as unknown as Pool;
+    h.deps.platformOpsPool = failingAudit;
+    const res = await run(h, s);
+    expect(res.outcome).toBe('refused');
+    expect(reports.classes).toEqual([{ service: 'test', route: '/', stage: 'github.create_repo.audit', code: '57P01' }]);
+    expect(reports.everything()).not.toContain('FAKE-h1b-audit-secret');
+  });
+
+  it('H1b: an attempt that throws answers failed and is reported as a coded class with no text', async () => {
+    const s = await setup();
+    const h = harness(s);
+    const reports = captureReports();
+    const underlying = h.deps.fetchImpl as typeof fetch;
+    h.deps.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/login/oauth/access_token')) throw new Error('exchange failed for code one-time-code with csecret FAKE-h1b-client-secret');
+      return underlying(url, init);
+    }) as typeof fetch;
+    const res = await run(h, s);
+    expect(res.outcome).toBe('failed');
+    expect(reports.classes).toHaveLength(1);
+    expect(reports.classes[0]).toMatchObject({ service: 'test', route: '/', stage: 'github.create_repo' });
+    expect(reports.everything()).not.toMatch(/one-time-code|FAKE-h1b-client-secret|csecret/);
   });
 
   it('created_not_connected returns the repo URL and a personal-account deep link built from the recorded installation id', async () => {

@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME, signSession } from "@fx/core/src/auth/session";
 import { descriptionHash, mintCreateRepoState, type CreateRepoResult } from "@fx/github";
+import { captureReports } from "../../../../../test/captureReports";
 import { createRepoCallbackHandler, type CreateRepoCallbackDeps } from "./handler";
 import { RateLimitedError } from "@fx/api/src/errors.js";
 
@@ -157,8 +158,12 @@ describe("GET /api/github/create-repo/callback", () => {
 
   it("a service that throws is a plain failed, and nothing is echoed or logged", async () => {
     const spies = [vi.spyOn(console, "log"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")];
+    const reports = captureReports();
     const res = await call(q(state()), {}, deps(new Error("ghu_TOKENVALUE boom")).d);
     expect(res.headers.get("location")).toBe("/?create=failed");
+    // Reported as one coded class under the request's route template; the error text is not in it.
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/github/create-repo/callback", stage: "github.create_repo", code: "other" }]);
+    expect(reports.everything()).not.toMatch(/ghu_|boom/);
     expect(JSON.stringify([...res.headers.entries()])).not.toMatch(/ghu_|boom|SECRETCODE/);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
@@ -169,17 +174,23 @@ describe("GET /api/github/create-repo/callback", () => {
       const limitSession = vi.fn(async () => {
         throw new RateLimitedError(9);
       });
+      const reports = captureReports();
       const res = await call(q(state()), {}, { ...d, limitSession });
       expect(res.headers.get("location")).toBe("/?create=rate_limited");
+      // A refusal by the limiter is the answer, not a failure: nothing is reported.
+      expect(reports.classes).toEqual([]);
       expect(limitSession).toHaveBeenCalledWith({ accountId, userId });
       expect(create).not.toHaveBeenCalled();
     });
 
     it("a limiter that cannot run is failed, never an unlimited pass", async () => {
       const { d, create } = deps();
-      const res = await call(q(state()), {}, { ...d, limitSession: async () => { throw new Error("db down"); } });
+      const reports = captureReports();
+      const res = await call(q(state()), {}, { ...d, limitSession: async () => { throw new Error("db down FAKE-h1b-db-password"); } });
       expect(res.headers.get("location")).toBe("/?create=failed");
       expect(create).not.toHaveBeenCalled();
+      expect(reports.classes).toEqual([{ service: "test", route: "/api/github/create-repo/callback", stage: "github.create_repo.limit", code: "other" }]);
+      expect(reports.everything()).not.toContain("FAKE-h1b-db-password");
     });
 
     it("a visit with a bad state is refused before it is counted", async () => {

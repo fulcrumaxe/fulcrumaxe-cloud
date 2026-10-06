@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { PoolClient } from 'pg';
 import type Stripe from 'stripe';
 import { withPlatformOps } from '../pg.js';
@@ -55,7 +56,8 @@ export async function handleSitekitEvent(event: Stripe.Event, deps: StripeWebhoo
   let prices: SitekitPriceMap;
   try {
     prices = deps.sitekitPriceMap ?? buildSitekitPriceMap(deps.priceMap ?? buildPriceMap());
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.sitekit.price_map", route: "/api/stripe/webhook" });
     return respond(500, { error: 'price_map_invalid' });
   }
   return event.type === 'checkout.session.completed'
@@ -66,7 +68,8 @@ export async function handleSitekitEvent(event: Stripe.Event, deps: StripeWebhoo
 async function fetchSubscription(deps: StripeWebhookDeps, id: string): Promise<Stripe.Subscription | WebhookResponse> {
   try {
     return await deps.stripe.subscriptions.retrieve(id);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.sitekit.fetch", route: "/api/stripe/webhook" });
     // The SDK error can carry request internals: never forwarded.
     return respond(503, { error: 'stripe_unavailable' });
   }
@@ -107,7 +110,8 @@ async function handleCheckout(event: Stripe.Event, deps: StripeWebhookDeps, pric
     try {
       const items = await (deps.stripe as unknown as LineItemsStripe).checkout.sessions.listLineItems(session.id, { limit: 2 });
       priceId = items.data.length === 1 ? items.data[0]!.price?.id : undefined;
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "billing.sitekit.line_items", route: "/api/stripe/webhook" });
       return respond(503, { error: 'stripe_unavailable' });
     }
     if (!priceId || prices.get(priceId) !== 'setup') return unknownPrice(priceId);
@@ -346,7 +350,8 @@ async function finishSync(o: Outcome, deps: StripeWebhookDeps, duplicateId: stri
   );
   try {
     await deps.stripe.subscriptions.cancel(duplicateId, {}, { idempotencyKey: `sitekit-duplicate-subscription-cancel:${duplicateId}` });
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.sitekit.cancel_duplicate", route: "/api/stripe/webhook" });
     return respond(503, { error: 'stripe_unavailable' });
   }
   return respond(200, { received: true, handled: false, reason: o.reason, duplicate_canceled: true });

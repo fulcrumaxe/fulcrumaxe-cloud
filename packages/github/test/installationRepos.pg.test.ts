@@ -8,10 +8,12 @@ import {
   handleGithubWebhookEventForApp,
   recordInstallationLifecycle,
   syncInstallationRepos,
+  syncClaimedInstallation,
   type GithubWebhookDbDeps,
   type GithubWebhookPayload,
   type SyncDeps,
 } from '../src/index.js';
+import { captureReports } from './helpers/captureReports.js';
 
 /**
  * D#2 H17b-2 against real Postgres: the installation_repositories case, the
@@ -159,13 +161,34 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
       seen.push(id);
       throw new Error('boom secret-repo-name ghs_token');
     });
+    const reports = captureReports();
     const out = await deliver(deps({ syncRepos, warn }), event(inst.gh, 'added', [11]));
     expect(out).toMatchObject({ handled: true, result: { applied: 'repos_detached', syncRequested: true } });
     expect(seen).toEqual([inst.id]);
+    // The same failure goes to the reporter as a class: the webhook route, no repo name, no token.
+    expect(reports.classes).toHaveLength(1);
+    expect(reports.classes[0]).toMatchObject({ service: 'test', route: '/api/github/webhook', code: 'other' });
+    expect(reports.everything()).not.toMatch(/secret-repo-name|ghs_token/);
     expect(warn.mock.calls.flat().join(' ')).toMatch(/^github repo sync failed \([A-Za-z0-9_. -]+\); the next event retries$/);
     // removed (nothing added) does not sync
     await deliver(deps({ syncRepos, warn }), event(inst.gh, 'removed', [11]));
     expect(syncRepos).toHaveBeenCalledTimes(1);
+  });
+
+  it('H1b: the post-commit sync used by the install callback reports its failure as a class without names', async () => {
+    const a = await account();
+    const inst = await install(a);
+    const warn = vi.fn();
+    const reports = captureReports();
+    const syncRepos = vi.fn(async () => {
+      throw new Error('boom secret-repo-name ghs_token');
+    });
+    await syncClaimedInstallation({ platformOpsPool, syncRepos, warn }, 'team', inst.gh);
+    expect(syncRepos).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(reports.classes).toHaveLength(1);
+    expect(reports.classes[0]).toMatchObject({ service: 'test', route: '/', code: 'other' });
+    expect(reports.everything()).not.toMatch(/secret-repo-name|ghs_token/);
   });
 
   it('the claim path syncs only after the claim transaction committed, and a sync failure leaves the claim intact', async () => {

@@ -4,6 +4,7 @@ import type { TokenScope } from "@fx/gh-policy";
 import { InstallationNotWritableError, assertWriteInstallation } from "../src/writeInstallation.js";
 import { InstallationTokenCache, InstallationTokenError, getInstallationToken, type AccessTokenRequester } from "../src/installationToken.js";
 import { decideProxyRequest } from "../src/proxyDecision.js";
+import { captureReports } from "./helpers/captureReports.js";
 
 /**
  * D#2 H13e, criteria 3 and 4 (D#31 C23 ruling 4): only the `team` App backs
@@ -97,6 +98,7 @@ describe("getInstallationToken purposes (criterion 3)", () => {
 describe("decideProxyRequest denies a non-team installation (criterion 3)", () => {
   it.each(["team_readonly", "sitekit", null])("appKind %j: 403 installation_not_writable, no mint", async (appKind) => {
     const requester = counting();
+    const reports = captureReports();
     const result = await decideProxyRequest(
       {
         method: "GET",
@@ -122,5 +124,8 @@ describe("decideProxyRequest denies a non-team installation (criterion 3)", () =
     );
     expect(result).toMatchObject({ allow: false, status: 403, reason: "installation_not_writable" });
     expect(requester).not.toHaveBeenCalled();
+    // A deliberate policy answer, not a failure: nothing is reported.
+    expect(reports.classes).toEqual([]);
+    expect(reports.lines).toEqual([]);
   });
 });

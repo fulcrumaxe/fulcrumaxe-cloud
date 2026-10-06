@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
@@ -89,6 +90,8 @@ export async function installCallbackHandler(
   try {
     await d.limitSession?.({ accountId: session.accountId, userId: session.userId });
   } catch (err) {
+    // A refusal by the limiter is the answer; any other failure means the limiter could not run.
+    if (!(err instanceof RateLimitedError)) reportError(err, { stage: "github.install.limit", route: req.nextUrl.pathname });
     return redirect(err instanceof RateLimitedError ? "rate_limited" : "failed", refreshedToken);
   }
 
@@ -105,7 +108,8 @@ export async function installCallbackHandler(
         code: req.nextUrl.searchParams.get("code"),
       },
     );
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "github.install", route: req.nextUrl.pathname });
     outcome = "failed";
   }
   console.info(`install callback: ${appKind} outcome=${outcome}`);

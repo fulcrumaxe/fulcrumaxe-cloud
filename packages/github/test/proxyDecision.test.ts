@@ -8,6 +8,7 @@ import {
 } from "../src/proxyDecision.js";
 import { InstallationTokenCache, MintTimeoutError, type AccessTokenRequester } from "../src/installationToken.js";
 import { loadAppCredentials } from "../src/appCredentials.js";
+import { captureReports } from "./helpers/captureReports.js";
 
 /**
  * D#2 H13b, sec-criteria B1-B7 (D#2 comment 18488780, "Part B"), and body
@@ -283,13 +284,17 @@ describe("decideProxyRequest", () => {
 
   it("token_mint_failed denies with 403 and never lets a decide()-allowed request through unforwarded silently", async () => {
     const requester: AccessTokenRequester = vi.fn(async () => {
-      throw new Error("mint down");
+      throw new Error("mint down for acme/widgets with ghs_FAKE_h1b_mint_token");
     });
+    const reports = captureReports();
     const result = await decideProxyRequest(
       { method: "GET", path: "/repos/acme/widgets/issues/5", query: {}, rawBody: body(""), sandboxName: "x" },
       deps({ accessTokenRequester: requester }),
     );
     expect(result).toMatchObject({ allow: false, status: 403, reason: "token_mint_failed" });
+    // Reported as one coded class: neither the repository nor the token is in it.
+    expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "github.proxy_mint", code: "other" }]);
+    expect(reports.everything()).not.toMatch(/acme|widgets|ghs_FAKE_h1b_mint_token/);
   });
 
   it("a mint failure logs the app kind and the error class only, never its message", async () => {
@@ -328,11 +333,15 @@ describe("decideProxyRequest", () => {
       const requester: AccessTokenRequester = vi.fn(async () => {
         throw new MintTimeoutError();
       });
+      const reports = captureReports();
       const result = await decideProxyRequest(
         { method: "GET", path: "/repos/acme/widgets/issues/5", query: {}, rawBody: body(""), sandboxName: "x" },
         deps({ accessTokenRequester: requester }),
       );
       expect(result).toMatchObject({ allow: false, status: 502, reason: "upstream_unavailable" });
+      // A timeout is an upstream availability failure, and is seen as one.
+      expect(reports.classes).toHaveLength(1);
+      expect(reports.classes[0]).toMatchObject({ stage: "github.proxy_mint" });
     });
   });
 
@@ -442,6 +451,20 @@ describe("decideProxyRequest", () => {
         deps(),
       );
       expect(result).toMatchObject({ allow: false, status: 403, reason: "body_unparsable" });
+    });
+
+    it("H1b: a body so deeply nested that the duplicate-key scan overflows is still denied unparsable, and the scan failure is reported", async () => {
+      const depth = 200_000;
+      const nested = '{"a":'.repeat(depth) + "1" + "}".repeat(depth);
+      const reports = captureReports();
+      const result = await decideProxyRequest(
+        { method: "PATCH", path: "/repos/acme/widgets/issues/5", query: {}, rawBody: body(nested), sandboxName: "x" },
+        deps(),
+      );
+      expect(result).toMatchObject({ allow: false, status: 403, reason: "body_unparsable" });
+      // A RangeError (stack overflow): its class name is reported with the fixed stage; no body text, no repository.
+      expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "github.proxy_scan", code: "other" }]);
+      expect(reports.everything()).not.toMatch(/acme|widgets|"a":/);
     });
 
     it("a labels POST with no duplicate keys still allows normally", async () => {

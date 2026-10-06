@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { recheckInstallationActive } from "../src/installationRecheck.js";
 import { strictGithubFetch } from "./helpers/strictGithub.js";
+import { captureReports } from "./helpers/captureReports.js";
 
 /** D#2 H17e R4: the live "still active" check, against a fake GitHub. */
 const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -29,6 +30,17 @@ describe("recheckInstallationActive", () => {
     ["a network failure", (async () => { throw new Error("net"); }) as unknown as typeof fetch],
   ])("refuses %s", async (_name, fetchImpl) => {
     expect(await check(fetchImpl)).toBe(false);
+  });
+
+  it("reports a failed check as a coded class, with nothing from the error", async () => {
+    const reports = captureReports();
+    const fetchImpl = (async () => {
+      throw Object.assign(new Error("connect failed Bearer ghs_FAKE_h1b_recheck_token to api.github.com"), { code: "ECONNRESET" });
+    }) as unknown as typeof fetch;
+    expect(await check(fetchImpl)).toBe(false);
+    // The errno is on the allowlist and survives; the message (with the fake token) does not.
+    expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "github.recheck_installation", code: "ECONNRESET" }]);
+    expect(reports.everything()).not.toMatch(/ghs_FAKE_h1b_recheck_token|Bearer/);
   });
 
   it("refuses, with no GitHub call, when the App key is unusable", async () => {

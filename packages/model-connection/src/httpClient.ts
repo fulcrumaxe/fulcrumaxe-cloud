@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { Provider } from './types.js';
 
 /**
@@ -68,7 +69,8 @@ export function fetchValidationHttpClient(timeoutMs = 5000): ValidationHttpClien
           redirect: 'error',
         });
         return outcomeFromStatus(response.status, provider);
-      } catch {
+      } catch (err) {
+        reportError(err, { stage: "model_key.validate" });
         // Security review finding 1: never interpolate the underlying
         // fetch/undici error into the outcome. A plaintext key with an
         // embedded CR/LF/NUL makes `fetch` throw an error whose message

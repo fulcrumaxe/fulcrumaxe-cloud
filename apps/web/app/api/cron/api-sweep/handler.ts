@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
@@ -109,7 +110,10 @@ async function gatedSweep(deps: ApiSweepHandlerDeps, runSweepFn: RunSweepFn, nex
     async () => {
       const summary = await runSweepFn(deps.platformOpsPool, deps.sender);
       // If the next-due read fails, keep the marker alive rather than drop work.
-      const nextDueAt = await nextDueFn(deps.platformOpsPool).catch(() => Date.now());
+      const nextDueAt = await nextDueFn(deps.platformOpsPool).catch((err: unknown) => {
+        reportError(err, { stage: "cron.api_sweep.next_due", route: "/api/cron/api-sweep" });
+        return Date.now();
+      });
       return { result: summary, workFound: foundWork(summary), nextDueAt };
     },
     undefined,
@@ -167,7 +171,7 @@ export async function apiSweepKickHandler(
     kickSweepInFlight = true;
     deps.schedule(
       gatedSweep(deps.sweepDeps(), runSweepFn, nextDueFn, true)
-        .catch((err: unknown) => console.error(`api-sweep kick failed: ${err instanceof Error ? err.name : "error"}`))
+        .catch((err: unknown) => reportError(err, { stage: "cron.api_sweep.kick", route: "/api/cron/api-sweep" }))
         .finally(() => {
           kickSweepInFlight = false;
         }),

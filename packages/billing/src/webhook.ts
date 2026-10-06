@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { Pool } from 'pg';
 import type Stripe from 'stripe';
 import type { StripeLike } from './stripeClient.js';
@@ -52,7 +53,8 @@ export async function handleStripeWebhookRequest(
   let event: Stripe.Event;
   try {
     event = deps.stripe.webhooks.constructEvent(rawBody, signatureHeader, deps.webhookSecret) as Stripe.Event;
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.verify_signature", route: "/api/stripe/webhook" });
     // The SDK's thrown error can embed the raw payload/signature --
     // never forward it into the response or a log line (pass/fail 5).
     return { status: 400, body: { error: 'invalid_signature' } };

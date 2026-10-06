@@ -20,6 +20,7 @@
     "@fx/db": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/net-guard": "workspace:*",
+    "@fx/telemetry": "workspace:*",
     "pg": "^8.13.1"
   },
   "devDependencies": {

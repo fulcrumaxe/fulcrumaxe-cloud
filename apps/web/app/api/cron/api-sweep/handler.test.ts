@@ -1,3 +1,4 @@
+import { captureReports } from "../../../../test/captureReports";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import type { SweepSummary } from "@fx/webhooks";
@@ -71,6 +72,21 @@ describe("GET /api/cron/api-sweep", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(fakeSummary);
     expect(runSweepFn).toHaveBeenCalledWith(deps.platformOpsPool, deps.sender);
+  });
+});
+
+describe("GET /api/cron/api-sweep: a failed next-due read", () => {
+  it("still answers 200 with the summary, and reports the failure as a coded class without its text", async () => {
+    const reports = captureReports();
+    const runSweepFn = vi.fn(async () => fakeSummary);
+    const nextDueFn = vi.fn(async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED postgres://app:FAKE-h1b-db-password@db.internal/fx"), { code: "ECONNREFUSED" });
+    });
+    const res = await apiSweepHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps(), runSweepFn, nextDueFn);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(fakeSummary);
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/cron/api-sweep", stage: "cron.api_sweep.next_due", code: "ECONNREFUSED" }]);
+    expect(reports.everything()).not.toMatch(/FAKE-h1b-db-password|db\.internal/);
   });
 });
 

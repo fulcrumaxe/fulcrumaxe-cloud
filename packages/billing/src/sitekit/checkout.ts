@@ -1,3 +1,4 @@
+import { reportError } from '@fx/telemetry';
 import type { Pool, PoolClient } from 'pg';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
 import { authorizeAccountWrite } from '../authorize.js';
@@ -138,7 +139,8 @@ export async function createSitekitCheckout(ctx: BillingCtx, input: SitekitCheck
     let priceId: string;
     try {
       priceId = stripeSitekitPriceIdFromEnv(input.product);
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "billing.sitekit.price" });
       return { ok: false, reason: 'price_not_configured' };
     }
 
@@ -166,7 +168,8 @@ export async function createSitekitCheckout(ctx: BillingCtx, input: SitekitCheck
         // A fixed marker, no ids: the webhook only ever uses it to refuse a stray event (see webhook.ts).
         ...(mode === 'subscription' ? { subscription_data: { metadata: { [SITEKIT_MARKER_KEY]: SITEKIT_MARKER_VALUE } } } : {}),
       }, { timeout }));
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "billing.sitekit.checkout" });
       return STRIPE_UNAVAILABLE_RESULT;
     }
     if (!session.url || !session.id) return STRIPE_UNAVAILABLE_RESULT;
@@ -218,7 +221,8 @@ async function closeEarlierSessions(
       else if (status !== 'expired') return STRIPE_UNAVAILABLE_RESULT; // a status this code doesn't know: fail closed
     }
     for (const id of open) await withTimeout(timeout, () => sessions.expire!(id, {}, { timeout }));
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.sitekit.close_earlier" });
     return STRIPE_UNAVAILABLE_RESULT;
   }
   return null;
@@ -241,7 +245,8 @@ export async function cancelSitekitSync(ctx: BillingCtx, input: SitekitBase & { 
   if (!subscriptions.update) return STRIPE_UNAVAILABLE_RESULT;
   try {
     await subscriptions.update(rows[0].sync_subscription_id, { cancel_at_period_end: true });
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "billing.sitekit.cancel_sync" });
     return STRIPE_UNAVAILABLE_RESULT;
   }
   return { ok: true };
