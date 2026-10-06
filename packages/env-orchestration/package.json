@@ -1,0 +1,28 @@
+{
+  "name": "@fx/env-orchestration",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "D#5 E9: the ensure-env step (resolve the environment for a run's commit, build it on a miss) and replay from a recorded digest. Decisions here; every effect is an injected port.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fx/env-build": "workspace:*",
+    "@fx/env-network": "workspace:*",
+    "@fx/env-presets": "workspace:*",
+    "@fx/env-spec": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
