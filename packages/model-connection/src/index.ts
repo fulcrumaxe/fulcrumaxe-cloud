@@ -30,3 +30,18 @@ export { test } from './validate.js';
 
 export type { BrokenConnectionCode, ConnectionStatusPort } from './markBroken.js';
 export { markBroken, markBrokenWithClient, createConnectionStatusPort } from './markBroken.js';
+
+export type { PlanPathKind } from './planKinds.js';
+export { PLAN_PATH_KINDS, NOTICE_VERSIONS, isPlanPathKind, assertPlanPathKind, UnknownPlanKindError } from './planKinds.js';
+
+export type { KindSwitchState, SetKindEnabledResult } from './killSwitch.js';
+export {
+  KILL_SWITCH_REFUSAL_REASON,
+  isKindEnabled,
+  isKindEnabledWithClient,
+  listKindSwitches,
+  setKindEnabled,
+} from './killSwitch.js';
+
+export type { NoticeAckCtx, NoticeAckView } from './noticeAck.js';
+export { recordAcknowledgement, hasAcknowledgement, hasAcknowledgementWithClient } from './noticeAck.js';

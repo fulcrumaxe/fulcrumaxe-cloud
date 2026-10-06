@@ -995,6 +995,66 @@ check_sandbox_reaper_role_shape() {
   fi
 }
 
+# D#221 KS (0739): the one SECURITY DEFINER owned by plan_kind_audit_writer (plan_kind_switch_audit_write(text)), matched by exact name. Prints
+# its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp with EXECUTE for platform_ops (the invoking trigger) and no one else, and no grant
+# option; SHAPE_FAIL:<count> when a definer owned by the role is not that; nothing when the role owns none.
+check_plan_kind_audit_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname = 'plan_kind_switch_audit_write'
+        AND p.proargtypes = array_to_string('{text}'::regtype[]::oid[], ' ')::oidvector
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'platform_ops'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'platform_ops'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'plan_kind_audit_writer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'plan-kind-audit-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by plan_kind_audit_writer fail the exception shape (not plan_kind_switch_audit_write(text), a loose search_path, or EXECUTE for anyone but platform_ops)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#221 KS (0739): role shape of plan_kind_audit_writer. A no-op when the role does not exist. NOLOGIN and unprivileged, no member but
+# the migration role and no live membership for it, a member of no role, privileges exactly INSERT on plan_kind_switch_audit and SELECT of three columns of plan_kind_switches, owning only
+# its one function, no CREATE on public.
+check_plan_kind_audit_role_shape() {
+  local dbname="$1" out rc=0 problems
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'plan_kind_audit_writer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'plan_kind_audit_writer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 4 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY['table plan_kind_switch_audit INSERT','column plan_kind_switches.kind SELECT','column plan_kind_switches.enabled SELECT','column plan_kind_switches.updated_by SELECT'])) THEN 'privileges are not exactly the 4 granted by 0739' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname = 'plan_kind_switch_audit_write'))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond plan_kind_switch_audit_write' END,
+      CASE WHEN has_schema_privilege('plan_kind_audit_writer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'plan_kind_audit_writer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): plan_kind_audit_writer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -1060,7 +1120,16 @@ if [ -n "$SANDBOX_REAPER_RESULT" ] && ! [[ "$SANDBOX_REAPER_RESULT" =~ ^[0-9]+(,
   echo "neon-shape: internal error -- sandbox_reaper exempt function oids were not numeric: $SANDBOX_REAPER_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}"
+PLAN_KIND_AUDIT_RESULT="$(check_plan_kind_audit_exception_shape fx_neon)"
+if [[ "$PLAN_KIND_AUDIT_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${PLAN_KIND_AUDIT_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$PLAN_KIND_AUDIT_RESULT" ] && ! [[ "$PLAN_KIND_AUDIT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- plan_kind_audit_writer exempt function oid was not numeric: $PLAN_KIND_AUDIT_RESULT" >&2
+  exit 1
+fi
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1078,6 +1147,7 @@ check_error_event_writer_role_shape fx_neon
 check_guard_definer_role_shape fx_neon
 check_guard_definer_owner_cascade fx_neon
 check_sandbox_reaper_role_shape fx_neon
+check_plan_kind_audit_role_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
