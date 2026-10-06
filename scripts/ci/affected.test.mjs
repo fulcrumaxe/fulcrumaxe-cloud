@@ -636,8 +636,9 @@ test("--github: an ignored-only change exports the word none, never an empty lis
   assert.equal(s.summary.trim(), "CI scope: affected — 0 packages (ignored paths only)");
 });
 
-test("--github: the Node 22 step is wanted exactly when runner-protocol is affected", () => {
+test("--github: the Node 22 step is wanted exactly when runner-protocol or fx-runner is affected", () => {
   assert.equal(runStep({ "packages/runner-protocol/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "true");
+  assert.equal(runStep({ "packages/fx-runner/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "true");
   assert.equal(runStep({ "packages/env-spec/src/a.ts": "x" }).env.CI_SCOPE_RUNNER_PROTOCOL, "false");
 });
 

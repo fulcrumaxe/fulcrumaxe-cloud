@@ -98,7 +98,7 @@ export interface SandboxSpec {
   /**
    * True only for the operator-subscription path: the sandbox's CLI holds the fixed
    * placeholder (never a token) and the firewall injects our own subscription token.
-   * The guard allows `CLAUDE_CODE_OAUTH_TOKEN` in `env` only in this mode, only with that
+   * The guard allows the subscription OAuth token variable in `env` only in this mode, only with that
    * placeholder, and only toward the Anthropic API default. See operatorSubscription.ts.
    */
   operatorSubscription?: true;

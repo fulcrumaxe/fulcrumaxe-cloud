@@ -57,6 +57,10 @@ describe("the Node 22 step in CI", () => {
     expect(step).toMatch(/nixpkgs#nodejs_22 --command node node_modules\/vitest\/vitest\.mjs run/);
     expect(step).not.toMatch(/pnpm|npx/);
   });
+
+  it("then runs the local runner package the same way, under the same Node", () => {
+    expect(step).toMatch(/cd packages\/runner-protocol\n.*vitest\.mjs run\n\s+cd \.\.\/fx-runner\n\s+nix shell --inputs-from \.\.\/\.\. nixpkgs#nodejs_22 --command node node_modules\/vitest\/vitest\.mjs run/);
+  });
 });
 
 describe("the toolchain record", () => {

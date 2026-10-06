@@ -67,6 +67,7 @@ export default defineWorkspace([
   "packages/env-presets",
   "packages/env-spec",
   "packages/features",
+  "packages/fx-runner",
   "packages/gh-policy",
   "packages/github",
   "packages/model-call",
