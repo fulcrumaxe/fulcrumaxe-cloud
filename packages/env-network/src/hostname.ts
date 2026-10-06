@@ -9,6 +9,8 @@ const CIDR = /^(\[?[0-9a-f:.]+\]?)\/\d{1,3}$/;
 /** A dotted quad, a bare integer, hex or octal: every spelling of an IPv4 address ends in one of these. */
 const NUMERIC_LABEL = /^(0x[0-9a-f]*|\d+)$/;
 
+const SPECIAL_USE_SUFFIXES: readonly string[] = ["internal", "local", "localhost", "home.arpa"];
+
 /**
  * Lower-cases, converts a non-ASCII name to its ASCII (punycode) form, drops ONE trailing dot, then decides
  * what the entry is. Every check runs on the normalised form, so a look-alike that normalises to a
@@ -30,5 +32,9 @@ export function normalizeHostname(raw: unknown): HostnameResult {
   const labels = s.split(".");
   if (NUMERIC_LABEL.test(labels[labels.length - 1]!)) return { code: "ip_address" };
   if (s.length > 253 || !labels.every((l) => LABEL.test(l))) return { code: "not_a_hostname" };
+  // Names that resolve inside the platform or the VM, never to a customer's service: a bare label (`localhost`,
+  // `metadata`) is looked up through the resolver's search path, and these suffixes are special-use (RFC 6761/8375)
+  // or the cloud metadata zone (`metadata.google.internal`).
+  if (labels.length === 1 || SPECIAL_USE_SUFFIXES.some((x) => s === x || s.endsWith(`.${x}`))) return { code: "special_use_host" };
   return { host: s };
 }

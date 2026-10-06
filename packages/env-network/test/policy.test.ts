@@ -46,7 +46,7 @@ describe("criterion 2: refusals name the entry and say a hostname is required", 
       expect(err.message).toContain("a hostname is required");
     }
   });
-  it.each(["example.com", "Example.COM.", "registry.npmjs.org", "localhost", "a-b.c1.example.co.uk", "bücher.de", "xn--bcher-kva.de"])("accepts the hostname %j", (entry) => {
+  it.each(["example.com", "Example.COM.", "registry.npmjs.org", "a-b.c1.example.co.uk", "bücher.de", "xn--bcher-kva.de"])("accepts the hostname %j", (entry) => {
     expect(code([entry])).toBe("none");
   });
   it("normalises before emitting: lower-case, no trailing dot, punycode", () => {

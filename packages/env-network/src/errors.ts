@@ -1,5 +1,5 @@
 export type NetworkErrorCode =
-  | "empty" | "wildcard" | "ip_address" | "address_range" | "not_a_hostname" | "reserved_host" | "invalid_context";
+  | "empty" | "wildcard" | "ip_address" | "address_range" | "not_a_hostname" | "reserved_host" | "special_use_host" | "invalid_context";
 
 const SHOWN = 80;
 
