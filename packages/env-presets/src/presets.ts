@@ -57,14 +57,14 @@ const sandboxBase: Layer = {
   ],
 };
 
-const PINS_DIR = "/usr/local/share/fx-pins";
+export const PINS_DIR = "/usr/local/share/fx-pins";
 
 /** The checksum file `sha256sum -c` reads: argv-only steps cannot pipe a hash into it. */
-const checksumFile = (name: string, pin: BinaryPin, target: string): LayerFile =>
+export const checksumFile = (name: string, pin: BinaryPin, target: string): LayerFile =>
   ({ path: `${PINS_DIR}/${name}.sha256`, mode: "0444", content: `${pin.sha256}  ${target}\n` });
 
 /** Download over https, refuse anything but the pinned bytes. The curl and ca-certificates come from sandbox-base. */
-const downloadSteps = (name: string, pin: BinaryPin, target: string): Argv[] => [
+export const downloadSteps = (name: string, pin: BinaryPin, target: string): Argv[] => [
   ["curl", "--fail", "--silent", "--show-error", "--location", "--proto", "=https", "--tlsv1.2", "--output", target, pin.url],
   ["sha256sum", "--check", "--strict", `${PINS_DIR}/${name}.sha256`],
 ];
