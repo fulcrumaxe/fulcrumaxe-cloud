@@ -17,12 +17,12 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
   const jkt = await verifySelfSignedRequest(deps, REGISTER_PATH, req, message.public_key_jwk);
 
   // The signer already has a runner: this is a replay of its registration (or a second try), never a second runner.
-  const existing = await deps.platformOpsPool.query("SELECT 1 FROM runners WHERE jkt = $1", [jkt]);
-  if (existing.rowCount) throw new RunnerHttpError(409, "key_registered", "that key is already registered");
+  const existing = await deps.appUserPool.query<{ taken: boolean }>("SELECT runner_jkt_registered($1) AS taken", [jkt]);
+  if (existing.rows[0]?.taken === true) throw new RunnerHttpError(409, "key_registered", "that key is already registered");
 
   // Before a tenant is known: which account does this code belong to? An unknown code and a used one look the same.
   const codeHash = hashRegistrationCode(message.code);
-  const { rows } = await deps.platformOpsPool.query<{ account_id: string }>("SELECT account_id FROM runner_registration_codes WHERE code_sha256 = $1", [codeHash]);
+  const { rows } = await deps.appUserPool.query<{ account_id: string | null }>("SELECT runner_code_account($1) AS account_id", [codeHash]);
   const accountId = rows[0]?.account_id;
   if (!accountId) throw new RunnerHttpError(401, "invalid_code", "the registration code is not valid");
 

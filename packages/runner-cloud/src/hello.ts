@@ -1,6 +1,6 @@
 import { HelloMessage } from "@fulcrumaxe/runner-protocol";
-import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
-import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
+import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 export const HELLO_PATH = "/api/runner/hello";
 
@@ -23,11 +23,17 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   if (!protocolVersionSupported(message.protocol_version, current)) {
     throw new RunnerHttpError(426, "upgrade_required", "this runner is too old to talk to the cloud", { current_protocol_version: current, minimum_protocol_version: current - 1 });
   }
-  const updated = await deps.platformOpsPool.query(
-    `UPDATE runners SET protocol_version = $3, binary_version = $4, isolation = $5, last_seen_at = now()
-      WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL`,
-    [runner.runnerId, runner.accountId, message.protocol_version, message.binary_version, message.isolation],
-  );
-  if (updated.rowCount === 0) throw new RunnerHttpError(401, "unauthorized", "the request is not signed by a registered runner");
+  let recorded: boolean;
+  try {
+    recorded = await withRunnerSession(deps.appUserPool, runner, async (client) => {
+      const { rows } = await client.query<{ ok: boolean }>("SELECT runner_hello_record($1, $2, $3) AS ok", [message.protocol_version, message.binary_version, message.isolation]);
+      return rows[0]?.ok === true;
+    });
+  } catch (error) {
+    // Revoked, or its account suspended, between the verification and here: the same answer as any later request.
+    if (pgCode(error) === "42501") recorded = false;
+    else throw error;
+  }
+  if (!recorded) throw new RunnerHttpError(401, "unauthorized", "the request is not signed by a registered runner");
   return { status: 200, body: { protocol_version: current } };
 }

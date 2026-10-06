@@ -7,13 +7,14 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { isUsableEd25519Key } from "./strictEd25519.js";
-import { MAX_BODY_BYTES, MAX_KEY_AGE_DAYS, NONCE_WINDOW_SECONDS, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpRequest } from "./http.js";
+import { MAX_BODY_BYTES, MAX_KEY_AGE_DAYS, NONCE_RETENTION_SECONDS, RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpRequest } from "./http.js";
 
 /**
  * D#6 R2a: the one door every `/api/runner/*` request goes through (README.md lists the checks). It refuses an oversize
  * body (413) before any signature work, checks the signature against `origin + path` from configuration (never the Host
  * header), looks the key up on every request (a revoked runner is refused at once), refuses a small-order key and a key
- * over 90 days old, and, for a once-only endpoint, a nonce seen in the last 2 minutes. The tenant is the runner's own row.
+ * over 90 days old, and, for a once-only endpoint, a nonce it has already seen (kept for the span `http.ts` derives
+ * from the signature skew). The tenant is the runner's own row.
  * Only a `VerifiedRunner` returned from here can be given to `withRunnerSession`.
  */
 
@@ -84,11 +85,8 @@ export async function verifyRunnerRequest(
   const seen: { row?: RunnerRow } = {};
   const signature = await checkSignature(deps, path, req, async (keyid) => {
     if (!/^[A-Za-z0-9_-]{43}$/.test(keyid)) return undefined;
-    const { rows } = await deps.platformOpsPool.query<RunnerRow>(
-      `SELECT id, account_id, registered_by, credential_mode, public_key_jwk, jkt, created_at, key_rotated_at
-         FROM runners WHERE jkt = $1 AND revoked_at IS NULL`,
-      [keyid],
-    );
+    // Before any tenant is known: one exact key through runner_lookup_by_jkt (0724), which finds active runners only.
+    const { rows } = await deps.appUserPool.query<RunnerRow>("SELECT * FROM runner_lookup_by_jkt($1)", [keyid]);
     const found = rows[0];
     if (!found || !isUsableEd25519Key(found.public_key_jwk.x)) return undefined;
     seen.row = found;
@@ -105,17 +103,17 @@ export async function verifyRunnerRequest(
 
   if (options.replay === "once") {
     if (!signature.nonce) throw UNAUTHORIZED();
-    const client = await deps.platformOpsPool.connect();
+    // Prune and record in one definer call (0724): it files the nonce under the runner's own account.
+    let fresh: boolean;
     try {
-      await client.query(`DELETE FROM runner_request_nonces WHERE seen_at < now() - make_interval(secs => $1)`, [NONCE_WINDOW_SECONDS]);
-      const inserted = await client.query(
-        `INSERT INTO runner_request_nonces (account_id, runner_id, nonce) VALUES ($1, $2, $3) ON CONFLICT (runner_id, nonce) DO NOTHING`,
-        [row.account_id, row.id, signature.nonce],
-      );
-      if (inserted.rowCount === 0) throw new RunnerHttpError(409, "nonce_reused", "this request was already received");
-    } finally {
-      client.release();
+      const { rows } = await deps.appUserPool.query<{ fresh: boolean }>("SELECT runner_nonce_record($1, $2, $3) AS fresh", [row.id, signature.nonce, NONCE_RETENTION_SECONDS]);
+      fresh = rows[0]?.fresh === true;
+    } catch (error) {
+      // Revoked between the lookup and here, or a nonce the table refuses: the same answer as any unverified request.
+      if (["P0002", "22023"].includes(pgCode(error) ?? "")) throw UNAUTHORIZED();
+      throw error;
     }
+    if (!fresh) throw new RunnerHttpError(409, "nonce_reused", "this request was already received");
   }
   return mint({ runnerId: row.id, accountId: row.account_id, registeredBy: row.registered_by, credentialMode: row.credential_mode, jkt: row.jkt });
 }
