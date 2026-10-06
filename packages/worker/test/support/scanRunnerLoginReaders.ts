@@ -348,7 +348,20 @@ function walk(dir: string, out: string[]): string[] {
  * SKIP_DIRS.
  */
 function listFiles(root: string, top: string): string[] {
+  return listFilesWithMode(root, top).files;
+}
+
+/** How each top directory of `root` was listed. A real checkout must say "git" for every one; "walk" would include untracked build output. */
+export function scanModes(root: string): Record<(typeof SCANNED_TOPS)[number], "git" | "walk"> {
+  const modes = {} as Record<(typeof SCANNED_TOPS)[number], "git" | "walk">;
+  for (const top of SCANNED_TOPS) modes[top] = listFilesWithMode(root, top).mode;
+  return modes;
+}
+
+/** The same listing, and how it was made: "git" (tracked plus not ignored) or "walk" (a directory walk). */
+function listFilesWithMode(root: string, top: string): { files: string[]; mode: "git" | "walk" } {
   let listed: string[];
+  let mode: "git" | "walk" = "git";
   try {
     const out = execFileSync("git", ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", top], {
       encoding: "utf8",
@@ -357,15 +370,17 @@ function listFiles(root: string, top: string): string[] {
     });
     listed = out.split("\0").filter(Boolean).map((f) => path.join(root, f));
   } catch {
+    mode = "walk";
     try {
       listed = walk(path.join(root, top), []);
     } catch {
-      return [];
+      return { files: [], mode };
     }
   }
   // Judged on the path below `root`: a checkout that itself sits under a skipped directory
   // (a `.claude/worktrees/...` worktree) must still be scanned.
-  return listed.filter((f) => SCANNED.test(f) && !path.relative(root, f).split(path.sep).some((seg) => SKIP_DIRS.has(seg)));
+  const files = listed.filter((f) => SCANNED.test(f) && !path.relative(root, f).split(path.sep).some((seg) => SKIP_DIRS.has(seg)));
+  return { files, mode };
 }
 
 /** Where the scan looks. `scripts` is included so the allowlisted ops script is scanned like the rest, not only checked by hand. */
