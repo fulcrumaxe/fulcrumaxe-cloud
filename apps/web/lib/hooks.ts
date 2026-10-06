@@ -1,5 +1,6 @@
 import { resumeHook, start } from "workflow/api";
 import type { WorkerPorts } from "@fx/worker";
+import { reportError } from "@fx/telemetry";
 import { agentRunFollowWorkflow } from "../workflows/agentRunFollow";
 
 /**
@@ -23,7 +24,8 @@ export function createHooksPort(deps: { resumeHook: (token: string, payload: { r
       try {
         await deps.resumeHook(hookToken, { runId: result.runId, status: result.status });
         log("hook.resumed", result.runId);
-      } catch {
+      } catch (err) {
+        reportError(err, { stage: "hooks.resume" });
         log("hook.resume_failed", result.runId);
       }
     },

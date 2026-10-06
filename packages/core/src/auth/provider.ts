@@ -99,6 +99,18 @@ interface GitHubEmail {
  * FX_FORBID_MODEL_CALLS guard this repo already runs under, which this
  * mirrors in spirit even though GitHub isn't a model endpoint).
  */
+/**
+ * A sign-in that failed because of what the caller brought (a stale or garbage code, an account with no verified
+ * email), not because anything on our side or GitHub's is down. The callback answers it and does not report it.
+ */
+export class SignInRefusedError extends Error {
+  readonly callerCaused = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'SignInRefusedError';
+  }
+}
+
 export class GitHubOAuthProvider implements AuthProvider {
   readonly name = 'github';
 
@@ -132,7 +144,9 @@ export class GitHubOAuthProvider implements AuthProvider {
     }
     const tokenBody = (await tokenRes.json()) as { access_token?: string; error?: string };
     if (!tokenBody.access_token) {
-      throw new Error(`GitHub token exchange returned no access_token: ${tokenBody.error ?? 'unknown error'}`);
+      const reason = `GitHub token exchange returned no access_token: ${tokenBody.error ?? 'unknown error'}`;
+      // GitHub answers 200 with this error for a code that is stale, reused or made up: the caller's, not an outage.
+      throw tokenBody.error === 'bad_verification_code' ? new SignInRefusedError(reason) : new Error(reason);
     }
 
     const authHeaders = {
@@ -157,7 +171,7 @@ export class GitHubOAuthProvider implements AuthProvider {
       }
     }
     if (!email) {
-      throw new Error('GitHub account has no accessible verified email address');
+      throw new SignInRefusedError('GitHub account has no accessible verified email address');
     }
 
     return { githubUserId: user.id, email, name: user.name, githubLogin: user.login };

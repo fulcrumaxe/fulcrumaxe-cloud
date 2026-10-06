@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { captureReports } from "../test/captureReports";
 
 /**
  * D#2 H14c-3-3a-3 (P2/P3): the production hooks port, the follower starter and the follower workflow's body.
@@ -148,7 +149,11 @@ describe("the production hooks port", () => {
         throw new Error(`Hook not found for token ${TOKEN}`);
       },
     });
+    const reports = captureReports();
     await expect(port.resume(TOKEN, { runId: RUN, status: "failed" })).resolves.toBeUndefined();
+    // Counted by stage and code: no hook token and no message reach the reporter.
+    expect(reports.classes).toEqual([{ service: "test", route: "/", stage: "hooks.resume", code: "other" }]);
+    expect(reports.everything()).not.toContain(TOKEN);
     expect(logged.some((l) => l.includes("hook.resume_failed") && l.includes(RUN))).toBe(true);
     for (const l of logged) expect(l).not.toContain(TOKEN);
   });

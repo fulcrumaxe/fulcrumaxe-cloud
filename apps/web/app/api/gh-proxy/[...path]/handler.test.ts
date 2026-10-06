@@ -13,6 +13,7 @@ import {
   type ProxyDecisionResult,
 } from "@fx/github";
 import { NetGuardError } from "@fx/net-guard";
+import { captureReports } from "../../../../test/captureReports";
 // Relative on purpose: the strict-GitHub and real-connect-path helpers live with the @fx/github tests (no openssl in the dev shell either).
 import { ghError } from "../../../../../../packages/github/test/helpers/strictGithub.js";
 import { httpsRoundTrip, startLocalTlsServer, startStrictGithubServer, type LocalTlsServer } from "../../../../../../packages/github/test/helpers/localTlsServer.js";
@@ -1084,5 +1085,52 @@ describe("buildAccessTokenRequester: the mint request body", () => {
     }
     expect(h.resolveUpstream).not.toHaveBeenCalled();
     expect(h.forwardPinned).not.toHaveBeenCalled();
+  });
+});
+
+describe("H1c: what the proxy reports when something fails, and what it leaves alone", () => {
+  const SECRET = "alice-h1c-canary@example.com";
+
+  it("counts an upstream lookup that failed for its own reason, keeps its code, and still answers 502", async () => {
+    const reports = captureReports();
+    const resolveUpstream = vi.fn(async () => {
+      throw Object.assign(new Error(`lookup failed for ${SECRET}`), { code: "ENOTFOUND" });
+    });
+    const res = await ghProxyHandler(req({ host: CONFIG_HOST, oidcToken: await signOidc() }), fakeDeps({ resolveUpstream }), allowDecide("api.github.com"));
+    expect(res.status).toBe(502);
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/gh-proxy", stage: "gh_proxy.resolve", code: "ENOTFOUND" }]);
+    expect(reports.everything()).not.toContain(SECRET);
+  });
+
+  it("does not count a blocked address: that is a policy answer", async () => {
+    const reports = captureReports();
+    const resolveUpstream = vi.fn(async () => {
+      throw new NetGuardError("blocked_address", "github.com");
+    });
+    const res = await ghProxyHandler(req({ host: CONFIG_HOST, oidcToken: await signOidc() }), fakeDeps({ resolveUpstream }), allowDecide("api.github.com"));
+    expect(res.status).toBe(502);
+    expect(reports.classes).toEqual([]);
+  });
+
+  it("does not count a token that fails verification: the 401 and its reason code are the answer", async () => {
+    const reports = captureReports();
+    const res = await ghProxyHandler(req({ host: CONFIG_HOST, oidcToken: "not.a.jwt" }), fakeDeps(), denyDecide());
+    expect(res.status).toBe(401);
+    expect(reports.classes).toEqual([]);
+  });
+
+  it("counts a body stream that fails mid-transfer, by code, with no upstream text", async () => {
+    const reports = captureReports();
+    const bodyStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(Object.assign(new Error(`socket said ${SECRET}`), { code: "ECONNRESET" }));
+      },
+    });
+    const inner: PinnedRequester = async () => ({ status: 200, headers: {}, bodyStream });
+    const wrapped = withPinnedTimeouts(inner, { headersTimeoutMs: UPSTREAM_HEADERS_TIMEOUT_MS, idleTimeoutMs: UPSTREAM_IDLE_TIMEOUT_MS });
+    const result = await wrapped({ host: "github.com", address: "1.2.3.4", method: "GET", path: "/", headers: {}, body: null });
+    await expect(result.bodyStream!.getReader().read()).rejects.toThrow();
+    expect(reports.classes).toEqual([{ service: "test", route: "/api/gh-proxy", stage: "gh_proxy.stream", code: "ECONNRESET" }]);
+    expect(reports.everything()).not.toContain(SECRET);
   });
 });

@@ -91,6 +91,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     bytes = await readBodyWithByteLimit(req, MAX_BODY_BYTES);
   } catch {
+    // fx-swallow-ok: a body that cannot be read is treated as empty; this beacon route never fails a page load
     bytes = new Uint8Array(0);
   }
   if (bytes === null) {
@@ -102,6 +103,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const text = new TextDecoder().decode(bytes);
     report = text ? JSON.parse(text) : null;
   } catch {
+    // fx-swallow-ok: a malformed report body is still just a report
     // A malformed report body is still just a report -- log what we can
     // (nothing parsed) and answer 204 either way; this endpoint's whole
     // job is to never be the reason a real page load fails.

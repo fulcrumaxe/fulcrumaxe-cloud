@@ -88,7 +88,7 @@ export async function signOutHandler(
       const body = (await req.json()) as unknown;
       everywhere = !!(body && typeof body === "object" && (body as { everywhere?: unknown }).everywhere === true);
     } catch {
-      // A malformed or empty JSON body is not fatal -- sign-out still proceeds as a plain (non-"everywhere") sign-out.
+      // fx-swallow-ok: a malformed or empty JSON body is not fatal -- sign-out still proceeds as a plain (non-"everywhere") sign-out.
     }
   }
 

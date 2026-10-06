@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
+import { reportError } from "@fx/telemetry";
 import { NextRequest, NextResponse } from "next/server";
-import type { AuthProvider } from "@fx/core/src/auth/provider";
+import { SignInRefusedError, type AuthProvider } from "@fx/core/src/auth/provider";
 import { signUpOrSignIn } from "@fx/core/src/auth/identity";
 import { SIGNIN_REFUSED_CODE, isSigninAllowed } from "@fx/core/src/auth/signinAllowlist";
 import { defaultAuthDeps, defaultGithubProvider } from "../../_lib/deps";
@@ -32,7 +33,9 @@ export async function githubCallbackHandler(
   let identity;
   try {
     identity = await provider.exchangeCode(code);
-  } catch {
+  } catch (err) {
+    // A stale, reused or made-up code is the caller's (answered 400 below, not reported); an upstream outage or a wrong client secret is ours.
+    if (!(err instanceof SignInRefusedError)) reportError(err, { stage: "auth.exchange_code", route: url.pathname });
     return NextResponse.json({ error: "exchange_failed" }, { status: 400 });
   }
 

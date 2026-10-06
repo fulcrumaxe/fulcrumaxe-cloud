@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { OTHER_ERROR_CODE, OWN_ERROR_CODES, errorCodeOrOther, isAllowedErrorCode, safeLabel, safeTagPart } from "../src/errorCodes.js";
+import { CLIENT_ANONYMOUS_CODE, CLIENT_ERROR_CODES, CLIENT_WINDOW_IDS, OTHER_ERROR_CODE, OWN_ERROR_CODES, errorCodeOrOther, isAllowedErrorCode, safeLabel, safeTagPart } from "../src/errorCodes.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -22,6 +22,16 @@ describe("the error-code allowlist", () => {
       expect(errorCodeOrOther(code)).toBe(OTHER_ERROR_CODE);
     }
     for (const value of [undefined, null, 5, {}, [], Symbol("x"), () => "validation_failed"]) expect(errorCodeOrOther(value)).toBe(OTHER_ERROR_CODE);
+  });
+
+  it("keeps the fixed client.* codes and no other code under that prefix", () => {
+    for (const code of [...CLIENT_ERROR_CODES, CLIENT_ANONYMOUS_CODE]) expect(errorCodeOrOther(code), code).toBe(code);
+    for (const code of ["client.", "client.made_up", "client.render_failed ", "Client.render_failed", "client.octocat"]) expect(errorCodeOrOther(code), code).toBe(OTHER_ERROR_CODE);
+  });
+
+  it("lists window ids that are plain lowercase words, each usable as a stage once its dashes become underscores", () => {
+    for (const id of CLIENT_WINDOW_IDS) expect(safeLabel(`client.${id.replace(/-/g, "_")}`, "x"), id).not.toBe("x");
+    expect(new Set(CLIENT_WINDOW_IDS).size).toBe(CLIENT_WINDOW_IDS.length);
   });
 
   it("has no duplicate in our own list", () => {
@@ -103,6 +113,16 @@ describe("the thrown-code scan", () => {
     const found = thrownCodes(REPO_ROOT);
     expect(found.length).toBeGreaterThan(30); // the scan really reads the tree
     expect(unlisted(REPO_ROOT)).toEqual([]);
+  });
+
+  it("passes on the tree: every `readonly code = \"...\"` literal on an error class is on the allowlist", () => {
+    const READONLY_CODE = /readonly\s+code\s*=\s*["']([^"'`$]+)["']/g;
+    const found: [string, string][] = [];
+    for (const file of scannedFiles(REPO_ROOT)) {
+      for (const m of readFileSync(file, "utf8").matchAll(READONLY_CODE)) found.push([m[1]!, path.relative(REPO_ROOT, file)]);
+    }
+    expect(found.length).toBeGreaterThan(0);
+    expect(found.filter(([code]) => !isAllowedErrorCode(code)).map(([code, file]) => `${code} (${file})`)).toEqual([]);
   });
 
   it("fails on a fixture that throws a code that is not on the list, direct or from a subclass", () => {

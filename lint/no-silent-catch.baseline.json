@@ -1,13 +1,4 @@
 {
-  "apps/web/app/api/auth/github/callback/handler.ts": 1,
-  "apps/web/app/api/auth/github/handler.ts": 1,
-  "apps/web/app/api/auth/signout/handler.ts": 1,
-  "apps/web/app/api/csp-report/route.ts": 2,
-  "apps/web/app/api/gh-proxy/[...path]/handler.ts": 6,
-  "apps/web/app/api/rum/handler.ts": 2,
-  "apps/web/lib/env/check.ts": 2,
-  "apps/web/lib/github/authorCheck.ts": 1,
-  "apps/web/lib/hooks.ts": 1,
   "packages/api/src/github/installUrl.ts": 1,
   "packages/api/src/handler.ts": 1,
   "packages/api/src/principal.ts": 1,

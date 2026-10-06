@@ -3,6 +3,12 @@ import type { Pool } from "pg";
 import { createPool } from "@fx/db/src/pool";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
+import { pgSessionLimiter, SESSION_LIMITS, type SessionSubject } from "@fx/api/src/ratelimit/session.js";
+import { RateLimitedError } from "@fx/api/src/errors.js";
+import { platformOpsPool } from "@fx/api/src/sse/pools.js";
+import { SESSION_COOKIE_NAME } from "@fx/core/src/auth/session";
+import { CLIENT_ANONYMOUS_CODE, CLIENT_ERROR_CODES, CLIENT_WINDOW_IDS, reportError } from "@fx/telemetry";
+import { resolveActiveSession } from "../../../lib/shell/session-guard";
 import { applySecurityHeaders } from "../../../lib/shell/headers";
 
 /**
@@ -49,6 +55,13 @@ import { applySecurityHeaders } from "../../../lib/shell/headers";
  * `RateLimitStore`'s own contract documents (packages/api/src/ratelimit/
  * store.ts) -- never served unlimited just because the store is down.
  *
+ * Client errors (H1c). The same endpoint takes a second kind, `{ kind: "client_error", code, window }`, from the
+ * workspace's own failure paths. It is a report of a CLASS, never a message: a signed-in caller picks `code` from
+ * CLIENT_ERROR_CODES and `window` from CLIENT_WINDOW_IDS (anything else is a 400) and is held to 30 reports a
+ * minute per account on top of the per-IP cap above. An anonymous caller (no valid session) chooses nothing:
+ * its fields are not read, and the report is stored under the single class `client.anonymous` with route `/`.
+ * The reporter writes the log line and the stored class; this route adds no line of its own for the kind.
+ *
  * Split into this handler.ts plus a thin route.ts wrapper (matching
  * auth/invitations/accept/{route,handler}.ts's own split elsewhere in
  * this app): Next's App Router type-checks a route file's exported
@@ -68,6 +81,10 @@ const RUM_LIMIT_PER_IP_PER_MINUTE = 60;
 export interface RumDeps {
   rateLimitStore: RateLimitStore;
   clientIp: (req: NextRequest) => string;
+  /** The signed-in caller of a client-error report, or null (anonymous). Defaults to the session cookie, checked against the database only when one is present. */
+  resolveSession?: (req: NextRequest) => Promise<SessionSubject | null>;
+  /** Counts a signed-in report against the account's budget; throws RateLimitedError when over it. Defaults to the Postgres store. */
+  limitSession?: (subject: SessionSubject) => Promise<void>;
 }
 
 let cachedAppUserPool: Pool | undefined;
@@ -83,11 +100,66 @@ function appUserPool(): Pool {
 }
 
 let cachedStore: RateLimitStore | undefined;
+let cachedLimitSession: ((subject: SessionSubject) => Promise<void>) | undefined;
+function defaultLimitSession(subject: SessionSubject): Promise<void> {
+  cachedLimitSession ??= pgSessionLimiter(appUserPool(), SESSION_LIMITS.rumClientError);
+  return cachedLimitSession(subject);
+}
+
 function defaultDeps(): RumDeps {
   if (!cachedStore) {
     cachedStore = new PgRateLimitStore(appUserPool());
   }
   return { rateLimitStore: cachedStore, clientIp: clientIpFromRequest };
+}
+
+async function defaultResolveSession(req: NextRequest): Promise<SessionSubject | null> {
+  // No cookie is the common anonymous case and must not open a database connection.
+  if (!req.cookies.has(SESSION_COOKIE_NAME)) return null;
+  const resolved = await resolveActiveSession(req, { platformOpsPool: platformOpsPool() });
+  return resolved ? { accountId: resolved.session.accountId, userId: resolved.session.userId } : null;
+}
+
+/** What the reporter sees in place of anything the browser sent: a fixed name, no message. */
+class ClientReportedError extends Error {
+  constructor() {
+    super("client error report");
+    this.name = "ClientReportedError";
+  }
+}
+
+async function handleClientError(req: NextRequest, body: Record<string, unknown>, deps: RumDeps): Promise<NextResponse> {
+  let subject: SessionSubject | null = null;
+  try {
+    subject = await (deps.resolveSession ?? defaultResolveSession)(req);
+  } catch (err) {
+    // A session check that cannot run leaves the caller anonymous: the report is still taken, with nothing chosen.
+    reportError(err, { stage: "rum.session", route: "/api/rum" });
+  }
+  if (!subject) {
+    reportError(new ClientReportedError(), { stage: "client", route: "/", code: CLIENT_ANONYMOUS_CODE });
+    return applySecurityHeaders(new NextResponse(null, { status: 204 }));
+  }
+  // Counted before the fields are checked, so a signed-in caller cannot probe the lists for free. A store failure
+  // is not caught: it fails the request rather than serving the caller unlimited, like the IP check above.
+  try {
+    await (deps.limitSession ?? defaultLimitSession)(subject);
+  } catch (err) {
+    if (!(err instanceof RateLimitedError)) throw err;
+    return applySecurityHeaders(
+      NextResponse.json(
+        { error: "rate_limited" },
+        { status: 429, headers: { "Retry-After": String(Math.max(1, Math.ceil(err.retryAfterSeconds))) } },
+      ),
+    );
+  }
+  const code = body.code;
+  const win = body.window;
+  if (typeof code !== "string" || !CLIENT_ERROR_CODES.includes(code) || typeof win !== "string" || !CLIENT_WINDOW_IDS.includes(win)) {
+    return applySecurityHeaders(NextResponse.json({ error: "invalid_client_error" }, { status: 400 }));
+  }
+  reportError(new ClientReportedError(), { stage: `client.${win.replace(/-/g, "_")}`, route: "/api/rum", code });
+  return applySecurityHeaders(new NextResponse(null, { status: 204 }));
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -148,6 +220,7 @@ export async function handleRumPost(req: NextRequest, deps: RumDeps = defaultDep
   try {
     bytes = await readBodyWithByteLimit(req, MAX_BODY_BYTES);
   } catch {
+    // fx-swallow-ok: a body that cannot be read is treated as empty; this beacon route never fails a page load
     bytes = new Uint8Array(0);
   }
   if (bytes === null) {
@@ -159,7 +232,11 @@ export async function handleRumPost(req: NextRequest, deps: RumDeps = defaultDep
     const text = new TextDecoder().decode(bytes);
     body = text ? JSON.parse(text) : null;
   } catch {
-    // Best-effort telemetry -- a malformed body never fails the request.
+    // fx-swallow-ok: best-effort telemetry; a malformed body never fails the request
+  }
+
+  if (body && typeof body === "object" && (body as Record<string, unknown>).kind === "client_error") {
+    return handleClientError(req, body as Record<string, unknown>, deps);
   }
 
   const marks: Array<{ name: string; startTime: number }> = [];

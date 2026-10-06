@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import { NextRequest, NextResponse } from "next/server";
 import { githubProxyForwardUrl, loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
 import { resolveChecked, NetGuardError, type HostLookup } from "@fx/net-guard";
+import { reportError } from "@fx/telemetry";
 import {
   decideProxyRequest,
   defaultSandboxRunResolver,
@@ -159,7 +160,7 @@ function applyIdleTimeout(
           try {
             controller.error(new UpstreamTimeoutError("idle"));
           } catch {
-            // already closed/errored -- nothing left to do.
+            // fx-swallow-ok: the stream is already closed or errored, so there is nothing left to do
           }
           reader.cancel().catch(() => {});
         }, idleTimeoutMs);
@@ -182,10 +183,12 @@ function applyIdleTimeout(
         clearTimeout(idleTimer);
         if (finished) return;
         finished = true;
+        // The error also reaches the consumer through controller.error below; this keeps a count of it.
+        reportError(err, { stage: "gh_proxy.stream", route: "/api/gh-proxy" });
         try {
           controller.error(err);
         } catch {
-          // already closed/errored -- nothing left to do.
+          // fx-swallow-ok: the stream is already closed or errored, so there is nothing left to do
         }
       }
     },
@@ -379,6 +382,7 @@ export function buildAccessTokenRequester(deps: {
       try {
         raw = (JSON.parse(text) as { message?: unknown } | null)?.message;
       } catch {
+        // fx-swallow-ok: a non-JSON error body is expected here, and the text itself is used below
         // GitHub answers a request without a User-Agent with PLAIN TEXT ("Request forbidden by administrative
         // rules ..."), not JSON, and that is the very failure worth naming. The same reduction applies.
         raw = text;
@@ -527,6 +531,7 @@ export async function ghProxyHandler(
     });
     sandboxName = claims.sandboxName;
   } catch (err) {
+    // fx-swallow-ok: a token that does not verify is the caller's problem and is answered below by its fixed code and logged by reason
     const code = err instanceof OidcVerifyError ? err.code : "signature";
     // Why the 401, as the fixed code the response already carries. Never a claim, a token or an
     // error message: those can echo caller-supplied text.
@@ -597,6 +602,8 @@ export async function ghProxyHandler(
   try {
     addresses = await deps.resolveUpstream(decision.upstreamHost);
   } catch (err) {
+    // A blocked address (NetGuardError) is a policy answer; a lookup that failed for any other reason is counted.
+    if (!(err instanceof NetGuardError)) reportError(err, { stage: "gh_proxy.resolve", route: "/api/gh-proxy" });
     console.warn("gh-proxy: upstream host refused", {
       reason: err instanceof NetGuardError ? err.code : "dns_failed",
     });
