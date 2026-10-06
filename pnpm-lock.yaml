@@ -863,6 +863,9 @@ importers:
       '@fx/billing':
         specifier: workspace:*
         version: link:../billing
+      '@fx/github':
+        specifier: workspace:*
+        version: link:../github
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

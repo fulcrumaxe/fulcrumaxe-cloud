@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
 import { reportError } from "@fx/telemetry";
+import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
 import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
 import {
@@ -97,7 +98,10 @@ export async function reconcileHandler(
     const deps = injected ?? defaultReconcileDeps();
     return runTickFn({
       pool: deps.platformOpsPool,
-      jobs: buildReconcileJobs({ stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError) }),
+      jobs: buildReconcileJobs({
+        githubInstallations: githubInstallationsJobFromEnv(deps.platformOpsPool, deps.reportError),
+        stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
+      }),
       enabled: deps.enabled,
       reportError: deps.reportError,
     });

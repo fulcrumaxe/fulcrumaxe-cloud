@@ -66,8 +66,8 @@ describe("GET /api/cron/reconcile: the tick", () => {
     expect(await res.json()).toEqual(summary);
     const tick = runTickFn.mock.calls[0]![0];
     expect(tick).toMatchObject({ pool: deps.platformOpsPool, enabled: true, reportError: deps.reportError });
-    // The fixed jobs first, then the Stripe job, which the route builds from its environment.
-    expect(tick.jobs.map((job) => job.name)).toEqual([...RECONCILE_JOBS.map((job) => job.name), "stripe_subscriptions"]);
+    // The fixed jobs first, then the GitHub and Stripe jobs, which the route builds from its environment.
+    expect(tick.jobs.map((job) => job.name)).toEqual([...RECONCILE_JOBS.map((job) => job.name), "github_installations", "stripe_subscriptions"]);
   });
 
   it("passes the kill switch through: a switched-off run is still answered 200 with the disabled summary", async () => {

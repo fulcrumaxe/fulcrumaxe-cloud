@@ -91,6 +91,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Non-ApiError reasons that the sync-failure tag has always reported.
   "mint_failed",
   "mint_timeout",
+  // Reconciler report codes (D#454 H2b): the installation job's breaker and orphan findings.
+  "breaker_tripped",
+  "orphan_installation",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */
