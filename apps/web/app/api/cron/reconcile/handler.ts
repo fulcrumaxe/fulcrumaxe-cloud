@@ -3,7 +3,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
 import { reportError } from "@fx/telemetry";
-import { RECONCILE_JOBS, runTick, type ReportError, type TickDeps, type TickSummary } from "@fx/reconcile";
+import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
+import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
+import {
+  buildReconcileJobs,
+  createStripeSubscriptionsJob,
+  runTick,
+  type ReconcileJob,
+  type ReportError,
+  type TickDeps,
+  type TickSummary,
+} from "@fx/reconcile";
 
 /**
  * The reconciler cron (every 6 hours, at minute 7). Same shape as the other cron handlers: route.ts stays thin, this
@@ -21,6 +31,21 @@ export interface ReconcileHandlerDeps {
   enabled: boolean;
   platformOpsPool: TickDeps["pool"];
   reportError: ReportError;
+}
+
+/**
+ * The Stripe job, built from STRIPE_RECONCILE_KEY (a restricted, read-only key; never STRIPE_SECRET_KEY). With no usable
+ * key the job still exists and records `not_configured` on each tick, so the digest and the launch check can show it.
+ */
+export function stripeSubscriptionsJobFromEnv(pool: TickDeps["pool"], report: ReportError): ReconcileJob {
+  const key = stripeReconcileKeyFromEnv();
+  if (!key) return createStripeSubscriptionsJob({ stripe: null, apply: async () => ({ applied: false }), reportError: report });
+  const livemode = stripeKeyIsLive(key);
+  return createStripeSubscriptionsJob({
+    stripe: reconcileStripeClient(key),
+    apply: (subscription, clock) => applyFetchedSubscription({ platformOpsPool: pool, livemode }, subscription, clock),
+    reportError: report,
+  });
 }
 
 let cachedPlatformOpsPool: ReturnType<typeof createPool> | undefined;
@@ -72,7 +97,7 @@ export async function reconcileHandler(
     const deps = injected ?? defaultReconcileDeps();
     return runTickFn({
       pool: deps.platformOpsPool,
-      jobs: RECONCILE_JOBS,
+      jobs: buildReconcileJobs({ stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError) }),
       enabled: deps.enabled,
       reportError: deps.reportError,
     });

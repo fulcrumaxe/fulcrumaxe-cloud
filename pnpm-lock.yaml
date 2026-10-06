@@ -734,12 +734,18 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
+      '@fx/billing':
+        specifier: workspace:*
+        version: link:../billing
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      stripe:
+        specifier: ^17.4.0
+        version: 17.7.0
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

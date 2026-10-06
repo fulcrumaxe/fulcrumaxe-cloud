@@ -48,6 +48,12 @@ export interface JobResult {
   cursor: string | null;
   /** True when the cursor wrapped: the job covered its whole estate. A job that stopped on a budget returns false. */
   wrapped: boolean;
+  /**
+   * A result the job itself decided. `not_configured`: the job's outside credential is absent, so it did nothing.
+   * `error`: the job already reported a failure and stopped, and its cursor (the progress made before it) is kept,
+   * which a thrown error would not do. Either one means the pass did not complete, so `wrapped` is ignored.
+   */
+  code?: 'not_configured' | 'error';
 }
 
 export interface ReconcileJob {
@@ -58,7 +64,7 @@ export interface ReconcileJob {
   run(ctx: JobContext): Promise<JobResult>;
 }
 
-export type JobOutcome = 'ok' | 'budget' | 'error' | 'disabled' | 'not_due' | 'skipped';
+export type JobOutcome = 'ok' | 'budget' | 'error' | 'disabled' | 'not_due' | 'skipped' | 'not_configured';
 
 export interface TickSummary {
   enabled: boolean;
@@ -200,9 +206,9 @@ export async function runTick(deps: TickDeps): Promise<TickSummary> {
         outcome = 'budget';
         cursor = latest;
       } else {
-        wrapped = raced.wrapped;
-        cursor = raced.wrapped ? null : raced.cursor;
-        outcome = raced.wrapped ? 'ok' : 'budget';
+        wrapped = raced.wrapped && raced.code === undefined;
+        cursor = wrapped ? null : raced.cursor;
+        outcome = raced.code ?? (wrapped ? 'ok' : 'budget');
       }
     } catch (err) {
       deps.reportError(err, { stage, route: RECONCILE_ROUTE });

@@ -46,6 +46,7 @@ export type Validation =
   | { type: "slug" }
   | { type: "hostname" }
   | { type: "stripe-secret-key" }
+  | { type: "stripe-restricted-key" }
   | { type: "stripe-webhook-secret" }
   | { type: "stripe-price-list" }
   | { type: "oidc-issuer" }
@@ -153,6 +154,7 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   // Billing.
   { name: "STRIPE_SECRET_KEY", scope: "web", requiredIn: SP, secret: true, feature: "Billing", validation: { type: "stripe-secret-key" }, whenMissing: "feature_disabled", note: "Checkout and the billing portal answer an error" },
   { name: "STRIPE_WEBHOOK_SECRET", scope: "web", requiredIn: SP, secret: true, feature: "Billing", validation: { type: "stripe-webhook-secret" }, whenMissing: "feature_disabled", note: "Stripe webhook deliveries are refused, so subscriptions never sync" },
+  { name: "STRIPE_RECONCILE_KEY", scope: "web", requiredIn: NONE, secret: true, feature: "Stripe subscription reconcile", validation: { type: "stripe-restricted-key" }, whenMissing: "feature_disabled", note: "The Stripe reconcile job records not_configured and does nothing. It never falls back to STRIPE_SECRET_KEY, and a secret key here is refused" },
   { name: "APP_ORIGIN", scope: "web", requiredIn: SP, secret: false, feature: "Billing", validation: { type: "origin" }, whenMissing: "feature_disabled", note: "Stripe return URLs cannot be built. Same value as FX_APP_ORIGIN" },
   { name: "STRIPE_PRICE_ID_STARTER", scope: "web", requiredIn: SP, secret: false, feature: "Billing", validation: { type: "stripe-price-list" }, whenMissing: "boot_error", note: "The server refuses to start. Comma-separated list allowed; the first is sold" },
   { name: "STRIPE_PRICE_ID_TEAM", scope: "web", requiredIn: SP, secret: false, feature: "Billing", validation: { type: "stripe-price-list" }, whenMissing: "boot_error", note: "The server refuses to start. Comma-separated list allowed; the first is sold" },

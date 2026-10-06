@@ -135,3 +135,14 @@ export function assertSitekitPriceIdsConfigured(env: NodeJS.ProcessEnv = process
     }
   }
 }
+
+/**
+ * D#454 H2d: the reconciler's own Stripe key, read-only by construction. Only a restricted key (`rk_test_`/`rk_live_`)
+ * is accepted; a secret key (`sk_`) is treated as absent so a mistake in the variable can never hand the reconciler a key
+ * that can write, and `STRIPE_SECRET_KEY` is never a fallback. Null means the Stripe reconcile job records
+ * `not_configured` and does nothing. The value is never logged or echoed.
+ */
+export function stripeReconcileKeyFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
+  const key = env.STRIPE_RECONCILE_KEY?.trim();
+  return key && /^rk_(test|live)_/.test(key) ? key : null;
+}

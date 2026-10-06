@@ -51,6 +51,7 @@ const CASES: Record<Validation["type"], { validation: Validation; good: string[]
   "runner-signer-id": { validation: { type: "runner-signer-id" }, good: ["job-signer-1", "a.b_c-D"], bad: [["has space", "not_a_runner_signer_id"], ["x".repeat(65), "not_a_runner_signer_id"], ["a/b", "not_a_runner_signer_id"]] },
   slug: { validation: { type: "slug" }, good: ["fx-team", "a1"], bad: [["Fx-Team", "not_a_slug"], ["has space", "not_a_slug"], ["x".repeat(65), "not_a_slug"]] },
   hostname: { validation: { type: "hostname" }, good: ["fwd.example.test"], bad: [["nodots", "not_a_hostname"], ["https://fwd.example.test", "not_a_hostname"], ["UPPER.example.test", "not_a_hostname"]] },
+  "stripe-restricted-key": { validation: { type: "stripe-restricted-key" }, good: ["rk_test_abc123", "rk_live_abc123"], bad: [["sk_test_abc123", "not_a_stripe_restricted_key"], ["rk_abc", "not_a_stripe_restricted_key"]] },
   "stripe-secret-key": { validation: { type: "stripe-secret-key" }, good: ["sk_test_abc123", "rk_live_abc123"], bad: [["pk_test_abc", "not_a_stripe_secret_key"], ["sk_abc", "not_a_stripe_secret_key"]] },
   "stripe-webhook-secret": { validation: { type: "stripe-webhook-secret" }, good: ["whsec_abc123"], bad: [["abc123", "not_a_stripe_webhook_secret"]] },
   "stripe-price-list": {

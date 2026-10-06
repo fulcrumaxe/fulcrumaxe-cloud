@@ -42,6 +42,8 @@ export function validValue(validation: Validation): string {
       return "forward.example.test";
     case "stripe-secret-key":
       return "sk_test_abc123";
+    case "stripe-restricted-key":
+      return "rk_test_abc123";
     case "stripe-webhook-secret":
       return "whsec_abc123";
     case "stripe-price-list":

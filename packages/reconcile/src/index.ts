@@ -19,5 +19,14 @@ export {
   type TickSummary,
   type Timer,
 } from './runner.js';
-export { RECONCILE_JOBS } from './jobs.js';
+export { RECONCILE_JOBS, buildReconcileJobs } from './jobs.js';
 export { createErrorEventsPrune, errorEventsPrune, ERROR_EVENTS_RETENTION_DAYS } from './jobs/errorEventsPrune.js';
+export {
+  createStripeSubscriptionsJob,
+  STRIPE_SUBSCRIPTIONS_JOB,
+  STRIPE_CUSTOMERS_PER_RUN,
+  type ApplyOutcome,
+  type FetchedSubscription,
+  type StripeSubscriptionsDeps,
+  type SubscriptionsReader,
+} from './jobs/stripeSubscriptions.js';

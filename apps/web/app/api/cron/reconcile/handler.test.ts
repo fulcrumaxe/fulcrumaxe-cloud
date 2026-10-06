@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { RECONCILE_JOBS, type TickDeps, type TickSummary } from "@fx/reconcile";
+import { RECONCILE_JOBS, type JobContext, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
-import { defaultReconcileDeps, reconcileHandler, type ReconcileHandlerDeps } from "./handler";
+import { defaultReconcileDeps, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
 
 /**
@@ -59,12 +59,15 @@ describe("GET /api/cron/reconcile: who may call it", () => {
 
 describe("GET /api/cron/reconcile: the tick", () => {
   it("runs every registered job once with the secret and returns the tick summary", async () => {
-    const runTickFn = vi.fn(async () => summary);
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
     const deps = fakeDeps();
     const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(summary);
-    expect(runTickFn).toHaveBeenCalledWith({ pool: deps.platformOpsPool, jobs: RECONCILE_JOBS, enabled: true, reportError: deps.reportError });
+    const tick = runTickFn.mock.calls[0]![0];
+    expect(tick).toMatchObject({ pool: deps.platformOpsPool, enabled: true, reportError: deps.reportError });
+    // The fixed jobs first, then the Stripe job, which the route builds from its environment.
+    expect(tick.jobs.map((job) => job.name)).toEqual([...RECONCILE_JOBS.map((job) => job.name), "stripe_subscriptions"]);
   });
 
   it("passes the kill switch through: a switched-off run is still answered 200 with the disabled summary", async () => {
@@ -92,6 +95,45 @@ describe("the real dependencies", () => {
       if (saved.url === undefined) delete process.env.DATABASE_URL_PLATFORM_OPS; else process.env.DATABASE_URL_PLATFORM_OPS = saved.url;
       if (saved.on === undefined) delete process.env.FX_RECONCILE_ENABLED; else process.env.FX_RECONCILE_ENABLED = saved.on;
     }
+  });
+});
+
+describe("the Stripe job's key", () => {
+  const withKey = async (key: string | undefined, secret: string | undefined, fn: () => Promise<void>) => {
+    const saved = { key: process.env.STRIPE_RECONCILE_KEY, secret: process.env.STRIPE_SECRET_KEY };
+    const set = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value));
+    set("STRIPE_RECONCILE_KEY", key);
+    set("STRIPE_SECRET_KEY", secret);
+    try {
+      await fn();
+    } finally {
+      set("STRIPE_RECONCILE_KEY", saved.key);
+      set("STRIPE_SECRET_KEY", saved.secret);
+    }
+  };
+  const ctx = (query: ReturnType<typeof vi.fn>): JobContext =>
+    ({ pool: { query } as never, cursor: null, signal: new AbortController().signal, calls: { limit: 50, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
+
+  it.each([
+    ["no STRIPE_RECONCILE_KEY", undefined, "sk_test_secret_is_never_a_fallback"],
+    ["a secret key in STRIPE_RECONCILE_KEY", "sk_test_not_restricted", "sk_test_secret_is_never_a_fallback"],
+  ])("records not_configured and touches neither the database nor Stripe with %s", async (_label, key, secret) => {
+    await withKey(key, secret, async () => {
+      const query = vi.fn();
+      const job = stripeSubscriptionsJobFromEnv({ query } as never, () => undefined);
+      expect(job.name).toBe("stripe_subscriptions");
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: false, code: "not_configured" });
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
+
+  it("with a restricted key the job reads accounts (and would call Stripe)", async () => {
+    await withKey("rk_test_restricted_read_only", "sk_test_unused", async () => {
+      const query = vi.fn(async () => ({ rows: [] }));
+      const job = stripeSubscriptionsJobFromEnv({ query } as never, () => undefined);
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: true });
+      expect(query).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
