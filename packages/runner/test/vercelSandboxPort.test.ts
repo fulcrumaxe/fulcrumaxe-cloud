@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NetworkPolicy } from "@vercel/sandbox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { configureErrorReporter } from "@fx/telemetry";
 import {
   CLAUDE_CLI_VERSION,
   SandboxNameConflictError,
@@ -1594,5 +1595,40 @@ describe("PREVIEW-RUNNER-EVENTS: the launch reports the sandbox as ready and the
       await expect(hostile.launched!).rejects.toThrow(/GitHub repository name/);
       expect(fake.cloneCommands).toHaveLength(0);
     });
+  });
+});
+
+describe("sandboxExists reports a doubt as a class", () => {
+  afterEach(() => configureErrorReporter({ service: "app" }));
+
+  it("answers exists, reports the stage, and carries nothing of the upstream message", async () => {
+    const lines: string[] = [];
+    configureErrorReporter({ service: "runner", write: (line) => void lines.push(line) });
+    const fake = createSdkFake();
+    const port = createVercelSandboxPort({
+      teamId: "t",
+      projectId: "p",
+      getToken: async () => "tok",
+      sdk: { ...fake.sdk, get: async () => { throw httpError(500, "upstream said h1d-canary-plainword at github.com/octo/repo"); } },
+    });
+    expect(await port.sandboxExists({ runId: "run-1", sandboxName: NAME })).toBe(true);
+    const out = lines.join("\n");
+    expect(lines).toHaveLength(1);
+    expect(out).toContain("sandbox.exists");
+    for (const leak of ["h1d-canary", "plainword", "octo", "github.com"]) expect(out).not.toContain(leak);
+  });
+
+  it("a definite 404 is the expected answer and reports nothing", async () => {
+    const lines: string[] = [];
+    configureErrorReporter({ service: "runner", write: (line) => void lines.push(line) });
+    const fake = createSdkFake();
+    const port = createVercelSandboxPort({
+      teamId: "t",
+      projectId: "p",
+      getToken: async () => "tok",
+      sdk: { ...fake.sdk, get: async () => { throw httpError(404); } },
+    });
+    expect(await port.sandboxExists({ runId: "run-1", sandboxName: NAME })).toBe(false);
+    expect(lines).toEqual([]);
   });
 });

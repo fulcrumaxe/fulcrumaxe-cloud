@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Sandbox } from "@vercel/sandbox";
+import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ModelId } from "@fx/spend";
@@ -553,8 +554,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   const reportInvalid = (reason: InvalidEventReason): void => {
     try {
       options.onInvalidEvent?.(reason);
-    } catch {
+    } catch (err) {
       // a counting hook must never break a run
+      reportError(err, { stage: "run.invalid_event_hook" });
     }
   };
 
@@ -956,8 +958,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // Best effort, like every mid-run write: the extension stands even if the event row does not land.
             try {
               void Promise.resolve(extPolicy.onExtended({ kind: g.d.kind, extensionsUsed: used, newLimit: g.d.newLimit, progress: g.d.progress })).catch(() => undefined);
-            } catch {
+            } catch (err) {
               // a throwing recorder does not undo the extension
+              reportError(err, { stage: "run.extension_record" });
             }
           }
           inForceLimits = guard.current();
@@ -987,7 +990,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         try {
           parsed = JSON.parse(line);
         } catch {
-          reportInvalid("not_json"); // never echoed anywhere
+          // fx-swallow-ok: a stream line that is not JSON is an expected answer, counted by reportInvalid and never echoed
+          reportInvalid("not_json");
           return;
         }
         if (!isPlainObject(parsed)) return reportInvalid("shape");
@@ -1314,7 +1318,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           })(),
           Math.min(COUNTERS_TIMEOUT_MS, callTimeoutMs),
         );
-      } catch {
+      } catch (err) {
+        reportError(err, { stage: "sandbox.counters" });
         if (held.command) await killQuietly(handle.sandboxName, held.command, held.sessionId);
         return undefined;
       }
@@ -1353,7 +1358,9 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         return true;
       } catch (err) {
         // Only a definite "not found" is "gone"; every other failure (timeout, 5xx, bad answer) counts as "exists".
-        return !(err instanceof SandboxPortError && (err.status === 404 || err.status === 410));
+        const gone = err instanceof SandboxPortError && (err.status === 404 || err.status === 410);
+        if (!gone) reportError(err, { stage: "sandbox.exists" });
+        return !gone;
       }
     },
 
