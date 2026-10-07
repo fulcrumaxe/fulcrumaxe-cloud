@@ -117,8 +117,7 @@ describe('migration 0619 (fix round 1, was 0614): platform_ops read on agent_run
     expect(agentRunsCols.map((r: { column_name: string }) => r.column_name)).toEqual(
       [
         'account_id', 'dispatch_repo_id', 'id', 'role', 'sandbox_name', 'status', 'work_item_id',
-        // 0689: the definer agent_run_sandbox_mark reads the five columns it writes (and nothing else new).
-        'sandbox_requested_at', 'sandbox_session_ids', 'sandbox_stopped_at', 'sandbox_self_measured', 'compute_settle_due_at',
+        // 0742: the five 0689 settle columns moved to sandbox_settle_definer; platform_ops no longer reads them.
         // 0691: the definer compute_settle_list_due returns the PR number that names an executor's sandbox.
         'dispatch_pr_number',
         // 0694: the definer agent_run_settle_failed writes these two and the lister reads them for the backoff.
