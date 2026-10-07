@@ -310,6 +310,8 @@ export function createPreviewModule(runnerPool: Pool, deps: PreviewModuleDeps): 
           used = await client.query<{ v: string }>("SELECT preview_daily_compute_usd() AS v");
           await client.query("RELEASE SAVEPOINT cap_read");
         } catch (thrown) {
+          // Reported here: guarded() collapses the rethrown value to a fixed action error, so this is the only place its class is seen.
+          reportError(thrown, { stage: "preview.cap_read" });
           return failedBeforeStart(thrown, true);
         }
         if (!(Number(used.rows[0]?.v) < PREVIEW_DAILY_COMPUTE_CAP_USD)) return voidAndRefuse("preview_capacity");
@@ -318,6 +320,8 @@ export function createPreviewModule(runnerPool: Pool, deps: PreviewModuleDeps): 
         try {
           seat = await deps.seats!.previewSeat(accountId, preview.repo_id);
         } catch (thrown) {
+          // Reported here: guarded() collapses the rethrown value to a fixed action error, so this is the only place its class is seen.
+          reportError(thrown, { stage: "preview.seat" });
           return failedBeforeStart(thrown);
         }
         if (!seat.ok) return voidAndRefuse(seatVoidReason(seat.reason));
@@ -338,7 +342,8 @@ export function createPreviewModule(runnerPool: Pool, deps: PreviewModuleDeps): 
         let prompt: string | null;
         try {
           prompt = deps.promptFor!({ owner: names.gh_owner, name: names.gh_name, workdir: PREVIEW_WORKDIR });
-        } catch {
+        } catch (err) {
+          reportError(err, { stage: "preview.prompt" });
           prompt = null;
         }
         if (prompt === null) return voidAndRefuse("no_repo");
@@ -382,6 +387,8 @@ export function createPreviewModule(runnerPool: Pool, deps: PreviewModuleDeps): 
           // A start that threw before its create committed left no run and no link: the preview is still
           // requested, and it spent nothing, so void it. One that threw after the create (the run exists
           // and is linked) cannot be voided; the run's own outcome is what the customer sees.
+          // Reported here: guarded() collapses the rethrown value to a fixed action error, so this is the only place its class is seen.
+          reportError(thrown, { stage: "preview.start" });
           await voidPreview(client, preview.id, "start_failed").catch(() => undefined);
           return { thrown };
         }

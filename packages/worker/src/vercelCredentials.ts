@@ -79,6 +79,7 @@ function claimsOf(token: string): Record<string, unknown> | undefined {
     const payload: unknown = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"));
     return typeof payload === "object" && payload !== null && !Array.isArray(payload) ? (payload as Record<string, unknown>) : undefined;
   } catch {
+    // fx-swallow-ok: a token that does not decode is not a JWT, an expected answer; the caller refuses it and the token is never echoed
     return undefined;
   }
 }

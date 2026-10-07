@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { configureErrorReporter } from "@fx/telemetry";
 import {
   IdempotencyKeyTakenError,
   SandboxTarget,
@@ -623,17 +624,65 @@ describe("onboarding preview performer [pg]", { timeout: 60_000 }, () => {
     expect(await previewRow(previewId)).toMatchObject({ state: "requested", run_id: null });
   });
 
-  it("a prompt builder that throws voids the preview as no_repo", async () => {
-    const { previewId, actionId } = await requested();
-    const m = createPreviewModule(writerPool, {
-      seats: fakeSeats,
-      starter: recordingStarter().starter,
-      promptFor: () => {
-        throw new Error("not a github name");
-      },
+  describe("a failure at the cap read, the seat or the start is reported once, by stage, with no message text", () => {
+    const canary = "h1d-canary-plainword";
+    async function reported(run: () => Promise<unknown>): Promise<string[]> {
+      const lines: string[] = [];
+      configureErrorReporter({ service: "worker", write: (line) => void lines.push(line) });
+      try {
+        await run().catch(() => undefined);
+      } finally {
+        configureErrorReporter({ service: "app" });
+      }
+      return lines;
+    }
+    function expectOnly(lines: string[], stage: string) {
+      expect(lines).toHaveLength(1);
+      const out = lines.join("\n");
+      expect(out).toContain(stage);
+      for (const other of ["preview.cap_read", "preview.seat", "preview.start"]) if (other !== stage) expect(out).not.toContain(other);
+      for (const leak of ["h1d-canary", "plainword", "octo", "github.com"]) expect(out).not.toContain(leak);
+    }
+
+    it("cap read", async () => {
+      const { actionId } = await requested();
+      const m = createPreviewModule(failingPool(/preview_daily_compute_usd/), { seats: fakeSeats, starter: recordingStarter().starter, promptFor: buildPreviewPrompt });
+      expectOnly(await reported(() => m.performStartPreview(actionId)), "preview.cap_read");
     });
-    expect(await m.performStartPreview(actionId)).toEqual({ result: "refused", errorCode: "no_repo" });
+
+    it("seat", async () => {
+      const { actionId } = await requested();
+      const seats: PreviewSeatSource = { previewSeat: async () => Promise.reject(new Error(`seat down ${canary} github.com/octo/repo`)) };
+      expectOnly(await reported(() => ready(recordingStarter().starter, seats).performStartPreview(actionId)), "preview.seat");
+    });
+
+    it("start", async () => {
+      const { actionId } = await requested();
+      const starter: RunStarter = { start: async () => Promise.reject(new Error(`start down ${canary} github.com/octo/repo`)) };
+      expectOnly(await reported(() => ready(starter).performStartPreview(actionId)), "preview.start");
+    });
+  });
+
+  it("a prompt builder that throws voids the preview as no_repo, and the report carries the stage only, never the planted token", async () => {
+    const { previewId, actionId } = await requested();
+    const lines: string[] = [];
+    configureErrorReporter({ service: "worker", write: (line) => void lines.push(line) });
+    try {
+      const m = createPreviewModule(writerPool, {
+        seats: fakeSeats,
+        starter: recordingStarter().starter,
+        promptFor: () => {
+          throw new Error("not a github name: h1d-canary-plainword at github.com/octo/repo");
+        },
+      });
+      expect(await m.performStartPreview(actionId)).toEqual({ result: "refused", errorCode: "no_repo" });
+    } finally {
+      configureErrorReporter({ service: "app" });
+    }
     expect(await previewRow(previewId)).toMatchObject({ state: "void", void_reason: "no_repo" });
+    const out = lines.join("\n");
+    expect(out).toContain("preview.prompt");
+    for (const leak of ["h1d-canary", "plainword", "octo", "github.com"]) expect(out).not.toContain(leak);
   });
 
   // ---- A6: refuse, void or throw all void the preview -------------------------------------------
