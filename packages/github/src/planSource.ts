@@ -1,5 +1,5 @@
 import type { RepoPermission } from "@fx/trust";
-import { createPlanReadClient, type PlanReadDeps, type PlanReadTarget } from "./planReadClient.js";
+import { createPlanReadClient, PlanReadError, type PlanReadDeps, type PlanReadTarget } from "./planReadClient.js";
 import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readRepoFile, readRepoHead, type IssuesAndPulls } from "./planReaders.js";
 
 /**
@@ -41,6 +41,8 @@ export function createPlanSourceFactory(deps: PlanReadDeps): (target: PlanReadTa
       file: (path, ref, maxBytes) => readRepoFile(client, repo, path, ref, maxBytes),
       async pulls() {
         const r = await list();
+        // The merged-pull-request read decides which tasks are done, so a budget that ran out is an error here, never a short list.
+        if (r.budgetExhausted) throw new PlanReadError("request_budget_exceeded");
         return { pulls: r.pulls.map((p) => ({ number: p.number, title: p.title, state: p.state, dLines: p.dLines })), truncated: r.truncated };
       },
       discussions: () => listDiscussions(client, repo),

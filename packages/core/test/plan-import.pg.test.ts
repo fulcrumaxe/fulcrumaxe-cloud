@@ -41,11 +41,18 @@ interface SourceOpts {
   issues?: Array<{ number: number; title: string; state: 'open' | 'closed' }>;
   permissions?: Record<string, RepoPermission>;
   discussionsError?: { code: string };
+  /** A read that runs into the request budget (the client's own error code) at this step. */
+  budgetAt?: 'permission' | 'pulls' | 'discussions' | 'comments';
 }
-function source(o: SourceOpts): PlanSource & { asked: string[] } {
+function source(o: SourceOpts): PlanSource & { asked: string[]; permissionAsked: string[]; commentsAsked: number[] } {
   const asked: string[] = [];
+  const permissionAsked: string[] = [];
+  const commentsAsked: number[] = [];
+  const budget = () => Object.assign(new Error('x'), { code: 'request_budget_exceeded' });
   return {
     asked,
+    permissionAsked,
+    commentsAsked,
     async head() {
       if (o.headError) throw Object.assign(new Error('x'), o.headError);
       return { defaultBranch: 'main', sha: SHA };
@@ -57,19 +64,25 @@ function source(o: SourceOpts): PlanSource & { asked: string[] } {
     },
     async pulls() {
       if (o.pullsError) throw Object.assign(new Error('x'), o.pullsError);
+      if (o.budgetAt === 'pulls') throw budget();
       return { pulls: o.pulls ?? [], truncated: o.truncated ?? false };
     },
     async discussions() {
       if (o.discussionsError) throw Object.assign(new Error('x'), o.discussionsError);
+      if (o.budgetAt === 'discussions') throw budget();
       return { discussions: (o.discussions ?? []).map((d) => ({ closed: false, authorLogin: 'someone', ...d })), truncated: false };
     },
     async discussionComments(n) {
+      commentsAsked.push(n);
+      if (o.budgetAt === 'comments') throw budget();
       return { comments: o.comments?.[n] ?? [], truncated: false };
     },
     async issues() {
       return { issues: o.issues ?? [], truncated: false };
     },
     async authorPermission(login) {
+      permissionAsked.push(login);
+      if (o.budgetAt === 'permission') throw budget();
       return o.permissions?.[login] ?? 'none';
     },
     evidence() {
@@ -288,7 +301,8 @@ describe('plan import (live build L1)', () => {
     ].join('\n');
     const CORRECTION = ['## Correction C1', '', '| Task | Description |', '|---|---|', '| T2-a | First half |', '| T2-b | Second half |'].join('\n');
     const comment = (body: string, authorLogin: string, createdAt = '2026-10-02T00:00:00Z'): SpecComment => ({ body, createdAt, authorLogin });
-    const specRepo = { discussions: [{ number: 7, title: 'Plan the widgets', body: SPEC_BODY }] };
+    // Specs are written by a maintainer here; the permissions map of a test adds the Correction authors it needs.
+    const specRepo = { discussions: [{ number: 7, title: 'Plan the widgets', body: SPEC_BODY, authorLogin: 'specmaint' }], permissions: { specmaint: 'maintain' as RepoPermission } };
     const taskRows = async (repoId: string) => (await admin.query('SELECT task_key, status, parent_key, planned_prs, title FROM plan_tasks WHERE repo_id = $1 ORDER BY task_key', [repoId])).rows;
     const lastImport = async (importId: string) => (await admin.query('SELECT level, source_path, error_detail, counts, truncated FROM plan_imports WHERE id = $1', [importId])).rows[0];
 
@@ -296,7 +310,7 @@ describe('plan import (live build L1)', () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);
       const before = await counts(r);
-      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint')] }, permissions: { maint: 'maintain' }, pulls: [pr(20, 'Closes D#7:T1', [])] }));
+      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint')] }, permissions: { ...specRepo.permissions, maint: 'maintain' }, pulls: [pr(20, 'Closes D#7:T1', [])] }));
       expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables', sourcePath: null });
       expect(await lastImport(out.importId)).toMatchObject({ level: 'spec_tables', source_path: null, error_detail: null });
       expect(await taskRows(repoId)).toMatchObject([
@@ -314,9 +328,109 @@ describe('plan import (live build L1)', () => {
     it('F2: the same Correction from an author without a trusted permission is ignored whole', async () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);
-      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'stranger'), comment(CORRECTION, 'writer')] }, permissions: { writer: 'write' } }));
+      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'stranger'), comment(CORRECTION, 'writer')] }, permissions: { ...specRepo.permissions, writer: 'write' } }));
       expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
       expect((await taskRows(repoId)).map((t) => t.task_key)).toEqual(['D#7:T1', 'D#7:T2']);
+    });
+
+    it('F2-1: a Spec-shaped Discussion by an author with only read or write permission imports at issues_discussions; by a maintain or admin author, at spec_tables', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const fixture = (authorLogin: string | null) => ({ discussions: [{ ...specRepo.discussions[0]!, authorLogin }], permissions: { writer: 'write', reader: 'read', maint: 'maintain', boss: 'admin' } as Record<string, RepoPermission> });
+      for (const author of ['reader', 'writer', 'stranger', null]) {
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source(fixture(author)));
+        expect(out, String(author)).toMatchObject({ state: 'succeeded', level: 'issues_discussions' });
+        expect(await taskRows(repoId)).toEqual([]);
+        // level 3 still reads the untrusted Discussion as an ordinary one: one proposal
+        expect(Object.keys(await proposals(repoId))).toEqual(['gh:discussion:7']);
+      }
+      for (const author of ['maint', 'boss']) {
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source(fixture(author)));
+        expect(out, author).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+        expect((await taskRows(repoId)).map((t) => t.task_key)).toEqual(['D#7:T1', 'D#7:T2']);
+      }
+    });
+
+    it('F2-1: an untrusted Spec-shaped Discussion does not take an issues-level repo to spec_tables, so its issue proposals stay', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const out = await run(r, repoId, source({ ...specRepo, discussions: [{ ...specRepo.discussions[0]!, authorLogin: 'stranger' }], issues: [{ number: 3, title: 'A real bug', state: 'open' }] }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'issues_discussions' });
+      expect((await proposals(repoId))['gh:issue:3']).toMatchObject({ state: 'new' });
+    });
+
+    it('F2-2: one permission lookup per distinct author in an import, none for the comment authors of an untrusted Discussion, no comment read for it', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const second = { number: 8, title: 'Second plan', body: SPEC_BODY, authorLogin: 'SpecMaint' };
+      const third = { number: 9, title: 'Outsider plan', body: SPEC_BODY, authorLogin: 'stranger' };
+      const fourth = { number: 10, title: 'Another outsider plan', body: SPEC_BODY, authorLogin: 'stranger' };
+      const src = source({
+        discussions: [specRepo.discussions[0]!, second, third, fourth],
+        comments: { 7: [comment(CORRECTION, 'maint'), comment(CORRECTION, 'maint'), comment(CORRECTION, 'SPECMAINT')], 8: [comment(CORRECTION, 'maint')], 9: [comment(CORRECTION, 'lurker')] },
+        permissions: { ...specRepo.permissions, maint: 'maintain' },
+      });
+      const out = await run(r, repoId, src);
+      expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+      expect(src.permissionAsked.map((l) => l.toLowerCase()).sort()).toEqual(['maint', 'specmaint', 'stranger']);
+      expect(src.permissionAsked).not.toContain('lurker');
+      expect(src.commentsAsked).toEqual([7, 8]);
+      expect((await view(r, repoId)).milestones.map((m) => m.key)).toEqual(['D#7', 'D#8']);
+    });
+
+    describe('F2-3: the request budget running out fails the import closed', () => {
+      const snapshot = async (repoId: string) => ({
+        milestones: (await admin.query('SELECT * FROM plan_milestones WHERE repo_id = $1 ORDER BY key', [repoId])).rows,
+        tasks: (await admin.query('SELECT * FROM plan_tasks WHERE repo_id = $1 ORDER BY task_key', [repoId])).rows,
+        props: (await admin.query('SELECT * FROM proposals WHERE repo_id = $1 ORDER BY dedupe_key', [repoId])).rows,
+      });
+      it.each([
+        ['the trust lookups', 'permission'],
+        ['the merged pull request read', 'pulls'],
+        ['the Discussions read', 'discussions'],
+        ['the Spec comment reads', 'comments'],
+      ] as const)('running out during %s ends failed with request_budget_exhausted; the previous plan rows are byte-identical and no succeeded row exists for the new import', async (_label, budgetAt) => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const good = source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint')] }, permissions: { ...specRepo.permissions, maint: 'maintain' }, pulls: [pr(20, 'Closes D#7:T1', [])] });
+        const first = await run(r, repoId, good);
+        expect(first.state).toBe('succeeded');
+        const before = await snapshot(repoId);
+        expect(before.tasks.length).toBe(3);
+        const bad = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint')] }, permissions: { ...specRepo.permissions, maint: 'maintain' }, pulls: [pr(20, 'Closes D#7:T1', [])], budgetAt }));
+        expect(bad).toMatchObject({ state: 'failed', code: 'request_budget_exhausted' });
+        expect(await snapshot(repoId)).toEqual(before);
+        expect((await admin.query(`SELECT state, error_code, level FROM plan_imports WHERE id = $1`, [bad.importId])).rows).toEqual([{ state: 'failed', error_code: 'request_budget_exhausted', level: null }]);
+        expect((await admin.query(`SELECT count(*)::int n FROM plan_imports WHERE repo_id = $1 AND state = 'succeeded'`, [repoId])).rows[0].n).toBe(1);
+        // the plan view keeps the previous successful import's rows and time; the failure is the latest import
+        const v = await view(r, repoId);
+        expect(v.latest_import).toMatchObject({ id: bad.importId, state: 'failed', error_code: 'request_budget_exhausted' });
+        expect(v.imported_from).toMatchObject({ id: first.importId, state: 'succeeded' });
+        expect(v.totals).toEqual({ tasks: 3, done: 1, remaining: 2 });
+        // nothing is stuck running: the next start is allowed at once
+        expect((await run(r, repoId, good)).state).toBe('succeeded');
+      });
+
+      it('a repo with no previous import shows the failure and an empty plan', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source({ ...specRepo, budgetAt: 'pulls' }));
+        expect(out).toMatchObject({ state: 'failed', code: 'request_budget_exhausted' });
+        const v = await view(r, repoId);
+        expect(v.latest_import).toMatchObject({ state: 'failed', error_code: 'request_budget_exhausted' });
+        expect(v.imported_from).toBeNull();
+        expect(v.milestones).toEqual([]);
+        expect(await taskRows(repoId)).toEqual([]);
+      });
+
+      it('a roadmap-file import that runs out of budget at the merged pull request read fails the same way', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source({ files: { 'roadmap.json': rm({ 'D#1:A': {} }, { m1: ['D#1:A'] }) }, budgetAt: 'pulls' }));
+        expect(out).toMatchObject({ state: 'failed', code: 'request_budget_exhausted' });
+        expect(await taskRows(repoId)).toEqual([]);
+      });
     });
 
     it('a file of the wrong shape falls through to the tables, and the shape problem is kept with the level', async () => {

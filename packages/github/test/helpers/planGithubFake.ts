@@ -41,6 +41,8 @@ export interface FakeDiscussion {
   title: string;
   body: string;
   closed: boolean;
+  /** The Discussion's author (default `someone`). */
+  login?: string;
   comments: Array<{ databaseId: number; body: string; login: string }>;
 }
 
@@ -219,7 +221,7 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
             discussions: {
               totalCount: state.discussions.length,
               pageInfo: { hasNextPage: end < state.discussions.length, endCursor: Buffer.from(String(end)).toString("base64") },
-              nodes: slice.map((d) => ({ number: d.number, title: d.title, body: d.body, closed: d.closed, createdAt: "2026-01-01T00:00:00Z", author: { login: "someone" } })),
+              nodes: slice.map((d) => ({ number: d.number, title: d.title, body: d.body, closed: d.closed, createdAt: "2026-01-01T00:00:00Z", author: { login: d.login ?? "someone" } })),
             },
           },
         },

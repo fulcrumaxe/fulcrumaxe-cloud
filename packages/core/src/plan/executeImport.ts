@@ -3,7 +3,7 @@ import type { RepoPermission } from '@fx/trust';
 import { computePlan, type ComputedPlan, type PullFacts } from './computePlan.js';
 import { buildIssuesLevel, type DiscussionFacts, type IssueFacts, type ItemProposal } from './issuesLevel.js';
 import { decideOwnerProcess, type OwnerProcess } from './ownerProcess.js';
-import { isSpecDiscussion, parseSpecTables, trustedCorrectionAuthors, type SpecComment } from './specTables.js';
+import { memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from './specTables.js';
 import {
   ImportNotRunningError,
   type ImportLevel,
@@ -22,11 +22,17 @@ import { MAX_PLAN_TASKS, PlanFileInconsistentError, PlanFileShapeError, parseRoa
  *
  * It picks the first level the repo supports and records which one it used:
  *   1. a roadmap file on the default branch (`roadmap_file`);
- *   2. Spec task tables in the repo's Discussions, with their trusted Corrections (`spec_tables`);
+ *   2. Spec task tables in the repo's Discussions (only Discussions written by an admin or maintainer count as Specs), with
+ *      their trusted Corrections (`spec_tables`);
  *   3. open issues and Discussions, one proposal each (`issues_discussions`).
  * A missing roadmap file falls through. So does a file of the wrong shape, and the import keeps the shape problem ("roadmap.json
  * didn't match the expected shape: ...") as the note shown with the level it ended at. A file that contradicts itself
  * (`plan_file_inconsistent`) does NOT fall through: it fails, naming the key, and the earlier import's data stays.
+ *
+ * Running out of the request budget is a failure, not a partial import, wherever the missing read decides what the plan is:
+ * the Discussion reads, the author trust lookups and the pull request read all end the import `failed` with
+ * `request_budget_exhausted`, and the write transaction never starts, so the earlier import's data stays. Only the level 3
+ * issues listing, which has no trust or merged-pull-request input, still ends as a partial (`truncated`) import.
  */
 export const ROADMAP_PATHS: readonly string[] = ['.fulcrumaxe/roadmap.json', '.autonomous-team/roadmap.json', 'roadmap.json'];
 /** The marker that the engine loop (the repo's own development loop) is installed. */
@@ -74,10 +80,13 @@ const FAILURE_CODES: ReadonlySet<string> = new Set([
   'github_unavailable',
   'rate_limited_by_github',
 ]);
+/** The request client's own word for a spent budget; the import records it as `request_budget_exhausted`. */
+const BUDGET_SPENT = 'request_budget_exceeded';
 
 /** A failure the source (the GitHub client) raised, in the import's own codes. Anything else is `internal_error`. */
 function codeOf(err: unknown): ImportErrorCode {
   const code = (err as { code?: unknown } | null)?.code;
+  if (code === BUDGET_SPENT) return 'request_budget_exhausted';
   return typeof code === 'string' && FAILURE_CODES.has(code) ? (code as ImportErrorCode) : 'internal_error';
 }
 
@@ -104,7 +113,10 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
       return { state: 'succeeded', importId, level: w.level, computed: w.computed, truncated, sourcePath: w.sourcePath, sourceSha: head.sha, maxMergedPr: w.maxMergedPr, evidence };
     };
     const hasLoop = async (): Promise<boolean> => (await source.file(ENGINE_LOOP_MARKER, head.sha, ENGINE_MARKER_MAX_BYTES)) !== null;
-    /** A read that runs into the request budget ends the import as partial, not as failed: what was read so far is used. */
+    /**
+     * Only for the level 3 issues listing: it feeds no trust decision and no merged-pull-request count, so a budget that runs
+     * out there ends the import as partial. Every other read lets the budget error through (the import fails closed).
+     */
     const tolerant = async <T>(read: () => Promise<T>, empty: T): Promise<T> => {
       try {
         return await read();
@@ -147,21 +159,23 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
     }
 
     // Level 2: Spec task tables in the Discussions.
-    const read = await tolerant(() => source.discussions(), { discussions: [], truncated: true });
+    const read = await source.discussions();
     if (read.truncated) truncated = true;
-    const specs = read.discussions.filter((d) => isSpecDiscussion(d.body));
+    // One permission lookup per distinct author for the whole import, shared by the Spec check and the Correction check.
+    const permissions = memoizePermissions(source);
+    // A Spec-shaped Discussion counts only when its author is trusted, decided before any of its comments are read.
+    const specs = await trustedSpecDiscussions(read.discussions, permissions);
     const comments = new Map<number, SpecComment[]>();
     for (const d of specs) {
-      const c = await tolerant(() => source.discussionComments(d.number), null);
-      if (c === null) break;
+      const c = await source.discussionComments(d.number);
       if (c.truncated) truncated = true;
       comments.set(d.number, c.comments);
     }
-    const trusted = await trustedCorrectionAuthors(comments, source, () => (truncated = true));
+    const trusted = await trustedCorrectionAuthors(comments, permissions);
     const specPlan = cap(parseSpecTables(specs, comments, trusted));
     if (specPlan.tasks.length > 0) {
       const owner = decideOwnerProcess({ repoHasEngineLoop: await hasLoop(), kind: 'task' });
-      const pulls = await tolerant(() => source.pulls(), { pulls: [], truncated: true });
+      const pulls = await source.pulls();
       if (pulls.truncated) truncated = true;
       return await finish({ level: 'spec_tables', sourcePath: null, plan: specPlan, computed: computePlan(specPlan, pulls.pulls), maxMergedPr: countPulls(pulls.pulls), fallbackNote }, owner);
     }

@@ -101,6 +101,8 @@ export interface IssuesAndPulls {
   pulls: PullSummary[];
   /** True when the read stopped at a bound (pull requests, or the client's request budget) before the end of the list. */
   truncated: boolean;
+  /** True when the client's request budget ran out before the list ended (`truncated` is then true too). A bound is not this. */
+  budgetExhausted: boolean;
   pagesRead: number;
 }
 
@@ -116,6 +118,7 @@ export async function listIssuesAndPulls(client: PlanReadClient, repo: RepoRef, 
   const issues: IssueSummary[] = [];
   const pulls: PullSummary[] = [];
   let truncated = false;
+  let budgetExhausted = false;
   let pagesRead = 0;
   for (let page = 1; ; page += 1) {
     let res;
@@ -128,6 +131,7 @@ export async function listIssuesAndPulls(client: PlanReadClient, repo: RepoRef, 
     } catch (err) {
       if (err instanceof PlanReadError && err.code === "request_budget_exceeded") {
         truncated = true;
+        budgetExhausted = true;
         break;
       }
       throw err;
@@ -181,7 +185,7 @@ export async function listIssuesAndPulls(client: PlanReadClient, repo: RepoRef, 
     if (truncated && (pulls.length >= maxPulls || issues.length >= maxIssues)) break;
     if (!/rel="next"/.test(res.headers["link"] ?? "")) break;
   }
-  return { issues, pulls, truncated, pagesRead };
+  return { issues, pulls, truncated, budgetExhausted, pagesRead };
 }
 
 export interface DiscussionSummary {

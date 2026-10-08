@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '../src/pool.js';
@@ -103,6 +104,26 @@ describe('plan import and proposals (0723)', () => {
       const { rows } = await admin.query(`SELECT tablename, qual FROM pg_policies WHERE schemaname = 'public' AND 'platform_ops' = ANY (roles) AND tablename = ANY ($1)`, [[...TABLES]]);
       expect(rows.map((r) => r.tablename).sort()).toEqual(['plan_imports', 'proposals']);
       for (const r of rows) expect(String(r.qual).toLowerCase()).toContain("session_user <> 'platform_ops'");
+    });
+
+    it('F2-5: plan_imports.error_code accepts request_budget_exhausted (0755) and the other twelve codes, refuses any other word, and 0723 still lacks it', async () => {
+      const codes = [
+        'repo_not_connected', 'app_permission_missing', 'discussions_disabled', 'plan_file_inconsistent', 'plan_file_too_large', 'token_not_read_only',
+        'github_unavailable', 'rate_limited_by_github', 'request_budget_exhausted', 'plan_file_missing', 'plan_file_shape', 'interrupted', 'internal_error',
+      ];
+      const r = await seedAccount(admin, randomUUID());
+      for (const code of codes) {
+        const repoId = await newRepo(r);
+        await admin.query(`INSERT INTO plan_imports (account_id, repo_id, state, finished_at, error_code) VALUES ($1, $2, 'failed', now(), $3)`, [r.accountId, repoId, code]);
+      }
+      const repoId = await newRepo(r);
+      await expect(admin.query(`INSERT INTO plan_imports (account_id, repo_id, state, finished_at, error_code) VALUES ($1, $2, 'failed', now(), 'request_budget_exceeded')`, [r.accountId, repoId])).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      // a failed import still needs a code
+      await expect(admin.query(`INSERT INTO plan_imports (account_id, repo_id, state, finished_at) VALUES ($1, $2, 'failed', now())`, [r.accountId, repoId])).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      const { rows } = await admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'plan_imports'::regclass AND conname = 'plan_imports_error_code_check'`);
+      expect(rows).toHaveLength(1);
+      for (const code of codes) expect(rows[0].def, code).toContain(`'${code}'`);
+      expect(readFileSync(new URL('../migrations/0723_plan_import.sql', import.meta.url), 'utf8')).not.toContain('request_budget_exhausted');
     });
 
     it("a tenant reads its own rows in all four tables and never another tenant's; with no tenant set it reads nothing", async () => {
