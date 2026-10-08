@@ -29,6 +29,7 @@ export * from "./vercelSandboxPort.js";
 export { recordStage, type RecordStageInput, type RecordStageResult } from "@fx/core/src/work-items/recordStage.js";
 export { checkRetryAuthor, type AuthorCheckProvider, type IssueAuthorLookup, type RetryAuthorVerdict } from "@fx/core/src/runActions/authorCheck.js";
 export * from "./computeSettleSweep.js";
+export * from "./outsideMeterSweep.js";
 export * from "./lostRunSweep.js";
 export * from "@fx/runtime/src/operatorSubscription.js";
 export * from "./repoClone.js";

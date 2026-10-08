@@ -41,13 +41,19 @@ describe('model_connections schema', () => {
     expect(byName.get('health_strikes')).toBe('smallint');
     expect(byName.get('created_at')).toBe('timestamp with time zone');
     expect(byName.get('updated_at')).toBe('timestamp with time zone');
-    expect(rows).toHaveLength(14);
+    // D#221 OM-2b: an enumerated entitlement word, its time, and a sha256 hex of (connection id, ciphertext) that says which key it was set for
+    expect(byName.get('outside_meter_entitlement')).toBe('text');
+    expect(byName.get('outside_meter_entitlement_at')).toBe('timestamp with time zone');
+    expect(byName.get('outside_meter_key_ref')).toBe('text');
+    expect(rows).toHaveLength(17);
 
     // The only columns permitted to be free-form text are provably NOT the
     // raw key: an enum-like status/provider, a one-way fingerprint, and an
     // error code. Any OTHER text/varchar column would be a plaintext-key
-    // smell -- this fails if one is ever added.
-    const allowedTextColumns = new Set(['provider', 'key_fingerprint', 'status', 'last_error_code']);
+    // smell -- this fails if one is ever added. The two outside-meter text
+    // columns are an enumerated word (CHECK-constrained) and a sha256 hex of
+    // (connection id, ciphertext): neither can hold a key.
+    const allowedTextColumns = new Set(['provider', 'key_fingerprint', 'status', 'last_error_code', 'outside_meter_entitlement', 'outside_meter_key_ref']);
     for (const row of rows) {
       if (row.data_type === 'text' || row.data_type === 'character varying') {
         expect(allowedTextColumns.has(row.column_name)).toBe(true);

@@ -46,7 +46,9 @@ export async function computeSettleSweepHandler(req: NextRequest, deps: ComputeS
     // Running runs are work too: the same tick looked for runs whose sandbox is gone (`lost`), and while any run is
     // running the marker stays, so a run stuck with no other pending work is still swept. It clears when none remain.
     const running = counts.lost?.listed ?? 0;
-    return { result: { configured: true, ...counts }, workFound: counts.listed > 0 || running > 0, nextDueAt: counts.settled < counts.listed || running > 0 ? Date.now() : null };
+    // Tagged runs still waiting for their outside read keep the marker alive too.
+    const outside = (counts.outside?.listed ?? 0) + (counts.outside?.waiting ?? 0);
+    return { result: { configured: true, ...counts }, workFound: counts.listed > 0 || running > 0 || outside > 0, nextDueAt: counts.settled < counts.listed || running > 0 || outside > 0 ? Date.now() : null };
   });
   if (ran === null) return NextResponse.json({ skipped: true, reason: "no_pending_work" }, { status: 200 });
   return NextResponse.json(ran.result, { status: 200 });

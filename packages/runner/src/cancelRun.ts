@@ -257,7 +257,7 @@ async function fallbackRelease(pool: Pool, accountId: string, runId: string): Pr
       `INSERT INTO ledger (account_id, kind, source, usd, run_id, budget, compute_basis)
        SELECT account_id, 'compute', 'sandbox', usd_reserved, run_id, budget, 'fallback' FROM spend_reservations
         WHERE account_id = $1 AND run_id = $2 AND state = 'open' AND budget <> 'model'
-       ON CONFLICT (account_id, run_id, budget) DO NOTHING`,
+       ON CONFLICT (account_id, run_id, budget) WHERE reason IS NULL DO NOTHING`,
       [accountId, runId],
     );
     await client.query(

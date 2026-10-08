@@ -107,6 +107,27 @@ describe("SandboxTarget", () => {
     expect(rows.map((r) => r.payload)).toEqual([{ kind: "model_calls", extensions_used: 1, new_limit: 450, progress: { usage_rose: true, gh_writes: 0, new_message_ids: 5 } }]);
   });
 
+  it("D#221 OM-2b: an ai_gateway run gets a report tag only when the outside meter is on; it is stored on the run and the model rule carries it", async () => {
+    const tagsSeen: Array<string | undefined> = [];
+    for (const on of [true, false, undefined]) {
+      const harness = createSandboxTargetHarness(db.runWriterPool);
+      const port = harness.deps.sandboxPort;
+      const spied: SandboxPort = {
+        ...port,
+        startDetached: (h, o) => (tagsSeen.push(o.networkPolicy.find((r) => r.purpose === "model")?.reportTag), port.startDetached(h, o)),
+      };
+      const target = new SandboxTarget({ ...harness.deps, sandboxPort: spied, ...(on === undefined ? {} : { outsideMeterOn: () => on }) });
+      const run = await seedRun();
+      await target.admit(run, db.admin);
+      await target.dispatch(run);
+      const { rows } = await db.admin.query(`SELECT gateway_report_tag AS tag, om_state AS state FROM agent_runs WHERE id = $1`, [run.id]);
+      expect(rows[0].tag ?? undefined).toBe(tagsSeen.at(-1));
+      expect(rows[0].state ?? null).toBe(on ? "pending" : null);
+    }
+    expect(tagsSeen[0]).toMatch(/^fxr_[a-z2-7]{26}$/);
+    expect(tagsSeen.slice(1)).toEqual([undefined, undefined]);
+  });
+
   it("H14c-3-2d-1: the run's limits reach startDetached and resume; a run without limits passes none", async () => {
     const limits = { maxTurns: 17, maxModelCalls: 40, maxRunMs: 9 * 60_000, meteringSilenceMs: 11 * 60_000 };
     const seen: Array<{ call: "startDetached" | "resume"; limits: StartDetachedOptions["limits"]; hasKey: boolean }> = [];

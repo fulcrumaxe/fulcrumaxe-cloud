@@ -127,6 +127,11 @@ describe('migration 0619 (fix round 1, was 0614): platform_ops read on agent_run
         'runtime', 'execution_mode',
         // 0734: the definer agent_run_list_pending_runner_runs orders the waiting runner runs by when they were created.
         'created_at',
+        // 0751: the outside-meter definers read and write these (never usd, tokens or the envelope): the tag, the payer and connection
+        // it was made under, the state, the read schedule and last read, the flags and the figures, and the runner's own model-call count.
+        'gateway_report_tag', 'om_payer_account_id', 'om_connection_id', 'om_key_ref', 'om_state', 'om_reason', 'om_reads', 'om_finalized_at',
+        'om_next_due_at', 'om_last_cost', 'om_last_count', 'om_read_share_usd', 'om_flags', 'om_gateway_usd', 'om_true_up_usd', 'om_overhead_usd',
+        'metered_model_calls',
       ].sort(),
     );
 
