@@ -6,15 +6,11 @@
  *   3. call `.error(...)` or `.warn(...)` on a logger (an object or property named `log` or `logger`),
  *   4. carry a comment `// fx-swallow-ok: <reason>` inside the clause, with a reason.
  *
- * A repo-wide rule cannot start at zero, so there is a baseline: `no-silent-catch.baseline.json` maps a file
- * to the number of silent catches it had when the rule landed. Counts, not line numbers, so an unrelated edit
- * above a catch does not move it. The plugin exports two rules over one check:
- *
- *   - `no-silent-catch`           reports the silent catches BEYOND the file's baseline count (configure as error),
- *   - `no-silent-catch-baselined` reports the ones WITHIN it (configure as warn: the burn-down list).
- *
- * The adoption PRs lower the counts as they fix sites; the last one empties the file and drops the second rule.
- * The "baseline is exact" test (no-silent-catch.test.mjs) fails when a count is higher or lower than the tree.
+ * The rule began over a baseline: `no-silent-catch.baseline.json` maps a file to the number of silent catches it
+ * had when the rule landed (counts, not line numbers, so an unrelated edit above a catch does not move it), and the
+ * adoption PRs lowered the counts as they fixed sites. The file is now empty, so every silent catch is an error.
+ * The `baseline` option stays so a file that must be added later has a place to be listed; the "baseline is exact"
+ * test (no-silent-catch.test.mjs) fails when a count is higher or lower than the tree.
  *
  * Out of scope on purpose: `.catch(fn)` on a promise (a different shape; the adoption PRs look at those by hand)
  * and client code in apps/workspace (its failures go through the session/rum path, not this rule).
@@ -51,8 +47,6 @@ function makeRule(report) {
       messages: {
         silent:
           "This catch swallows the error. Rethrow it, call reportError(err, { stage, route }) or a logger's error/warn, or add `// fx-swallow-ok: <reason>`.",
-        baselined:
-          "Baselined silent catch (lint/no-silent-catch.baseline.json): report it, rethrow it or mark it `// fx-swallow-ok: <reason>`, then lower the file's count.",
       },
     },
     create(context) {
@@ -100,9 +94,6 @@ function makeRule(report) {
 export const rules = {
   "no-silent-catch": makeRule((context, node, baselined) => {
     if (!baselined) context.report({ node, messageId: "silent" });
-  }),
-  "no-silent-catch-baselined": makeRule((context, node, baselined) => {
-    if (baselined) context.report({ node, messageId: "baselined" });
   }),
 };
 

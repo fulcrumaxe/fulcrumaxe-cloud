@@ -67,6 +67,7 @@ export async function runApprovalChecks(dir: string, input: ApprovalCheckInput):
       const r = await runs[check]();
       checks.push({ check, ok: r.ok === true, findings: r.findings });
     } catch {
+      // fx-swallow-ok: a check that cannot run is recorded in the report as a failed check_error finding
       checks.push({ check, ok: false, findings: [{ path: "/", kind: "check_error", message: "the check could not run", severity: "error" }] });
     }
   }

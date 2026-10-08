@@ -42,6 +42,7 @@ async function resolveFile(realRoot: string, rawPath: string): Promise<string | 
   try {
     decoded = decodeURIComponent(rawPath);
   } catch {
+    // fx-swallow-ok: a request path that does not decode is served as not found
     return null;
   }
   if (decoded.includes("\0") || decoded.includes("\\")) return null;
@@ -52,6 +53,7 @@ async function resolveFile(realRoot: string, rawPath: string): Promise<string | 
     if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
     return (await fs.stat(real)).isFile() ? real : null;
   } catch {
+    // fx-swallow-ok: a missing or unreadable file is served as not found
     return null;
   }
 }

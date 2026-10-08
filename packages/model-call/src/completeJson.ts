@@ -52,14 +52,14 @@ export async function completeJson<T>(ctx: ModelCallCtx, p: CompleteJsonParams<T
   try {
     reply = replyFrom(res.provider, JSON.parse(res.text));
   } catch {
-    // an unreadable envelope is "no follow-up" too
+    // fx-swallow-ok: an unreadable envelope is "no follow-up" too
   }
   let value: T | null = null;
   try {
     const parsed = p.schema.safeParse(JSON.parse((reply?.text ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '')));
     if (parsed.success) value = parsed.data;
   } catch {
-    // not JSON: "no follow-up"
+    // fx-swallow-ok: not JSON is "no follow-up"
   }
   return { value, usage: reply?.usage ?? NO_USAGE };
 }

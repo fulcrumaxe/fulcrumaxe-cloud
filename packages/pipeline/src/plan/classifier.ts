@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { sanitize } from "@fx/trust";
 import { MAX_HINT_LABELS, MAX_HINT_LABEL_CHARS } from "./labels.js";
 import { parseClassifierOutput, TRIAGE_CATEGORIES, type TriageCategory } from "./categories.js";
@@ -84,7 +85,8 @@ export async function classifyWorkItem(classifier: TriageClassifier, text: Triag
   let raw: unknown;
   try {
     raw = await classifier.complete(buildTriagePrompt(text));
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "plan.classify" });
     return { ok: false, reason: "classifier call failed" };
   }
   return parseClassifierOutput(raw);

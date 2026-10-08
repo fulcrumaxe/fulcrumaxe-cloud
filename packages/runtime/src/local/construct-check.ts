@@ -12,6 +12,7 @@ try {
   createLocalRuntime(process.env);
   console.log("local runner constructed OK");
 } catch (error) {
+  // fx-swallow-ok: a CLI check; it prints the failure and sets a failing exit code
   console.error(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
   process.exitCode = 1;
 }

@@ -59,6 +59,7 @@ export function extractAgentOutputEnvelope(text: string): Record<string, unknown
     }
     return undefined;
   } catch {
+    // fx-swallow-ok: a body that is not JSON is "no envelope"; the caller rejects it
     return undefined;
   }
 }

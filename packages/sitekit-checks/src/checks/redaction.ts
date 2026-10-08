@@ -143,7 +143,7 @@ function exemptShaRanges(html: string, ev: EvidenceCommits): Map<number, number>
     const sha = raw.slice(prefix.length).match(/^(?:[0-9a-f]{64}|[0-9a-f]{40})(?=\/)/)?.[0];
     if (!sha || !known.has(sha)) continue;
     let url: URL;
-    try { url = new URL(unescapeHtml(raw)); } catch { continue; }
+    try { url = new URL(unescapeHtml(raw)); } catch { /* fx-swallow-ok: an unparseable URL is not an exempt link, so it stays flagged */ continue; }
     if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || url.port) continue;
     if (!url.pathname.startsWith(`/${ev.repo}/blob/${sha}/`)) continue;
     const start = at + prefix.length;

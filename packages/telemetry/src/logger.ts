@@ -50,7 +50,7 @@ export function createLogger(options: LoggerOptions): Logger {
       // The type already forbids a free-text event; a value that got past it (a cast, plain JS) is not emitted.
       line(level, isEventCode(event) ? event : "telemetry.invalid_event", fields);
     } catch {
-      // dropped
+      // fx-swallow-ok: the logger is what reports, so a failure inside it has nowhere to go; the line is dropped
     }
   }
 
@@ -63,7 +63,7 @@ export function createLogger(options: LoggerOptions): Logger {
         try {
           dropped(key, count);
         } catch {
-          // dropped: a throwing sink costs this line only
+          // fx-swallow-ok: a throwing sink costs this line only; the logger cannot report its own failure
         }
       }
     },

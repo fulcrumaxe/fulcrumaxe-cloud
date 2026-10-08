@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { randomBytes } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -535,6 +536,7 @@ async function withPublishLock<T>(pool: Pool, workItemId: string, fn: () => Prom
         try {
           await client.query("ROLLBACK");
         } catch {
+          // fx-swallow-ok: a failed ROLLBACK marks the connection broken, and release(broken) discards it
           broken = true;
         }
         client.release(broken);
@@ -608,7 +610,8 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
       ),
       aborted,
     ]);
-  } catch {
+  } catch (err) {
+    reportError(err, { stage: "plan.spec_writer" });
     return { status: "refused", reason: "pm_failed" };
   } finally {
     budget.cancel();

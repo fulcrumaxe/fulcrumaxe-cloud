@@ -78,6 +78,7 @@ async function readJson(file: string): Promise<Catalogue | { error: string }> {
   try {
     return JSON.parse(await fs.readFile(file, "utf-8"));
   } catch (e) {
+    // fx-swallow-ok: the read or parse failure is returned as `{ error }` and becomes a finding
     return { error: e instanceof Error ? e.message : String(e) };
   }
 }

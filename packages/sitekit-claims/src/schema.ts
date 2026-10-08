@@ -255,6 +255,7 @@ export function parseRepoUrlShape(value: string): RepoUrlShape {
     try {
       parsed = new URL(value);
     } catch {
+      // fx-swallow-ok: an unparseable URL is returned as a not-url-like result
       return { ok: false, reason: "not-url-like", message: "not a parseable URL" };
     }
     if (parsed.protocol !== "https:") {

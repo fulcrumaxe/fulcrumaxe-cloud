@@ -48,6 +48,7 @@ export async function evaluateJson(page: BrowserPage, script: string, arg?: Json
   try {
     text = JSON.stringify(raw);
   } catch {
+    // fx-swallow-ok: a value that will not serialise leaves `text` undefined, which throws browser_result_invalid just below
     text = undefined;
   }
   if (text === undefined) throw new BrowserCheckError("browser_result_invalid", "evaluate returned a non-JSON value");
@@ -78,6 +79,7 @@ export async function withBrowser(
   try {
     return await Promise.race([body(driver), timeout]);
   } catch (err) {
+    // fx-swallow-ok: the failure is returned as a failed check result carrying its kind and message
     if (err instanceof BrowserCheckError) return failed(err.kind, err.message);
     return failed("browser_unavailable", err instanceof Error ? err.message : "browser error");
   } finally {

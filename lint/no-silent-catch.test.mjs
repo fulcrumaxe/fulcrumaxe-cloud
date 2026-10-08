@@ -10,8 +10,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = JSON.parse(readFileSync(path.join(ROOT, "lint", "no-silent-catch.baseline.json"), "utf8"));
 const FILE = path.join(ROOT, "packages", "demo", "src", "a.js");
 
-/** Messages for `code` linted as FILE with the given baseline; `rule` picks the error rule or the baselined (warn) one. */
-function lint(code, { baseline = {}, rule = "no-silent-catch" } = {}) {
+/** Messages for `code` linted as FILE with the given baseline. */
+function lint(code, { baseline = {} } = {}) {
   const linter = new Linter({ cwd: ROOT });
   return linter.verify(
     code,
@@ -19,7 +19,7 @@ function lint(code, { baseline = {}, rule = "no-silent-catch" } = {}) {
       {
         plugins: { "fx-catch": plugin },
         languageOptions: { ecmaVersion: "latest", sourceType: "module" },
-        rules: { [`fx-catch/${rule}`]: ["error", { baseline }] },
+        rules: { "fx-catch/no-silent-catch": ["error", { baseline }] },
       },
     ],
     { filename: FILE },
@@ -90,11 +90,9 @@ describe("no-silent-catch: the baseline", () => {
   const two = "try { a(); } catch {}\ntry { b(); } catch {}";
   const rel = "packages/demo/src/a.js";
 
-  it("the error rule reports only the sites beyond the file's count; the baselined rule reports the ones within it", () => {
+  it("the rule reports only the sites beyond the file's count", () => {
     expect(flagged(two, { baseline: { [rel]: 1 } })).toBe(1);
-    expect(flagged(two, { baseline: { [rel]: 1 }, rule: "no-silent-catch-baselined" })).toBe(1);
     expect(flagged(two, { baseline: { [rel]: 2 } })).toBe(0);
-    expect(flagged(two, { baseline: { [rel]: 2 }, rule: "no-silent-catch-baselined" })).toBe(2);
     expect(flagged(two, { baseline: { "packages/demo/src/other.js": 2 } })).toBe(2);
   });
 
@@ -107,7 +105,7 @@ describe("no-silent-catch: the baseline", () => {
 // The rule over the real tree, with no baseline applied, must find exactly the sites the baseline file lists.
 // Higher means a new silent catch slipped in; lower means a fixed site is still listed (lower its count).
 describe("no-silent-catch: the baseline file is exact for the tree", () => {
-  it("every silent catch in the server code is in the baseline, and every baseline count is still true", { timeout: 180_000 }, async () => {
+  it("every silent catch in the server code is in the baseline, and every baseline count is still true (the file is empty)", { timeout: 180_000 }, async () => {
     const SCOPE = ["packages/*/src/**/*.{ts,tsx,js,mjs}", "apps/web/app/**/*.{ts,tsx}", "apps/web/lib/**/*.{ts,tsx}"];
     const eslint = new ESLint({
       cwd: ROOT,
@@ -131,7 +129,8 @@ describe("no-silent-catch: the baseline file is exact for the tree", () => {
       if (n > 0) found[path.relative(ROOT, r.filePath).split(path.sep).join("/")] = n;
     }
     const sorted = (o) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => (a < b ? -1 : 1)));
+    expect(BASELINE).toEqual({});
     expect(sorted(found)).toEqual(sorted(BASELINE));
-    expect(Object.keys(found).length).toBeGreaterThan(0); // the scan really read the tree
+    expect(results.length).toBeGreaterThan(100); // the scan really read the tree
   });
 });
