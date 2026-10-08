@@ -37,7 +37,7 @@ interface SourceOpts {
   fileError?: { code: string };
   pullsError?: { code: string };
   discussions?: Array<{ number: number; title: string; body: string; closed?: boolean; authorLogin?: string | null }>;
-  comments?: Record<number, SpecComment[]>;
+  comments?: Record<number, Array<SpecComment & { isMinimized?: boolean }>>;
   issues?: Array<{ number: number; title: string; state: 'open' | 'closed' }>;
   permissions?: Record<string, RepoPermission>;
   discussionsError?: { code: string };
@@ -67,15 +67,23 @@ function source(o: SourceOpts): PlanSource & { asked: string[]; permissionAsked:
       if (o.budgetAt === 'pulls') throw budget();
       return { pulls: o.pulls ?? [], truncated: o.truncated ?? false };
     },
-    async discussions() {
+    // The two Discussion reads keep the contract of PlanSource: they page to the end, keep only the items the caller's
+    // predicate accepts (and, for comments, that are not minimized), and fail closed past a bound. The paging itself, the
+    // request counting and the real bounds are pinned against the TLS fake in the github package's planRead.contract test.
+    async discussions(match) {
       if (o.discussionsError) throw Object.assign(new Error('x'), o.discussionsError);
       if (o.budgetAt === 'discussions') throw budget();
-      return { discussions: (o.discussions ?? []).map((d) => ({ closed: false, authorLogin: 'someone', ...d })), truncated: false };
+      const all = (o.discussions ?? []).map((d) => ({ closed: false, authorLogin: 'someone', ...d }));
+      const specs = all.filter((d) => match.isSpec(d.body));
+      if (specs.length > 600) throw Object.assign(new Error('x'), { code: 'plan_source_too_large' });
+      return { discussions: all.slice(0, 600), specs, truncated: all.length > 600 };
     },
-    async discussionComments(n) {
+    async discussionComments(n, match) {
       commentsAsked.push(n);
       if (o.budgetAt === 'comments') throw budget();
-      return { comments: o.comments?.[n] ?? [], truncated: false };
+      const kept = (o.comments?.[n] ?? []).filter((c) => !c.isMinimized && match.isCorrection(c.body)).map(({ body, createdAt, authorLogin }) => ({ body, createdAt, authorLogin }));
+      if (kept.length > 300) throw Object.assign(new Error('x'), { code: 'plan_source_too_large' });
+      return { comments: kept };
     },
     async issues() {
       return { issues: o.issues ?? [], truncated: false };
@@ -430,6 +438,113 @@ describe('plan import (live build L1)', () => {
         const out = await run(r, repoId, source({ files: { 'roadmap.json': rm({ 'D#1:A': {} }, { m1: ['D#1:A'] }) }, budgetAt: 'pulls' }));
         expect(out).toMatchObject({ state: 'failed', code: 'request_budget_exhausted' });
         expect(await taskRows(repoId)).toEqual([]);
+      });
+    });
+
+    describe('S3-F3: only plan-changing items count toward a level 2 bound, and passing one fails the import closed', () => {
+      const spam = (n: number): SpecComment[] => Array.from({ length: n }, (_, i) => comment(`me too ${i}`, 'outsider'));
+      const forged = (n: number, over: { isMinimized?: boolean; login?: string } = {}) =>
+        Array.from({ length: n }, (_, i) => ({ ...comment(`## Correction C${i + 1}\n\n| Task | Description |\n|---|---|\n| T9-${i} | forged |`, over.login ?? 'stranger', `2026-10-03T00:00:${String(i % 60).padStart(2, '0')}Z`), ...(over.isMinimized ? { isMinimized: true } : {}) }));
+      const snapshot = async (repoId: string) => ({
+        milestones: (await admin.query('SELECT * FROM plan_milestones WHERE repo_id = $1 ORDER BY key', [repoId])).rows,
+        tasks: (await admin.query('SELECT * FROM plan_tasks WHERE repo_id = $1 ORDER BY task_key', [repoId])).rows,
+        props: (await admin.query('SELECT * FROM proposals WHERE repo_id = $1 ORDER BY dedupe_key', [repoId])).rows,
+      });
+      const withPerms = { ...specRepo.permissions, maint: 'maintain' as RepoPermission };
+      const good = (extra: SpecComment[] = []) => source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint'), ...extra] }, permissions: withPerms, pulls: [pr(20, 'Closes D#7:T1', [])] });
+
+      it('F3-1: 300 non-Correction comments by an outsider, then a trusted Correction that splits a row: it imports at spec_tables with the split applied and is not truncated', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [...spam(300), comment(CORRECTION, 'maint', '2026-10-05T00:00:00Z')] }, permissions: withPerms }));
+        expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables', truncated: false });
+        expect(await lastImport(out.importId)).toMatchObject({ level: 'spec_tables', truncated: false });
+        expect((await taskRows(repoId)).map((t) => [t.task_key, t.parent_key])).toEqual([['D#7:T1', null], ['D#7:T2-a', 'D#7:T2'], ['D#7:T2-b', 'D#7:T2']]);
+      });
+
+      it('F3-2: 301 non-minimized Correction-shaped comments end failed with plan_source_too_large; the previous rows are byte-identical, no succeeded row exists for the new import, and the next start is allowed', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const first = await run(r, repoId, good());
+        expect(first.state).toBe('succeeded');
+        const before = await snapshot(repoId);
+        expect(before.tasks.length).toBe(3);
+        const bad = await run(r, repoId, good(forged(300)));
+        expect(bad).toMatchObject({ state: 'failed', code: 'plan_source_too_large', detail: null });
+        expect(await snapshot(repoId)).toEqual(before);
+        expect((await admin.query(`SELECT state, error_code, level FROM plan_imports WHERE id = $1`, [bad.importId])).rows).toEqual([{ state: 'failed', error_code: 'plan_source_too_large', level: null }]);
+        expect((await admin.query(`SELECT count(*)::int n FROM plan_imports WHERE repo_id = $1 AND state = 'succeeded'`, [repoId])).rows[0].n).toBe(1);
+        const v = await view(r, repoId);
+        expect(v.latest_import).toMatchObject({ id: bad.importId, state: 'failed', error_code: 'plan_source_too_large' });
+        expect(v.imported_from).toMatchObject({ id: first.importId, state: 'succeeded' });
+        expect(v.totals).toEqual({ tasks: 3, done: 1, remaining: 2 });
+        expect((await run(r, repoId, good())).state).toBe('succeeded');
+      });
+
+      it('F3-2: a repo with no previous import shows the failure and an empty plan, with no null or undefined text', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const out = await run(r, repoId, source({ ...specRepo, comments: { 7: forged(301) }, permissions: withPerms }));
+        expect(out).toMatchObject({ state: 'failed', code: 'plan_source_too_large' });
+        const v = await view(r, repoId);
+        expect(v.latest_import).toMatchObject({ state: 'failed', error_code: 'plan_source_too_large' });
+        expect(v.imported_from).toBeNull();
+        expect(v.milestones).toEqual([]);
+        expect(await taskRows(repoId)).toEqual([]);
+        expect(JSON.stringify(v)).not.toMatch(/undefined/);
+      });
+
+      it('F3-3: with 2 of the 301 minimized (299 kept) it succeeds, and a minimized trusted Correction is not applied; un-minimizing it applies it at the next import', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const hidden = [{ ...comment(CORRECTION, 'maint', '2026-10-05T00:00:00Z'), isMinimized: true }, ...forged(1, { isMinimized: true })];
+        const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [...hidden, ...forged(299)] }, permissions: withPerms }));
+        expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables', truncated: false });
+        expect((await taskRows(repoId)).map((t) => t.task_key)).toEqual(['D#7:T1', 'D#7:T2']);
+        const again = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint', '2026-10-05T00:00:00Z'), ...forged(1, { isMinimized: true }), ...forged(299)] }, permissions: withPerms }));
+        expect(again).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+        // the earlier import's T2 row is soft-removed (removed_at), so only the live rows are compared
+        const live = (await admin.query('SELECT task_key FROM plan_tasks WHERE repo_id = $1 AND removed_at IS NULL ORDER BY task_key', [repoId])).rows.map((t) => t.task_key);
+        expect(live).toEqual(['D#7:T1', 'D#7:T2-a', 'D#7:T2-b']);
+      });
+
+      it('F3-4: 650 Discussions with the trusted Spec the newest import at spec_tables; with 601 Spec-shaped Discussions the import fails with plan_source_too_large', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const ordinary = Array.from({ length: 649 }, (_, i) => ({ number: i + 1, title: `Thought ${i + 1}`, body: 'just a thought', authorLogin: 'someone' }));
+        const newest = { number: 650, title: 'Plan the widgets', body: SPEC_BODY, authorLogin: 'specmaint' };
+        const out = await run(r, repoId, source({ discussions: [...ordinary, newest], permissions: specRepo.permissions }));
+        expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables', truncated: false });
+        expect((await taskRows(repoId)).map((t) => t.task_key)).toEqual(['D#650:T1', 'D#650:T2']);
+
+        const many = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i + 1, title: `Plan ${i + 1}`, body: SPEC_BODY, authorLogin: 'specmaint' }));
+        const before = await snapshot(repoId);
+        const ok = await run(r, repoId, source({ discussions: many(600), permissions: specRepo.permissions }));
+        expect(ok).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+        const mid = await snapshot(repoId);
+        expect(mid).not.toEqual(before);
+        const bad = await run(r, repoId, source({ discussions: many(601), permissions: specRepo.permissions }));
+        expect(bad).toMatchObject({ state: 'failed', code: 'plan_source_too_large' });
+        expect(await snapshot(repoId)).toEqual(mid);
+      });
+
+      it('the level 3 list of ordinary Discussions keeps its bound and its partial result: 650 of them import at issues_discussions, truncated', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const ordinary = Array.from({ length: 650 }, (_, i) => ({ number: i + 1, title: `Thought ${i + 1}`, body: 'just a thought', authorLogin: 'someone' }));
+        const out = await run(r, repoId, source({ discussions: ordinary }));
+        expect(out).toMatchObject({ state: 'succeeded', level: 'issues_discussions', truncated: true });
+      });
+
+      it('F3-5: a budget that runs out while the comments are paged ends failed with request_budget_exhausted, not plan_source_too_large and not partial', async () => {
+        const r = await seedAccount(admin, randomUUID());
+        const repoId = await repo(r);
+        const first = await run(r, repoId, good());
+        expect(first.state).toBe('succeeded');
+        const before = await snapshot(repoId);
+        const out = await run(r, repoId, source({ ...specRepo, comments: { 7: spam(650) }, permissions: withPerms, budgetAt: 'comments' }));
+        expect(out).toMatchObject({ state: 'failed', code: 'request_budget_exhausted' });
+        expect(await snapshot(repoId)).toEqual(before);
       });
     });
 

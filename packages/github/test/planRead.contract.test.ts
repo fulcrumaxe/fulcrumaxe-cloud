@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PLAN_READ_PERMISSIONS, getInstallationToken, InstallationTokenCache } from "../src/installationToken.js";
 import { createPlanReadClient, PLAN_READ_USER_AGENT, type PlanReadClient, type PlanReadDeps } from "../src/planReadClient.js";
 import { ALLOWED_GRAPHQL_DOCUMENTS, assertSingleQueryDocument, DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, REPO_HEAD_QUERY } from "../src/planQueries.js";
-import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readRepoFile, readRepoHead } from "../src/planReaders.js";
+import { listDiscussionComments, listDiscussions, listIssuesAndPulls, PlanSourceTooLargeError, readAuthorPermission, readRepoFile, readRepoHead } from "../src/planReaders.js";
 import { createPlanSourceFactory } from "../src/planSource.js";
 import { httpsRoundTrip } from "./helpers/localTlsServer.js";
 import { newFakeState, startPlanGithub, type FakeGithubState, type FakeItem, type PlanGithub } from "./helpers/planGithubFake.js";
@@ -40,6 +40,10 @@ async function setup(over: Partial<FakeGithubState> = {}, deps: Partial<PlanRead
   });
   return { gh, client: open(TARGET) };
 }
+
+/** The two shape rules @fx/core hands the source (isSpecDiscussion, isCorrectionComment), restated so these tests need no core import. */
+const isSpec = (body: string): boolean => /^##\s+Spec\b/m.test(body);
+const isCorrection = (body: string): boolean => /^#{2,3}\s+Correction\s+C\d+\b/.test(body.replace(/^\s+/, "").split(/\r?\n/, 1)[0] ?? "");
 
 const code = async (p: Promise<unknown>): Promise<string> => (await p.then(() => "ok", (e: unknown) => (e as { code?: string }).code ?? String(e)));
 const merged = (n: number, title: string, body: string | null = null, state: "open" | "closed" = "closed"): FakeItem => ({ number: n, title, body, state, pull: { merged_at: "2026-10-01T00:00:00Z" } });
@@ -291,8 +295,8 @@ describe("GraphQL failures are failures, never empty data", () => {
   it("a null repository with no errors at all is still not an empty repository", async () => {
     const { client } = await setup({ faults: { graphqlNullWithoutErrors: true } });
     expect(await code(readRepoHead(client, REPO))).toBe("app_permission_missing");
-    expect(await code(listDiscussions(client, REPO))).toBe("app_permission_missing");
-    expect(await code(listDiscussionComments(client, REPO, 1))).toBe("app_permission_missing");
+    expect(await code(listDiscussions(client, REPO, { isSpec }))).toBe("app_permission_missing");
+    expect(await code(listDiscussionComments(client, REPO, 1, { isCorrection }))).toBe("app_permission_missing");
   });
   it("the RATE_LIMITED type is rate_limited_by_github", async () => {
     const { client } = await setup({ faults: { graphqlRateLimited: true } });
@@ -304,7 +308,7 @@ describe("GraphQL failures are failures, never empty data", () => {
   });
   it("hasDiscussionsEnabled false is discussions_disabled", async () => {
     const { client } = await setup({ discussionsEnabled: false });
-    expect(await code(listDiscussions(client, REPO))).toBe("discussions_disabled");
+    expect(await code(listDiscussions(client, REPO, { isSpec }))).toBe("discussions_disabled");
     expect((await readRepoHead(client, REPO)).discussionsEnabled).toBe(false);
   });
 });
@@ -415,20 +419,21 @@ describe("the readers", () => {
     expect(g.server.seen.filter((s) => s.path.includes("/contents/")).length).toBe(2);
   });
 
-  it("listDiscussions and listDiscussionComments page through pageInfo and stop at their bounds", async () => {
-    const discussions = Array.from({ length: 230 }, (_, i) => ({ number: i + 1, title: `d${i + 1}`, body: "b", closed: i % 2 === 0, comments: Array.from({ length: i === 4 ? 130 : 1 }, (_, c) => ({ databaseId: 1000 + c, body: `c${c}`, login: "u" })) }));
+  it("listDiscussions and listDiscussionComments page through pageInfo to the end; the level 3 list stops at its bound and the comment bound fails closed", async () => {
+    const discussions = Array.from({ length: 230 }, (_, i) => ({ number: i + 1, title: `d${i + 1}`, body: "b", closed: i % 2 === 0, comments: Array.from({ length: i === 4 ? 130 : 1 }, (_, c) => ({ databaseId: 1000 + c, body: i === 4 ? `## Correction C${c + 1}` : `c${c}`, login: "u" })) }));
     const { gh: g, client } = await setup({ discussions });
-    const all = await listDiscussions(client, REPO);
+    const all = await listDiscussions(client, REPO, { isSpec });
     expect(all.discussions.length).toBe(230);
+    expect(all.specs).toEqual([]);
     expect(all.truncated).toBe(false);
     expect(g.server.seen.filter((s) => s.path === "/graphql").length).toBe(3);
-    const capped = await listDiscussions(client, REPO, { maxDiscussions: 150 });
+    const capped = await listDiscussions(client, REPO, { isSpec, maxDiscussions: 150 });
     expect(capped).toMatchObject({ truncated: true });
     expect(capped.discussions.length).toBe(150);
-    const comments = await listDiscussionComments(client, REPO, 5);
+    const comments = await listDiscussionComments(client, REPO, 5, { isCorrection });
     expect(comments.comments.length).toBe(130);
-    expect((await listDiscussionComments(client, REPO, 5, { maxComments: 100 })).truncated).toBe(true);
-    expect((await listDiscussionComments(client, REPO, 99999)).comments).toEqual([]);
+    expect(await code(listDiscussionComments(client, REPO, 5, { isCorrection, maxComments: 100 }))).toBe("plan_source_too_large");
+    expect((await listDiscussionComments(client, REPO, 99999, { isCorrection })).comments).toEqual([]);
   });
 
   it("an issues list that is not a JSON array is github_unavailable, not an empty plan", async () => {
@@ -483,9 +488,10 @@ describe("the plan source (levels 2 and 3 read through the same read-only client
     const issues = await source.issues();
     expect(pulls.pulls.map((p) => [p.number, p.state, p.dLines])).toEqual([[1, "merged", ["Closes D#7:T1"]]]);
     expect(issues.issues).toEqual([{ number: 2, title: "an issue", state: "open" }, { number: 3, title: "old", state: "closed" }]);
-    const d = await source.discussions();
+    const d = await source.discussions({ isSpec });
+    expect(d.specs).toMatchObject([{ number: 7 }]);
     expect(d.discussions).toMatchObject([{ number: 7, title: "Plan", closed: false }]);
-    expect((await source.discussionComments(7)).comments).toMatchObject([{ body: "## Correction C1", authorLogin: "maint" }]);
+    expect((await source.discussionComments(7, { isCorrection })).comments).toMatchObject([{ body: "## Correction C1", authorLogin: "maint" }]);
     expect(await source.authorPermission("maint")).toBe("maintain");
     expect(gh.server.seen.filter((s) => s.path.endsWith("/issues"))).toHaveLength(1);
     const log = source.evidence().requests;
@@ -531,7 +537,7 @@ describe("the plan source and the request budget (a spent budget is an error whe
   it("discussions() carries each Discussion's author, and the permission route is asked once per call", async () => {
     gh = await startPlanGithub(newFakeState({ collaborators: { maint: "maintain" }, discussions: [{ number: 7, title: "Plan", body: "## Spec", closed: false, login: "maint", comments: [] }, { number: 8, title: "Other", body: "## Spec", closed: false, comments: [] }] }));
     const source = sourceOf(gh, 400);
-    expect((await source.discussions()).discussions.map((d) => [d.number, d.authorLogin])).toEqual([[7, "maint"], [8, "someone"]]);
+    expect((await source.discussions({ isSpec })).discussions.map((d) => [d.number, d.authorLogin])).toEqual([[7, "maint"], [8, "someone"]]);
     expect(await source.authorPermission("maint")).toBe("maintain");
     expect(await source.authorPermission("someone")).toBe("none");
     expect(gh.server.seen.filter((s) => s.path.includes("/collaborators/"))).toHaveLength(2);
@@ -553,5 +559,94 @@ describe("the mint requester is not shared between clients", () => {
     await readRepoHead(a, REPO);
     await readRepoHead(b, REPO);
     expect(gh.mints).toHaveLength(2);
+  });
+});
+
+describe("S3-F3: only plan-changing items count toward a level 2 bound, and a bound fails closed", () => {
+  const sourceOf = (g: PlanGithub, maxRequests = 400) =>
+    createPlanSourceFactory({ resolveInstallation: async () => ({ installationId: 777, appKind: "team_readonly" }), appCredentials: creds, requester: g.requester, fetchImpl: g.fetch, maxRequests })(TARGET);
+  const SPEC = "## Spec\n| Task | Description |\n|---|---|\n| P1 | the first |";
+  const spam = (n: number) => Array.from({ length: n }, (_, i) => ({ databaseId: 1000 + i, body: `me too ${i}`, login: "outsider" }));
+  const correction = (i: number, over: { login?: string; isMinimized?: boolean } = {}) => ({ databaseId: 5000 + i, body: `## Correction C${i + 1}\n| P1a | the part |`, login: "outsider", ...over });
+  const specOn = (comments: FakeGithubState["discussions"][number]["comments"]) => ({ number: 7, title: "Plan", body: SPEC, closed: false, login: "maint", comments });
+  const commentPages = (s: ReturnType<typeof sourceOf>) => s.evidence().requests.filter((r) => r.path === "/graphql PlanDiscussionComments").length;
+
+  it("F3-1: 300 non-Correction comments by an outsider do not count and do not hide the trusted Correction after them; the pages are paid from the request log", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn([...spam(300), correction(0, { login: "maint" })])] }));
+    const source = sourceOf(gh);
+    const r = await source.discussionComments(7, { isCorrection });
+    expect(r.comments).toMatchObject([{ body: "## Correction C1\n| P1a | the part |", authorLogin: "maint" }]);
+    expect(commentPages(source)).toBe(4); // 301 comments, 100 per page
+  });
+
+  it("F3-1: it reads past 600 comments to a Correction that is last (the old 300 bound would have buried it)", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn([...spam(650), correction(0, { login: "maint" })])] }));
+    const source = sourceOf(gh);
+    expect((await source.discussionComments(7, { isCorrection })).comments).toHaveLength(1);
+    expect(commentPages(source)).toBe(7);
+  });
+
+  it("F3-2: 300 kept comments are read, the 301st non-minimized Correction-shaped comment fails closed with plan_source_too_large", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn(Array.from({ length: 300 }, (_, i) => correction(i)))] }));
+    expect((await sourceOf(gh).discussionComments(7, { isCorrection })).comments).toHaveLength(300);
+    await gh.close();
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn(Array.from({ length: 301 }, (_, i) => correction(i)))] }));
+    const err = await sourceOf(gh).discussionComments(7, { isCorrection }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(PlanSourceTooLargeError);
+    expect((err as PlanSourceTooLargeError).code).toBe("plan_source_too_large");
+  });
+
+  it("F3-3: with 2 of 301 minimized, 299 are kept and the read succeeds; a minimized trusted Correction is not kept", async () => {
+    const list = Array.from({ length: 301 }, (_, i) => correction(i, i < 2 ? { isMinimized: true } : {}));
+    list[0] = correction(0, { login: "maint", isMinimized: true });
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn(list)] }));
+    const r = await sourceOf(gh).discussionComments(7, { isCorrection });
+    expect(r.comments).toHaveLength(299);
+    expect(r.comments.some((c) => c.authorLogin === "maint")).toBe(false);
+    expect(r.comments.some((c) => c.body.startsWith("## Correction C1\n"))).toBe(false);
+  });
+
+  it("F3-3: a comments answer that leaves isMinimized out is github_unavailable, never every comment read as not hidden", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn([correction(0)])], faults: { commentsWithoutIsMinimized: true } }));
+    expect(await code(sourceOf(gh).discussionComments(7, { isCorrection }))).toBe("github_unavailable");
+  });
+
+  it("the comments document asks for isMinimized (the fake refuses one that does not, so a dropped field fails every F3 read)", () => {
+    expect(DISCUSSION_COMMENTS_QUERY).toMatch(/\bisMinimized\b/);
+  });
+
+  it("F3-4: with 650 Discussions and the trusted Spec the newest, level 2 gets it, and the level 3 list is still cut at 600 and says so", async () => {
+    const ordinary = Array.from({ length: 649 }, (_, i) => ({ number: i + 1, title: `d${i + 1}`, body: "just a thought", closed: false, comments: [] }));
+    gh = await startPlanGithub(newFakeState({ discussions: [...ordinary, { number: 650, title: "Plan", body: SPEC, closed: false, login: "maint", comments: [] }] }));
+    const source = sourceOf(gh);
+    const r = await source.discussions({ isSpec });
+    expect(r.specs.map((d) => d.number)).toEqual([650]);
+    expect(r.discussions).toHaveLength(600);
+    expect(r.truncated).toBe(true);
+    expect(source.evidence().requests.filter((q) => q.path === "/graphql PlanDiscussions")).toHaveLength(7);
+  });
+
+  it("F3-4: 600 Spec-shaped Discussions are read; the 601st fails closed with plan_source_too_large", async () => {
+    const specs = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i + 1, title: `s${i + 1}`, body: SPEC, closed: false, login: "maint", comments: [] }));
+    gh = await startPlanGithub(newFakeState({ discussions: specs(600) }));
+    expect((await sourceOf(gh).discussions({ isSpec })).specs).toHaveLength(600);
+    await gh.close();
+    gh = await startPlanGithub(newFakeState({ discussions: specs(601) }));
+    expect(await code(sourceOf(gh).discussions({ isSpec }))).toBe("plan_source_too_large");
+  });
+
+  it("F3-5: a budget that runs out while paging the comments is request_budget_exceeded, not plan_source_too_large and not a short list", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn(Array.from({ length: 301 }, (_, i) => correction(i)))] }));
+    const source = sourceOf(gh, 3); // the bound is only reached on page 4
+    expect(await code(source.discussionComments(7, { isCorrection }))).toBe("request_budget_exceeded");
+    expect(commentPages(source)).toBe(3);
+    await gh.close();
+    gh = await startPlanGithub(newFakeState({ discussions: [specOn(spam(650))] }));
+    expect(await code(sourceOf(gh, 3).discussionComments(7, { isCorrection }))).toBe("request_budget_exceeded");
+  });
+
+  it("F3-5: a budget that runs out while paging the Discussions is request_budget_exceeded too", async () => {
+    gh = await startPlanGithub(newFakeState({ discussions: Array.from({ length: 650 }, (_, i) => ({ number: i + 1, title: "d", body: "b", closed: false, comments: [] })) }));
+    expect(await code(sourceOf(gh, 3).discussions({ isSpec }))).toBe("request_budget_exceeded");
   });
 });

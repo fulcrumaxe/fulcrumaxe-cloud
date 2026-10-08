@@ -11,7 +11,7 @@ import { DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, REPO_HEAD_QUERY } fr
  *   readRepoHead        default branch, its head commit, whether Discussions are on (one GraphQL query)
  *   readRepoFile        a file at a commit, raw, capped (a missing file is null)
  *   listIssuesAndPulls  the issues list, paged by its Link header, split into issues and pull requests
- *   listDiscussions / listDiscussionComments   paged by pageInfo
+ *   listDiscussions / listDiscussionComments   paged by pageInfo, to the end (only plan-changing items count toward a bound)
  *
  * Untrusted text is bounded where it is read: a pull request's body is not kept, only its `D#` lines (the importer's
  * reference-line rule needs nothing else), and titles and bodies are cut to fixed lengths.
@@ -204,10 +204,50 @@ export interface DiscussionComment {
 }
 
 export const MAX_BODY_CHARS = 60_000;
+/** The most Spec-shaped Discussions one level 2 import reads. Past it the import fails; it never reads a part of them. */
+export const MAX_SPEC_DISCUSSIONS = 600;
+/** The most kept (Correction-shaped, not minimized) comments of one Spec. Past it the import fails. */
+export const MAX_KEPT_COMMENTS = 300;
 
-export async function listDiscussions(client: PlanReadClient, repo: RepoRef, opts: { maxDiscussions?: number } = {}): Promise<{ discussions: DiscussionSummary[]; truncated: boolean }> {
+/**
+ * More plan-changing input than one import reads: a bound on Spec-shaped Discussions or on a Spec's Correction comments was
+ * passed. The import ends `failed` with this code and writes nothing, because dropping some of those items would leave a plan
+ * that is silently wrong (a split not applied, a new Spec's tasks missing).
+ */
+export class PlanSourceTooLargeError extends Error {
+  readonly code = "plan_source_too_large" as const;
+  constructor(what: "spec_discussions" | "correction_comments") {
+    super(`planRead: plan_source_too_large (${what})`);
+    this.name = "PlanSourceTooLargeError";
+  }
+}
+
+export interface DiscussionList {
+  /** The first `maxDiscussions` Discussions, oldest first: the level 3 list. */
+  discussions: DiscussionSummary[];
+  /** Every Discussion `isSpec` accepts, oldest first, whatever its position in the list: the level 2 input. */
+  specs: DiscussionSummary[];
+  /** True when the level 3 list was cut at its bound. It says nothing about `specs`, which is never cut. */
+  truncated: boolean;
+}
+
+/**
+ * Pages through ALL of the repository's Discussions, oldest first. Two things come out of the one pass: the level 3 list of
+ * ordinary Discussions, which keeps its bound (`maxDiscussions`, default 600) and its partial result, and the level 2 list of
+ * Spec-shaped ones (`isSpec`, applied by the caller's own rule), which is bounded by `maxSpecs` (default 600) and fails closed
+ * past it. Only Spec-shaped Discussions count toward that bound. A page costs one request and is paid from the client's own
+ * budget, whose exhaustion throws `request_budget_exceeded` out of here.
+ */
+export async function listDiscussions(
+  client: PlanReadClient,
+  repo: RepoRef,
+  opts: { isSpec: (body: string) => boolean; maxDiscussions?: number; maxSpecs?: number },
+): Promise<DiscussionList> {
   const max = opts.maxDiscussions ?? 600;
+  const maxSpecs = opts.maxSpecs ?? MAX_SPEC_DISCUSSIONS;
   const discussions: DiscussionSummary[] = [];
+  const specs: DiscussionSummary[] = [];
+  let truncated = false;
   let after: string | null = null;
   for (;;) {
     const data: unknown = await client.graphqlDocument(DISCUSSIONS_PAGE_QUERY, { owner: repo.owner, name: repo.name, first: 100, after });
@@ -219,24 +259,41 @@ export async function listDiscussions(client: PlanReadClient, repo: RepoRef, opt
     if (!isRecord(conn) || !Array.isArray(conn.nodes) || !isRecord(conn.pageInfo)) return unexpected();
     for (const n of conn.nodes) {
       if (!isRecord(n) || typeof n.number !== "number") return unexpected();
-      if (discussions.length >= max) return { discussions, truncated: true };
       const author = isRecord(n.author) ? n.author : null;
-      discussions.push({
+      const summary: DiscussionSummary = {
         number: n.number,
         title: typeof n.title === "string" ? n.title.slice(0, MAX_TITLE_CHARS) : "",
         body: typeof n.body === "string" ? n.body.slice(0, MAX_BODY_CHARS) : "",
         closed: n.closed === true,
         authorLogin: author && typeof author.login === "string" ? author.login : null,
-      });
+      };
+      if (opts.isSpec(summary.body)) {
+        if (specs.length >= maxSpecs) throw new PlanSourceTooLargeError("spec_discussions");
+        specs.push(summary);
+      }
+      if (discussions.length < max) discussions.push(summary);
+      else truncated = true;
     }
-    if (conn.pageInfo.hasNextPage !== true) return { discussions, truncated: false };
+    if (conn.pageInfo.hasNextPage !== true) return { discussions, specs, truncated };
     if (typeof conn.pageInfo.endCursor !== "string") return unexpected();
     after = conn.pageInfo.endCursor;
   }
 }
 
-export async function listDiscussionComments(client: PlanReadClient, repo: RepoRef, number: number, opts: { maxComments?: number } = {}): Promise<{ comments: DiscussionComment[]; truncated: boolean }> {
-  const max = opts.maxComments ?? 300;
+/**
+ * Pages through ALL of one Discussion's comments, oldest first, and keeps only the ones that can change the plan: those
+ * `isCorrection` accepts (the caller's first-line rule) that are not minimized. Every other comment is dropped as it is read
+ * and counts toward no bound. The kept ones are bounded by `maxComments` (default 300) and the read fails closed past it. A
+ * node without a boolean `isMinimized` is GitHub misbehaving (`github_unavailable`), never "not minimized": a Correction a
+ * maintainer hid must not come back because the field was missing. The kept list is read fresh at every import.
+ */
+export async function listDiscussionComments(
+  client: PlanReadClient,
+  repo: RepoRef,
+  number: number,
+  opts: { isCorrection: (body: string) => boolean; maxComments?: number },
+): Promise<{ comments: DiscussionComment[] }> {
+  const max = opts.maxComments ?? MAX_KEPT_COMMENTS;
   const comments: DiscussionComment[] = [];
   let after: string | null = null;
   for (;;) {
@@ -245,22 +302,24 @@ export async function listDiscussionComments(client: PlanReadClient, repo: RepoR
     if (r === null) throw new PlanReadError("app_permission_missing");
     if (!isRecord(r)) return unexpected();
     const d = r.discussion;
-    if (d === null) return { comments, truncated: false };
+    if (d === null) return { comments };
     if (!isRecord(d) || !isRecord(d.comments)) return unexpected();
     const conn = d.comments;
     if (!Array.isArray(conn.nodes) || !isRecord(conn.pageInfo)) return unexpected();
     for (const n of conn.nodes) {
-      if (!isRecord(n) || typeof n.databaseId !== "number") return unexpected();
-      if (comments.length >= max) return { comments, truncated: true };
+      if (!isRecord(n) || typeof n.databaseId !== "number" || typeof n.isMinimized !== "boolean") return unexpected();
+      const body = typeof n.body === "string" ? n.body.slice(0, MAX_BODY_CHARS) : "";
+      if (n.isMinimized || !opts.isCorrection(body)) continue;
+      if (comments.length >= max) throw new PlanSourceTooLargeError("correction_comments");
       const author = isRecord(n.author) ? n.author : null;
       comments.push({
         id: n.databaseId,
-        body: typeof n.body === "string" ? n.body.slice(0, MAX_BODY_CHARS) : "",
+        body,
         createdAt: typeof n.createdAt === "string" ? n.createdAt : "",
         authorLogin: author && typeof author.login === "string" ? author.login : null,
       });
     }
-    if (conn.pageInfo.hasNextPage !== true) return { comments, truncated: false };
+    if (conn.pageInfo.hasNextPage !== true) return { comments };
     if (typeof conn.pageInfo.endCursor !== "string") return unexpected();
     after = conn.pageInfo.endCursor;
   }

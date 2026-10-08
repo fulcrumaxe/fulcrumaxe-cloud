@@ -65,6 +65,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "payment_not_settled",
   "plan_data_unavailable",
   "plan_import_unavailable",
+  "plan_source_too_large",
   "preview_cap_not_confirmed",
   "preview_capacity",
   "preview_exists",

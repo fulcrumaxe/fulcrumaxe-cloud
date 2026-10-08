@@ -47,10 +47,10 @@ function fakeSource(files: Record<string, string>, pulls: Array<{ number: number
     },
     // Levels 2 and 3 are not exercised by the routes: a repo with no roadmap file here has no Discussions and no issues.
     async discussions() {
-      return { discussions: [], truncated: false };
+      return { discussions: [], specs: [], truncated: false };
     },
     async discussionComments() {
-      return { comments: [], truncated: false };
+      return { comments: [] };
     },
     async issues() {
       return { issues: [], truncated: false };
