@@ -19,6 +19,10 @@ module.exports = {
       {
         patterns: [
           {
+            group: ["@fulcrumaxe/fx-runner", "@fulcrumaxe/fx-runner/*", "**/packages/fx-runner", "**/packages/fx-runner/*"],
+            message: "apps/web must never import the local runner (D#6): it runs on a customer's machine and is not part of the web app.",
+          },
+          {
             group: [
               "**/packages/runtime/src/local",
               "**/packages/runtime/src/local/*",

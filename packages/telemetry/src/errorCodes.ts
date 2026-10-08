@@ -103,6 +103,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "app_identity_mismatch",
   "breaker_released",
   "deleted_but_listed",
+  // Local runner (D#6): a sandbox grant the settings file refuses.
+  "sandbox_grant_refused",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */
