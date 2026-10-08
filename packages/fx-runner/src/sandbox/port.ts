@@ -2,7 +2,7 @@ import type { AgentHandle, NormalizedEvent, StartOptions } from "@fulcrumaxe/run
 
 /**
  * A structural copy of the cloud's `SandboxPort` (the private `@fx/runner` package), kept here because this public
- * package may not import it. the cloud runner package's `sandboxPortContract.test.ts` assigns this type to the real one and
+ * package may not import it. Its `test/sandboxPortContract.test.ts` (which imports the cloud runner as a dev dependency) assigns this type to the real one and
  * the real one to this, so `tsc` fails on drift in either direction. Fields this package never reads are typed loosely
  * (`unknown`, `string`); the copy follows the real port in names, optionality and arity.
  */
