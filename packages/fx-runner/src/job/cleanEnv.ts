@@ -26,13 +26,37 @@ export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUD
  */
 export type CredentialMode = { mode: "subscription" } | { mode: "api_key"; apiKey: string };
 
+/** Settings for the one part of the environment that is neither copied from the host nor fixed. */
+export interface CleanEnvOptions {
+  /**
+   * Absolute directories added to the end of PATH when not already on it: where the shell sandbox's own tools
+   * (bubblewrap, socat) were found at setup, which on NixOS is a store path the host PATH does not hold. Added at the
+   * end, never the front, so a system directory cannot reorder the commands the agent already resolved. A relative
+   * entry is refused.
+   */
+  extraPathDirs?: readonly string[];
+}
+
+/** `pathValue` with each of `dirs` added at the end unless it is already an entry. */
+function withDirs(pathValue: string | undefined, dirs: readonly string[]): string | undefined {
+  // POSIX only: the runner supports macOS, Linux and WSL2, where PATH entries are `:`-separated and absolute paths start with `/`.
+  const entries = pathValue === undefined || pathValue === "" ? [] : pathValue.split(":");
+  for (const dir of dirs) {
+    if (typeof dir !== "string" || !dir.startsWith("/") || dir.includes(":") || dir.includes("\0")) throw new TypeError("cleanEnv: extraPathDirs must be absolute directories");
+    if (!entries.includes(dir)) entries.push(dir);
+  }
+  return entries.length === 0 ? undefined : entries.join(":");
+}
+
 /** Builds the child environment. A name outside the allowlist, the fixed set and this mode's one credential is never copied. */
-export function cleanEnv(credentials: CredentialMode): Record<string, string> {
+export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of HOST_ENV_ALLOWLIST) {
     const value = process.env[name];
     if (typeof value === "string" && value !== "") env[name] = value;
   }
+  const widened = withDirs(env.PATH, options.extraPathDirs ?? []);
+  if (widened !== undefined) env.PATH = widened;
   Object.assign(env, FIXED_ENV);
   if (credentials.mode === "subscription") {
     const token = process.env[SUBSCRIPTION_TOKEN_VAR];

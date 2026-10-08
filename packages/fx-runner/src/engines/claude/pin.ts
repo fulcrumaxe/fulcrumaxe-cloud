@@ -5,11 +5,13 @@ import { runCapture, type SpawnFn } from "./capture.js";
 import { EngineRefusal } from "./refusal.js";
 
 /**
- * The lowest build with every flag in `REQUIRED_FLAGS`. `--permission-prompts` is the newest of them (2.1.259, from the
- * CLI reference); `--tools`, `--disallowedTools` and `--disable-slash-commands` are older. The flag check below is the
- * real test, this constant only keeps the refusal message and the doctor output simple.
+ * The lowest build the runner accepts: the oldest one the real-binary canary (`scripts/canary.sh`) has been run on and
+ * passed, which is what proves the file-tool confinement settings (`permissions.deny`, `blockReadsOutsideWorkingDirectories`)
+ * are honoured. Change it in this one place, to the version the canary printed. Every flag in `REQUIRED_FLAGS` exists well
+ * below it (`--permission-prompts`, the newest, is 2.1.259, from the CLI reference); the flag check below is the real test
+ * for those, this constant keeps the refusal message and the doctor output simple.
  */
-export const MIN_CLAUDE_VERSION = "2.1.259";
+export const MIN_CLAUDE_VERSION = "2.1.294";
 
 /** The one thing the engine is given: where the binary is, and which version it reported. */
 export interface ClaudeBinary {

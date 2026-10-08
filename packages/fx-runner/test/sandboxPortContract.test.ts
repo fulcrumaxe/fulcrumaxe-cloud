@@ -42,13 +42,14 @@ describeSandboxPortContract("hostSandbox", (runtime) => {
     stateDir: "/home/contract-user/.fx-runner",
     binaryDir: "/opt/claude/bin",
     tempRoot: mkdtempSync(path.join(tmpdir(), "r4b13_contract-")),
+    workspaceRoot: tmpdir(),
   });
   return { port: host, env: () => cleanEnv({ mode: "subscription" }), workdir: mkdtempSync(path.join(tmpdir(), "r4b13_work-")), timeoutMsOf: (handle) => host.timeoutMsOf(handle) };
 }, { reportsOutcomes: true });
 
 describe("the two copies of the port", () => {
   it("are assignable in both directions (checked by tsc; this runs the assignments)", () => {
-    const host = createHostSandbox({ credentials: { mode: "subscription" }, makeRuntime: () => { throw new Error("unused"); }, home: "/h", stateDir: "/h/.fx-runner", binaryDir: "/opt/bin", tempRoot: tmpdir() });
+    const host = createHostSandbox({ credentials: { mode: "subscription" }, makeRuntime: () => { throw new Error("unused"); }, home: "/h", stateDir: "/h/.fx-runner", binaryDir: "/opt/bin", tempRoot: tmpdir(), workspaceRoot: tmpdir() });
     expect(asReal(host)).toBe(host);
   });
 });

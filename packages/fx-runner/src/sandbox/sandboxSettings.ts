@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 
 /** The one model host every job may reach. */
@@ -11,6 +12,33 @@ export const CREDENTIAL_FLOOR: readonly string[] = Object.freeze([
   ".ssh", ".aws", ".config/gh", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc",
   ".claude", ".claude.json", ".config/fx-runner", ".local/share/keyrings", "Library/Keychains",
 ]);
+
+/**
+ * Where an agent that could write to the home directory would persist a foothold, relative to the home directory:
+ * shell start-up files, user services, login items and the version-control config. Edits are denied; reads are not.
+ */
+export const PERSISTENCE_TARGETS: readonly string[] = Object.freeze([
+  ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+  ".config/fish", ".config/systemd/user", "Library/LaunchAgents", ".config/autostart", ".gitconfig", ".config/git",
+]);
+
+/**
+ * The one protected-path list. `noAccess` (read and edit): the credential floor, the runner's state directory and the
+ * stored agent binary's directory. `noEdit`: the persistence targets. The sandbox builder refuses grants over both, and
+ * the file-tool deny rules are generated from these same two arrays.
+ */
+export interface ProtectedPaths {
+  readonly noAccess: readonly string[];
+  readonly noEdit: readonly string[];
+}
+
+export function protectedPaths(input: { home: string; stateDir: string; binaryDir: string }): ProtectedPaths {
+  if (!path.isAbsolute(input.home) || !path.isAbsolute(input.stateDir) || !path.isAbsolute(input.binaryDir)) throw new TypeError("protectedPaths: home, stateDir and binaryDir must be absolute");
+  return {
+    noAccess: [...CREDENTIAL_FLOOR.map((entry) => path.join(input.home, entry)), path.normalize(input.stateDir), path.normalize(input.binaryDir)],
+    noEdit: PERSISTENCE_TARGETS.map((entry) => path.join(input.home, entry)),
+  };
+}
 
 /** System-wide places that are never granted, whatever a job asks for. */
 const NEVER_GRANTED: readonly string[] = Object.freeze(["/", "/etc", "/Library/Keychains"]);
@@ -26,6 +54,11 @@ export interface SandboxInput {
   stateDir: string;
   /** The directory holding the stored agent binary. Writes are denied, and no grant may overlap it. Absolute. */
   binaryDir: string;
+  /** The directory every workspace is made under, and the directory every temp directory is made under. Absolute. */
+  workspaceRoot: string;
+  tempRoot: string;
+  /** Named roots (R7) under which extra read or write paths may sit, besides the workspace and the temp directory. */
+  extraRoots?: readonly string[];
   /** The repository's declared package registries (hosts), none by default. */
   registries?: readonly string[];
   /** R7's per-job additions, already floor-checked by the caller and checked again here. */
@@ -57,17 +90,43 @@ export class SandboxGrantRefused extends TypeError {
   }
 }
 
-function inside(parent: string, child: string): boolean {
-  const rel = path.relative(parent, child);
+/**
+ * Whether `child` is `parent` or under it. `fold` compares case-insensitively, because the default macOS volume is
+ * case-insensitive (`~/.SSH` is `~/.ssh` there). Fold only where a match means "refuse" (the protected-overlap test):
+ * folding in an allowlist would let `/Work/x` pass for a root `/work`, which on a case-sensitive volume is another place.
+ */
+function inside(parent: string, child: string, fold = false): boolean {
+  const rel = fold ? path.relative(parent.toLowerCase(), child.toLowerCase()) : path.relative(parent, child);
   // A whole-segment test: a child named `..cache` is inside its parent, a path that climbs out (`..` or `../x`) is not.
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
-function assertGrantable(label: string, value: string, home: string, floor: readonly string[]): string {
+/** The path with every symlink in its existing part resolved; a part that does not exist yet is kept as written. */
+function realOf(value: string): string {
+  try {
+    return realpathSync(value);
+  } catch {
+    // fx-swallow-ok: a path that does not exist yet resolves through its nearest existing parent
+    const up = path.dirname(value);
+    return up === value ? value : path.join(realOf(up), path.basename(value));
+  }
+}
+
+/** Two paths overlap if either contains the other, as written or once symlinks are followed. */
+function overlaps(a: string, b: string): boolean {
+  for (const x of [a, realOf(a)]) for (const y of [b, realOf(b)]) if (inside(x, y, true) || inside(y, x, true)) return true;
+  return false;
+}
+
+function assertGrantable(label: string, value: string, home: string, guarded: readonly string[], roots: readonly string[], mayEqualRoot = false): string {
   if (!path.isAbsolute(value) || value.split(path.sep).includes("..") || value !== path.normalize(value)) throw new SandboxGrantRefused(`sandboxSettings: ${label} must be a normalised absolute path`);
   const trimmed = value.length > 1 && value.endsWith(path.sep) ? value.slice(0, -1) : value;
-  if (trimmed === home || NEVER_GRANTED.includes(trimmed) || /\.sock$/.test(trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} may not be the home directory, a system directory or a socket`);
-  for (const protectedPath of floor) if (inside(protectedPath, trimmed) || inside(trimmed, protectedPath)) throw new SandboxGrantRefused(`sandboxSettings: ${label} overlaps a credential location`);
+  if ((inside(trimmed, home, true) && inside(home, trimmed, true)) || NEVER_GRANTED.includes(trimmed) || /\.sock$/.test(trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} may not be the home directory, a system directory or a socket`);
+  for (const protectedPath of guarded) if (overlaps(protectedPath, trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} overlaps a protected location`);
+  // An allowlist, compared exactly (no case folding): the grant, and where it really lands once symlinks are followed,
+  // must both be strictly under a runner-owned root. A grant equal to a root is the root itself, not a child of it.
+  const under = (root: string, grant: string): boolean => inside(root, grant) && (mayEqualRoot || path.relative(root, grant) !== "");
+  if (!roots.some((root) => under(root, trimmed) && under(realOf(root), realOf(trimmed)))) throw new SandboxGrantRefused(`sandboxSettings: ${label} is not under a runner-owned root`);
   return trimmed;
 }
 
@@ -84,20 +143,24 @@ function assertGrantable(label: string, value: string, home: string, floor: read
  *    (the job then fails instead of running unconfined), and not through the weaker nested or network modes.
  *
  * This is the only builder: the engine writes its result into the settings file, and the sandbox probe in `doctor` calls
- * the same function. Every key here is in the sandboxing documentation for Claude Code 2.1.259, the minimum version
- * this runner supports (`strictAllowlist` needs 2.1.219, `credentials` 2.1.246).
+ * the same function. Every key here is in the sandboxing documentation for Claude Code; the minimum version this runner
+ * supports is `MIN_CLAUDE_VERSION` (2.1.294, the oldest build the canary has passed on), and `strictAllowlist` needs
+ * 2.1.219 and `credentials` 2.1.246, both below it.
  */
 export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const { home } = input;
   if (!path.isAbsolute(home)) throw new TypeError("sandboxSettings: home must be absolute");
   if (!path.isAbsolute(input.stateDir) || !path.isAbsolute(input.binaryDir)) throw new TypeError("sandboxSettings: stateDir and binaryDir must be absolute");
   const floor = CREDENTIAL_FLOOR.map((entry) => path.join(home, entry));
-  // The runner's state and the agent binary's directory are never granted either, so a grant cannot reopen a write there.
-  const guarded = [...floor, path.normalize(input.stateDir), path.normalize(input.binaryDir)];
-  const workspace = assertGrantable("workspace", input.workspace, home, guarded);
-  const tempDir = assertGrantable("tempDir", input.tempDir, home, guarded);
-  const extraRead = (input.extraReadPaths ?? []).map((value) => assertGrantable("extra read path", value, home, guarded));
-  const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded));
+  if (!path.isAbsolute(input.workspaceRoot) || !path.isAbsolute(input.tempRoot)) throw new TypeError("sandboxSettings: workspaceRoot and tempRoot must be absolute");
+  // The protected list (floor, state, binary directory, persistence targets) is never granted, so a grant cannot reopen a write there.
+  const listed = protectedPaths({ home, stateDir: input.stateDir, binaryDir: input.binaryDir });
+  const guarded = [...listed.noAccess, ...listed.noEdit];
+  const workspace = assertGrantable("workspace", input.workspace, home, guarded, [path.normalize(input.workspaceRoot)]);
+  const tempDir = assertGrantable("tempDir", input.tempDir, home, guarded, [path.normalize(input.tempRoot)]);
+  const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true))];
+  const extraRead = (input.extraReadPaths ?? []).map((value) => assertGrantable("extra read path", value, home, guarded, roots));
+  const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded, roots));
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
   const unique = (values: string[]): string[] => [...new Set(values)];
   return {
@@ -105,14 +168,14 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
     failIfUnavailable: true,
     allowUnsandboxedCommands: false,
     excludedCommands: [] as string[],
-    autoAllowBashIfSandboxed: true,
+    autoAllowBashIfSandboxed: false,
     enableWeakerNestedSandbox: false,
     enableWeakerNetworkIsolation: false,
     filesystem: {
       disabled: false,
       allowWrite: unique([workspace, tempDir, ...extraWrite]),
       denyWrite: [path.normalize(input.stateDir), path.normalize(input.binaryDir)],
-      denyRead: [home],
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir)]),
       allowRead: unique([workspace, tempDir, ...extraRead]),
     },
     credentials: { files: floor.map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },
@@ -126,5 +189,5 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
  */
 export function assertEnabledSandbox(block: unknown): asserts block is Record<string, unknown> {
   const b = block as Record<string, unknown> | null;
-  if (b === null || typeof b !== "object" || b.enabled !== true || b.failIfUnavailable !== true || b.allowUnsandboxedCommands !== false) throw new TypeError("sandbox block is not an enabled, strict one");
+  if (b === null || typeof b !== "object" || b.enabled !== true || b.failIfUnavailable !== true || b.allowUnsandboxedCommands !== false || b.autoAllowBashIfSandboxed !== false) throw new TypeError("sandbox block is not an enabled, strict one");
 }

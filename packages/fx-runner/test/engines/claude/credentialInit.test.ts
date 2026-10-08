@@ -19,7 +19,7 @@ describe("init-line credential check, through the engine", () => {
     "%s mode with init source %s: the process is signalled, nothing is processed, one credential_mismatch is reported",
     async (mode, source) => {
       const { outcome, local, opts } = await runWith(mode, source);
-      expect(outcome).toEqual({ status: "failed", failureReason: "credential_mismatch", engineVersion: "2.1.289" });
+      expect(outcome).toEqual({ status: "failed", failureReason: "credential_mismatch", engineVersion: "2.1.294" });
       expect(opts.events).toEqual([]);
       expect(local.map((event) => event.type)).toEqual(["engine_version", "credential_mismatch"]);
     },
@@ -32,7 +32,7 @@ describe("init-line credential check, through the engine", () => {
     const rig = makeRig({ fake, onLocalEvent: (event) => void local.push(event) });
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.289" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.294" });
     expect(opts.events).toEqual([]);
     expect(local.map((event) => event.type)).toEqual(["engine_version"]);
   });
@@ -44,7 +44,7 @@ describe("init-line credential check, through the engine", () => {
     const rig = makeRig({ fake });
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.289" });
+    expect(await outcomeOf(handle)).toEqual({ status: "failed", failureReason: "no_init_line", engineVersion: "2.1.294" });
     expect(opts.events).toEqual([]);
     expect(Object.keys(readSessionIndex(rig.config.sessionsFile))).toEqual([]);
   });

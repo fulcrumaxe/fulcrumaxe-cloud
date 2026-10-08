@@ -18,11 +18,12 @@ async function run(opts: { stream?: string; stateDirIsWorkspaceRoot?: boolean } 
   const stateDir = path.join(rig.root, "state");
   const host = createHostSandbox({
     credentials: { mode: "subscription" },
-    makeRuntime: (sandbox) => createClaudeEngine({ ...rig.config, sandboxSettings: sandbox }),
+    makeRuntime: (sandbox, protectedList) => createClaudeEngine({ ...rig.config, sandboxSettings: sandbox, protectedPaths: protectedList }),
     home: rig.root,
     stateDir,
     binaryDir: path.dirname(fake.binary),
     tempRoot: path.join(rig.root, "tmp"),
+    workspaceRoot: opts.stateDirIsWorkspaceRoot === true ? path.join(stateDir, "workspaces") : path.join(rig.root, "work"),
   });
   const workspaces = createWorkspaceStore(opts.stateDirIsWorkspaceRoot === true ? path.join(stateDir, "workspaces") : path.join(rig.root, "work"));
   const job = { ...sampleJob(), job_id: "22222222-2222-4222-8222-222222222222", run_id: RUN_ID, continues: null, model_hint: null };
