@@ -7,3 +7,6 @@ export type { EngineConfig, EngineStartOptions, RunOutcome } from "./engines/cla
 export * from "./sandbox/platform.js";
 export * from "./sandbox/sandboxSettings.js";
 export * from "./sandbox/select.js";
+export * from "./sandbox/port.js";
+export { HostSandboxRefused, createHostSandbox } from "./sandbox/hostSandbox.js";
+export type { HostSandbox, HostSandboxConfig } from "./sandbox/hostSandbox.js";
