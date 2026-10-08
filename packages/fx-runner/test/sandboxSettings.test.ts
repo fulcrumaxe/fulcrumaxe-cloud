@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CREDENTIAL_FLOOR, MODEL_HOST, SandboxGrantRefused, assertEnabledSandbox, assertPlainHost, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
@@ -142,5 +143,76 @@ describe("a refused grant carries a closed code", () => {
       expect(caught).toBeInstanceOf(SandboxGrantRefused);
       expect((caught as { code: string }).code).toBe("sandbox_grant_refused");
     }
+  });
+});
+
+describe("the mirrors root (git path B, correction C25 section 2)", () => {
+  const MIRRORS = "/home/jane/.cache/fx-runner/mirrors";
+  const ID_A = "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f";
+  const ID_B = "1c2c7d63-8b54-4e6f-9b88-1a1a1a1a1a1a";
+  const OBJECTS = `${MIRRORS}/${ID_A}.git/objects`;
+
+  it("takes one repo's objects directory as the only read under it: no write entry, and the root in denyWrite and denyRead", () => {
+    const s = block({ mirrorsRoot: MIRRORS, extraReadPaths: [OBJECTS] });
+    expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir, OBJECTS]);
+    expect(s.filesystem.allowWrite).toEqual([base.workspace, base.tempDir]);
+    expect(s.filesystem.denyWrite).toEqual([STATE, BIN, MIRRORS]);
+    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, MIRRORS]);
+  });
+
+  it("changes nothing when no mirrors root is given", () => {
+    expect(block().filesystem.denyWrite).toEqual([STATE, BIN]);
+    expect(() => block({ extraReadPaths: [OBJECTS] })).toThrow(SandboxGrantRefused);
+  });
+
+  it.each([
+    ["the mirrors root", { extraReadPaths: [MIRRORS] }],
+    ["a parent of the mirrors root", { extraReadPaths: ["/home/jane/.cache/fx-runner"] }],
+    ["a second repo's mirror next to the job's own", { extraReadPaths: [OBJECTS, `${MIRRORS}/${ID_B}.git/objects`] }],
+    ["another repo's whole mirror", { extraReadPaths: [`${MIRRORS}/${ID_B}.git`] }],
+    ["a mirror's config", { extraReadPaths: [`${MIRRORS}/${ID_A}.git/config`] }],
+    ["a mirror's hooks", { extraReadPaths: [`${MIRRORS}/${ID_A}.git/hooks`] }],
+    ["a mirror's refs", { extraReadPaths: [`${MIRRORS}/${ID_A}.git/refs`] }],
+    ["a mirror's packed-refs", { extraReadPaths: [`${MIRRORS}/${ID_A}.git/packed-refs`] }],
+    ["a directory inside objects", { extraReadPaths: [`${OBJECTS}/pack`] }],
+    ["a mirror that is not a .git directory", { extraReadPaths: [`${MIRRORS}/${ID_A}/objects`] }],
+    ["a write to the mirrors root", { extraWritePaths: [MIRRORS] }],
+    ["a write to a mirror's objects", { extraWritePaths: [OBJECTS] }],
+    ["a write beside the read of the same objects", { extraReadPaths: [OBJECTS], extraWritePaths: [`${MIRRORS}/${ID_A}.git/refs`] }],
+  ])("refuses %s", (_label, extra) => {
+    expect(() => block({ mirrorsRoot: MIRRORS, ...extra })).toThrow(SandboxGrantRefused);
+  });
+
+  it.each([
+    ["inside the state directory", `${STATE}/mirrors`],
+    ["the state directory itself", STATE],
+    ["a parent of the state directory", HOME],
+    ["inside the binary directory", `${BIN}/mirrors`],
+    ["inside the workspace root", "/home/jane/work/mirrors"],
+    ["inside the temp root", "/tmp/mirrors"],
+    ["inside a credential directory", `${HOME}/.ssh/mirrors`],
+    ["a persistence target", `${HOME}/.config/git/mirrors`],
+    ["the system root", "/"],
+    ["relative", "mirrors"],
+  ])("refuses a mirrors root %s", (_label, mirrorsRoot) => {
+    expect(() => block({ mirrorsRoot })).toThrow();
+  });
+
+  it("refuses a mirrors root that reaches the state directory through a symlink, and an objects directory that links out of its mirror", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "fxr-mirrorlink-"));
+    const home = path.join(dir, "home");
+    const state = path.join(home, ".fx-runner");
+    mkdirSync(path.join(state, "inner"), { recursive: true });
+    symlinkSync(path.join(state, "inner"), path.join(dir, "link"));
+    const own = { workspace: path.join(dir, "work", "r1"), tempDir: path.join(dir, "t", "r1"), home, stateDir: state, binaryDir: path.join(home, "bin"), workspaceRoot: path.join(dir, "work"), tempRoot: path.join(dir, "t") };
+    expect(() => sandboxSettings({ ...own, mirrorsRoot: path.join(dir, "link", "mirrors") })).toThrow(SandboxGrantRefused);
+
+    const root = path.join(dir, "cache", "mirrors");
+    mkdirSync(path.join(root, `${ID_A}.git`), { recursive: true });
+    mkdirSync(path.join(root, `${ID_B}.git`, "objects"), { recursive: true });
+    symlinkSync(path.join(root, `${ID_B}.git`, "objects"), path.join(root, `${ID_A}.git`, "objects"));
+    expect(() => sandboxSettings({ ...own, mirrorsRoot: root, extraReadPaths: [path.join(root, `${ID_A}.git`, "objects")] })).toThrow(SandboxGrantRefused);
+    // The same shape with a real directory is the one grant that works.
+    expect(() => sandboxSettings({ ...own, mirrorsRoot: root, extraReadPaths: [path.join(root, `${ID_B}.git`, "objects")] })).not.toThrow();
   });
 });

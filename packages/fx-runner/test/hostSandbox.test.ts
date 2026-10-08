@@ -10,7 +10,7 @@ import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
 
-function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions } = {}) {
+function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
   const blocks: Block[] = [];
   const starts: unknown[] = [];
   const stops: unknown[] = [];
@@ -41,6 +41,7 @@ function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOpti
     stateDir: `${HOME}/.fx-runner`,
     binaryDir: `${HOME}/.local/bin`,
     registries: ["registry.npmjs.org"],
+    ...(over.mirrorsRoot === undefined ? {} : { mirrorsRoot: over.mirrorsRoot }),
     tempRoot,
     workspaceRoot: tmpdir(),
   });
@@ -213,5 +214,33 @@ describe("hostSandbox: the block goes through the one builder and its guard", ()
     const host = readFileSync(path.join(import.meta.dirname, "..", "src", "sandbox", "hostSandbox.ts"), "utf8");
     expect(host).toContain("sandboxSettings({");
     expect(host.indexOf("assertEnabledSandbox(sandbox)")).toBeLessThan(host.indexOf("config.makeRuntime(sandbox,"));
+  });
+});
+
+describe("hostSandbox: git path B reads one repo mirror's objects and nothing else of the mirrors", () => {
+  const MIRRORS = `${HOME}/.cache/fx-runner/mirrors`;
+  const OBJECTS = `${MIRRORS}/0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f.git/objects`;
+  type FsBlock = { filesystem: { allowRead: string[]; allowWrite: string[]; denyWrite: string[]; denyRead: string[] } };
+
+  it("the job's settings hold exactly one extra read path, no matching write entry, and the mirrors root in denyWrite", async () => {
+    const t = setup({ mirrorsRoot: MIRRORS });
+    const handle = await t.create();
+    t.host.startDetached(handle, t.opts({ extraReadPaths: [OBJECTS] }));
+    const fs = (t.blocks[0] as unknown as FsBlock).filesystem;
+    expect(fs.allowRead).toEqual([t.workdir, expect.stringContaining(t.tempRoot), OBJECTS]);
+    expect(fs.allowWrite).not.toContain(OBJECTS);
+    expect(fs.allowWrite.some((entry) => entry === MIRRORS || entry.startsWith(`${MIRRORS}/`))).toBe(false);
+    expect(fs.denyWrite).toContain(MIRRORS);
+    expect(fs.denyRead).toContain(MIRRORS);
+  });
+
+  it("a job with no grant gets none, and a grant is refused when no mirrors root is configured", async () => {
+    const t = setup({ mirrorsRoot: MIRRORS });
+    t.host.startDetached(await t.create(), t.opts());
+    expect((t.blocks[0] as unknown as FsBlock).filesystem.allowRead).toEqual([t.workdir, expect.stringContaining(t.tempRoot)]);
+    const bare = setup();
+    const handle = await bare.create("rn-2");
+    expect(() => bare.host.startDetached(handle, bare.opts({ extraReadPaths: [OBJECTS] }))).toThrow(/not under a runner-owned root/);
+    expect(bare.blocks).toEqual([]);
   });
 });

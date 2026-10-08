@@ -7,6 +7,8 @@ import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import { createJobHandler, MAX_DONE_ATTEMPTS, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import { createEventRelay, realClock, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
+import { GitPathError } from "../../src/daemon/git.js";
+import { fakeGitPath } from "../helpers/fakeGitPath.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
 import { pollLoop } from "../../src/daemon/pollLoop.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
@@ -14,6 +16,7 @@ import { createWorkspaceStore } from "../../src/job/workspace.js";
 import type { SandboxHandle, SandboxPort, StartDetachedOptions, StartDetachedResult } from "../../src/sandbox/port.js";
 import { recordSession } from "../../src/engines/claude/session.js";
 import { generateRunnerKey } from "../../src/keys.js";
+import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { KEYRING, jobFor, signRaw, signedJob } from "../helpers/signedJob.js";
 import { until } from "../helpers/manualClock.js";
 import { retryBody, startStrictRunnerCloud, stopBody, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
@@ -57,10 +60,12 @@ afterEach(async () => {
 /** A sandbox port that counts every call. `hold` makes the agent run until the sandbox is stopped; otherwise it ends at once with `end`. */
 function recordingPort(over: { hold?: boolean; end?: (runId: string) => NormalizedEvent | undefined; emit?: (n: number) => void } = {}) {
   const calls: string[] = [];
+  const starts: StartDetachedOptions[] = [];
   const handle: SandboxHandle = { runId: "", sandboxName: "rn" };
   let release: (() => void) | undefined;
   const launch = (opts: StartDetachedOptions): StartDetachedResult => {
     calls.push("start");
+    starts.push(opts);
     over.emit?.(0);
     const hookFired = over.hold
       ? new Promise<NormalizedEvent | undefined>((resolve) => {
@@ -94,7 +99,7 @@ function recordingPort(over: { hold?: boolean; end?: (runId: string) => Normaliz
       return true;
     },
   };
-  return { port, calls };
+  return { port, calls, starts };
 }
 
 function makeRig(over: { portOver?: Parameters<typeof recordingPort>[0]; handler?: Partial<JobHandlerDeps>; fetchFn?: typeof fetch } = {}) {
@@ -115,7 +120,7 @@ function makeRig(over: { portOver?: Parameters<typeof recordingPort>[0]; handler
   };
   const ledger = createFileLedger(path.join(root, "jobs.json"), ledgerOptions());
   const deps: JobHandlerDeps = {
-    client, keyring: KEYRING, clock, run, sandbox: port.port, ledger, events: relay, recordSession: (id, workspace) => recordSession(sessionsFile, id, workspace),
+    client, keyring: KEYRING, clock, run, sandbox: port.port, ledger, git: fakeGitPath(), events: relay, recordSession: (id, workspace) => recordSession(sessionsFile, id, workspace),
     heartbeatMs: 1e9, flushMs: 1e9, runJobFn: (job, d) => (calls++, runJob(job, d)), ...over.handler,
   };
   const handler = createJobHandler(deps);
@@ -683,5 +688,99 @@ describe("the pieces together: poll, verify, run, done, then idle", () => {
     expect(handled).toEqual([{ status: "completed", outcome: "succeeded", failureReason: null, prNumber: 7 }]);
     expect(rig.clock.slept).toContain(60_000);
     expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/done", "/api/runner/claim"]);
+  });
+});
+
+describe("git path B around the run (D#6 R4a-3)", () => {
+  const ended = (runId: string) => cloud.runs.get(runId)?.endedBy;
+  const throwing = (code: ConstructorParameters<typeof GitPathError>[0]) => async (): Promise<never> => {
+    throw new GitPathError(code);
+  };
+
+  it("checks the job, fills the new workspace, runs, pushes the run's commit, and only then sends done", async () => {
+    const seenAtPublish: string[][] = [];
+    const filled: string[] = [];
+    const git = fakeGitPath({
+      async prepare(_job, _lease, workspace) {
+        filled.push(workspace);
+        return { base: "b".repeat(40) };
+      },
+      async publish(_job, _lease, workspace, base) {
+        seenAtPublish.push(cloud.seen.map((s) => s.path.replace(/[0-9a-f-]{36}/, ":id")));
+        expect({ workspace, base }).toEqual({ workspace: filled[0], base: "b".repeat(40) });
+        return { pushed: true, branch: "fx/x", sha: "c".repeat(40) };
+      },
+    });
+    const rig = makeRig({ handler: { git } });
+    const claimed = await rig.claim();
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "prepare", "publish"]);
+    expect(git.calls[0]).toBe(`check ${claimed.runId} g${claimed.leaseGeneration} fx/`);
+    expect(path.dirname(filled[0]!)).toBe(rig.workspaces);
+    // Nothing but the claim had gone to the cloud when the push ran; done followed it.
+    expect(seenAtPublish).toEqual([["/api/runner/claim"]]);
+    expect(sentToCloud().at(-1)).toBe("/api/runner/runs/:id/done");
+  });
+
+  it("a push that fails sends no done: run_ended runner_setup / other, and the failure code is returned", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ publish: throwing("push_failed") }) } });
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "push_failed" });
+    expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
+    expect(ended(claimed.runId)).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "other" });
+  });
+
+  it("a workspace that cannot be filled is removed, no sandbox is made, and the run ends runner_setup / other", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ prepare: throwing("workspace_failed") }) } });
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "workspace_failed" });
+    expect(readdirSync(rig.workspaces)).toEqual([]);
+    expect(rig.port.calls).toEqual([]);
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "other" });
+  });
+
+  it("the sandbox is started with the git path's read grants for this job, and with none when the path names none", async () => {
+    const grant = "/cache/fx-runner/mirrors/00000000-0000-4000-8000-000000000000.git/objects";
+    const rig = makeRig({ handler: { git: fakeGitPath({ readGrants: () => [grant] }) } });
+    expect((await rig.handle(await rig.claim())).status).toBe("completed");
+    expect(rig.port.starts.map((s) => s.extraReadPaths)).toEqual([[grant]]);
+    rig.ledger.close();
+    const plain = makeRig();
+    expect((await plain.handle(await plain.claim())).status).toBe("completed");
+    expect(plain.port.starts.map((s) => s.extraReadPaths)).toEqual([[]]);
+  });
+
+  it("a continuation on a role that is not the executor is refused as continues_wrong_role: one run_ended, nothing made", async () => {
+    const base = jobFor({ role: "code-reviewer", role_tools_sha256: roleToolsDigest("code-reviewer"), continues: { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: "s1", branch: "fx/22222222-2222-4222-8222-222222222222-g1" } });
+    const rig = makeRig();
+    const claimed = await rig.claim(signRaw(base) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "refused", reason: "continues_wrong_role" });
+    expect(rig.runJobCalls()).toBe(0);
+    expect(rig.port.calls).toEqual([]);
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "job_refused", detail: "continues_wrong_role" });
+  });
+
+  it("a job the path will not push is refused before runJob: no workspace, no sandbox", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ check: () => { throw new GitPathError("continuation_unsupported"); } }) } });
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "continuation_unsupported" });
+    expect(rig.runJobCalls()).toBe(0);
+    expect(existsSync(rig.workspaces)).toBe(false);
+    expect(rig.port.calls).toEqual([]);
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "other" });
+  });
+
+  it("a run that failed pushes nothing", async () => {
+    const git = fakeGitPath();
+    const rig = makeRig({ portOver: { end: (runId) => resultEvent(runId, { type: "error" }) }, handler: { git } });
+    const claimed = await rig.claim();
+    expect((await rig.handle(claimed)).status).toBe("failed");
+    expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "prepare"]);
+  });
+
+  it("an error that is not the git path's own is not swallowed", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ publish: async () => { throw new RangeError("boom"); } }) } });
+    const claimed = await rig.claim();
+    await expect(rig.handle(claimed)).rejects.toThrow("boom");
   });
 });

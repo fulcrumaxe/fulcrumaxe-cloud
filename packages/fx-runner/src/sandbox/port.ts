@@ -35,6 +35,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   backend?: string;
   env: Record<string, string>;
   extension?: unknown;
+  /** Read-only grants for this job, each checked again by the host sandbox's builder (git path B: one repo mirror's `objects` directory). */
+  extraReadPaths?: readonly string[];
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

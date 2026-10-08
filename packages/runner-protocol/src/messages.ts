@@ -41,7 +41,7 @@ export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_fail
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
-export const JOB_REFUSED_DETAILS = ["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch"] as const;
+export const JOB_REFUSED_DETAILS = ["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role"] as const;
 export const RUNNER_SETUP_DETAILS = [
   "sandbox_unavailable",
   "claude_binary_missing",

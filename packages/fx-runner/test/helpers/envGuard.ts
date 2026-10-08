@@ -47,6 +47,11 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
+  "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id
+  "src/daemon/gitPath.ts": ["path"], // the snapshots directory under the runner's state directory
+  "src/daemon/snapshot.ts": ["fs", "fs/promises", "path"], // the daemon-owned copy of the workspace's git files: no-follow reads, one 0700 directory per push
+  "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path
+  "src/daemon/workspaceGit.ts": ["fs", "path"], // lstat of the agent-written `.git`: nothing in it is followed
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/filePermissions.ts": ["path"],
