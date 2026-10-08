@@ -21,6 +21,8 @@ export const COPY = {
   approval: "Waiting for {person} to approve (it runs on their Claude plan).",
   lost: "Runner lost contact at {time}. Retrying from the last pushed commit (attempt {n} of 2).",
   timedOut: "Timed out waiting for a runner.",
+  /** The reason on a queued runner run that was cancelled because its repo left `runner_local` (failure reason `execution_mode_changed`). */
+  executionModeChanged: "Cancelled because this repository was moved off your runner. Retry to run it under the new setting.",
   paused: "Paused: Claude usage limit reached.",
   /** D#6 R4a-2 (C24 section 1): `{detail}` is the closed code the runner sent, shown as it is; nothing else the runner says is shown. */
   jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",

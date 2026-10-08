@@ -337,11 +337,13 @@ describe("compute-settle-sweep", () => {
 
 describe("runner-sweeper (D#6 R2b)", () => {
   const HOUR = 60 * MIN;
-  const none = { listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null as number | null };
+  const none = { listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null as number | null };
   const noLeases = { leasesListed: 0, lost: 0, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0, joblessRetried: 0, joblessFailed: 0, joblessErrors: 0, revoked: 0, wallClockTimedOut: 0, held: 0, leasesSkipped: 0, leasesFailed: 0, nextDueAt: null as number | null };
+  const noNotices = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, failed: 0, nextDueAt: null as number | null };
   const sweepRunnerQueue = vi.fn(async () => none);
   const sweepRunnerLeases = vi.fn(async () => noLeases);
-  const getWorker = vi.fn(async () => ({ sweepRunnerQueue, sweepRunnerLeases }) as { sweepRunnerQueue: typeof sweepRunnerQueue; sweepRunnerLeases: typeof sweepRunnerLeases } | null);
+  const sweepRunnerNotices = vi.fn(async () => noNotices);
+  const getWorker = vi.fn(async () => ({ sweepRunnerQueue, sweepRunnerLeases, sweepRunnerNotices }) as { sweepRunnerQueue: typeof sweepRunnerQueue; sweepRunnerLeases: typeof sweepRunnerLeases; sweepRunnerNotices: typeof sweepRunnerNotices } | null);
   const deps = () => ({ cronSecret: SECRET, getWorker, log: vi.fn() });
   beforeEach(() => {
     getWorker.mockClear();
@@ -349,6 +351,8 @@ describe("runner-sweeper (D#6 R2b)", () => {
     sweepRunnerQueue.mockResolvedValue(none);
     sweepRunnerLeases.mockReset();
     sweepRunnerLeases.mockResolvedValue(noLeases);
+    sweepRunnerNotices.mockReset();
+    sweepRunnerNotices.mockResolvedValue(noNotices);
   });
 
   it("with no pending work builds no worker and sweeps nothing", async () => {
@@ -393,7 +397,7 @@ describe("runner-sweeper (D#6 R2b)", () => {
     vi.setSystemTime(clock.value);
     sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, expired: 1 });
     const due = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
-    expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, waiting: 0, skipped: 0, failed: 0, leases: (({ nextDueAt: _n, ...rest }) => rest)(noLeases) });
+    expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, cancelled: 0, waiting: 0, skipped: 0, failed: 0, leases: (({ nextDueAt: _n, ...rest }) => rest)(noLeases) });
     // A marker younger than a minute is kept, as its writer may not have committed; the next tick finds nothing and clears it.
     advance(6 * MIN);
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
@@ -479,6 +483,27 @@ describe("runner-sweeper (D#6 R2b)", () => {
     });
   });
 
+  it("the earliest due time of the queue sweep and the notice sweep is the one kept (the 15 minute notice comes before the 72 hour end)", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(20 * MIN);
+    const queueDue = clock.value + 72 * HOUR;
+    const noticeDue = clock.value + 40 * MIN;
+    await markWorkPending("runner-sweeper", { since: clock.value + 10 * MIN });
+    advance(15 * MIN);
+    sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, waiting: 1, nextDueAt: queueDue });
+    sweepRunnerNotices.mockResolvedValueOnce({ ...noNotices, listed: 1, nextDueAt: noticeDue });
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(10 * MIN);
+    getWorker.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+    clock.value = noticeDue;
+    vi.setSystemTime(clock.value);
+    sweepRunnerNotices.mockClear();
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(sweepRunnerNotices).toHaveBeenCalledTimes(1);
+  });
+
   it("a failed run keeps the next tick coming soon instead of dropping the marker", async () => {
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
     advance(20 * MIN);
@@ -534,7 +559,7 @@ describe("runner-sweeper (D#6 R2b)", () => {
     const d = { cronSecret: SECRET, getWorker: async () => null, log: vi.fn() };
     const res = await runnerSweeperHandler(cronRequest("runner-sweeper"), d);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ configured: false, listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0 });
+    expect(await res.json()).toEqual({ configured: false, listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0 });
     expect(d.log).toHaveBeenCalledWith("runner sweeper: worker not configured");
   });
 });

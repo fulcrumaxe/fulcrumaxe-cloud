@@ -11,6 +11,7 @@ import { revokeRunnerHandler } from "../app/api/runners/[id]/revoke/handler";
 import { revokeAllHandler } from "../app/api/runners/revoke-all/handler";
 import { listRunnersHandler } from "../app/api/runners/handler";
 import { approveRunHandler } from "../app/api/runners/runs/[id]/approve/handler";
+import { executionModeHandler } from "../app/api/runners/repos/[id]/execution-mode/handler";
 import { makeRegisterHandler } from "../app/api/runner/register/handler";
 import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
 import type { RateLimitStore } from "@fx/api/src/ratelimit/store.js";
@@ -134,10 +135,11 @@ describe("a runner-signed request is not a session (every route outside api/runn
       () => revokeRunnerHandler(signedNext(`${ORIGIN}/api/runners/x/revoke`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => revokeAllHandler(signedNext(`${ORIGIN}/api/runners/revoke-all`)),
       () => revokeAllHandler(signedNext(`${ORIGIN}/api/runners/revoke-all`, { authorization: "Bearer fxat_notarealtoken" })),
-      // D#6 R2b: the list and the approval are session routes too.
+      // D#6 R2b: the list, the approval and the execution-mode change are session routes too.
       () => listRunnersHandler(signedNext(`${ORIGIN}/api/runners`)),
       () => listRunnersHandler(signedNext(`${ORIGIN}/api/runners`, { authorization: "Bearer fxat_notarealtoken" })),
       () => approveRunHandler(signedNext(`${ORIGIN}/api/runners/runs/x/approve`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      () => executionModeHandler(signedNext(`${ORIGIN}/api/runners/repos/x/execution-mode`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
     ];
     for (const call of calls) expect((await call()).status).toBe(401);
   });

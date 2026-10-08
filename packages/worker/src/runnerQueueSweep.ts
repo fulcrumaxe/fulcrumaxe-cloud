@@ -14,6 +14,13 @@ import { RUNNER_QUEUE_TTL_MS, writeRunStatus } from "@fx/runner";
  * A run that has no job yet falls back to `created_at` plus the queue time, so a run whose job was never written is still
  * cleaned up.
  *
+ * Race backstop (correction C24 section 2): switching a repo off `runner_local` cancels its pending runner runs in the switch's own
+ * transaction, but a dispatch that read the old mode can insert one just after the switch commits. So each tick also cancels,
+ * whatever the run's age, a pending runner run whose repo is now in another mode (`sandbox`), with the failure reason
+ * `execution_mode_changed` and through the same writer: it would otherwise wait out its 72 hours, never claimed. A run whose repo
+ * row is gone is not touched here (no mode change ended it; its queue time does). Only runs the lister returns are looked at, and
+ * the lister is oldest first and limited to 50, so a run behind 50 older waiting runs is reached once those are claimed or end.
+ *
  * Requeue is the existing `retry_run` (no new path). A retry of a run that ended this way keeps the same model (C12 A5; the
  * retry module already refuses to escalate on `queue_ttl`).
  *
@@ -29,6 +36,8 @@ export interface RunnerQueueSweepResult {
   listed: number;
   /** Runs moved to `timed_out` by this tick. */
   expired: number;
+  /** Runs cancelled because their repo is no longer `runner_local` (the race backstop). */
+  cancelled: number;
   /** Runs still inside their queue time. */
   waiting: number;
   /** Runs that were no longer waiting when looked at again, or that another writer moved first. */
@@ -62,21 +71,29 @@ export function createRunnerQueueSweeper(pool: Pool, deps: RunnerQueueSweepDeps 
   const now = deps.now ?? Date.now;
   return {
     async sweepRunnerQueue() {
-      const result: RunnerQueueSweepResult = { listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null };
+      const result: RunnerQueueSweepResult = { listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null };
       const { rows } = await pool.query<Waiting>("SELECT account_id, run_id, created_at FROM agent_run_list_pending_runner_runs($1)", [RUNNER_QUEUE_SWEEP_BATCH]);
       result.listed = rows.length;
       let earliest: number | null = null;
       for (const row of rows) {
         try {
           const state = await withTenant(pool, row.account_id, async (client) => {
-            const found = await client.query<{ status: string; expires_at: string | null }>(
-              "SELECT status, job_signed #>> '{job,expires_at}' AS expires_at FROM agent_runs WHERE id = $1 AND account_id = $2",
+            const found = await client.query<{ status: string; expires_at: string | null; repo_mode: string | null }>(
+              `SELECT a.status, a.job_signed #>> '{job,expires_at}' AS expires_at,
+                      (SELECT g.execution_mode FROM repos g WHERE g.id = a.dispatch_repo_id AND g.account_id = a.account_id) AS repo_mode
+                 FROM agent_runs a WHERE a.id = $1 AND a.account_id = $2`,
               [row.run_id, row.account_id],
             );
             return found.rows[0];
           });
           if (!state || state.status !== "pending") {
             result.skipped++;
+            continue;
+          }
+          if (state.repo_mode !== null && state.repo_mode !== "runner_local") {
+            const moved = await writeRunStatus(pool, { accountId: row.account_id, runId: row.run_id, from: "pending", to: "cancelled", failureReason: "execution_mode_changed" });
+            if (moved.updated) result.cancelled++;
+            else result.skipped++;
             continue;
           }
           const parsed = state.expires_at === null ? Number.NaN : Date.parse(state.expires_at);
@@ -97,7 +114,7 @@ export function createRunnerQueueSweeper(pool: Pool, deps: RunnerQueueSweepDeps 
       }
       // A full batch may have left more behind, and a failure should be tried again soon; otherwise the next run to expire.
       if (result.failed > 0) result.nextDueAt = now() + (deps.retryDelayMs ?? 5 * 60_000);
-      else if (rows.length >= RUNNER_QUEUE_SWEEP_BATCH && result.expired + result.skipped > 0) result.nextDueAt = now();
+      else if (rows.length >= RUNNER_QUEUE_SWEEP_BATCH && result.expired + result.cancelled + result.skipped > 0) result.nextDueAt = now();
       else result.nextDueAt = earliest;
       return result;
     },

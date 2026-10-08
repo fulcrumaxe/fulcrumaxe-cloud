@@ -7,6 +7,7 @@ import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/sto
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
 import { runnerLimitsFor } from "@fx/worker";
+import { createAppRepoVisibility } from "./github/repoVisibility";
 import { getWorker } from "./worker";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
@@ -35,9 +36,12 @@ async function requireWorker() {
   return worker;
 }
 
+let visibilityPort: ReturnType<typeof createAppRepoVisibility> | undefined;
+const liveVisibility = (): ReturnType<typeof createAppRepoVisibility> => (visibilityPort ??= createAppRepoVisibility());
+
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }) };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

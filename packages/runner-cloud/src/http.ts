@@ -89,6 +89,11 @@ export interface RunnerCloudDeps {
    * as unavailable. An account that is not on the runner plan is never asked.
    */
   maxRunners?: () => number;
+  /**
+   * Whether a repository is private, asked of GitHub (apps/web supplies it). Anything but "private" keeps a repo off a
+   * runner. Absent is "unknown".
+   */
+  repoVisibility?: (accountId: string, repoId: string) => Promise<"private" | "public" | "unknown">;
 }
 
 export type FailRunnerLeases = (input: { accountId: string; runnerId: string; reason: "runner_revoked" }) => Promise<{ runIds: string[]; complete: boolean }>;

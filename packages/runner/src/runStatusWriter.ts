@@ -227,6 +227,17 @@ export async function recordAgentOutputCapped(
   );
 }
 
+/**
+ * D#6 R2b: one notice row (`runner.waiting` or `runner.ttl_reminder`) on a run that is waiting for a runner, written on the
+ * caller's client so it commits with the caller's "no such notice yet" check. The payload is ids and times only.
+ */
+export async function recordRunnerNotice(
+  client: PoolClient,
+  p: { accountId: string; runId: string; kind: "runner.waiting" | "runner.ttl_reminder"; payload: Record<string, unknown> },
+): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, p.kind, p.payload);
+}
+
 /** D#2 PREVIEW-RUNNER-EVENTS: one `run.stage` row. The caller has already limited `stage` to a fixed name. */
 export async function recordRunStage(pool: Pool, p: { accountId: string; runId: string; stage: string }): Promise<void> {
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "run.stage", { stage: p.stage }));
@@ -515,6 +526,38 @@ function checkRunStatusParams(params: WriteRunStatusParams): void {
   }
 }
 
+/** The `run.status_changed` `run_events` row of one status move, with the failure reason when there is one. */
+async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason">): Promise<void> {
+  await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
+    from: params.from,
+    to: params.to,
+    ...(params.failureReason ? { failureReason: params.failureReason } : {}),
+  });
+}
+
+async function emitRunStatusDomainEvent(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to">): Promise<void> {
+  await emitDomainEvent(client, {
+    type: "run.status_changed",
+    accountId: params.accountId,
+    subjectId: params.runId,
+    payload: {
+      runId: params.runId,
+      from: params.from,
+      to: params.to,
+    },
+  });
+}
+
+/**
+ * The events of a status move that was written elsewhere, by a database function that holds its own compare-and-set (the
+ * execution-mode switch cancels a repo's queued runner runs in the database, 0759): the `run.status_changed` row and the domain
+ * event, from the same code `writeRunStatusOn` uses, in the caller's transaction. It writes nothing to `agent_runs`.
+ */
+export async function recordRunStatusMove(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason">): Promise<void> {
+  await recordRunStatusChanged(client, params);
+  await emitRunStatusDomainEvent(client, params);
+}
+
 /**
  * The same write on a client the caller already holds, inside the caller's tenant transaction (D#6 R2b-3): a runner's claim,
  * its events and the sweeper move a run's status in the SAME transaction as the lease columns they check, so the two commit or
@@ -541,11 +584,7 @@ export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatu
     ],
   );
   if (written[0]?.updated === true) {
-    await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
-      from: params.from,
-      to: params.to,
-      ...(params.failureReason ? { failureReason: params.failureReason } : {}),
-    });
+    await recordRunStatusChanged(client, params);
     if (checkpoint) {
       await insertRunEvent(client, params.accountId, params.runId, "checkpoint", {
         ...(checkpoint.reason === "agent_checkpoint"
@@ -564,16 +603,7 @@ export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatu
         flags: params.metering.flags,
       });
     }
-    await emitDomainEvent(client, {
-      type: "run.status_changed",
-      accountId: params.accountId,
-      subjectId: params.runId,
-      payload: {
-        runId: params.runId,
-        from: params.from,
-        to: params.to,
-      },
-    });
+    await emitRunStatusDomainEvent(client, params);
     return { updated: true };
   }
   const { rows } = await client.query<{ status: RunStatus }>(
