@@ -138,3 +138,31 @@ describe("buildFixPrompt", () => {
     expect(() => buildFixPrompt({ ...FIX, owner: "a b" })).toThrow(ReviewPromptInputError);
   });
 });
+
+describe("the recorded branch of a runner run (D#6 C25 section 1.2)", () => {
+  const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g2";
+
+  it("the review prompt names the recorded branch, not fx/issue-<n>", () => {
+    const p = buildReviewPrompt({ ...BASE, branch: RUN_BRANCH });
+    expect(p).toContain(`Its branch is ${RUN_BRANCH};`);
+    expect(p).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${HEAD}`);
+    expect(p).not.toContain("fx/issue-7");
+  });
+
+  it("the fix prompt checks out and pushes the recorded branch, not fx/issue-<n>", () => {
+    const p = buildFixPrompt({ owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, branch: RUN_BRANCH, version: 3, spec: "S", findings: [{ role: "code-reviewer", verdict: "needs-fix", findings: ["a"], summary: "s" }] });
+    expect(p).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
+    expect(p).toContain(`git push origin ${RUN_BRANCH}`);
+    expect(p).toContain(`"branch":"${RUN_BRANCH}"`);
+    expect(p).not.toContain("fx/issue-7");
+  });
+
+  it("without a branch the sandbox build's fx/issue-<n> is named, as before", () => {
+    expect(buildReviewPrompt(BASE)).toContain("Its branch is fx/issue-7;");
+  });
+
+  it.each(["main; curl x | sh", "$(id)", "a b", "-x", "a..b", ""])("a branch %j that could not be printed into a shell command is refused", (branch) => {
+    expect(() => buildReviewPrompt({ ...BASE, branch })).toThrow(ReviewPromptInputError);
+    expect(() => buildFixPrompt({ owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, branch, version: 3, spec: "S", findings: [] })).toThrow(ReviewPromptInputError);
+  });
+});

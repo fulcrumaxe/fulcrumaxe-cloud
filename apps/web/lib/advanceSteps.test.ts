@@ -8,7 +8,7 @@ const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ACTION = "44444444-4444-4444-8444-444444444444";
 
-const ITEM_OK: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null };
+const ITEM_OK: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const issue = (over: Partial<Extract<IssueReadResult, { status: "found" }>> = {}): IssueReadResult => ({ status: "found", title: "T", body: "B", login: "owner-1", state: "open", labels: [], ...over });
 type L = { name: string; actorLogin: string | null; actorPermission: "admin" | "maintain" | "write" | "triage" | "read" | "none" | null };
 const maintainer = (name: string): L => ({ name, actorLogin: "maint", actorPermission: "maintain" });
@@ -257,7 +257,7 @@ describe("loadBody: an item at needs_human with its Spec is loaded for Build aga
   const withItem = (over: Partial<AdvanceItem>) => worker({ advanceLoadItem: async (): Promise<AdvanceItem | null> => ({ ...STUCK, ...over }) });
 
   it("hands the rebuild the Spec version to pin and the repository facts for the open-pull-request look; reads no issue, even with no reader", async () => {
-    expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "rebuild", number: 7, specVersion: 4, repoId: REPO, owner: "acme", name: "widgets" });
+    expect(await loadBody(withItem({}), null, ACCOUNT, ITEM)).toEqual({ ok: true, mode: "rebuild", number: 7, specVersion: 4, repoId: REPO, owner: "acme", name: "widgets", executionMode: "sandbox", recordedPr: null });
   });
   it.each(["critical", "feature", "small", "bug", "doc"])("a %s item is built again", async (kind) => {
     expect(await loadBody(withItem({ kind }), null, ACCOUNT, ITEM)).toMatchObject({ ok: true, mode: "rebuild" });

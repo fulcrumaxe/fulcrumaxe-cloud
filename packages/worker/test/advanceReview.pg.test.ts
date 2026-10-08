@@ -772,6 +772,111 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     });
   });
 
+  describe("a runner repository's pull request is the one its run recorded at done (D#6 C25 section 1.2)", () => {
+    const branchOf = (runId: string, generation = 1) => `fx/${runId}-g${generation}`;
+    /** An executor run that finished through the runner's `done`, recording `prNumber` and `branch` the way the writer does. */
+    async function doneRun(a: SeedRefs, workItemId: string, o: { prNumber: number | null; branch?: (id: string) => string | undefined; role?: string; status?: "succeeded" | "failed" }): Promise<string> {
+      const id = randomUUID();
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, $4, 'production', 'running')", [id, a.accountId, workItemId, o.role ?? "executor"]);
+      const branch = o.branch ? o.branch(id) : branchOf(id);
+      const to = o.status ?? "succeeded";
+      await writeRunStatus(writerPool, {
+        accountId: a.accountId,
+        runId: id,
+        from: "running",
+        to,
+        ...(to === "failed" ? { failureReason: "scope_violation" } : {}),
+        runnerDone: { prNumber: o.prNumber, ...(branch === undefined ? {} : { branch }) },
+      });
+      return id;
+    }
+    const mode = (a: SeedRefs, executionMode: string) => admin.query("UPDATE repos SET execution_mode = $2 WHERE id = $1", [a.repoId, executionMode]);
+    const recordedOf = async (a: SeedRefs, w: string) => {
+      const fromReview = await build({}, review()).module.advanceLoadReview(who(a, w));
+      const fromItem = await build().module.advanceLoadItem(a.accountId, w);
+      expect(fromReview.ok).toBe(true);
+      const ctx = (fromReview as { ctx: { executionMode: string; recordedPr: unknown } }).ctx;
+      // The two loads (the review's and "Check the build" and "Build again"'s) answer the same.
+      expect({ executionMode: fromItem!.executionMode, recordedPr: fromItem!.recordedPr }).toEqual({ executionMode: ctx.executionMode, recordedPr: ctx.recordedPr });
+      return ctx;
+    };
+
+    it("a runner_local repository answers the recorded number and branch, and the branch is not fx/issue-<n>", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      await mode(a, "runner_local");
+      const w = await item(a);
+      const run = await doneRun(a, w, { prNumber: 41 });
+      const ctx = await recordedOf(a, w);
+      expect(ctx).toMatchObject({ executionMode: "runner_local", recordedPr: { number: 41, branch: branchOf(run) } });
+      expect((ctx.recordedPr as { branch: string }).branch).not.toBe(`fx/issue-${await numberOf(w)}`);
+    });
+
+    it("no record is null: a run with no pull request, a run that has not finished, and an item with no run", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      await mode(a, "runner_local");
+      const w = await item(a);
+      expect(await recordedOf(a, w)).toMatchObject({ executionMode: "runner_local", recordedPr: null });
+      await doneRun(a, w, { prNumber: null, branch: () => undefined });
+      expect(await recordedOf(a, w)).toMatchObject({ recordedPr: null });
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'production', 'running')", [randomUUID(), a.accountId, w]);
+      expect(await recordedOf(a, w)).toMatchObject({ recordedPr: null });
+    });
+
+    it("the newest succeeded recording wins (a fix round's done); a failed run's newer record is ignored, and with only a failed record there is none", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      await mode(a, "runner_local");
+      const w = await item(a);
+      await doneRun(a, w, { prNumber: 41 });
+      const fix = await doneRun(a, w, { prNumber: 41 });
+      expect(await recordedOf(a, w)).toMatchObject({ recordedPr: { number: 41, branch: branchOf(fix) } });
+      // A newer run that failed (its pull request was closed for scope_violation) is not the review target, even though it is the newest record.
+      await doneRun(a, w, { prNumber: 52, status: "failed" });
+      expect(await recordedOf(a, w)).toMatchObject({ recordedPr: { number: 41, branch: branchOf(fix) } });
+      // With only a failed record the item has no recorded pull request, so the lookup answers no_open_pr without asking GitHub.
+      const b = await seedAccount(admin, randomUUID());
+      await mode(b, "runner_local");
+      const wb = await item(b);
+      await doneRun(b, wb, { prNumber: 52, status: "failed" });
+      expect(await recordedOf(b, wb)).toMatchObject({ executionMode: "runner_local", recordedPr: null });
+    });
+
+    it("only an executor run of THIS item counts, and only a run branch and a positive number", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      await mode(a, "runner_local");
+      const w = await item(a);
+      const other = await item(a);
+      await doneRun(a, other, { prNumber: 90 });
+      await doneRun(a, w, { prNumber: 41, role: "code-reviewer" });
+      expect(await recordedOf(a, w)).toMatchObject({ recordedPr: null });
+      const bad = await doneRun(a, w, { prNumber: 41 });
+      for (const branch of [`fx/issue-${await numberOf(w)}`, "main", `fx/${bad}-g0`, `fx/${bad}-g1/x`]) {
+        await admin.query("UPDATE run_events SET payload = jsonb_set(payload, '{branch}', to_jsonb($2::text)) WHERE run_id = $1 AND kind = 'run.status_changed'", [bad, branch]);
+        expect(await recordedOf(a, w), branch).toMatchObject({ recordedPr: null });
+      }
+      await admin.query("UPDATE run_events SET payload = jsonb_set(payload, '{branch}', to_jsonb($2::text)) WHERE run_id = $1 AND kind = 'run.status_changed'", [bad, branchOf(bad)]);
+      for (const pr of [0, -3]) {
+        await admin.query("UPDATE run_events SET payload = jsonb_set(payload, '{prNumber}', to_jsonb($2::int)) WHERE run_id = $1 AND kind = 'run.status_changed'", [bad, pr]);
+        expect(await recordedOf(a, w), String(pr)).toMatchObject({ recordedPr: null });
+      }
+    });
+
+    it("a sandbox repository carries no record, even when a run of the item has one", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await doneRun(a, w, { prNumber: 41 });
+      expect(await recordedOf(a, w)).toMatchObject({ executionMode: "sandbox", recordedPr: null });
+    });
+
+    it("another account's item answers nothing", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      await mode(a, "runner_local");
+      const w = await item(a);
+      await doneRun(a, w, { prNumber: 41 });
+      const other = await seedAccount(admin, randomUUID());
+      expect(await build().module.advanceLoadItem(other.accountId, w)).toBeNull();
+    });
+  });
+
   describe("advanceLightSpec: the short Spec of a small, bug or doc item", () => {
     async function pmRun(a: SeedRefs, w: string, envelope: unknown, status = "succeeded", role = "project-manager"): Promise<string> {
       const id = randomUUID();

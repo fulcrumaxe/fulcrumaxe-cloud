@@ -19,4 +19,4 @@ export { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";
 // D#6 R2b: the runner tier's limits, read from the plan data (a pure read, no pool or secret); apps/web passes the register limit from it.
 export { runnerLimitsFor } from "@fx/spend";
 export { createVercelKeepAlive } from "./keepAlive.js";
-export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult } from "./advance.js";
+export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvancePrSource, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult } from "./advance.js";

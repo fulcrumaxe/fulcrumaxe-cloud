@@ -197,7 +197,7 @@ export async function advanceReviewLoadStep(accountId: string, userId: string, w
   return reviewLoadBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, pinned);
 }
 
-export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue">): Promise<PrLookup> {
+export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<PrLookup> {
   "use step";
   return findPrBody(openInstallationHttp, ctx);
 }
@@ -219,7 +219,7 @@ export async function advanceStartReviewerStep(
   workItemId: string,
   haltEpoch: number,
   ctx: ReviewCtx,
-  pr: { number: number; headSha: string; baseRef: string },
+  pr: { number: number; headSha: string; baseRef: string; branch: string },
   role: string,
   prior: Array<{ role: string; runId: string }>,
 ): Promise<StartedReviewer> {
@@ -249,7 +249,7 @@ export async function advanceStartFixStep(
   workItemId: string,
   haltEpoch: number,
   ctx: ReviewCtx,
-  pr: { number: number; headSha: string },
+  pr: { number: number; headSha: string; branch: string },
   actionId: string,
   round: number,
   failing: Array<{ role: string; runId: string }>,
@@ -281,7 +281,7 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   const pinned = (read: number | null): number | null => (args.specVersion !== undefined ? args.specVersion : read);
   if (loaded.mode === "build") return buildPhase(args, pinned(loaded.specVersion));
   // Build again, for an item at Needs a person: a fresh build, unless a pull request is still open for the issue's branch.
-  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number });
+  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr });
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
@@ -429,14 +429,14 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
 }
 
 /**
- * Build again, for an item at Needs a person that still has its Spec. The executor's branch is `fx/issue-<n>`, and a pull
+ * Build again, for an item at Needs a person that still has its Spec. The sandbox executor's branch is `fx/issue-<n>` (a runner run's pull request is the one its run recorded), and a pull
  * request still open for it is somebody's work in review (the review stage handed the item over, or a person opened one): a
  * fresh build would replace its branch under it. So the driver looks first. Open: it stops with a recorded code and starts
  * nothing (close that pull request on GitHub, then press the button again). None open: the build, exactly as for Spec ready
  * but from `needs_human` (its own run key, so the failed run is never reused). A lookup that failed decides nothing: it stops
  * too, since a build must not start on a guess.
  */
-async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue">): Promise<Result> {
+async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<Result> {
   const found = await advanceFindPrStep(repo);
   if (found.ok) {
     await stopped(args, "rebuild_pr", "rebuild_pr_open", { pr: found.number });
@@ -514,7 +514,7 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
 
 /**
  * "Check the build", for an item at In progress with no run live (its build ended, or its workflow was lost, and nobody
- * recorded what came of it). The executor's pull request (`fx/issue-<n>`) is looked for: found, the item is moved to PR opened
+ * recorded what came of it). The executor's pull request (`fx/issue-<n>`, or the one a runner run recorded) is looked for: found, the item is moved to PR opened
  * if the webhook never did, and the review follows in this same workflow; none open, the item goes to Needs human against the
  * executor's newest run, whose own summary says why. A lookup that failed (GitHub unavailable, an ambiguous answer) decides
  * nothing: the driver stops and the item stays where it is.
@@ -527,7 +527,7 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
     await stopped(args, "check_build_load", CHECK_UNAVAILABLE);
     return { status: "failed", detail: `check_build_${loaded.reason}` };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) {
     const stage = await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number);
@@ -583,7 +583,7 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
 }
 
 /** Starts the given roles in parallel (each keyed by head and role) and waits for each; a role that could not start has no verdict. */
-async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number): Promise<{ verdicts: Verdict[]; refused: string[] }> {
+async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number): Promise<{ verdicts: Verdict[]; refused: string[] }> {
   const { accountId, userId, workItemId } = args;
   const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior)));
   await advanceLogStep("advance.review_started", {
@@ -639,7 +639,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
 
   for (let attempt = 0; attempt < MAX_REVIEW_ROUNDS; attempt++) {
     const found = await advanceFindPrStep(ctx);
@@ -647,7 +647,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await stopped(args, "review_pr", found.reason);
       return { status: "no_pr", detail: found.reason };
     }
-    const pr = { number: found.number, headSha: found.headSha, baseRef: found.baseRef };
+    const pr = { number: found.number, headSha: found.headSha, baseRef: found.baseRef, branch: found.branch };
 
     // Who must review this head: code and acceptance always; security when the item is critical, the diff touches a
     // security surface, or (below) the code reviewer asks for it; the debater when the repo's role setting allows it.

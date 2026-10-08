@@ -29,7 +29,7 @@ const WHO = { accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpo
 const H1 = "a".repeat(40);
 const H2 = "b".repeat(40);
 const H3 = "c".repeat(40);
-const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null };
+const AT_PR: AdvanceItem = { stage: "pr_opened", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 
 interface PrFile {
   filename: string;
@@ -61,6 +61,9 @@ interface World {
   refuseStart: Set<string>;
   pinned: number;
   loadReview: { ok: boolean; reason?: string; specVersion?: number };
+  /** `runner_local`: the repository's agents run on a runner; `recorded` is what its run's `done` recorded (null: nothing). */
+  mode?: "runner_local";
+  recorded?: { number: number; branch: string } | null;
 }
 
 function fresh(over: Partial<World> = {}): World {
@@ -92,7 +95,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceLoadItem: vi.fn(async () => item),
     advanceLoadReview: vi.fn(async () =>
       w.loadReview.ok
-        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled } }
+        ? { ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: w.tier, specVersion: w.loadReview.specVersion ?? w.pinned, debaterEnabled: w.debaterEnabled, executionMode: w.mode ?? "sandbox", recordedPr: w.recorded ?? null } }
         : { ok: false as const, reason: w.loadReview.reason ?? "no_spec" },
     ),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === w.pinned ? { version: v, body: "SPEC BODY: the footer shows the year." } : null)),
@@ -137,6 +140,12 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
         if (w.githubDown) return { status: 502, body: { message: "Bad Gateway" } };
         if (w.noPr) return { status: 200, body: [] };
         return { status: 200, body: [{ number: 41, head: { sha: w.head, ref: "fx/issue-7", repo: { full_name: "acme/widgets" } }, base: { ref: "main" } }] };
+      }
+      // A runner run's pull request is read by its recorded number; its head is the recorded run branch.
+      if (req.method === "GET" && req.path === `${base}/pulls/41`) {
+        if (w.githubDown) return { status: 502, body: { message: "Bad Gateway" } };
+        if (w.noPr) return { status: 404, body: { message: "Not Found" } };
+        return { status: 200, body: { number: 41, state: "open", head: { sha: w.head, ref: w.recorded?.branch ?? "fx/issue-7", repo: { full_name: "acme/widgets" } }, base: { ref: "main" } } };
       }
       if (req.method === "GET" && req.path === `${base}/pulls/41/files`) {
         const per = Number(req.query?.per_page ?? 30);
@@ -745,5 +754,84 @@ describe("Build again: an item at Needs a person that still has its Spec", () =>
     t.worker.advanceBuild.mockResolvedValue({ status: "refused", reason: "start_no_model" });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_no_model" });
     expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+  });
+});
+
+describe("a runner run's pull request is the one its done recorded (D#6 C25 section 1.2)", () => {
+  const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g2";
+  const recorded = { number: 41, branch: RUN_BRANCH };
+  const runner = (over: Partial<World> = {}) => fresh({ mode: "runner_local", recorded, ...over });
+  const RUNNER_PR: AdvanceItem = { ...AT_PR, executionMode: "runner_local", recordedPr: recorded };
+  const listCalls = (reqs: InstallationHttpRequest[]) => reqs.filter((r) => r.path === "/repos/acme/widgets/pulls");
+
+  it("a recorded branch that is not fx/issue-<n> is found and reviewed: the reviewers are told that branch and GitHub is never asked for the issue's", async () => {
+    const t = setup(runner());
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "merged", detail: undefined });
+    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    for (const req of t.started) {
+      expect(req.prompt).toContain(`Its branch is ${RUN_BRANCH};`);
+      expect(req.prompt).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${H1}`);
+      expect(req.prompt).not.toContain("fx/issue-7");
+    }
+    expect(listCalls(t.requests)).toEqual([]);
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(true);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
+  });
+
+  it("the fix round's prompt carries the recorded branch", async () => {
+    const needsFix = (role: string, head: string) =>
+      head === H1 && role === "code-reviewer" ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" } } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
+    const t = setup(runner({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    const req = t.worker.advanceStartFix.mock.calls[0]![1];
+    expect(req.prompt).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
+    expect(req.prompt).toContain(`git push origin ${RUN_BRANCH}`);
+    expect(req.prompt).not.toContain("fx/issue-7");
+  });
+
+  it("no record: the review fails closed as no_open_pr, starts no reviewer and never looks up the issue's branch", async () => {
+    const t = setup(runner({ recorded: null }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "no_pr", detail: "no_open_pr" });
+    expect(t.started).toEqual([]);
+    expect(t.requests).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it("no record and 'Check the build': the item goes to Needs human and no reviewer starts", async () => {
+    const t = setup(runner({ recorded: null }), { ...RUNNER_PR, recordedPr: null, stage: "in_progress", executorRunId: "66666666-6666-4666-8666-666666666666" });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_no_pull_request" });
+    expect(t.started).toEqual([]);
+    expect(t.requests).toEqual([]);
+  });
+
+  it("a recorded pull request that GitHub no longer has open ends the same way, and a GitHub error decides nothing", async () => {
+    const gone = setup(runner({ noPr: true }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "no_pr", detail: "no_open_pr" });
+    expect(gone.started).toEqual([]);
+    const down = setup(runner({ githubDown: true }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "no_pr", detail: "github_unavailable" });
+    expect(down.started).toEqual([]);
+  });
+
+  it("Build again for a runner repository looks at the recorded pull request, not the issue's branch: an open one stops it, none lets the build start", async () => {
+    const STUCK: AdvanceItem = { ...RUNNER_PR, stage: "needs_human", executorRunId: "66666666-6666-4666-8666-666666666666" };
+    const open = setup(runner(), STUCK);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "rebuild_pr_open" });
+    expect(open.worker.advanceBuild).not.toHaveBeenCalled();
+    expect(listCalls(open.requests)).toEqual([]);
+    const none = setup(runner({ recorded: null }), { ...STUCK, recordedPr: null });
+    none.worker.advanceBuild.mockResolvedValue({ status: "refused", reason: "start_no_model" });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_no_model" });
+    expect(none.worker.advanceBuild).toHaveBeenCalledTimes(1);
+    expect(none.requests).toEqual([]);
+  });
+
+  it("a sandbox repository is unchanged: found by fx/issue-<n>, prompts name it, and a stray recorded pull request is not used", async () => {
+    const t = setup(fresh({ recorded }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(listCalls(t.requests)).toHaveLength(1);
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(false);
+    for (const req of t.started) expect(req.prompt).toContain("Its branch is fx/issue-7;");
   });
 });

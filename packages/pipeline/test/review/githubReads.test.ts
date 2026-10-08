@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubHttp } from "../../src/build/githubMergePort.js";
-import { REVIEW_STATUS_CONTEXT, findOpenPullRequest, listChangedFiles, postReviewStatus } from "../../src/review/githubReads.js";
+import { REVIEW_STATUS_CONTEXT, findOpenPullRequest, findPullRequestForItem, findRecordedPullRequest, listChangedFiles, postReviewStatus } from "../../src/review/githubReads.js";
 import { fakeGitHubRest, freshRepo } from "./helpers/fakeGitHubRest.js";
 
 /** D#483 P3: the driver's GitHub reads and the one write, against the fake that answers like GitHub. */
@@ -14,7 +14,7 @@ describe("findOpenPullRequest", () => {
   it("asks for the open pull request whose head is fx/issue-<n> in this repository, and reads number, head and base only", async () => {
     const calls: unknown[] = [];
     const http: GitHubHttp = { request: async (r) => (calls.push(r), { status: 200, body: [pull({ title: "T", body: "SECRET" })] }) };
-    expect(await findOpenPullRequest(http, { ...repo, issue: 7 })).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main" } });
+    expect(await findOpenPullRequest(http, { ...repo, issue: 7 })).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: "fx/issue-7" } });
     expect(calls[0]).toEqual({ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: "acme:fx/issue-7", per_page: 5 } });
   });
 
@@ -52,6 +52,74 @@ describe("findOpenPullRequest", () => {
   it("an answer that is not a list, and a status that is not 200, are not read as 'no pull request'", async () => {
     expect(await findOpenPullRequest(withList({ message: "x" }), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "malformed" });
     for (const status of [401, 403, 404, 500, 502]) expect(await findOpenPullRequest(withList([], status), { ...repo, issue: 7 })).toEqual({ ok: false, reason: "github_unavailable" });
+  });
+});
+
+const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g2";
+const recorded = { number: 41, branch: RUN_BRANCH };
+const runnerPull = (over: Record<string, unknown> = {}) => ({ number: 41, state: "open", head: { sha: HEAD, ref: RUN_BRANCH, repo: { full_name: "acme/widgets" } }, base: { ref: "main" }, ...over });
+const recordingHttp = (status: number, body: unknown) => {
+  const calls: unknown[] = [];
+  const http: GitHubHttp = { request: async (r) => (calls.push(r), { status, body }) };
+  return { http, calls };
+};
+
+describe("findRecordedPullRequest (a runner run's pull request, by what its done recorded)", () => {
+  it("reads the recorded number directly and answers with the recorded branch, which is not fx/issue-<n>", async () => {
+    const { http, calls } = recordingHttp(200, runnerPull({ title: "T", body: "SECRET" }));
+    expect(await findRecordedPullRequest(http, repo, recorded)).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: RUN_BRANCH } });
+    expect(calls).toEqual([{ method: "GET", path: "/repos/acme/widgets/pulls/41" }]);
+  });
+
+  it("a pull request whose head is some other branch than the recorded one is not the run's: malformed", async () => {
+    const other = runnerPull({ head: { sha: HEAD, ref: "fx/issue-7", repo: { full_name: "acme/widgets" } } });
+    expect(await findRecordedPullRequest(recordingHttp(200, other).http, repo, recorded)).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  it("an answer for a different number, and one from another repository's branch, are malformed", async () => {
+    expect(await findRecordedPullRequest(recordingHttp(200, runnerPull({ number: 42 })).http, repo, recorded)).toEqual({ ok: false, reason: "malformed" });
+    expect(await findRecordedPullRequest(recordingHttp(200, runnerPull({ head: { sha: HEAD, ref: RUN_BRANCH, repo: { full_name: "evil/widgets" } } })).http, repo, recorded)).toEqual({ ok: false, reason: "malformed" });
+    expect(await findRecordedPullRequest(recordingHttp(200, [runnerPull()]).http, repo, recorded)).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  it("a closed or merged pull request, and a missing one, are no_open_pr; any other status is github_unavailable", async () => {
+    expect(await findRecordedPullRequest(recordingHttp(200, runnerPull({ state: "closed" })).http, repo, recorded)).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await findRecordedPullRequest(recordingHttp(404, { message: "Not Found" }).http, repo, recorded)).toEqual({ ok: false, reason: "no_open_pr" });
+    for (const status of [401, 403, 500, 502]) expect(await findRecordedPullRequest(recordingHttp(status, {}).http, repo, recorded)).toEqual({ ok: false, reason: "github_unavailable" });
+  });
+
+  it("checks the head commit and the base branch as the sandbox lookup does", async () => {
+    expect(await findRecordedPullRequest(recordingHttp(200, runnerPull({ head: { sha: "main", ref: RUN_BRANCH, repo: { full_name: "acme/widgets" } } })).http, repo, recorded)).toEqual({ ok: false, reason: "malformed" });
+    expect(await findRecordedPullRequest(recordingHttp(200, runnerPull({ base: { ref: "a b" } })).http, repo, recorded)).toEqual({ ok: false, reason: "bad_base_ref" });
+  });
+});
+
+describe("findPullRequestForItem (the runner or sandbox switch)", () => {
+  it("a runner_local repo is found by its recorded pull request, and never asks for fx/issue-<n>", async () => {
+    const { http, calls } = recordingHttp(200, runnerPull());
+    const out = await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "runner_local", recordedPr: recorded });
+    expect(out).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: RUN_BRANCH } });
+    expect(JSON.stringify(calls)).not.toContain("fx/issue-7");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a runner_local repo with no recorded pull request fails closed as no_open_pr without asking GitHub, even when fx/issue-<n> has one open", async () => {
+    const { http, calls } = recordingHttp(200, [pull()]);
+    expect(await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "runner_local", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(calls).toEqual([]);
+  });
+
+  it("a sandbox repo keeps the lookup by fx/issue-<n>, and a recorded pull request does not change it", async () => {
+    const { http, calls } = recordingHttp(200, [pull()]);
+    const out = await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "sandbox", recordedPr: recorded });
+    expect(out).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: "fx/issue-7" } });
+    expect(calls).toEqual([{ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: "acme:fx/issue-7", per_page: 5 } }]);
+  });
+
+  it("an execution mode that is not runner_local is a sandbox build", async () => {
+    const { http, calls } = recordingHttp(200, []);
+    expect(await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "sandbox", recordedPr: null })).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(calls).toHaveLength(1);
   });
 });
 
