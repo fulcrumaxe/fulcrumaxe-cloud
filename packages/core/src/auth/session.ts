@@ -1,4 +1,4 @@
-import { SignJWT, jwtVerify } from 'jose';
+import { SignJWT, decodeProtectedHeader, jwtVerify } from 'jose';
 
 /**
  * The Web Crypto global (`crypto.randomUUID()`), NOT `node:crypto`'s
@@ -107,12 +107,133 @@ interface SessionClaims extends SessionPayload {
 
 export type VerifiedSession = SessionClaims;
 
-function sessionSecret(env: NodeJS.ProcessEnv = process.env): Uint8Array {
+const SESSION_SECRET_MIN_CHARS = 32;
+
+function sessionSecretText(env: NodeJS.ProcessEnv): string {
   const secret = env.FX_SESSION_SECRET;
-  if (!secret || secret.length < 32) {
+  if (!secret || secret.length < SESSION_SECRET_MIN_CHARS) {
     throw new Error('FX_SESSION_SECRET must be set to a string of at least 32 characters');
   }
-  return new TextEncoder().encode(secret);
+  return secret;
+}
+
+/**
+ * H7b: the key id a session cookie's protected header carries. Derived from
+ * the secret itself (a domain-separated SHA-256, 6 bytes of it as hex), so a
+ * new secret is a new kid with no extra setting to forget, and the kid says
+ * which secret signed a cookie without revealing it. Web Crypto, not
+ * `node:crypto`, for the same Edge-bundling reason as the note at the top of
+ * this file.
+ */
+async function keyIdOf(secret: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`fx-session-kid-v1:${secret}`));
+  return Array.from(new Uint8Array(digest).subarray(0, 6), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function trimmedEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  return raw;
+}
+
+/** Strict ISO 8601 date-time with an explicit zone (`2026-11-01T00:00:00Z`, `...+02:00`). Epoch numbers and zoneless local times are refused: a window end that depends on the server's zone is a trap. Returns ms, or null. */
+function parseUntil(raw: string): number | null {
+  const value = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * H7b: the rotation window. `FX_SESSION_SECRET_PREVIOUS` verifies cookies
+ * signed before a rotation, and only until `FX_SESSION_SECRET_PREVIOUS_UNTIL`.
+ * The three settings (the secret, UNTIL and `FX_SESSION_SECRET_ROTATED_AT`,
+ * the moment of the rotation) are set together. The bound: no session
+ * outlives its absolute limit, so a previous secret is never needed longer
+ * than the rotation time plus that limit. UNTIL is measured from the recorded
+ * rotation time, not from now, so a later clock never makes a value valid
+ * that was refused before: the window can only shorten. An UNTIL beyond the
+ * bound is refused (ignored here, a health error in `sessionSecretProblems`),
+ * and so is a rotation time later than now.
+ */
+function previousWindow(env: NodeJS.ProcessEnv, nowMs: number): { secret: string; untilMs: number } | null {
+  const secret = trimmedEnv(env, 'FX_SESSION_SECRET_PREVIOUS');
+  const untilRaw = trimmedEnv(env, 'FX_SESSION_SECRET_PREVIOUS_UNTIL');
+  const rotatedRaw = trimmedEnv(env, 'FX_SESSION_SECRET_ROTATED_AT');
+  if (secret === undefined || untilRaw === undefined || rotatedRaw === undefined) return null;
+  if (secret.length < SESSION_SECRET_MIN_CHARS) return null;
+  const untilMs = parseUntil(untilRaw);
+  const rotatedAtMs = parseUntil(rotatedRaw);
+  if (untilMs === null || rotatedAtMs === null) return null;
+  if (rotatedAtMs > nowMs) return null; // a rotation that has not happened yet
+  if (nowMs >= untilMs) return null; // after UNTIL the previous secret is ignored even though it is still set
+  if (untilMs > rotatedAtMs + absoluteLimitSeconds(env) * 1000) return null;
+  return { secret, untilMs };
+}
+
+export interface SessionSecretProblem {
+  name: string;
+  /** A fixed code. Never a value, never a fragment of one. */
+  reason: string;
+}
+
+/**
+ * H7b: the cross-setting faults /api/health reports for the rotation window.
+ * Each single value's own shape (the 32-character minimum, the timestamp
+ * format) is judged by the env manifest; this covers what only the pair can
+ * show. Names and fixed codes only.
+ */
+export function sessionSecretProblems(env: NodeJS.ProcessEnv = process.env, nowMs: number = Date.now()): SessionSecretProblem[] {
+  const secret = trimmedEnv(env, 'FX_SESSION_SECRET_PREVIOUS');
+  const untilRaw = trimmedEnv(env, 'FX_SESSION_SECRET_PREVIOUS_UNTIL');
+  const rotatedRaw = trimmedEnv(env, 'FX_SESSION_SECRET_ROTATED_AT');
+  const problems: SessionSecretProblem[] = [];
+  if (secret !== undefined && untilRaw === undefined) {
+    problems.push({ name: 'FX_SESSION_SECRET_PREVIOUS', reason: 'set_without_until' });
+  }
+  if (untilRaw !== undefined && secret === undefined) {
+    problems.push({ name: 'FX_SESSION_SECRET_PREVIOUS_UNTIL', reason: 'set_without_previous_secret' });
+  }
+  if (rotatedRaw === undefined && (secret !== undefined || untilRaw !== undefined)) {
+    problems.push({ name: 'FX_SESSION_SECRET_ROTATED_AT', reason: 'set_without_rotated_at' });
+  }
+  if (rotatedRaw !== undefined && secret === undefined && untilRaw === undefined) {
+    problems.push({ name: 'FX_SESSION_SECRET_ROTATED_AT', reason: 'set_without_previous_pair' });
+  }
+  const rotatedAtMs = rotatedRaw === undefined ? null : parseUntil(rotatedRaw);
+  if (rotatedAtMs !== null && rotatedAtMs > nowMs) {
+    problems.push({ name: 'FX_SESSION_SECRET_ROTATED_AT', reason: 'in_the_future' });
+  }
+  if (untilRaw !== undefined) {
+    const untilMs = parseUntil(untilRaw);
+    if (untilMs !== null && rotatedAtMs !== null && untilMs > rotatedAtMs + absoluteLimitSeconds(env) * 1000) {
+      problems.push({ name: 'FX_SESSION_SECRET_PREVIOUS_UNTIL', reason: 'beyond_session_lifetime' });
+    } else if (untilMs !== null && secret !== undefined && nowMs >= untilMs) {
+      problems.push({ name: 'FX_SESSION_SECRET_PREVIOUS', reason: 'expired_remove_it' });
+    }
+  }
+  return problems;
+}
+
+/**
+ * The secrets a cookie may be verified with. A cookie names its signing
+ * secret by kid: the current one, or the previous one while its window is
+ * open. A kid that matches neither verifies against nothing. A cookie with no
+ * kid predates H7b, so it gets the current secret and then, while the window
+ * is open, the previous one (a first rotation must not sign out every
+ * pre-H7b cookie).
+ */
+async function verificationKeys(token: string, env: NodeJS.ProcessEnv, nowMs: number): Promise<Uint8Array[]> {
+  const kid = decodeProtectedHeader(token).kid;
+  const current = sessionSecretText(env);
+  const previous = previousWindow(env, nowMs);
+  const encode = (s: string) => new TextEncoder().encode(s);
+  if (kid === undefined) {
+    return previous ? [encode(current), encode(previous.secret)] : [encode(current)];
+  }
+  if (kid === (await keyIdOf(current))) return [encode(current)];
+  if (previous && kid === (await keyIdOf(previous.secret))) return [encode(previous.secret)];
+  return [];
 }
 
 /**
@@ -133,10 +254,10 @@ function expirationAt(claims: SessionClaims, nowMs: number, env: NodeJS.ProcessE
 
 async function signClaims(claims: SessionClaims, nowMs: number, env: NodeJS.ProcessEnv): Promise<string> {
   return new SignJWT({ ...claims })
-    .setProtectedHeader({ alg: 'HS256' })
+    .setProtectedHeader({ alg: 'HS256', kid: await keyIdOf(sessionSecretText(env)) })
     .setIssuedAt(Math.floor(nowMs / 1000))
     .setExpirationTime(expirationAt(claims, nowMs, env))
-    .sign(sessionSecret(env));
+    .sign(new TextEncoder().encode(sessionSecretText(env)));
 }
 
 export interface SignSessionOptions {
@@ -176,7 +297,16 @@ export async function verifySession(
   now: () => number = Date.now,
 ): Promise<VerifiedSession | null> {
   try {
-    const { payload } = await jwtVerify(token, sessionSecret(env), { currentDate: new Date(now()) });
+    let payload: Awaited<ReturnType<typeof jwtVerify>>['payload'] | null = null;
+    for (const key of await verificationKeys(token, env, now())) {
+      try {
+        payload = (await jwtVerify(token, key, { currentDate: new Date(now()) })).payload;
+        break;
+      } catch {
+        // fx-swallow-ok: this secret did not verify the cookie; the next candidate is tried, and none left is an unauthenticated request
+      }
+    }
+    if (payload === null) return null;
     if (
       typeof payload.userId !== 'string' ||
       typeof payload.accountId !== 'string' ||

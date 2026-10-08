@@ -145,6 +145,9 @@ export function validateValue(validation: Validation, value: string): string | n
       return value.split(",").every((part) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(part.trim())) ? null : "not_a_uuid_list";
     case "subscription-token":
       return /^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{10,}$/.test(value) ? null : "not_a_subscription_token";
+    case "iso-timestamp":
+      // The same shape packages/core/src/auth/session.ts accepts for the rotation window's end: a zone is required.
+      return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value.trim()) && Number.isFinite(Date.parse(value.trim())) ? null : "not_an_iso_timestamp";
   }
 }
 

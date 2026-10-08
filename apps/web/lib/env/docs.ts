@@ -63,6 +63,8 @@ export function describeValidation(validation: Validation): string {
       return "comma-separated account ids (UUIDs)";
     case "subscription-token":
       return "`sk-ant-oat` subscription token";
+    case "iso-timestamp":
+      return "ISO 8601 date and time with a zone";
   }
 }
 

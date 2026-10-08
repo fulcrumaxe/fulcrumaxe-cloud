@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
+import { sessionSecretProblems } from "@fx/core/src/auth/session";
 import { planDataStatus } from "@fx/plan-data";
 import { ENV_MANIFEST } from "../../../env-manifest";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
@@ -53,8 +54,27 @@ function identity(env: EnvLike) {
   return { deploy_env, project_id: orNull(env.VERCEL_PROJECT_ID), commit: orNull(env.VERCEL_GIT_COMMIT_SHA) };
 }
 
-export function healthResponse(env: EnvLike, authHeader: string | null): NextResponse {
-  const report = evaluateEnv(ENV_MANIFEST, env, deployKindOf(env));
+/**
+ * The session secret rotation window is judged as a trio (packages/core/src/auth/session.ts): one half set without the other,
+ * an end further out than the session lifetime allows, and an expired previous secret still set are errors in every deploy
+ * kind, because they mean a rotation is half done or a retired secret is still present.
+ */
+function withSessionSecretProblems(report: EnvReport, env: EnvLike, nowMs: number): EnvReport {
+  const rotationNames = new Set(["FX_SESSION_SECRET_PREVIOUS", "FX_SESSION_SECRET_PREVIOUS_UNTIL", "FX_SESSION_SECRET_ROTATED_AT"]);
+  // The three are optional, so the manifest check files a malformed value as optional-invalid; a malformed rotation setting is an error.
+  const malformed = report.invalidOptional.filter((i) => rotationNames.has(i.name));
+  const problems = [...malformed, ...sessionSecretProblems(env as NodeJS.ProcessEnv, nowMs)];
+  if (problems.length === 0) return report;
+  return {
+    ...report,
+    ok: false,
+    invalid: [...report.invalid, ...problems],
+    invalidOptional: report.invalidOptional.filter((i) => !rotationNames.has(i.name)),
+  };
+}
+
+export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: number = Date.now()): NextResponse {
+  const report = withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs);
   const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
   if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report) }, init);

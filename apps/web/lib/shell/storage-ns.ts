@@ -18,10 +18,33 @@ import { createHmac } from "node:crypto";
  * a server secret (never shipped to the client) makes that correlation
  * infeasible without the secret.
  */
+/**
+ * H7b: the key behind the storage namespace and the opaque user id is its own
+ * setting, FX_STABLE_ID_SECRET, so rotating the session secret changes
+ * neither (a rotation must not read as a different user, or the signed-out
+ * dialog would wipe a returning user's state). Unset or blank, it falls back
+ * to FX_SESSION_SECRET so today's namespaces and ids keep working; that is
+ * logged once per process, and /api/health reports the setting missing.
+ * Set but shorter than 32 characters it throws rather than falling back: a
+ * quiet fallback would change every namespace and id.
+ */
+let fallbackLogged = false;
+
 function hmacSecret(env: NodeJS.ProcessEnv): string {
+  const stable = env.FX_STABLE_ID_SECRET;
+  if (stable !== undefined && stable.trim() !== "") {
+    if (stable.length < 32) {
+      throw new Error("FX_STABLE_ID_SECRET must be a string of at least 32 characters");
+    }
+    return stable;
+  }
   const secret = env.FX_SESSION_SECRET;
   if (!secret || secret.length < 32) {
     throw new Error("FX_SESSION_SECRET must be set to a string of at least 32 characters");
+  }
+  if (!fallbackLogged) {
+    fallbackLogged = true;
+    console.warn("FX_STABLE_ID_SECRET is not set; the storage namespace and opaque user id are derived from FX_SESSION_SECRET, so rotating it would change both");
   }
   return secret;
 }
