@@ -224,6 +224,8 @@ interface RunBookkeeping {
   cumulativeModelUsd: number;
   /** X-4: in-run extensions granted so far (the checkpoint's `extensions_used`). */
   extensionsUsed: number;
+  /** D#221 OM-1: distinct model responses the run guard counted, summed over this run's commands (a resume starts a new guard). */
+  meteredModelCalls: number;
   /** The metered token total (W3) and the plausibility flags (MP-PLAUS), both for the terminal report. */
   meteredTokens: TokenTotals;
   /** The same tokens by the model each message was priced at (W2). */
@@ -253,6 +255,7 @@ function freshBookkeeping(): RunBookkeeping {
     stoppedDirectly: false,
     cumulativeModelUsd: 0,
     extensionsUsed: 0,
+    meteredModelCalls: 0,
     meteredTokens: { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 },
     modelTokens: new Map(),
     meterFlags: new Set(),
@@ -458,6 +461,7 @@ export class SandboxTarget implements ExecutionTarget {
       networkPolicy: networkPolicyRules,
       env,
       ...this.extensionOf(run, bk),
+      onModelCalls: (n) => (bk.meteredModelCalls += n),
       ...(run.limits && { limits: run.limits }),
       onEvent,
       onStage,
@@ -661,6 +665,7 @@ export class SandboxTarget implements ExecutionTarget {
         networkPolicy: networkPolicyRules,
         env,
         ...this.extensionOf(run, bk),
+        onModelCalls: (n) => (bk.meteredModelCalls += n),
         ...(run.limits && { limits: run.limits }),
         onEvent,
         onStage,
@@ -1840,8 +1845,9 @@ interface MeterSnapshot {
   tokens: TokenTotals;
   flags: Iterable<string>;
   extensionsUsed?: number;
+  modelCalls?: number;
 }
-const snapshotOf = (bk: RunBookkeeping): MeterSnapshot => ({ tokens: bk.meteredTokens, flags: bk.meterFlags, extensionsUsed: bk.extensionsUsed });
+const snapshotOf = (bk: RunBookkeeping): MeterSnapshot => ({ tokens: bk.meteredTokens, flags: bk.meterFlags, extensionsUsed: bk.extensionsUsed, modelCalls: bk.meteredModelCalls });
 const extensionsOf = (snap: MeterSnapshot): { extensionsUsed?: number } => (snap.extensionsUsed ? { extensionsUsed: snap.extensionsUsed } : {});
 
 /**
@@ -1864,7 +1870,7 @@ function meteringOf(meteredUsd: number, reportedUsd: number | undefined, snap: M
   if (reportedUsd !== undefined && reportedUsd < 0.95 * meteredUsd) flags.add("reported_below_metered");
   if (limit?.kind === "silence") flags.add("metering_silent");
   if (limit?.kind === "model_calls") flags.add("model_call_cap");
-  return { meteredUsd, reportedUsd: reportedUsd ?? null, flags: [...flags].sort() };
+  return { meteredUsd, reportedUsd: reportedUsd ?? null, flags: [...flags].sort(), ...(snap.modelCalls !== undefined && { modelCalls: snap.modelCalls }) };
 }
 
 /** W3: the report's token counts are the METERED figures, never the VM's last result. */
@@ -1876,7 +1882,7 @@ export function buildTerminalReport(
   lastEvent: NormalizedEvent | undefined,
   sessionId?: string,
   meteredUsd = 0,
-  snap: MeterSnapshot = { tokens: ZERO_TOKENS, flags: [] },
+  snap: MeterSnapshot = { tokens: ZERO_TOKENS, flags: [], modelCalls: 0 },
 ): TerminalReport {
   const usd = settledUsd(meteredUsd, lastEvent?.costUsd);
   const common = { usd, sessionId, ...meteredTokenCounts(snap.tokens), ...extensionsOf(snap), metering: meteringOf(meteredUsd, lastEvent?.costUsd, snap) };

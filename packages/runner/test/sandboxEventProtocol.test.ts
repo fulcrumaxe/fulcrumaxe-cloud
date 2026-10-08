@@ -735,7 +735,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   it("MP-PLAUS 10d: a message over the per-line ceiling is killed under the cap: failed, the clamped total settles, the reservation is not released, nothing after it is metered", async () => {
     const r = await endedBy({}, (h) => h.print(usageMsg("m1", 100_000), usageMsg("forged", 50_000_000), usageMsg("m3")), RICH);
     expect(r.report).toMatchObject({ status: "failed", failureReason: "sandbox_error", usd: usdOf("haiku-4.5", 1_100_000), tokensIn: 1_100_000 });
-    expect(r.report.metering).toEqual({ meteredUsd: usdOf("haiku-4.5", 1_100_000), reportedUsd: null, flags: ["implausible_usage"] });
+    expect(r.report.metering).toEqual({ meteredUsd: usdOf("haiku-4.5", 1_100_000), reportedUsd: null, flags: ["implausible_usage"], modelCalls: 1 });
     expect(r.status).toBe("failed");
     expect(r.checkpoints).toEqual([]);
     expect(r.ledger).toEqual([usdOf("haiku-4.5", 1_100_000)]);
@@ -757,7 +757,7 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
     // The dearest maximal message: 1M cache-write tokens plus 128k output tokens on the dearest model.
     expect(maxLineUsd()).toBeCloseTo(computeModelUsd("opus-5", { inputTokens: 0, outputTokens: 128_000, cacheWriteTokens: 1_000_000 }), 4);
     expect(r.report.usd).toBeCloseTo(2 * ONE_M + maxLineUsd(), 4);
-    expect(r.report.metering).toEqual({ meteredUsd: 2 * ONE_M, reportedUsd: 9999, flags: ["reported_above_metered"] });
+    expect(r.report.metering).toEqual({ meteredUsd: 2 * ONE_M, reportedUsd: 9999, flags: ["reported_above_metered"], modelCalls: 2 });
     expect(r.ledger).toEqual([r4(r.report.usd!)]);
   });
 
@@ -780,13 +780,13 @@ describe("H14c-5b-1 over SandboxTarget and the real port [pg]", () => {
   it("MP-PLAUS: a final cost more than 5% below the metered total is flagged, nothing is killed, and the metered total settles", async () => {
     const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), usageMsg("m2"), result("done", { total_cost_usd: 0.5 })), h.exit(0)), RICH);
     expect(r.report).toMatchObject({ status: "succeeded", usd: 2 * ONE_M });
-    expect(r.report.metering).toEqual({ meteredUsd: 2 * ONE_M, reportedUsd: 0.5, flags: ["reported_below_metered"] });
+    expect(r.report.metering).toEqual({ meteredUsd: 2 * ONE_M, reportedUsd: 0.5, flags: ["reported_below_metered"], modelCalls: 2 });
     expect(r.ledger).toEqual([2 * ONE_M]);
   });
 
   it("MP-PLAUS: a clean run's terminal report carries the metering block with no flags", async () => {
     const r = await endedBy({}, (h) => (h.print(usageMsg("m1"), result("done", { total_cost_usd: ONE_M })), h.exit(0)), RICH);
-    expect(r.report.metering).toEqual({ meteredUsd: ONE_M, reportedUsd: ONE_M, flags: [] });
+    expect(r.report.metering).toEqual({ meteredUsd: ONE_M, reportedUsd: ONE_M, flags: [], modelCalls: 1 });
   });
 
   it("MP-PLAUS: the limit kills add their flags to the metering block (metering_silent, model_call_cap)", async () => {

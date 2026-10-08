@@ -395,7 +395,14 @@ export interface WriteRunStatusParams {
    * when the status write updated a row. `extensionsUsed` counts the in-run extensions (X-4). */
   checkpoint?: LimitCheckpoint | AgentCheckpoint;
   /** D#2 H14c-3-2c (CARRY-17): one `run.metering` row, same transaction, only when the status write updated a row. */
-  metering?: { meteredUsd: number | null; reportedUsd: number | null; flags: string[] };
+  metering?: {
+    meteredUsd: number | null;
+    reportedUsd: number | null;
+    flags: string[];
+    /** D#221 OM-1: the runner's own count of distinct model responses, from the run guard. Written once, in this same call, to
+     * `agent_runs.metered_model_calls` (0744). Absent or null leaves the column NULL ("not recorded"); never shown as 0. */
+    modelCalls?: number | null;
+  };
 }
 
 interface CheckpointBase {
@@ -472,7 +479,7 @@ export async function writeRunStatus(pool: Pool, params: WriteRunStatusParams): 
     const result = params.result;
     const { rows: written } = await client.query<{ updated: boolean }>(
       `SELECT agent_run_set_status($1::uuid, $2::uuid, $3::text, $4::text, $5::jsonb,
-                                   $6::bigint, $7::bigint, $8::numeric, $9::text) AS updated`,
+                                   $6::bigint, $7::bigint, $8::numeric, $9::text, $10::integer) AS updated`,
       [
         params.accountId,
         params.runId,
@@ -483,6 +490,7 @@ export async function writeRunStatus(pool: Pool, params: WriteRunStatusParams): 
         result?.tokensOut ?? null,
         result?.usd ?? null,
         result?.sessionId ?? null,
+        params.metering?.modelCalls ?? null,
       ],
     );
     if (written[0]?.updated === true) {

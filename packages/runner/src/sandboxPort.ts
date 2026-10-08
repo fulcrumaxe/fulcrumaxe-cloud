@@ -98,6 +98,9 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   env: Record<string, string>;
   /** D#2 H14c-5c-2a (X-1): the per-run in-run extension policy. Absent = a limit ends the run. */
   extension?: ExtensionPolicy;
+  /** D#221 OM-1: called once when this command's stream ends, however it ends, with the run guard's count of distinct
+   * assistant message ids for this command. The runner's own number; the caller adds it to the run's total. */
+  onModelCalls?: (count: number) => void;
   /** D#2 H14c-3-2d-1 (C56 s1): this run's limits. Fields left out take the port's
    * own defaults, so nothing one run sets reaches another. The port refuses a launch
    * whose `maxRunMs` is not below its sandbox's `timeoutMs` (MP-CLOCK). */
