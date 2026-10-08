@@ -15,8 +15,11 @@ import {
   sweepOutsideMeter,
   type OutsideMeterResult,
   sweepSandboxReap,
+  sandboxInventory,
   type SweepSandboxReapInput,
   type SweepSandboxReapResult,
+  type SandboxInventoryInput,
+  type SandboxInventoryResult,
   type LostSweepResult,
   type AuthorCheckProvider,
   configureAgentRunWiring,
@@ -147,9 +150,11 @@ export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimF
    * tenants and is for the cron only, never callable from a user request; the pool, the provider port and the stop path stay
    * inside. `pass: "terminal"` deletes executor sandboxes whose work items have all ended; `ephemeral` and `idle` are
    * refused with a typed `not_supported` error until they ship. There is no `off` mode: the caller decides that and never calls.
-   * Nothing calls this yet (REAPER-1b adds the cron and the kill switch).
+   * The reconcile cron calls it (REAPER-1b); the kill switch (`FX_SANDBOX_REAP_MODE`) is read there.
    */
   sweepSandboxReap(input: SweepSandboxReapInput): Promise<SweepSandboxReapResult>;
+  /** D#2 SANDBOX-REAPER-1b (C82): the per-account inventory, rebuilt from the provider's list and the run rows. Plain data in and out; for the cron only. */
+  sandboxInventory(input: SandboxInventoryInput): Promise<SandboxInventoryResult>;
   close(): Promise<void>;
 }
 
@@ -305,7 +310,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     };
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
-    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerLeaseSweep, ...runnerQueue, ...runnerNotices, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
+    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerLeaseSweep, ...runnerQueue, ...runnerNotices, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -325,13 +331,14 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
         resolveRunSeat,
         sweepComputeSettle,
         sweepSandboxReap,
+        sandboxInventory: inventory,
         claimRunAction,
         settleRunAction,
         listDueRunActions,

@@ -66,6 +66,24 @@ export {
   type CheckConnection,
   type ModelKeyHealthDeps,
 } from './jobs/modelKeyHealth.js';
+export {
+  parseSandboxReapMode,
+  sandboxJobGate,
+  sandboxReapJobs,
+  SANDBOX_INVENTORY_CALLS_PER_RUN,
+  SANDBOX_INVENTORY_JOB,
+  SANDBOX_REAP_CALLS_PER_RUN,
+  SANDBOX_REAP_EPHEMERAL_JOB,
+  SANDBOX_REAP_TERMINAL_JOB,
+  type SandboxInventorySummary,
+  type SandboxReapJobDeps,
+  type SandboxReapMode,
+  type SandboxReapModeSetting,
+  type SandboxReapSweepInput,
+  type SandboxReapSweepResult,
+  type SandboxReapWorker,
+} from './jobs/sandboxReap.js';
+export { sandboxInventoryJob } from './jobs/sandboxInventory.js';
 export { handleReleaseRequest, restoreIfConfirmed, RESTORE_CALL_ALLOWANCE, type ReleaseApiDeps, type RestoreOutcome } from './releaseApi.js';
 export {
   breakerAllowance,

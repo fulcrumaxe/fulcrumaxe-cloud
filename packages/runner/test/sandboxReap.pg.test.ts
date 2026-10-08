@@ -166,10 +166,10 @@ describe("D#2 SANDBOX-REAPER-1a: the end-of-item pass [pg]", () => {
       expect([await reapRow(a.name), await reapRow(b.name)]).toEqual([undefined, undefined]);
     });
 
-    it("the ephemeral and idle passes are not built yet (a typed not_supported error), and input it cannot trust is refused: nothing is read either way", async () => {
-      for (const pass of ["ephemeral", "idle"] as const) await expect(sweep({ pass })).rejects.toBeInstanceOf(SandboxReapNotSupportedError);
+    it("the idle pass is not built yet (a typed not_supported error), and input it cannot trust is refused: nothing is read either way", async () => {
+      await expect(sweep({ pass: "idle" })).rejects.toBeInstanceOf(SandboxReapNotSupportedError);
       await expect(sweep({ pass: "idle" })).rejects.toMatchObject({ code: "not_supported" });
-      for (const bad of [{ cursor: "rn-1-x-2" }, { cursor: "ex-a b" }, { maxCalls: -1 }, { maxCalls: 1.5 }, { timeBudgetMs: 0 }, { now: Number.NaN }, { mode: "off" as never }, { pass: "other" as never }]) {
+      for (const bad of [{ cursor: "rn-1-x-2" }, { pass: "ephemeral" as const, cursor: "ex-a" }, { cursor: "ex-a b" }, { maxCalls: -1 }, { maxCalls: 1.5 }, { timeBudgetMs: 0 }, { now: Number.NaN }, { mode: "off" as never }, { pass: "other" as never }]) {
         await expect(sweep(bad), JSON.stringify(bad)).rejects.toThrow(TypeError);
       }
       expect(h.fakeSandbox.state.calls).toEqual([]);

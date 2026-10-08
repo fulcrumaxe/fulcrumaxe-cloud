@@ -34,6 +34,12 @@ describe("the error-code allowlist", () => {
     expect(new Set(CLIENT_WINDOW_IDS).size).toBe(CLIENT_WINDOW_IDS.length);
   });
 
+  it("keeps the sandbox reaper's alert codes (D#2 SANDBOX-REAPER-1b) instead of folding them into other", () => {
+    for (const code of ["sandbox_cap_exceeded", "sandbox_total_high", "sandbox_orphan_found", "sandbox_unsettled_stale", "sandbox_name_mismatch", "sandbox_reap_mode_invalid", "sandbox_reap_unconfigured"]) {
+      expect(errorCodeOrOther(code), code).toBe(code);
+    }
+  });
+
   it("has no duplicate in our own list", () => {
     expect(new Set(OWN_ERROR_CODES).size).toBe(OWN_ERROR_CODES.length);
   });

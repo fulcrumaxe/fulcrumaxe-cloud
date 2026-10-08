@@ -995,6 +995,79 @@ check_sandbox_reaper_role_shape() {
   fi
 }
 
+# D#2 SANDBOX-REAPER-1b (0760): the SECURITY DEFINER functions owned by one of the two roles 0760 adds. Called as
+# check_sandbox_net_exception_shape <db> <role> <quoted, comma-separated exact function names>. Prints their oids, comma separated,
+# when each is one of the named definers pinned to search_path=pg_catalog, public, pg_temp and executable by agent_run_writer and no
+# one else, with no grant option; SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic owner check then
+# rejects anything else).
+check_sandbox_net_exception_shape() {
+  local dbname="$1" role="$2" names="$3" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname IN ($names)
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'agent_run_writer'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'agent_run_writer'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check '$role-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by $role fail the exception shape (not one of $names, a loose search_path, or EXECUTE for anyone but agent_run_writer)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#2 SANDBOX-REAPER-1b (0760): role shape of one of the two roles 0760 adds. Called as
+# check_sandbox_net_role_shape <db> <role> <variable prefix>, where <prefix>_PRIVILEGES lists the quoted, comma-separated privileges
+# the role may hold (their number is counted from the list) and <prefix>_FUNCTIONS the quoted function names it may own. A no-op when
+# the role does not exist. Every problem is named: NOLOGIN and unprivileged, no member but the migration role and no live
+# membership for it, a member of no role, exactly the listed privileges, owning only the listed functions.
+check_sandbox_net_role_shape() {
+  local dbname="$1" role="$2" prefix="$3" out rc=0 problems expected owned count
+  local privileges_var="${prefix}_PRIVILEGES" functions_var="${prefix}_FUNCTIONS"
+  expected="${!privileges_var}"
+  owned="${!functions_var}"
+  count="$(awk -F, '{print NF}' <<<"$expected")"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = '$role'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', '$role', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> $count OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the $count granted by 0760' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname IN ($owned)))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond its listed functions' END,
+      CASE WHEN has_schema_privilege('$role', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check '$role-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): $role role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
+# The two roles of 0760 and what each may hold and own (see the migration header).
+SANDBOX_EPHEMERAL_REAPER_FUNCTIONS="'sandbox_reap_ephemeral_state', 'sandbox_reap_candidates_ephemeral', 'sandbox_reap_claim_ephemeral'"
+SANDBOX_EPHEMERAL_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column agent_runs.compute_settle_due_at SELECT','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','column ledger.account_id SELECT','column ledger.run_id SELECT','column ledger.kind SELECT','table sandbox_reaps SELECT','table sandbox_reaps INSERT','table sandbox_reaps UPDATE','schema public USAGE'"
+SANDBOX_INVENTORY_WRITER_FUNCTIONS="'sandbox_inventory_write'"
+SANDBOX_INVENTORY_WRITER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.updated_at SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','table sandbox_inventory SELECT','table sandbox_inventory INSERT','table sandbox_inventory DELETE','schema public USAGE'"
+
 # D#221 KS (0739): the one SECURITY DEFINER owned by plan_kind_audit_writer (plan_kind_switch_audit_write(text)), matched by exact name. Prints
 # its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp with EXECUTE for platform_ops (the invoking trigger) and no one else, and no grant
 # option; SHAPE_FAIL:<count> when a definer owned by the role is not that; nothing when the role owns none.
@@ -1581,6 +1654,24 @@ if [ -n "$SANDBOX_REAPER_RESULT" ] && ! [[ "$SANDBOX_REAPER_RESULT" =~ ^[0-9]+(,
   echo "neon-shape: internal error -- sandbox_reaper exempt function oids were not numeric: $SANDBOX_REAPER_RESULT" >&2
   exit 1
 fi
+SANDBOX_EPHEMERAL_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_ephemeral_reaper "$SANDBOX_EPHEMERAL_REAPER_FUNCTIONS")"
+if [[ "$SANDBOX_EPHEMERAL_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_EPHEMERAL_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_EPHEMERAL_RESULT" ] && ! [[ "$SANDBOX_EPHEMERAL_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_ephemeral_reaper exempt function oids were not numeric: $SANDBOX_EPHEMERAL_RESULT" >&2
+  exit 1
+fi
+SANDBOX_INVENTORY_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_inventory_writer "$SANDBOX_INVENTORY_WRITER_FUNCTIONS")"
+if [[ "$SANDBOX_INVENTORY_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_INVENTORY_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_INVENTORY_RESULT" ] && ! [[ "$SANDBOX_INVENTORY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_inventory_writer exempt function oids were not numeric: $SANDBOX_INVENTORY_RESULT" >&2
+  exit 1
+fi
 PLAN_KIND_AUDIT_RESULT="$(check_plan_kind_audit_exception_shape fx_neon)"
 if [[ "$PLAN_KIND_AUDIT_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${PLAN_KIND_AUDIT_RESULT#SHAPE_FAIL:}" >&2
@@ -1653,7 +1744,7 @@ if [ -n "$RUNNER_NOTICE_RESULT" ] && ! [[ "$RUNNER_NOTICE_RESULT" =~ ^[0-9]+(,\ 
   echo "neon-shape: internal error -- runner_notice_lister exempt function oid was not numeric: $RUNNER_NOTICE_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1671,6 +1762,8 @@ check_error_event_writer_role_shape fx_neon
 check_guard_definer_role_shape fx_neon
 check_guard_definer_owner_cascade fx_neon
 check_sandbox_reaper_role_shape fx_neon
+check_sandbox_net_role_shape fx_neon sandbox_ephemeral_reaper SANDBOX_EPHEMERAL_REAPER
+check_sandbox_net_role_shape fx_neon sandbox_inventory_writer SANDBOX_INVENTORY_WRITER
 check_plan_kind_audit_role_shape fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
 check_work_item_halt_definer_role_shape fx_neon
@@ -1816,7 +1909,9 @@ fi
 # D#2 (0721): 0721 changes the owner of functions that 0001, 0005 and 0200 create or replace (current_member_*, has_open_invitation,
 # the partner helpers). It is held back so the upgrade path applies it AFTER 0005, as every real database has it: a CREATE OR
 # REPLACE of an already guard_definer-owned has_open_invitation in 0005 would otherwise fail for the migration role.
-HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql)
+# D#2 (0760): 0731 is held back by the audit_write rule above (it grants EXECUTE on audit_write_system to its role), and 0760 reads 0731's
+# sandbox_reaps table and its sandbox_reap_done definer. A migration cannot run before the one it extends, so it is held back with it.
+HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql)
 
 AUDIT_WRITE_FUNCTION_PATTERN='FUNCTION[[:space:]]+("?public"?[[:space:]]*\.[[:space:]]*)?"?audit_write(_system)?"?([^A-Za-z0-9_]|$)'
 

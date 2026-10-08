@@ -76,7 +76,48 @@ describe("the sandbox reaper through the worker [pg]", () => {
     await expect(worker.sweepSandboxReap({ ...input("on"), pass: "idle" })).rejects.toMatchObject({ code: "not_supported" });
   });
 
-  for (const sql of ["SELECT * FROM sandbox_reap_candidates_terminal(5, NULL)", "SELECT sandbox_reap_claim('ex-x', 'terminal')", "SELECT sandbox_reap_done('ex-x', 'deleted')", "SELECT sandbox_reap_unknown_names(ARRAY['ex-x'])"]) {
+  /** REAPER-1b: a settled non-executor run that ended 25 hours ago, and its stopped sandbox at the (fake) provider. */
+  async function ephemeralCandidate(): Promise<{ name: string; accountId: string }> {
+    const a = await seedAccount(admin, randomUUID());
+    const runId = randomUUID();
+    const name = `rn-15-project-manager-${runId}`;
+    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, sandbox_name, created_at) VALUES ($1, $2, 'project-manager', 'production', 'succeeded', $3, now() - interval '30 hours')`, [runId, a.accountId, name]);
+    await admin.query(`ALTER TABLE agent_runs DISABLE TRIGGER USER`);
+    try {
+      await admin.query(`UPDATE agent_runs SET ended_at = now() - interval '25 hours' WHERE id = $1`, [runId]);
+    } finally {
+      await admin.query(`ALTER TABLE agent_runs ENABLE TRIGGER USER`);
+    }
+    await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'compute', 'sandbox', 0.5, $2, 'foreground_compute')`, [a.accountId, runId]);
+    sdk.seed(name, "stopped", { persistent: false });
+    return { name, accountId: a.accountId };
+  }
+
+  it("the ephemeral pass and the inventory run on the runner login too: a settled rn- sandbox is deleted, the inventory is written, the platform_ops pool is never used, and both answer in plain data", async () => {
+    const c = await ephemeralCandidate();
+    opsQueries.length = 0;
+    const result = await worker.sweepSandboxReap({ ...input("on"), pass: "ephemeral" });
+    expect(result.candidates).toContainEqual({ accountId: c.accountId, sandboxName: c.name, reason: "ephemeral" });
+    expect(sdk.estate.has(c.name)).toBe(false);
+    expect((await admin.query(`SELECT state, reason FROM sandbox_reaps WHERE sandbox_name = $1`, [c.name])).rows).toEqual([{ state: "deleted", reason: "ephemeral" }]);
+    const kept = await candidate(); // an executor sandbox the inventory then counts
+    const inventory = await worker.sandboxInventory({ now: Date.now() });
+    expect(JSON.parse(JSON.stringify(inventory))).toEqual(inventory);
+    expect(Object.keys(inventory).sort()).toEqual(["accounts", "alerts", "live", "orphans", "stoppedEphemeral", "stoppedExecutor"]);
+    expect((await admin.query(`SELECT stopped_executor, idle_executor FROM sandbox_inventory WHERE account_id = $1`, [kept.accountId])).rows).toEqual([{ stopped_executor: 1, idle_executor: 1 }]);
+    expect(opsQueries).toEqual([]);
+    expect(sdk.waking).toEqual([]);
+  });
+
+  for (const sql of [
+    "SELECT * FROM sandbox_reap_candidates_terminal(5, NULL)",
+    "SELECT sandbox_reap_claim('ex-x', 'terminal')",
+    "SELECT sandbox_reap_done('ex-x', 'deleted')",
+    "SELECT sandbox_reap_unknown_names(ARRAY['ex-x'])",
+    "SELECT * FROM sandbox_reap_candidates_ephemeral(5, NULL)",
+    "SELECT sandbox_reap_claim_ephemeral('rn-1-x-1')",
+    "SELECT * FROM sandbox_inventory_write(ARRAY[]::text[], ARRAY[]::text[], 20)",
+  ]) {
     it(`${sql.slice(7, 40)}: a platform_ops session and an app_user session fail with insufficient_privilege, the runner login's session does not`, async () => {
       await expect(opsPool.query(sql)).rejects.toMatchObject({ code: "42501" });
       await expect(appPool.query(sql)).rejects.toMatchObject({ code: "42501" });

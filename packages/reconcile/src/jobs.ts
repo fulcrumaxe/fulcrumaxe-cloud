@@ -16,6 +16,8 @@ export function buildReconcileJobs(extra: {
   githubRepos: ReconcileJob;
   stripeSubscriptions: ReconcileJob;
   modelKeyHealth: ReconcileJob;
+  /** The sandbox reaper's jobs (they need the worker, so the route builds them); they follow the fixed jobs. */
+  sandbox?: readonly ReconcileJob[];
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth];
+  return [...RECONCILE_JOBS, ...(extra.sandbox ?? []), extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth];
 }

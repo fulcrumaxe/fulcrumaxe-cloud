@@ -484,8 +484,11 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
       const allFiles = readdirSync(DEFAULT_MIGRATIONS_DIR)
         .filter((f) => f.endsWith('.sql'))
         .sort();
-      const AUDIT_WRITE_MIGRATIONS = allFiles.filter((f) =>
-        isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
+      // D#2 (0760): a migration that builds on one of the held-back ones (0760 reads 0731's sandbox_reaps and uses its done definer)
+      // cannot run before it, so it is held back and applied with them.
+      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql'];
+      const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
+        (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
       );
       // Pinned: 0008 is found first, and 0008/0011 are both found --
       // fails loudly if the match ever gets weaker (D#97 C1).
