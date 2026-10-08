@@ -22,6 +22,10 @@ export const COPY = {
   lost: "Runner lost contact at {time}. Retrying from the last pushed commit (attempt {n} of 2).",
   timedOut: "Timed out waiting for a runner.",
   paused: "Paused: Claude usage limit reached.",
+  /** D#6 R4a-2 (C24 section 1): `{detail}` is the closed code the runner sent, shown as it is; nothing else the runner says is shown. */
+  jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
+  agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
+  runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
   pushTooLarge:
     "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
   pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",

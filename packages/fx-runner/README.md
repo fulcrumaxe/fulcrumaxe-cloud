@@ -21,6 +21,31 @@ the daemon come in later changes.
   where the binary says its credential came from before it processes any output, keeps the raw stream only in
   `~/.fx-runner/logs/<run>.jsonl` (0600, credential values removed) and reports metadata-only events.
 
+## The daemon's parts
+
+`src/daemon/` is what a runner does between claiming a run and reporting it done. Nothing starts on its own yet: a later
+change wires it to the command line and the pinned job-signing keys. It only calls out (no listening socket).
+
+- `client.ts`: signed `claim`, `heartbeat`, `events` and `done` calls. Requests are built with the protocol's message
+  schemas and replies read with its reply schemas; anything else is an error with a closed code.
+- `verifyJob.ts`: the one gate for a claimed job. A job that is not private, not signed by a pinned key, expired, tampered,
+  or whose prompt, role card or tool list does not match its digest is refused before anything exists on this machine.
+- `runEnded.ts`: how a run the daemon refused or could not finish is reported, with one closed-code `run_ended` event on the
+  events route: `job_refused` (with the refusal as its detail, `duplicate_job` for a repeat), `repo_not_private`,
+  `agent_failed`, `wall_clock`, `runner_setup` (with the setup failure as its detail, `other` for a code it does not know)
+  and `runner_shutdown`. It is tried up to three times while the lease holds; a stop from the cloud, a lost lease, a crash or
+  a `done` that was never confirmed send nothing, and the lease running out stays the fallback. A credential mismatch is
+  never reported this way. The daemon's shutdown report is one attempt of five seconds at most.
+- `ledger.ts`: a 0600 file of the job ids this machine has started, each kept until its own job's expiry; a job id seen
+  before is not run again, also after a restart. A file that is damaged (anything but missing) is moved aside and the
+  ledger refuses every job until a valid file is back at the path; a restart does not reopen it. One process holds the
+  ledger at a time (a second one fails to start with `LedgerLockedError`); `close()` releases it.
+- `lease.ts`: a heartbeat every 30 seconds and the run's metadata events in batches. A stop from the cloud, or a lease that
+  could not be kept for 90 seconds, aborts the run. A batch the cloud has part of is trimmed and resent.
+- `jobHandler.ts`: verify, hold the lease, run, then send `done` (retried a bounded number of times when the cloud cannot
+  reach GitHub) with the engine's session id, and write the local session index.
+- `pollLoop.ts`: the claim loop: waits the `retry_after` the cloud gives, backs off on errors, stops on SIGTERM or SIGINT.
+
 ## Command line
 
 `bin/fx-runner.mjs` is the entry point; it looks up `HOME` and `FX_RUNNER_HOME` by name and hands everything else to

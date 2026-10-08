@@ -46,6 +46,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/cloud.ts": ["crypto"],
   "src/config.ts": ["crypto", "fs", "path"],
   "src/keys.ts": ["crypto"],
+  "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/filePermissions.ts": ["path"],

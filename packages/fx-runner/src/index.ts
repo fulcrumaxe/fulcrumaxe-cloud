@@ -12,3 +12,10 @@ export { HostSandboxRefused, createHostSandbox } from "./sandbox/hostSandbox.js"
 export type { HostSandbox, HostSandboxConfig } from "./sandbox/hostSandbox.js";
 export * from "./job/runJob.js";
 export * from "./job/workspace.js";
+export * from "./daemon/client.js";
+export * from "./daemon/jobHandler.js";
+export * from "./daemon/lease.js";
+export * from "./daemon/ledger.js";
+export * from "./daemon/pollLoop.js";
+export * from "./daemon/runEnded.js";
+export * from "./daemon/verifyJob.js";

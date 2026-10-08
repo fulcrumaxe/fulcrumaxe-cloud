@@ -372,6 +372,138 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(await send(b, g2, [ev(0, { type: "credential_mismatch" })])).toMatchObject({ ended: "credential_mismatch" });
       expect((await statusEvents(b)).at(-1)?.payload).toEqual({ from: "running", to: "failed", failureReason: "credential_mismatch" });
     });
+
+    describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
+      const bare = (seq: number, extra: object) => ({ seq, ts: "2026-10-10T12:00:00.000Z", ...extra });
+      const ended = (seq: number, reason: string, detail?: string) => bare(seq, { type: "run_ended", reason, ...(detail === undefined ? {} : { detail }) });
+      const children = async (id: string) => (await admin.query("SELECT id FROM agent_runs WHERE parent_run_id = $1", [id])).rows;
+      /** What each reason records, exactly as the correction's table lists it. `runner_shutdown` is in the follow-up test file, where the work item it needs is seeded. */
+      const TABLE: Array<[reason: string, detail: string | undefined, status: string, failureReason: string]> = [
+        ["job_refused", "job_signature_invalid", "failed", "job_refused"],
+        ["job_refused", "duplicate_job", "failed", "job_refused"],
+        ["repo_not_private", undefined, "failed", "public_repo"],
+        ["agent_failed", undefined, "failed", "agent_failed"],
+        ["wall_clock", undefined, "timed_out", "wall_clock_limit"],
+        ["runner_setup", "claude_binary_missing", "failed", "runner_setup_failed"],
+        ["runner_setup", "other", "failed", "runner_setup_failed"],
+      ];
+
+      for (const [reason, detail, status, failureReason] of TABLE) {
+        it(`${reason}${detail === undefined ? "" : ` (${detail})`} ends the run ${status} with ${failureReason}, in one status event, and makes no follow-up`, async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          expect(await send(id, g, [ended(0, reason, detail)])).toMatchObject({ outcome: "accepted", stored: 1, ended: failureReason });
+          expect((await row(id)).status).toBe(status);
+          expect((await statusEvents(id)).map((e) => e.payload)).toEqual([{ from: "pending", to: "running" }, { from: "running", to: status, failureReason }]);
+          expect(await children(id)).toEqual([]);
+          // The closed code the runner sent is on the stored event, which is where the dashboard reads it from.
+          expect((await events(id, "runner.event"))[0]!.payload).toMatchObject({ type: "run_ended", reason, ...(detail === undefined ? {} : { detail }) });
+        });
+      }
+
+      it("is fenced like every other event: a stale generation or a finished run stores nothing and changes nothing", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        expect(await send(id, g + 1, [ended(0, "agent_failed")])).toMatchObject({ outcome: "fenced", reason: "stale_generation" });
+        expect((await row(id)).status).toBe("running");
+        expect(await send(id, g, [ended(0, "agent_failed")])).toMatchObject({ outcome: "accepted" });
+        expect(await send(id, g, [ended(1, "job_refused", "duplicate_job")])).toMatchObject({ outcome: "fenced", reason: "run_terminal" });
+        expect((await statusEvents(id)).at(-1)?.payload).toEqual({ from: "running", to: "failed", failureReason: "agent_failed" });
+      });
+
+      it("follows the seq rule: a run_ended at or below the last accepted number is seq_not_increasing and ends nothing", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        await send(id, g, [ev(0), ev(1)]);
+        expect(await send(id, g, [ended(1, "agent_failed")])).toEqual({ outcome: "seq_not_increasing", lastAcceptedSeq: 1 });
+        expect((await row(id)).status).toBe("running");
+        expect(await send(id, g, [ended(2, "agent_failed")])).toMatchObject({ outcome: "accepted", ended: "agent_failed" });
+      });
+
+      it("after a usage limit in the same batch, the usage limit is what is recorded (the first ending event wins)", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        expect(await send(id, g, [bare(0, { type: "usage_limit_reached" }), ended(1, "agent_failed")])).toMatchObject({ outcome: "accepted", stored: 2, ended: "usage_limit" });
+        expect((await statusEvents(id)).at(-1)?.payload).toEqual({ from: "running", to: "failed", failureReason: "usage_limit" });
+      });
+
+      it("after a credential mismatch in the same batch, the mismatch is what is recorded", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        expect(await send(id, g, [bare(0, { type: "credential_mismatch" }), ended(1, "runner_setup", "other")])).toMatchObject({ ended: "credential_mismatch" });
+        expect((await statusEvents(id)).at(-1)?.payload).toEqual({ from: "running", to: "failed", failureReason: "credential_mismatch" });
+      });
+
+      /**
+       * A pool whose clients, right after the batch reads the last accepted number, store a row under `runnerSeq` with another body.
+       * The run row's lock normally keeps that from happening; this puts the row in the one window the database guard exists for,
+       * so the batch's own event for that number reaches `insertRunnerEvent` as a duplicate or a conflict.
+       */
+      const racingPool = (runId: string, runnerSeq: number, bodySha256: string): Pool =>
+        new Proxy(writerPool, {
+          get(target, prop) {
+            if (prop !== "connect") {
+              const value: unknown = Reflect.get(target, prop);
+              return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+            }
+            return async () => {
+              const client = await target.connect();
+              const query = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
+              const release = client.release.bind(client);
+              (client as unknown as { query: unknown }).query = async (...args: unknown[]) => {
+                const result = await query(...args);
+                if (typeof args[0] === "string" && args[0].includes("max(runner_seq)")) {
+                  await insertRunnerEvent(client, { accountId: A.accountId, runId, runnerSeq, bodySha256, payload: { type: "usage" } });
+                }
+                return result;
+              };
+              (client as unknown as { release: unknown }).release = (...args: unknown[]) => {
+                (client as unknown as { query: unknown }).query = query;
+                (client as unknown as { release: unknown }).release = release;
+                return (release as (...a: unknown[]) => void)(...args);
+              };
+              return client;
+            };
+          },
+        });
+      const racingSend = (pool: Pool, id: string, g: number, list: object[]) =>
+        createRunnerClaimFacade(pool, { visibility: { visibility: async () => visibility }, now: () => clock, randomBetween: (min) => min }).ingestRunnerEvents({
+          accountId: A.accountId,
+          runnerId: runner,
+          runId: id,
+          leaseGeneration: g,
+          events: list as never,
+        });
+
+      it("a run_ended whose number is already stored with another body is a conflict, is dropped and ends nothing", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        // Number 0 is stored by another writer after the batch read the last accepted number: the run_ended that reuses it is dropped.
+        expect(await racingSend(racingPool(id, 0, "c".repeat(64)), id, g, [ended(0, "agent_failed")])).toMatchObject({ outcome: "accepted", stored: 0, duplicates: 1, conflicts: 1, ended: null });
+        expect((await row(id)).status).toBe("running");
+        expect((await statusEvents(id)).map((e) => e.payload)).toEqual([{ from: "pending", to: "running" }]);
+        expect(await children(id)).toEqual([]);
+        // The same for the events that end a run without a reason.
+        expect(await racingSend(racingPool(id, 1, "d".repeat(64)), id, g, [bare(1, { type: "usage_limit_reached" })])).toMatchObject({ outcome: "accepted", stored: 0, conflicts: 1, ended: null });
+        expect((await row(id)).status).toBe("running");
+        expect(await children(id)).toEqual([]);
+      });
+
+      it("a reason that is not a key of the ending table, such as an inherited property name, ends nothing", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        // The protocol schema refuses these on the events route; the table lookup must hold on its own too.
+        expect(await send(id, g, [ended(0, "constructor"), ended(1, "toString"), ended(2, "__proto__")])).toMatchObject({ outcome: "accepted", stored: 3, ended: null });
+        expect((await row(id)).status).toBe("running");
+      });
+
+      it("a usage limit that arrives first ends the run, so the run_ended sent after it is answered run_terminal", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        await send(id, g, [bare(0, { type: "usage_limit_reached" })]);
+        expect(await send(id, g, [ended(1, "agent_failed")])).toMatchObject({ outcome: "fenced", reason: "run_terminal" });
+      });
+    });
   });
 
   describe("who may write the lease columns", () => {

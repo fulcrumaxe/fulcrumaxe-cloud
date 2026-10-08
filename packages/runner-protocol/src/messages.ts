@@ -30,7 +30,40 @@ export type Ed25519PublicJwk = z.infer<typeof Ed25519PublicJwk>;
 export const MAX_EVENTS_PER_BATCH = 100;
 
 /** What a runner may say about its progress: metadata only, with no field for model text, tool output or file content. */
-export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch", "engine_version"] as const;
+export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch", "engine_version", "run_ended"] as const;
+
+/**
+ * D#6 R4a-2 (correction C24 section 1; additive under C8 section 6): why the runner ended a run it refused or could not finish. A
+ * closed set, and the only thing a `run_ended` event says: no job content, no error text. Each reason has a closed `detail` set
+ * where C24 gives one, and none otherwise (`DETAILS_OF_RUN_ENDED` maps a reason to its set; an empty set means "no detail").
+ */
+export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown"] as const;
+export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
+export type RunEndedReason = z.infer<typeof RunEndedReason>;
+
+export const JOB_REFUSED_DETAILS = ["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch"] as const;
+export const RUNNER_SETUP_DETAILS = [
+  "sandbox_unavailable",
+  "claude_binary_missing",
+  "claude_version_unsupported",
+  "claude_flags_unsupported",
+  "auth_missing",
+  "bad_start_options",
+  "no_init_line",
+  "permission_mode_forced",
+  "other",
+] as const;
+export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
+export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];
+
+export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetail[]> = {
+  job_refused: JOB_REFUSED_DETAILS,
+  repo_not_private: [],
+  agent_failed: [],
+  wall_clock: [],
+  runner_setup: RUNNER_SETUP_DETAILS,
+  runner_shutdown: [],
+};
 
 export const LocalOnlyEvent = z
   .object({
@@ -49,9 +82,21 @@ export const LocalOnlyEvent = z
     // D#6 R2b-3 (comment 27 item 7; additive under C8 section 6): when the plan's usage limit resets, on a `usage_limit_reached`
     // event only. Display data: the follow-up run becomes claimable from it, and a false value only affects the tenant that sent it.
     reset_at: z.string().datetime().optional(),
+    // D#6 R4a-2 (C24 section 1), on a `run_ended` event only: why the run ended, and for two reasons which closed code. Neither holds job content.
+    reason: RunEndedReason.optional(),
+    detail: z.enum(RUN_ENDED_DETAILS).optional(),
   })
   .strict()
-  .refine((event) => event.reset_at === undefined || event.type === "usage_limit_reached", { message: "reset_at belongs to usage_limit_reached only", path: ["reset_at"] });
+  .superRefine((event, ctx) => {
+    if (event.reset_at !== undefined && event.type !== "usage_limit_reached") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "reset_at belongs to usage_limit_reached only", path: ["reset_at"] });
+    if (event.type !== "run_ended") {
+      if (event.reason !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "reason belongs to run_ended only", path: ["reason"] });
+      if (event.detail !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "detail belongs to run_ended only", path: ["detail"] });
+      return;
+    }
+    if (event.reason === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "run_ended names its reason", path: ["reason"] });
+    else if (event.detail !== undefined && !DETAILS_OF_RUN_ENDED[event.reason].includes(event.detail)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "detail is not one of this reason's codes", path: ["detail"] });
+  });
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */

@@ -69,7 +69,13 @@ export type FailureReason =
   /** D#6 R2b-3 (C21 section 7): an executor's changes could not be checked against the Spec's file scope (no scope on record, or one the matcher cannot read), so no pull request is opened. */
   | "scope_unknown"
   /** A caller that cannot wait for a runner to claim a run was handed a queued one and cancelled it (`failClosedOnQueued`). */
-  | "queued_not_supported";
+  | "queued_not_supported"
+  /** D#6 R4a-2 (C24 section 1): the runner refused the job it was given (a key or hash mismatch with the cloud), or saw it twice. The runner's closed `detail` is kept on the stored `run_ended` event. */
+  | "job_refused"
+  /** D#6 R4a-2 (C24 section 1): the agent stopped without a result. It would stop the same way again, so no follow-up is made. */
+  | "agent_failed"
+  /** D#6 R4a-2 (C24 section 1): the runner could not start the agent (sandbox, binary, login or flags). Same on a retry, so no follow-up. */
+  | "runner_setup_failed";
 
 /** What a target reports once a dispatched run reaches a terminal
  * outcome. `SandboxTarget` builds this from the sandbox's last

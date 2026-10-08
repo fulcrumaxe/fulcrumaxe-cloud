@@ -8,17 +8,24 @@ import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
 
 /** The job fields `runJob` reads. The daemon passes a job it has already verified (signature, expiry, repo visibility). */
-export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint">;
+export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & { expires_at?: Job["expires_at"] };
 
 /** Resume a session this machine still holds, in its workspace, or start fresh in a new workspace on `branch`. */
 export type SessionPlan = { kind: "resume"; sessionId: string; workspace: string } | { kind: "fresh"; branch: string | null };
 
 /**
  * Remembers which job ids this runner has started. `claim` is synchronous and answers true exactly once per id, so two
- * calls with the same id (a redelivery, a retry racing the first) cannot both start. A durable ledger comes with the daemon.
+ * calls with the same id (a redelivery, a retry racing the first) cannot both start. `expiresAt` is the job's own expiry: a durable
+ * ledger keeps the id until then, since a job past it is refused before it gets here.
  */
 export interface JobLedger {
-  claim(jobId: string): boolean;
+  claim(jobId: string, expiresAt?: string): boolean;
+  /**
+   * Whether the ledger holds this id. A `claim` that answered false for an id this says it does not hold was refused because the
+   * ledger could not record it (a damaged file, a failed write), which is not a repeat of the job. Optional: a ledger without it is
+   * taken to answer false only for repeats.
+   */
+  has?(jobId: string): boolean;
 }
 
 export function createMemoryLedger(): JobLedger {
@@ -81,7 +88,7 @@ function reasonOf(error: unknown): FailureReason {
  *    The workspace is left for the caller (it pushes the branch from it) unless the run never got as far as starting.
  */
 export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJobResult> {
-  if (!deps.ledger.claim(job.job_id)) return { status: "duplicate" };
+  if (!deps.ledger.claim(job.job_id, job.expires_at)) return { status: "duplicate" };
   const reasons = jobHashRefusals(job);
   if (reasons.length > 0) return { status: "refused", reasons };
 
