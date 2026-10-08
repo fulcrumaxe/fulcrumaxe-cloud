@@ -539,6 +539,89 @@ describe("runner follow-up runs [pg]", () => {
     });
   });
 
+  describe("after a run_ended event (D#6 R4a-2, C24 section 1)", () => {
+    const facade = () => createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, randomBetween: (min) => min, followUp: ports });
+    const endWith = (runId: string, reason: string, detail?: string) =>
+      facade().ingestRunnerEvents({ accountId: A.accountId, runnerId: runnerA, runId, leaseGeneration: 1, events: [{ seq: 0, ts: new Date(clock).toISOString(), type: "run_ended", reason, ...(detail === undefined ? {} : { detail }) } as never] });
+    /** The status, and the reason of the last status change (the reason is recorded on the event, not on the row). */
+    const statusOf = async (id: string) => {
+      const { rows } = await admin.query("SELECT r.status, (SELECT e.payload->>'failureReason' FROM run_events e WHERE e.run_id = r.id AND e.kind = 'run.status_changed' ORDER BY e.seq DESC LIMIT 1) AS reason FROM agent_runs r WHERE r.id = $1", [id]);
+      return rows[0] as { status: string; reason: string | null };
+    };
+    /** The follow-up child, claimed by the runner and still holding its lease, as a fixture would have it. */
+    async function running(childId: string): Promise<void> {
+      await admin.query("SET session_replication_role = replica");
+      await admin.query("UPDATE agent_runs SET status = 'running', runner_id = $2, lease_generation = 1, lease_expires_at = to_timestamp($3 / 1000.0), started_at = now() WHERE id = $1", [childId, runnerA, clock + 60_000]);
+      await admin.query("SET session_replication_role = DEFAULT");
+    }
+
+    it("runner_shutdown ends the run failed runner_lost at once, without waiting for the lease, and makes the follow-up in that transaction", async () => {
+      const id = await run({ lease: clock + 60_000 });
+      expect(await endWith(id, "runner_shutdown")).toMatchObject({ outcome: "accepted", stored: 1, ended: "runner_lost" });
+      expect(await statusOf(id)).toEqual({ status: "failed", reason: "runner_lost" });
+      const children = await child(id);
+      expect(children).toHaveLength(1);
+      expect(children[0].status).toBe("pending");
+      // After the commit the child is dispatched, exactly as for a lost lease.
+      expect(calls.dispatched).toEqual([children[0].id]);
+      // The slot is free: nothing of this account is still running.
+      expect((await admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running'", [A.accountId])).rows[0].n).toBe(0);
+    });
+
+    it("every other reason makes no child and dispatches nothing", async () => {
+      const cases: Array<[string, string | undefined]> = [["job_refused", "job_signature_invalid"], ["repo_not_private", undefined], ["agent_failed", undefined], ["wall_clock", undefined], ["runner_setup", "other"]];
+      for (const [reason, detail] of cases) {
+        const id = await run({ lease: clock + 60_000 });
+        expect(await endWith(id, reason, detail), reason).toMatchObject({ outcome: "accepted" });
+        expect(await child(id), reason).toEqual([]);
+      }
+      expect(calls.dispatched).toEqual([]);
+      expect(calls.failed).toEqual([]);
+    });
+
+    it("a shutdown counts toward the two losses: the shutdown of a follow-up child fails the work item instead of making a third run", async () => {
+      const first = await run({ lease: clock + 60_000 });
+      await endWith(first, "runner_shutdown");
+      const [second] = await child(first);
+      await running(second.id);
+      calls.dispatched.length = 0;
+      expect(await endWith(second.id, "runner_shutdown")).toMatchObject({ outcome: "accepted", ended: "runner_lost" });
+      expect(await child(second.id)).toEqual([]);
+      expect(calls.dispatched).toEqual([]);
+      expect(calls.failed).toEqual([{ workItemId: A.workItemId, runId: second.id, reason: "runner_lost" }]);
+    });
+
+    it("a lost lease and a shutdown count together, in either order", async () => {
+      // Lost lease first, shutdown second.
+      const lostFirst = await run({ lease: clock - 1 });
+      await sweep();
+      const [afterLoss] = await child(lostFirst);
+      await running(afterLoss.id);
+      calls.dispatched.length = 0;
+      await endWith(afterLoss.id, "runner_shutdown");
+      expect(await child(afterLoss.id)).toEqual([]);
+      expect(calls.failed).toEqual([{ workItemId: A.workItemId, runId: afterLoss.id, reason: "runner_lost" }]);
+
+      // Shutdown first, lost lease second.
+      calls.failed.length = 0;
+      const shutFirst = await run({ lease: clock + 60_000 });
+      await endWith(shutFirst, "runner_shutdown");
+      const [afterShutdown] = await child(shutFirst);
+      await running(afterShutdown.id);
+      await admin.query("UPDATE agent_runs SET lease_expires_at = to_timestamp($2 / 1000.0) WHERE id = $1", [afterShutdown.id, clock - 1]);
+      expect(await sweep()).toMatchObject({ lost: 1, followUpsCreated: 0, followUpsExhausted: 1 });
+      expect(calls.failed).toEqual([{ workItemId: A.workItemId, runId: afterShutdown.id, reason: "runner_lost" }]);
+    });
+
+    it("a shutdown from a runner that no longer holds the run is fenced and makes nothing", async () => {
+      const id = await run({ lease: clock + 60_000 });
+      const out = await facade().ingestRunnerEvents({ accountId: A.accountId, runnerId: runnerA, runId: id, leaseGeneration: 2, events: [{ seq: 0, ts: new Date(clock).toISOString(), type: "run_ended", reason: "runner_shutdown" } as never] });
+      expect(out).toMatchObject({ outcome: "fenced", reason: "stale_generation" });
+      expect(await child(id)).toEqual([]);
+      expect((await statusOf(id)).status).toBe("running");
+    });
+  });
+
   describe("a pending runner run with no job (C22 section 3)", () => {
     const MIN = 60_000;
     /** A follow-up child with no job. Answers its id and when it was made (database clock); the sweeper's clock is then set relative to that. */

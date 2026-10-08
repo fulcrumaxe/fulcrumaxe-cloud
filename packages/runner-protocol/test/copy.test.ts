@@ -22,6 +22,9 @@ describe("the runner copy (D#6 R2b)", () => {
       lost: "Runner lost contact at {time}. Retrying from the last pushed commit (attempt {n} of 2).",
       timedOut: "Timed out waiting for a runner.",
       paused: "Paused: Claude usage limit reached.",
+      jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
+      agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
+      runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
       pushTooLarge:
         "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
       pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
@@ -50,6 +53,6 @@ describe("the runner copy (D#6 R2b)", () => {
       expect(text.length, key).toBeGreaterThan(0);
       for (const match of text.matchAll(/\{([a-z]+)\}/g)) placeholders.add(match[1]!);
     }
-    expect([...placeholders].sort()).toEqual(["machine", "n", "person", "repo", "size", "time"]);
+    expect([...placeholders].sort()).toEqual(["detail", "machine", "n", "person", "repo", "size", "time"]);
   });
 });

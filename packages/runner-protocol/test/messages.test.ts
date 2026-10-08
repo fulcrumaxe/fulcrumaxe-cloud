@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { JobSchema, SignedJobSchema } from "../src/job.js";
-import { CREDENTIAL_MODES, INT4_MAX, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, type RunnerMessageName } from "../src/messages.js";
+import { CREDENTIAL_MODES, DETAILS_OF_RUN_ENDED, INT4_MAX, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, type RunnerMessageName } from "../src/messages.js";
 import { CREDENTIAL_NAME, G1_ALLOWLIST, fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const UUID = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -119,7 +119,7 @@ describe("LocalOnlyEvent", () => {
   });
 
   it("has only the Spec's fields, and reset_at (D#6 R2b-3, comment 27 item 7)", () => {
-    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["duration_ms", "engine_version", "exit_code", "file_path", "reset_at", "seq", "tool_name", "ts", "type", "usage"]);
+    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "tool_name", "ts", "type", "usage"]);
   });
 
   it("takes a reset time on usage_limit_reached only, as an ISO timestamp", () => {
@@ -130,6 +130,49 @@ describe("LocalOnlyEvent", () => {
     for (const type of LOCAL_ONLY_EVENT_TYPES.filter((t) => t !== "usage_limit_reached")) {
       expect(LocalOnlyEvent.safeParse({ ...EVENT, type, reset_at: "2026-10-04T17:00:00.000Z" }).success, type).toBe(false);
     }
+  });
+
+  describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
+    const ended = { ...EVENT, type: "run_ended" };
+    it("is a local-only event type, with exactly the six reasons", () => {
+      expect(LOCAL_ONLY_EVENT_TYPES).toContain("run_ended");
+      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "job_refused", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
+    });
+
+    it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
+      for (const reason of Object.keys(DETAILS_OF_RUN_ENDED)) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
+      expect(DETAILS_OF_RUN_ENDED.job_refused).toEqual(["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch"]);
+      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "other"]);
+      for (const [reason, details] of Object.entries(DETAILS_OF_RUN_ENDED)) {
+        for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail }).success, `${reason}/${detail}`).toBe(true);
+      }
+    });
+
+    it("refuses a reason outside the set, and a run_ended with no reason", () => {
+      for (const bad of ["credential_mismatch", "usage_limit", "", "JOB_REFUSED", 3]) expect(LocalOnlyEvent.safeParse({ ...ended, reason: bad }).success, String(bad)).toBe(false);
+      expect(LocalOnlyEvent.safeParse(ended).success).toBe(false);
+    });
+
+    it("refuses a detail outside its reason's set, and any detail on a reason that has none", () => {
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "job_refused", detail: "auth_missing" }).success).toBe(false);
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "duplicate_job" }).success).toBe(false);
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "free text from an error message" }).success).toBe(false);
+      for (const reason of ["agent_failed", "repo_not_private", "wall_clock", "runner_shutdown"]) {
+        expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "other" }).success, reason).toBe(false);
+        expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "duplicate_job" }).success, reason).toBe(false);
+      }
+    });
+
+    it("refuses reason and detail on every other event type", () => {
+      for (const type of LOCAL_ONLY_EVENT_TYPES.filter((t) => t !== "run_ended")) {
+        expect(LocalOnlyEvent.safeParse({ ...EVENT, type, reason: "agent_failed" }).success, `${type} reason`).toBe(false);
+        expect(LocalOnlyEvent.safeParse({ ...EVENT, type, detail: "other" }).success, `${type} detail`).toBe(false);
+      }
+    });
+
+    it("refuses a reset time on a run_ended", () => {
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "agent_failed", reset_at: "2026-10-04T17:00:00.000Z" }).success).toBe(false);
+    });
   });
 
   it("refuses model text, tool output, file content or a message under any name", () => {

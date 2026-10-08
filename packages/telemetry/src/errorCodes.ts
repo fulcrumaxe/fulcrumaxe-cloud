@@ -107,6 +107,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_grant_refused",
   // Local runner (D#6): a job segment name that is not a plain word.
   "bad_segment",
+  // Local runner (D#6): the daemon ledger is held by another process.
+  "ledger_locked",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

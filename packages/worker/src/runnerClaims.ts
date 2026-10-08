@@ -9,6 +9,7 @@ import {
   canonicalJson,
   redactDeep,
   type LocalOnlyEvent,
+  type RunEndedReason,
   type SignedJob,
   type StopReason,
 } from "@fulcrumaxe/runner-protocol";
@@ -88,7 +89,7 @@ export type IngestRunnerEventsResult =
       duplicates: number;
       /** Of `duplicates`, the ones whose body differed from the stored one. A count only; the dropped body is never kept. */
       conflicts: number;
-      ended: "usage_limit" | "credential_mismatch" | null;
+      ended: RunnerEndReason | null;
       /** The lease's new end; unchanged when this batch ended the run. */
       leaseExpiresAt: Date;
     }
@@ -106,6 +107,7 @@ export interface RunnerClaimFacade {
   /**
    * Stores a batch of the runner's events and extends the lease. A `usage_limit_reached` or `credential_mismatch` event ends the
    * run `failed`; a usage limit also makes the follow-up run, claimable at the reset time the runner reported (C21 section 4).
+   * A `run_ended` event ends it as C24 section 1's table says (`RUN_ENDED_ENDINGS`); only its `runner_shutdown` reason makes a follow-up.
    */
   ingestRunnerEvents(input: IngestRunnerEventsInput): Promise<IngestRunnerEventsResult>;
 }
@@ -130,8 +132,40 @@ interface CandidateRow {
   job_signed: unknown;
 }
 
-/** The `FailureReason` each terminal event type records. */
+/** What an ending event writes: the run's new status and failure reason, and whether the same transaction makes a follow-up run. */
+interface Ending {
+  to: "failed" | "timed_out";
+  reason: FailureReason;
+  followUp: boolean;
+}
+
+/** The `FailureReason` an event can end a run with. */
+export type RunnerEndReason = "usage_limit" | "credential_mismatch" | "job_refused" | "public_repo" | "agent_failed" | "wall_clock_limit" | "runner_setup_failed" | "runner_lost";
+
+/**
+ * What each terminal event records (the first one stored in a batch wins). `run_ended` (D#6 R4a-2, correction C24 section 1) is keyed
+ * by its closed `reason`, which the protocol schema has already checked; every value recorded comes from this table and none from the
+ * event, so nothing the runner sends becomes free text. Only a usage limit and a shutdown make a follow-up run: the others would end
+ * the same way again. A shutdown is a lost runner told early, so it counts toward the same limit of two losses.
+ */
 const ENDING_EVENTS = { usage_limit_reached: "usage_limit", credential_mismatch: "credential_mismatch" } as const satisfies Record<string, FailureReason>;
+const RUN_ENDED_ENDINGS = {
+  job_refused: { to: "failed", reason: "job_refused", followUp: false },
+  repo_not_private: { to: "failed", reason: "public_repo", followUp: false },
+  agent_failed: { to: "failed", reason: "agent_failed", followUp: false },
+  wall_clock: { to: "timed_out", reason: "wall_clock_limit", followUp: false },
+  runner_setup: { to: "failed", reason: "runner_setup_failed", followUp: false },
+  runner_shutdown: { to: "failed", reason: "runner_lost", followUp: true },
+} as const satisfies Record<RunEndedReason, Ending>;
+
+/** The ending a stored event causes, or null for an event that ends nothing. */
+function endingOf(event: LocalOnlyEvent): Ending | null {
+  if (event.type === "usage_limit_reached") return { to: "failed", reason: ENDING_EVENTS.usage_limit_reached, followUp: true };
+  if (event.type === "credential_mismatch") return { to: "failed", reason: ENDING_EVENTS.credential_mismatch, followUp: false };
+  // Own-property lookup: a reason that is not a key of the table (such as "constructor") ends nothing, whatever parsed the event.
+  if (event.type === "run_ended" && event.reason !== undefined && Object.hasOwn(RUN_ENDED_ENDINGS, event.reason)) return RUN_ENDED_ENDINGS[event.reason];
+  return null;
+}
 
 /** The fence (`agent_run_runner_lease`, 0754) on a client already inside the tenant transaction. Shared with the sweeper. */
 export const leaseVerdict = async (client: PoolClient, i: HeartbeatRunnerRunInput, now: Date, extendSeconds: number, maxWallClockMs: number): Promise<LeaseVerdict> => {
@@ -304,7 +338,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           let stored = 0;
           let duplicates = 0;
           let conflicts = 0;
-          let ending: keyof typeof ENDING_EVENTS | null = null;
+          let ending: Ending | null = null;
           for (const event of input.events) {
             // G2 at ingest: the runner redacts before it sends, and the cloud does it again before anything is stored.
             const clean = redactDeep(event, []);
@@ -321,17 +355,17 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
               duplicates++;
               if (outcome === "conflict") conflicts++;
             }
-            if (outcome === "stored" && ending === null && event.type in ENDING_EVENTS) ending = event.type as keyof typeof ENDING_EVENTS;
+            if (outcome === "stored" && ending === null) ending = endingOf(event);
           }
           if (ending === null) {
             await leaseVerdict(client, input, at, RUNNER_LEASE_SECONDS, maxWallClockMs);
             return { outcome: "accepted", stored, duplicates, conflicts, ended: null, leaseExpiresAt: new Date(at.getTime() + RUNNER_LEASE_SECONDS * 1000) };
           }
-          await writeRunStatusOn(client, { accountId: input.accountId, runId: input.runId, from: "running", to: "failed", failureReason: ENDING_EVENTS[ending] });
-          // A usage limit makes the run that follows it, in this same transaction: the child commits with the status move or not at all.
-          const followUp = ending === "usage_limit_reached" ? await requestFollowUp(client, input.runId) : null;
+          await writeRunStatusOn(client, { accountId: input.accountId, runId: input.runId, from: "running", to: ending.to, failureReason: ending.reason });
+          // A usage limit or a shutdown makes the run that follows it, in this same transaction: the child commits with the status move or not at all.
+          const followUp = ending.followUp ? await requestFollowUp(client, input.runId) : null;
           const lease = await client.query<{ lease_expires_at: Date }>("SELECT lease_expires_at FROM agent_runs WHERE id = $1 AND account_id = $2", [input.runId, input.accountId]);
-          return { outcome: "accepted", stored, duplicates, conflicts, ended: ENDING_EVENTS[ending], leaseExpiresAt: lease.rows[0]!.lease_expires_at, followUp };
+          return { outcome: "accepted", stored, duplicates, conflicts, ended: ending.reason as RunnerEndReason, leaseExpiresAt: lease.rows[0]!.lease_expires_at, followUp };
         });
         const { followUp, ...reply } = result as IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null };
         if (followUp && deps.followUp) {
