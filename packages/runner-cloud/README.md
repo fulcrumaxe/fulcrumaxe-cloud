@@ -33,7 +33,8 @@ the repository to keep it that way.
   database refuses a value under 180. A request that fails verification stores nothing. Hello, revoke, heartbeat and event writes store no
   nonce: they are idempotent by state, by `(run_id, seq)` or by lease generation.
 - **Register.** No runner row exists yet for a nonce to belong to. The code is single use (`runner_register` marks it used
-  in the insert's transaction) and the key is unique, so a replay is 409 `key_registered`.
+  in the insert's transaction) and the key is unique, so a replay is 409 `key_registered`. The 201 reply is the protocol's `RegisterResponse`: the runner id, the account and the credential mode, the last two read
+  from the stored row (never from the request), so the runner can check that the mode it was told to use is the mode the cloud will treat it as.
 - **Lease fence.** Heartbeat, events and done carry `(run_id, lease_generation)`, compared inside the write transaction, so
   a stale lease's replay is refused (R2b builds and tests it).
 - **Runner-side `job_id` dedupe.** The signed job has no audience, runner binding or lifetime cap, as the Spec's field list

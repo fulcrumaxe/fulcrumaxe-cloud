@@ -11,7 +11,8 @@ export interface Rig {
   cloud: FakeCloud;
   dir: string;
   run: (argv: string[], over?: { fetchFn?: typeof fetch; now?: () => Date }) => Promise<{ code: number; out: string; err: string }>;
-  register: (mode?: string) => Promise<{ code: number; out: string; err: string }>;
+  /** `serverMode` is the mode the code was minted for (default: the same as `mode`). */
+  register: (mode?: string, serverMode?: "subscription" | "api_key") => Promise<{ code: number; out: string; err: string }>;
 }
 
 /** A fresh state directory (inside a throwaway parent, so the CLI creates it) and a fake cloud for each test. */
@@ -29,7 +30,10 @@ export function useRig(): Rig {
       const code = await runCli({ argv, home: undefined, stateDirOverride: rig.dir, stdout: (t) => (out += t), stderr: (t) => (err += t), ...over });
       return { code, out, err };
     };
-    rig.register = (mode = "api_key") => rig.run(["register", "--code", CODE, "--credential-mode", mode, "--cloud-url", rig.cloud.origin]);
+    rig.register = (mode = "api_key", serverMode) => {
+      rig.cloud.codeModes.set(CODE, serverMode ?? (mode === "subscription" ? "subscription" : "api_key"));
+      return rig.run(["register", "--code", CODE, "--credential-mode", mode, "--cloud-url", rig.cloud.origin]);
+    };
   });
   afterEach(async () => {
     await rig.cloud.close();

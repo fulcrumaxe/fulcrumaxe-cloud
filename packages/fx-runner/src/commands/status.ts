@@ -17,6 +17,7 @@ export async function statusCommand(ctx: CommandContext): Promise<number> {
   const key = loadRunnerKey(ctx.stateDir);
   const ageDays = Math.max(0, Math.floor((ctx.now().getTime() - Date.parse(registration.registered_at)) / DAY_MS));
   ctx.out(`Runner:          ${registration.runner_id}`);
+  ctx.out(`Account:         ${registration.account_id}`);
   ctx.out(`Cloud:           ${registration.cloud_origin}`);
   ctx.out(`Credential mode: ${registration.credential_mode}`);
   ctx.out(`Registered:      ${registration.registered_at}`);

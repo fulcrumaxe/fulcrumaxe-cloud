@@ -66,11 +66,11 @@ export const registerKey = (admin: PoolClient, accountId: string, registeredBy: 
   insertRunner(admin, accountId, registeredBy, { jwk: key.jwk, jkt: key.jkt });
 
 /** A fresh registration code row, returning the plaintext code. */
-export async function insertCode(admin: PoolClient, accountId: string, registeredBy: string): Promise<string> {
+export async function insertCode(admin: PoolClient, accountId: string, registeredBy: string, mode: "subscription" | "api_key" = "subscription"): Promise<string> {
   const code = `fxrr_${randomBytes(30).toString("base64url").replace(/[-_]/g, "a").slice(0, 40)}`;
   await admin.query(
-    `INSERT INTO runner_registration_codes (account_id, registered_by, code_sha256, expires_at, credential_mode) VALUES ($1, $2, $3, now() + interval '10 minutes', 'subscription')`,
-    [accountId, registeredBy, hashRegistrationCode(code)],
+    `INSERT INTO runner_registration_codes (account_id, registered_by, code_sha256, expires_at, credential_mode) VALUES ($1, $2, $3, now() + interval '10 minutes', $4)`,
+    [accountId, registeredBy, hashRegistrationCode(code), mode],
   );
   return code;
 }

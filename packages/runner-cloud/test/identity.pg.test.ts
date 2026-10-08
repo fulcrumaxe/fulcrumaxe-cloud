@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { seedAccount } from "@fx/db/test/helpers/seed.js";
 import { CODE_TTL_MINUTES, HELLO_PATH, MAX_BODY_BYTES, REGISTER_PATH, REVOKE_PATH, ROTATE_PATH, mintRegistrationCode, registerRunner, revokeAllRunners, revokeRunner } from "../src/index.js";
@@ -66,13 +67,33 @@ describe("runner identity routes [pg]", () => {
       const key = newKey();
       const res = await register(key, code);
       expect(res.status).toBe(201);
-      expect(Object.keys(res.body as object)).toEqual(["runner_id"]);
-      expect(await runnerRow((res.body as { runner_id: string }).runner_id)).toMatchObject({ account_id: f.accountId, registered_by: f.a1, credential_mode: "subscription", jkt: key.jkt });
+      const runnerId = (res.body as { runner_id: string }).runner_id;
+      expect(res.body).toEqual({ runner_id: runnerId, account_id: f.accountId, credential_mode: "subscription" });
+      expect(RegisterResponse.safeParse(res.body).success).toBe(true);
+      expect(await runnerRow(runnerId)).toMatchObject({ account_id: f.accountId, registered_by: f.a1, credential_mode: "subscription", jkt: key.jkt });
       expect(await audit(f.accountId, "runner.registered")).toHaveLength(1);
       // A second use of the same code, by another key: 401. The same signed request again: 409.
       expect((await register(newKey(), code)).status).toBe(401);
       expect((await register(key, code)).status).toBe(409);
       expect((await h.admin.query("SELECT 1 FROM runners WHERE account_id = $1", [f.accountId])).rowCount).toBe(1);
+    });
+
+    it("replies with the account and the mode of the stored row, whatever the request says (api_key and subscription)", async () => {
+      const f = await fresh();
+      for (const mode of ["api_key", "subscription"] as const) {
+        const code = await insertCode(h.admin, f.accountId, f.a1, mode);
+        const key = newKey();
+        const res = await register(key, code);
+        expect(res.status, mode).toBe(201);
+        const body = RegisterResponse.parse(res.body);
+        expect(body).toEqual({ runner_id: expect.any(String), account_id: f.accountId, credential_mode: mode });
+        expect(await runnerRow(body.runner_id)).toMatchObject({ account_id: f.accountId, credential_mode: mode });
+      }
+      // The body names no account or mode, so a request that tries to is a 400 and registers nothing.
+      const code = await insertCode(h.admin, f.accountId, f.a1, "api_key");
+      const key = newKey();
+      expect((await register(key, code, { body: { code, public_key_jwk: key.jwk, credential_mode: "subscription" } })).status).toBe(400);
+      expect((await h.admin.query("SELECT 1 FROM runners WHERE account_id = $1 AND jkt = $2", [f.accountId, key.jkt])).rowCount).toBe(0);
     });
 
     it("accepts only an Ed25519 public JWK, a signature made with that key, and a usable code", async () => {
