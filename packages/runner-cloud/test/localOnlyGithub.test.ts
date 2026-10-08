@@ -44,6 +44,7 @@ const ALLOWED: Array<[string, GithubRequest]> = [
   ["A3 the open pull request for the run branch", { method: "GET", path: `${R}/pulls`, query: { head: "acme:fx/run-g1", base: "main", state: "open", per_page: 5 } }],
   ["A3 with no query", { method: "GET", path: `${R}/pulls` }],
   ["A4 opening the draft", { method: "POST", path: `${R}/pulls`, body: pr }],
+  ["A4 opening it ready, the no-draft fallback", { method: "POST", path: `${R}/pulls`, body: { ...pr, draft: false } }],
   ["A5 closing it", { method: "PATCH", path: `${R}/pulls/12`, body: { state: "closed" } }],
   ["A6 an installation token", { method: "POST", path: "/app/installations/99/access_tokens" }],
   ["A6 an installation token with an empty body", { method: "POST", path: "/app/installations/99/access_tokens", body: {} }],
@@ -60,41 +61,28 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
       { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
       { id: "A3", method: "GET", paths: ["/repos/{owner}/{repo}/pulls"], query: ["head", "base", "state", "per_page"], body: "none" },
-      { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: true }" },
+      { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
       { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
       { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });
 
+  /** What the wrapper forwards for `req`: the same call, with the JSON Accept added when the caller sent none. */
+  const forwarded = (req: GithubRequest): GithubRequest =>
+    Object.keys(req.headers ?? {}).some((h) => h.toLowerCase() === "accept") ? req : { ...req, headers: { ...req.headers, accept: "application/vnd.github+json" } };
+
   for (const [name, req] of ALLOWED) {
-    it(`lets ${name} through, untouched`, async () => {
+    it(`lets ${name} through, unchanged but for the JSON Accept`, async () => {
       const { client, seen } = recorder();
       await localOnlyGithub(client).request(req);
-      expect(seen).toEqual([req]);
+      expect(seen).toEqual([forwarded(req)]);
       expect(localOnlyViolation(req)).toBeNull();
     });
   }
 
-  it("a fixture run, from the claim's visibility read to the pull request, makes only A1 to A6 calls, with zero refusals", async () => {
-    const { client, seen } = recorder();
-    const wrapped = localOnlyGithub(client);
-    const calls: GithubRequest[] = [
-      { method: "GET", path: "/repositories/1234567" }, // A2: the visibility re-read at claim and issue
-      { method: "GET", path: R }, // A2: the default branch at done
-      graphql(DOC.RunBranchState, branchState), // A1: the run branch at dispatch and at done
-      { method: "POST", path: "/app/installations/99/access_tokens", body: { repository_ids: [1234567] } }, // A6: the installation token
-      { method: "GET", path: `${R}/pulls`, query: { head: "acme:fx/run-g1", state: "open", per_page: 1 } }, // A3: idempotent open
-      { method: "POST", path: `${R}/pulls`, body: pr }, // A4: the draft
-      graphql(DOC.PullRequestFiles, { owner: "acme", name: "app", number: 12, cursor: null }), // A1: the changed paths
-      graphql(DOC.MarkReady, { id: "PR_kwDOAbCd123" }), // A1: mark ready
-      { method: "PATCH", path: `${R}/pulls/12`, body: { state: "closed" } }, // A5: close on scope_violation
-    ];
-    const refusals: unknown[] = [];
-    for (const call of calls) await wrapped.request(call).catch((e: unknown) => refusals.push(e));
-    expect(refusals).toEqual([]);
-    expect(seen).toEqual(calls);
-  });
+  // The positive run-through is port-driven: runPullRequest.test.ts drives createRunPullRequestPort against a strict fake that
+  // independently refuses anything outside A1 to A5, and asserts the call sequence and zero refusals.
 
   describe("refuses everything the deny list let through, and everything it already refused", () => {
     const refused: Array<[string, GithubRequest]> = [
@@ -287,14 +275,15 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       for (const req of cases) expect((await attempt(req)).result, `${req.path} ${JSON.stringify(req.query)}`).toBe(NOT);
     });
 
-    it("refuses an A4 body that is not exactly title, head, base, body and draft: true", async () => {
+    it("refuses an A4 body that is not exactly title, head, base, body and a boolean draft", async () => {
       const bad: unknown[] = [
         undefined,
         null,
         "title",
         [],
-        { ...pr, draft: false },
         { ...pr, draft: "true" },
+        { ...pr, draft: 1 },
+        { ...pr, draft: null },
         { ...pr, draft: undefined },
         { title: pr.title, head: pr.head, base: pr.base, body: pr.body },
         { ...pr, maintainer_can_modify: true },
@@ -325,6 +314,22 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
   });
 
   describe("the Accept rule (C21 section 5)", () => {
+    it("sends application/vnd.github+json on every call that supplies no Accept, and keeps the one a caller supplied when it is allowed", async () => {
+      const { client, seen } = recorder();
+      const gh = localOnlyGithub(client);
+      await gh.request({ method: "GET", path: R });
+      await gh.request({ method: "POST", path: `${R}/pulls`, body: pr, headers: { "x-other": "1" } });
+      await gh.request({ method: "GET", path: R, headers: { Accept: "application/vnd.github.v3+json" } });
+      await gh.graphql("MarkReady", { id: "PR_x" });
+      expect(seen.map((r) => Object.entries(r.headers ?? {}).filter(([k]) => k.toLowerCase() === "accept"))).toEqual([
+        [["accept", "application/vnd.github+json"]],
+        [["accept", "application/vnd.github+json"]],
+        [["Accept", "application/vnd.github.v3+json"]],
+        [["accept", "application/vnd.github+json"]],
+      ]);
+      expect(seen[1]!.headers).toEqual({ "x-other": "1", accept: "application/vnd.github+json" });
+    });
+
     it("refuses a diff or patch media type in the Accept header, whatever the header's case, on a call that is otherwise allowed", async () => {
       for (const accept of ["application/vnd.github.diff", "application/vnd.github.v3.diff", "application/vnd.github.patch", "Application/VND.GitHub.v3.Patch", "application/json, application/vnd.github.diff", "application/vnd.github.raw", "application/vnd.github.v3.raw", "application/json", "*/*", ""]) {
         for (const name of ["accept", "Accept", "ACCEPT"]) {
@@ -340,6 +345,40 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
 
     it("a call that is not allowed is refused as not allowed, whatever its Accept", async () => {
       expect((await attempt({ method: "GET", path: `${R}/pulls/12`, headers: { accept: "application/vnd.github+json" } })).result).toBe(NOT);
+    });
+  });
+
+  describe("graphql(op, variables) (C21 section 5)", () => {
+    it("sends the named fixed document as POST /graphql, with JSON Accept, and the answer is GitHub's as received", async () => {
+      const seen: GithubRequest[] = [];
+      const gh = localOnlyGithub({ request: async (req) => (seen.push(req), { status: 200, body: { data: { ok: true } } }) });
+      for (const [op, vars] of [["RunBranchState", branchState], ["PullRequestFiles", { owner: "acme", name: "app", number: 12 }], ["MarkReady", { id: "PR_kwDOAbCd123" }]] as const) {
+        expect(await gh.graphql(op, vars)).toEqual({ status: 200, body: { data: { ok: true } } });
+      }
+      expect(seen.map((r) => [r.method, r.path, (r.body as { query: string }).query])).toEqual([
+        ["POST", "/graphql", DOC.RunBranchState],
+        ["POST", "/graphql", DOC.PullRequestFiles],
+        ["POST", "/graphql", DOC.MarkReady],
+      ]);
+      for (const r of seen) expect(r.headers).toEqual({ accept: "application/vnd.github+json" });
+    });
+
+    it("a caller never supplies a query: an unknown name, a prototype key or a non-string is refused, and nothing is sent", async () => {
+      const { client, seen } = recorder();
+      const gh = localOnlyGithub(client);
+      for (const op of ["toString", "__proto__", "constructor", "hasOwnProperty", "runbranchstate", "RunBranchState ", "", "{ viewer { login } }", 5, null, undefined, {}]) {
+        await expect(gh.graphql(op as never, { id: "PR_x" }), String(op)).rejects.toMatchObject({ rule: NOT });
+      }
+      expect(seen).toEqual([]);
+    });
+
+    it("holds the variables to the named document's schema", async () => {
+      const { client, seen } = recorder();
+      const gh = localOnlyGithub(client);
+      await expect(gh.graphql("MarkReady", { id: "PR_x", query: "{ viewer { login } }" })).rejects.toMatchObject({ rule: NOT });
+      await expect(gh.graphql("RunBranchState", { owner: "acme", name: "app", head: "fx/r-g1" })).rejects.toMatchObject({ rule: NOT });
+      await expect(gh.graphql("PullRequestFiles", { owner: "acme", name: "app", number: "12" })).rejects.toMatchObject({ rule: NOT });
+      expect(seen).toEqual([]);
     });
   });
 

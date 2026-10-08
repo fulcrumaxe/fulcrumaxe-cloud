@@ -131,4 +131,71 @@ describe("createInstallationHttp", () => {
     await expect(setup(() => undefined, { appKind: "team_readonly" }).open("merge_gate", TARGET)).rejects.toThrow();
     await expect(setup(() => undefined).open("read", { ...TARGET, owner: "-bad" })).rejects.toThrow("invalid_coordinates");
   });
+
+  describe("runner_pr (D#6 R2b-3e)", () => {
+    it("mints a one-repository token that can read refs and write pull requests, sends JSON Accept, and reaches /graphql and PATCH", async () => {
+      const seen: Array<{ url: string; method: string; accept: string | null; type: string | null }> = [];
+      const t = setup((u, init) => {
+        const headers = new Headers(init?.headers);
+        seen.push({ url: u.toString(), method: init?.method ?? "GET", accept: headers.get("accept"), type: headers.get("content-type") });
+        return json(200, { ok: true });
+      });
+      const http = await t.open("runner_pr", TARGET);
+      await http.request({ method: "POST", path: "/graphql", body: { query: "query X { __typename }", variables: {} } });
+      await http.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: { state: "closed" } });
+      await http.request({ method: "POST", path: "/repos/acme/widgets/pulls", body: { title: "t" } });
+      await http.request({ method: "GET", path: "/repos/acme/widgets/pulls", query: { head: "acme:fx/r-g1", state: "open" } });
+      expect(t.minted).toHaveLength(1);
+      expect(t.minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", contents: "read", pull_requests: "write" } });
+      expect(seen.map((c) => [c.method, new URL(c.url).pathname])).toEqual([["POST", "/graphql"], ["PATCH", "/repos/acme/widgets/pulls/3"], ["POST", "/repos/acme/widgets/pulls"], ["GET", "/repos/acme/widgets/pulls"]]);
+      expect(new URL(seen[0]!.url).origin).toBe("https://api.github.com");
+      expect(new URL(seen[3]!.url).search).toBe("?head=acme%3Afx%2Fr-g1&state=open");
+      for (const c of seen) expect(c.accept).toBe("application/vnd.github+json");
+      expect(seen[0]!.type).toBe("application/json");
+    });
+
+    it("keeps /graphql and PATCH to this kind, refuses PUT and any other graphql shape, before a request is made", async () => {
+      const t = setup(() => undefined);
+      const gate = await t.open("merge_gate", TARGET);
+      const read = await t.open("read", TARGET);
+      const pr = await t.open("runner_pr", TARGET);
+      await expect(gate.request({ method: "POST", path: "/graphql", body: {} })).rejects.toThrow("path_refused");
+      await expect(read.request({ method: "POST", path: "/graphql", body: {} })).rejects.toThrow("path_refused");
+      await expect(read.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: {} })).rejects.toThrow("method_refused");
+      await expect(gate.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: {} })).rejects.toThrow("method_refused");
+      await expect(pr.request({ method: "PUT", path: "/repos/acme/widgets/pulls/3/merge", body: {} })).rejects.toThrow("path_refused");
+      for (const [method, path] of [["GET", "/graphql"], ["POST", "/graphql/x"], ["POST", "/graphql?x=1"], ["POST", "/app/installations/9/access_tokens"], ["POST", "/repos/acme/other/pulls"], ["PATCH", "/repos/acme/widgets/../other/pulls/3"]] as const) {
+        await expect(pr.request({ method, path, body: {} }), `${method} ${path}`).rejects.toThrow("path_refused");
+      }
+      expect(t.calls).toEqual([]);
+    });
+
+    it.each([
+      ["GET", "/repos/acme/widgets/contents/src/a.ts"],
+      ["GET", "/repos/acme/widgets/readme"],
+      ["GET", "/repos/acme/widgets/pulls/3/files"],
+      ["GET", "/repos/acme/widgets/pulls/3"],
+      ["GET", "/repos/acme/widgets/commits/abc123"],
+      ["GET", "/repos/acme/widgets/tarball/main"],
+      ["GET", "/repos/acme/widgets/git/blobs/abc"],
+      ["POST", "/repos/acme/widgets/issues"],
+      ["POST", "/repos/acme/widgets/pulls/3"],
+      ["POST", "/repos/acme/widgets/contents/x"],
+      ["PATCH", "/repos/acme/widgets/pulls"],
+      ["PATCH", "/repos/acme/widgets/pulls/3/files"],
+      ["PATCH", "/repos/acme/widgets/pulls/x3"],
+      ["PATCH", "/repos/acme/widgets/issues/3"],
+      ["PUT", "/repos/acme/widgets/pulls"],
+      ["PUT", "/repos/acme/widgets/contents/x"],
+    ] as const)("refuses %s %s with path_refused, before any request", async (method, path) => {
+      const t = setup(() => undefined);
+      const pr = await t.open("runner_pr", TARGET);
+      await expect(pr.request({ method, path, body: {} })).rejects.toThrow("path_refused");
+      expect(t.calls).toEqual([]);
+    });
+
+    it("needs the write App: a read-only installation cannot open it", async () => {
+      await expect(setup(() => undefined, { appKind: "team_readonly" }).open("runner_pr", TARGET)).rejects.toThrow();
+    });
+  });
 });

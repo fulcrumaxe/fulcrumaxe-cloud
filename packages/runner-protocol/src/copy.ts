@@ -28,6 +28,10 @@ export const COPY = {
   runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
   pushTooLarge:
     "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
+  /** The description of the draft pull request our cloud opens when a runner run finishes. Fixed text: the agent's own output never goes into it. */
+  pullRequestBody: "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
+  /** The pull request title when the work item has none. */
+  pullRequestTitleFallback: "Changes from your runner",
   pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
 } as const;
 

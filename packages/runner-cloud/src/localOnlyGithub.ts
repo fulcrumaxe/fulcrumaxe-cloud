@@ -16,10 +16,11 @@
  *   - every query key (from `query` and from a query string written in the path) is one the entry lists, with a value of its shape;
  *   - its body has the entry's shape (a GET has none);
  *   - an `Accept` header, if the caller supplied one, is `application/vnd.github+json` or `application/vnd.github.v3+json`, so a
- *     diff or patch media type is refused whatever the path (the GitHub port in the next PR sends the first as its own default).
+ *     diff or patch media type is refused whatever the path. A call that supplies none is sent with the first, so no call this
+ *     wrapper forwards ever leaves it to GitHub's default media type.
  *
  * `POST /graphql` (A1) is allowed only for three documents fixed in this module, byte for byte, with variables of their own
- * schema. A caller never supplies a query; the documents select refs, counts, oids and changed paths with their change type, and
+ * schema. A caller never supplies a query (`graphql(op, variables)` takes the operation's name and looks the text up here); the documents select refs, counts, oids and changed paths with their change type, and
  * none selects a patch, a diff, text, a blob, contents or a body (a test holds that).
  *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. That includes the review gate's
@@ -92,7 +93,7 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
     { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
     { id: "A3", method: "GET", paths: ["/repos/{owner}/{repo}/pulls"], query: ["head", "base", "state", "per_page"], body: "none" },
-    { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: true }" },
+    { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
     { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
     { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
@@ -100,6 +101,8 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
 
 const NOT_ALLOWLISTED = "not_allowlisted";
 const ACCEPT_RULE = "accept";
+/** The media type every forwarded call carries. */
+const JSON_ACCEPT = "application/vnd.github+json";
 const ACCEPT = /^application\/vnd\.github(?:\.v3)?\+json$/i;
 
 const NAME = /^[a-z0-9_.-]{1,100}$/;
@@ -199,7 +202,7 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
         str(body.head, REF_NAME) &&
         str(body.base, REF_NAME) &&
         typeof body.body === "string" && body.body.length <= 65536 &&
-        body.draft === true
+        typeof body.draft === "boolean"
       );
     case "A5":
       return isPlainObject(body) && hasExactKeys(body, ["state"]) && body.state === "closed";
@@ -249,13 +252,29 @@ export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | 
   return null;
 }
 
+/** The wrapped client: `request` for the REST calls on the allowlist, and `graphql` for the three fixed documents. */
+export interface LocalOnlyGithub extends GithubClient {
+  /**
+   * Runs one of the fixed documents by name. The caller never supplies query text: an unknown name (including a prototype key such as
+   * `toString`) is refused as `not_allowlisted`, and the variables are held to that document's schema by the same check as every call.
+   * The answer is GitHub's, as received: a GraphQL error arrives as status 200 with an `errors` array, so the caller must read it.
+   */
+  graphql(op: GithubGraphqlOperation, variables: Readonly<Record<string, unknown>>): Promise<GithubResponse>;
+}
+
 /** Wraps `inner`: every call is checked first, and one the allowlist does not hold throws `LocalOnlyGithubError` without reaching `inner`. */
-export function localOnlyGithub(inner: GithubClient): GithubClient {
+export function localOnlyGithub(inner: GithubClient): LocalOnlyGithub {
+  const send = (req: GithubRequest): Promise<GithubResponse> => {
+    const rule = localOnlyViolation(req);
+    if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
+    const hasAccept = Object.keys(req.headers ?? {}).some((name) => name.toLowerCase() === "accept");
+    return inner.request(hasAccept ? req : { ...req, headers: { ...req.headers, accept: JSON_ACCEPT } });
+  };
   return {
-    request(req) {
-      const rule = localOnlyViolation(req);
-      if (rule !== null) return Promise.reject(new LocalOnlyGithubError(rule));
-      return inner.request(req);
+    request: send,
+    graphql(op, variables) {
+      if (typeof op !== "string" || !Object.hasOwn(GITHUB_GRAPHQL_DOCUMENTS, op)) return Promise.reject(new LocalOnlyGithubError(NOT_ALLOWLISTED));
+      return send({ method: "POST", path: "/graphql", body: { query: GITHUB_GRAPHQL_DOCUMENTS[op], variables } });
     },
   };
 }
