@@ -263,7 +263,7 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
       const inst = await install(acc);
       const fetchImpl = (async () => {
         await lifecycle(inst.gh, action); // lands while the sync is between its entry gate and its write
-        return Response.json({ repositories: [{ id: 21, name: 'x', owner: { login: 'acme' } }] });
+        return Response.json({ total_count: 1, repositories: [{ id: 21, name: 'x', owner: { login: 'acme' } }] });
       }) as unknown as typeof fetch;
       expect(await syncInstallationRepos(syncDeps(fetchImpl), inst.id)).toEqual({ status: 'skipped', reason: 'inactive' });
       expect(await attached(acc)).toEqual([]);
@@ -306,7 +306,7 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
       await blocker.query('BEGIN');
       // Park the sync inside its tenant write, on the first repo's lock.
       await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`repos-sync:${acc}:1:team`]);
-      const listing = (async () => Response.json({ repositories: [1, 2].map((id) => ({ id, name: `r${id}`, owner: { login: 'acme' } })) })) as unknown as typeof fetch;
+      const listing = (async () => Response.json({ total_count: 2, repositories: [1, 2].map((id) => ({ id, name: `r${id}`, owner: { login: 'acme' } })) })) as unknown as typeof fetch;
       const syncP = syncInstallationRepos(syncDeps(listing), inst.id);
       for (let i = 0; i < 200; i++) {
         const w = await admin.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
@@ -443,7 +443,7 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
       await repo(a, inst.id, 1);
       await life(inst.gh, 'team_readonly', 'suspend');
       expect((await rows(a))[0]!.installation_id).toBeNull();
-      const listing = (async () => Response.json({ repositories: [{ id: 1, name: 'r1', owner: { login: 'acme' } }] })) as unknown as typeof fetch;
+      const listing = (async () => Response.json({ total_count: 1, repositories: [{ id: 1, name: 'r1', owner: { login: 'acme' } }] })) as unknown as typeof fetch;
       const sync = (id: string) => syncInstallationRepos({
         platformOpsPool, appUserPool, appCredentials: () => ({ appId: '7', privateKeyPem: pem, webhookSecret: '' }),
         requester: async () => ({ token: 'ghs_t', expiresAt: new Date(Date.now() + 3_600_000).toISOString() }), cache: new InstallationTokenCache(), fetchImpl: listing,

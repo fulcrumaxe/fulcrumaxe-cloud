@@ -1,4 +1,4 @@
-import { RECONCILE_ROUTE, type JobContext, type JobResult, type ReconcileJob, type ReportError } from '../runner.js';
+import { RECONCILE_ROUTE, type CallBudget, type JobContext, type JobResult, type ReconcileJob, type ReportError } from '../runner.js';
 import type { GithubAppApi, GithubAppResponse } from '../githubAppApi.js';
 
 export const GITHUB_INSTALLATIONS_JOB = 'github_installations';
@@ -29,8 +29,15 @@ export interface InstallationChange {
 export interface GithubInstallationsDeps {
   /** The client for one kind's App, or null when that kind is not configured (it is then skipped, never borrowed from another kind). */
   api(kind: InstallationKind): GithubAppApi | null;
-  apply(change: InstallationChange): Promise<void>;
+  /**
+   * `meter` is this run's call allowance: an un-suspend re-syncs the installation's repos, and those GitHub calls take from it.
+   * Throw an error named `RepoListBudgetError` when it ran out: the change itself was applied, the repo rows were left as they
+   * were, and the run ends `budget` and keeps its place.
+   */
+  apply(change: InstallationChange, meter: CallBudget): Promise<void>;
   reportError: ReportError;
+  /** Tests only: a smaller per-run call allowance than GITHUB_CALLS_PER_RUN. */
+  callsPerRun?: number;
 }
 
 interface OurRow {
@@ -85,7 +92,7 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
 
   return {
     name: GITHUB_INSTALLATIONS_JOB,
-    maxCalls: GITHUB_CALLS_PER_RUN,
+    maxCalls: deps.callsPerRun ?? GITHUB_CALLS_PER_RUN,
     async run(ctx: JobContext): Promise<JobResult> {
       const apis = INSTALLATION_KINDS.map((k) => deps.api(k));
       if (apis.every((a) => a === null)) return { cursor: null, wrapped: false, code: 'not_configured' };
@@ -245,8 +252,13 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
     if (tripped) report(new Error('detach breaker tripped: no installation was detached'), 'breaker_tripped');
     for (const change of tripped ? changes.filter((c) => c.action === 'unsuspend') : changes) {
       try {
-        await deps.apply(change);
+        await deps.apply(change, ctx.calls);
       } catch (err) {
+        if ((err as { name?: unknown } | null)?.name === 'RepoListBudgetError') {
+          // The change is in; only its repo re-sync ran out of calls. Stop here and let the repo job pick the repos up.
+          stop ??= 'budget';
+          break;
+        }
         // The change is found again on the next pass; the rest of this one still runs.
         deps.reportError(err, { stage, route: RECONCILE_ROUTE });
         failed = true;

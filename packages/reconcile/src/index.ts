@@ -42,6 +42,14 @@ export {
   type InstallationKind,
 } from './jobs/githubInstallations.js';
 export {
+  createGithubReposJob,
+  GITHUB_REPOS_JOB,
+  GITHUB_REPOS_INSTALLATIONS_PER_RUN,
+  GITHUB_REPOS_CALLS_PER_RUN,
+  type GithubReposDeps,
+  type RepoSyncOutcome,
+} from './jobs/githubRepos.js';
+export {
   createGithubAppApi,
   GithubTransportError,
   GITHUB_API_HOST,

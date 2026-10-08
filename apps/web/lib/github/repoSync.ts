@@ -16,5 +16,5 @@ export function buildRepoSyncDeps(deps: { platformOpsPool: Pool; appUserPool: Po
 
 export function buildSyncRepos(deps: { platformOpsPool: Pool; appUserPool: Pool; appCredentials: AppCredentialsSource }): SyncRepos {
   const full = buildRepoSyncDeps(deps);
-  return (installationId) => syncInstallationRepos(full, installationId);
+  return (installationId, meter) => syncInstallationRepos(meter ? { ...full, meter } : full, installationId);
 }

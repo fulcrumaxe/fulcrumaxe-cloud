@@ -13,8 +13,9 @@ export const RECONCILE_JOBS: readonly ReconcileJob[] = [errorEventsPrune];
  */
 export function buildReconcileJobs(extra: {
   githubInstallations: ReconcileJob;
+  githubRepos: ReconcileJob;
   stripeSubscriptions: ReconcileJob;
   modelKeyHealth: ReconcileJob;
 }): readonly ReconcileJob[] {
-  return [...RECONCILE_JOBS, extra.githubInstallations, extra.stripeSubscriptions, extra.modelKeyHealth];
+  return [...RECONCILE_JOBS, extra.githubInstallations, extra.githubRepos, extra.stripeSubscriptions, extra.modelKeyHealth];
 }
