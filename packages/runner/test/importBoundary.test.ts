@@ -46,6 +46,9 @@ const FORBIDDEN_MODULE_FILES = new Set([
   "sandboxEnv.ts",
   "networkPolicy.ts",
   "connectionStatusPort.ts",
+  // D#221 OM-2b: the outside meter reads the run's model-connection key through the firewall module's decrypt type and uses @fx/spend's
+  // gateway rules; only the sandbox target and the worker's tick reach it.
+  "outsideMeterSweep.ts",
   // D#2 H14c-2: the real `SandboxPort` implements sandboxPort.ts and
   // reuses fakeSandbox.ts's env assertion -- the same internal edges.
   "vercelSandboxPort.ts",

@@ -1,5 +1,6 @@
 import { envKekSource, type KekSource } from "@fx/model-connection";
 import type { HostLookup } from "@fx/net-guard";
+import { outsideMeterOn } from "@fx/spend";
 import {
   RunnerTarget,
   createJobIssuer,
@@ -10,6 +11,8 @@ import {
   unwiredRepoVisibility,
   sweepComputeSettle,
   sweepLostRuns,
+  sweepOutsideMeter,
+  type OutsideMeterResult,
   sweepSandboxReap,
   type SweepSandboxReapInput,
   type SweepSandboxReapResult,
@@ -131,7 +134,7 @@ export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerQueueS
    * for the cron only, never callable from a user request. Takes no input and returns counts. The same tick first settles
    * runs that are `running` while their sandbox is gone (`lost`), so a run stopped from outside ends within a few minutes.
    */
-  sweepComputeSettle(): Promise<ComputeSettleSweepResult & { lost: LostSweepResult }>;
+  sweepComputeSettle(): Promise<ComputeSettleSweepResult & { lost: LostSweepResult; outside: OutsideMeterResult }>;
   /**
    * D#2 SANDBOX-REAPER-1a (C82): one pass of the sandbox reaper, over plain data. Like `sweepComputeSettle` it works across
    * tenants and is for the cron only, never callable from a user request; the pool, the provider port and the stop path stay
@@ -231,6 +234,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       decryptTenantKey: options.ports.decryptTenantKey ?? createDecryptTenantKey(kek),
       modelConnection: options.ports.modelConnection ?? createModelConnectionPort(pools.runnerPool),
       connectionStatus: options.ports.connectionStatus ?? createConnectionStatusPort(pools.platformOpsPool),
+      outsideMeterOn: () => outsideMeterOn(env.FX_OUTSIDE_METER),
       hooks: options.ports.hooks,
       // The payer is read from targetDeps at call time, so an extension is held against the account `admit` charged.
       extensionPolicyFor:
@@ -264,7 +268,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
     const advance = createAdvanceModule(pools.runnerPool, { starter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, registry });
-    const runSweepComputeSettle = async (): Promise<ComputeSettleSweepResult & { lost: LostSweepResult }> => {
+    const runSweepComputeSettle = async (): Promise<ComputeSettleSweepResult & { lost: LostSweepResult; outside: OutsideMeterResult }> => {
       // The lost-run check goes first and spends part of the tick's time; the settle gets what is left of its budget.
       const began = performance.now();
       let lost: LostSweepResult = { listed: 0, young: 0, stale: 0, settled: 0, alive: 0, unknown: 0, failed: 0, skipped: 0 };
@@ -275,7 +279,16 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
         console.warn(JSON.stringify({ event: "run.lost_sweep_list_failed" }));
       }
       const left = Math.max(SWEEP_TIME_BUDGET_MS - (performance.now() - began), 0);
-      return { ...(await sweepComputeSettle({ pool: pools.runnerPool, target: sandboxTarget, timeBudgetMs: left })), lost };
+      const settled = await sweepComputeSettle({ pool: pools.runnerPool, target: sandboxTarget, timeBudgetMs: left });
+      // D#221 OM-2b: the outside meter rides the same tick. It never fails the settle above.
+      let outside: OutsideMeterResult = { listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 };
+      try {
+        outside = await sweepOutsideMeter({ pool: pools.runnerPool, modelConnection: targetDeps.modelConnection, decryptTenantKey: targetDeps.decryptTenantKey, flagOn: () => outsideMeterOn(env.FX_OUTSIDE_METER), onError: (runId) => console.warn(JSON.stringify({ event: "run.outside_meter_failed", run_id: runId })) });
+      } catch {
+        // fx-swallow-ok: the list itself failed (a fixed-code line is logged); the next tick tries again
+        console.warn(JSON.stringify({ event: "run.outside_meter_list_failed" }));
+      }
+      return { ...settled, lost, outside };
     };
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);

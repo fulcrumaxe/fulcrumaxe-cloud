@@ -29,6 +29,7 @@ import {
   type RunLimit,
   type TerminalReport,
 } from "../executionTarget.js";
+import { connectionEntitlement, ensureReportTag, keyRefOf } from "../outsideMeterSweep.js";
 import { buildFirewallPolicy, buildOperatorFirewallPolicy, type DecryptTenantKey, type EncryptedTenantKey } from "../firewallPolicy.js";
 import type { GithubForwardConfig } from "../githubForwardConfig.js";
 import { defaultResolvePayer } from "../funding.js";
@@ -128,6 +129,8 @@ export interface SandboxTargetDeps {
    * for 401/403" -- H21 (`packages/model-connection/**`) is HOLD; this is
    * the same narrow port H09a already defined for it (connectionStatusPort.ts). */
   connectionStatus: ConnectionStatusPort;
+  /** D#221 OM-2b: the `FX_OUTSIDE_METER` switch. Absent or false, no run is tagged. */
+  outsideMeterOn?: () => boolean;
   /** D#2 H09b2, correction C16: resolves which account's spend/model-key
    * this run draws on. Defaults to `defaultResolvePayer` (funding.ts) --
    * `{kind:'self'}`/omitted returns `run.accountId`; `{kind:'claim'}` fails
@@ -185,6 +188,8 @@ export const OWN_STOP_GRACE_MS = 5 * 60_000;
 interface RunBookkeeping {
   /** Set when the run's firewall policy was built from the operator subscription (decided once, at dispatch/resume). */
   operatorSubscription?: boolean;
+  /** D#221 OM-2b: this run carries a gateway report tag, so its finalize wakes the outside-meter sweep. */
+  reportTagged?: boolean;
   handle?: SandboxHandle;
   hookToken?: string;
   hookResumed: boolean;
@@ -885,9 +890,23 @@ export class SandboxTarget implements ExecutionTarget {
     }
     bk.operatorSubscription = false;
     const { provider, encryptedKey, connectionId } = await this.deps.modelConnection.get(payerAccountId);
+    // D#221 OM-2b: an ai_gateway run paid by its own account gets a report tag when the switch is on and the plan is not known to refuse
+    // it. Tagging never stops a run: a failure here leaves the run untagged.
+    let reportTag: string | undefined;
+    if (provider === "ai_gateway" && this.deps.outsideMeterOn?.() === true && payerAccountId === run.accountId) {
+      try {
+        const keyRef = keyRefOf(connectionId, encryptedKey.ciphertext);
+        if ((await connectionEntitlement(this.deps.pool, payerAccountId, connectionId, keyRef)) !== "no") {
+          reportTag = await ensureReportTag((id, fn) => this.withAccount(id, fn), { accountId: run.accountId, runId: run.id, connectionId, keyRef });
+          bk.reportTagged = true;
+        }
+      } catch {
+        // fx-swallow-ok: the outside check is an audit; the run goes untagged rather than not at all
+      }
+    }
     const networkPolicyRules = await buildFirewallPolicy(
       this.deps.decryptTenantKey,
-      { role: run.role, product: run.product, provider, encryptedKey, keyContext: { accountId: payerAccountId, connectionId }, phase: "run" },
+      { role: run.role, product: run.product, provider, encryptedKey, keyContext: { accountId: payerAccountId, connectionId }, phase: "run", ...(reportTag !== undefined && { reportTag }) },
       { githubForward: this.deps.githubForward, lookup: this.deps.lookup },
     );
     const env = buildSandboxEnv(run.role);
@@ -955,6 +974,15 @@ export class SandboxTarget implements ExecutionTarget {
           : {}),
     });
 
+    if (write.updated) {
+      // D#221 OM-2b: the first outside read falls due five minutes after this. Never delays or fails the finalize.
+      try {
+        await this.withAccount(run.accountId, (c) => c.query("SELECT agent_run_outside_meter_finalize($1::uuid, $2::uuid)", [run.accountId, run.id]));
+        if (this.runs.get(run.id)?.reportTagged) void markWorkPending("compute-settle-sweep");
+      } catch {
+        // fx-swallow-ok: the run is final either way; a run missed here is simply not checked
+      }
+    }
     if (write.updated && report.failureReason === "model_key_broken" && !operatorRun) {
       const code = brokenConnectionCodeFor(report);
       if (code !== undefined) {

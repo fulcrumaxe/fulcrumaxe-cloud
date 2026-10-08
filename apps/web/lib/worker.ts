@@ -27,7 +27,7 @@ import type { LightPublishWorker } from "./advanceLightSteps";
 
 /** What one compute-settle tick reports (the runner's counts; the real `Worker` is checked against this shape at `getWorker`'s return). */
 export interface ComputeSettleSweepWorker {
-  sweepComputeSettle(): Promise<{ listed: number; settled: number; deleted: number; failed: number; skipped: number; lost?: { listed: number } }>;
+  sweepComputeSettle(): Promise<{ listed: number; settled: number; deleted: number; failed: number; skipped: number; lost?: { listed: number }; outside?: { listed: number; waiting: number } }>;
 }
 
 /** What one runner-queue tick reports (D#6 R2b): the worker's `sweepRunnerQueue`, checked against this shape at `getWorker`'s return. */
