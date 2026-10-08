@@ -54,6 +54,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/settingsFile.ts": ["fs", "path"],
   "src/engines/claude/stream.ts": ["fs", "path"],
   // The host sandbox tier and the job runner: directories and paths on this machine, and the OS name for platform detection. No child processes.
+  "src/job/workspace.ts": ["fs", "path"],
   "src/sandbox/hostSandbox.ts": ["fs", "path"],
   "src/sandbox/platform.ts": ["os"],
   "src/sandbox/select.ts": ["fs", "path"],

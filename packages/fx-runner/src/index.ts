@@ -10,3 +10,5 @@ export * from "./sandbox/select.js";
 export * from "./sandbox/port.js";
 export { HostSandboxRefused, createHostSandbox } from "./sandbox/hostSandbox.js";
 export type { HostSandbox, HostSandboxConfig } from "./sandbox/hostSandbox.js";
+export * from "./job/runJob.js";
+export * from "./job/workspace.js";
