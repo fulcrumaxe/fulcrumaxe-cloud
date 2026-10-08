@@ -3,7 +3,7 @@ import type { RepoPermission } from '@fx/trust';
 import { computePlan, type ComputedPlan, type PullFacts } from './computePlan.js';
 import { buildIssuesLevel, type DiscussionFacts, type IssueFacts, type ItemProposal } from './issuesLevel.js';
 import { decideOwnerProcess, type OwnerProcess } from './ownerProcess.js';
-import { memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from './specTables.js';
+import { isCorrectionComment, isSpecDiscussion, memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from './specTables.js';
 import {
   ImportNotRunningError,
   type ImportLevel,
@@ -33,6 +33,11 @@ import { MAX_PLAN_TASKS, PlanFileInconsistentError, PlanFileShapeError, parseRoa
  * the Discussion reads, the author trust lookups and the pull request read all end the import `failed` with
  * `request_budget_exhausted`, and the write transaction never starts, so the earlier import's data stays. Only the level 3
  * issues listing, which has no trust or merged-pull-request input, still ends as a partial (`truncated`) import.
+ *
+ * Level 2 reads every page of the Discussions and of each Spec's comments, and only items that can change the plan count
+ * toward a bound: Spec-shaped Discussions (at most 600) and, per Spec, Correction-shaped comments that are not minimized (at
+ * most 300). Passing either bound ends the import `failed` with `plan_source_too_large`, the same way, because dropping some of
+ * them would leave a plan that is silently wrong. The level 3 Discussion list keeps its own bound and its partial result.
  */
 export const ROADMAP_PATHS: readonly string[] = ['.fulcrumaxe/roadmap.json', '.autonomous-team/roadmap.json', 'roadmap.json'];
 /** The marker that the engine loop (the repo's own development loop) is installed. */
@@ -47,10 +52,21 @@ export interface PlanSource {
   file(path: string, ref: string, maxBytes: number): Promise<string | null>;
   /** Every pull request of the repository, with the facts the counting rule needs. `truncated` when a bound stopped the read. */
   pulls(): Promise<{ pulls: PullFacts[]; truncated: boolean }>;
-  /** Level 2 and 3: every Discussion (oldest first), bounded. `discussions_disabled` and `app_permission_missing` are thrown as codes. */
-  discussions(): Promise<{ discussions: Array<DiscussionFacts & { authorLogin: string | null }>; truncated: boolean }>;
-  /** Level 2: one Discussion's comments, bounded. */
-  discussionComments(number: number): Promise<{ comments: SpecComment[]; truncated: boolean }>;
+  /**
+   * Reads every page of the Discussions. `discussions` is the level 3 list (oldest first, bounded, `truncated` when cut) and
+   * `specs` is every Discussion `match.isSpec` accepts (level 2, never cut). More Spec-shaped Discussions than the bound throws
+   * an error whose `code` is `plan_source_too_large`. `discussions_disabled` and `app_permission_missing` are thrown as codes.
+   */
+  discussions(match: { isSpec(body: string): boolean }): Promise<{
+    discussions: Array<DiscussionFacts & { authorLogin: string | null }>;
+    specs: Array<DiscussionFacts & { authorLogin: string | null }>;
+    truncated: boolean;
+  }>;
+  /**
+   * Level 2: one Discussion's comments, every page, keeping only those `match.isCorrection` accepts that are not minimized.
+   * More kept comments than the bound throws an error whose `code` is `plan_source_too_large`.
+   */
+  discussionComments(number: number, match: { isCorrection(body: string): boolean }): Promise<{ comments: SpecComment[] }>;
   /** Level 3: the repository's issues (pull requests already split off). Shares one read with `pulls()`. */
   issues(): Promise<{ issues: IssueFacts[]; truncated: boolean }>;
   /** A login's real permission on the repository (a person who is not a collaborator is `none`). */
@@ -79,6 +95,7 @@ const FAILURE_CODES: ReadonlySet<string> = new Set([
   'token_not_read_only',
   'github_unavailable',
   'rate_limited_by_github',
+  'plan_source_too_large',
 ]);
 /** The request client's own word for a spent budget; the import records it as `request_budget_exhausted`. */
 const BUDGET_SPENT = 'request_budget_exceeded';
@@ -159,16 +176,14 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
     }
 
     // Level 2: Spec task tables in the Discussions.
-    const read = await source.discussions();
-    if (read.truncated) truncated = true;
+    const read = await source.discussions({ isSpec: isSpecDiscussion });
     // One permission lookup per distinct author for the whole import, shared by the Spec check and the Correction check.
     const permissions = memoizePermissions(source);
     // A Spec-shaped Discussion counts only when its author is trusted, decided before any of its comments are read.
-    const specs = await trustedSpecDiscussions(read.discussions, permissions);
+    const specs = await trustedSpecDiscussions(read.specs, permissions);
     const comments = new Map<number, SpecComment[]>();
     for (const d of specs) {
-      const c = await source.discussionComments(d.number);
-      if (c.truncated) truncated = true;
+      const c = await source.discussionComments(d.number, { isCorrection: isCorrectionComment });
       comments.set(d.number, c.comments);
     }
     const trusted = await trustedCorrectionAuthors(comments, permissions);
@@ -180,7 +195,8 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
       return await finish({ level: 'spec_tables', sourcePath: null, plan: specPlan, computed: computePlan(specPlan, pulls.pulls), maxMergedPr: countPulls(pulls.pulls), fallbackNote }, owner);
     }
 
-    // Level 3: issues and Discussions.
+    // Level 3: issues and Discussions. Its own list of Discussions is bounded, and a cut there is a partial import.
+    if (read.truncated) truncated = true;
     const issues = await tolerant(() => source.issues(), { issues: [], truncated: true });
     if (issues.truncated) truncated = true;
     const loop = await hasLoop();

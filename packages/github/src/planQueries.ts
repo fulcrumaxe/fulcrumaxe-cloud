@@ -44,7 +44,7 @@ export const DISCUSSIONS_PAGE_QUERY = `query PlanDiscussions($owner: String!, $n
   }
 }`;
 
-/** One page of one Discussion's comments, oldest first. */
+/** One page of one Discussion's comments, oldest first. `isMinimized` is how a maintainer hides a spam comment; the import skips those. */
 export const DISCUSSION_COMMENTS_QUERY = `query PlanDiscussionComments($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     discussion(number: $number) {
@@ -57,6 +57,7 @@ export const DISCUSSION_COMMENTS_QUERY = `query PlanDiscussionComments($owner: S
           databaseId
           body
           createdAt
+          isMinimized
           author {
             login
           }

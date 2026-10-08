@@ -126,6 +126,26 @@ describe('plan import and proposals (0723)', () => {
       expect(readFileSync(new URL('../migrations/0723_plan_import.sql', import.meta.url), 'utf8')).not.toContain('request_budget_exhausted');
     });
 
+    it('F3-7: plan_imports.error_code accepts plan_source_too_large (0758) and the other thirteen codes, refuses any other word, and 0723 and 0755 still lack it', async () => {
+      const codes = [
+        'repo_not_connected', 'app_permission_missing', 'discussions_disabled', 'plan_file_inconsistent', 'plan_file_too_large', 'token_not_read_only',
+        'github_unavailable', 'rate_limited_by_github', 'request_budget_exhausted', 'plan_source_too_large', 'plan_file_missing', 'plan_file_shape', 'interrupted', 'internal_error',
+      ];
+      const r = await seedAccount(admin, randomUUID());
+      for (const code of codes) {
+        const repoId = await newRepo(r);
+        await admin.query(`INSERT INTO plan_imports (account_id, repo_id, state, finished_at, error_code) VALUES ($1, $2, 'failed', now(), $3)`, [r.accountId, repoId, code]);
+      }
+      const repoId = await newRepo(r);
+      await expect(admin.query(`INSERT INTO plan_imports (account_id, repo_id, state, finished_at, error_code) VALUES ($1, $2, 'failed', now(), 'plan_source_too_big')`, [r.accountId, repoId])).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      const { rows } = await admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'plan_imports'::regclass AND conname = 'plan_imports_error_code_check'`);
+      expect(rows).toHaveLength(1);
+      for (const code of codes) expect(rows[0].def, code).toContain(`'${code}'`);
+      for (const file of ['0723_plan_import.sql', '0755_plan_import_budget_code.sql']) {
+        expect(readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8'), file).not.toContain('plan_source_too_large');
+      }
+    });
+
     it("a tenant reads its own rows in all four tables and never another tenant's; with no tenant set it reads nothing", async () => {
       const repoA = await newRepo(a);
       const repoB = await newRepo(b);

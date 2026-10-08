@@ -5,7 +5,7 @@ import { buildIssuesLevel } from '../src/plan/issuesLevel.js';
 import { decideOwnerProcess } from '../src/plan/ownerProcess.js';
 import { declaresCompletion, isDeclarationLine, referenceLineNames } from '../src/plan/referenceLine.js';
 import { PlanFileInconsistentError, PlanFileShapeError, parseRoadmapFile } from '../src/plan/roadmapFile.js';
-import { REQUEST_BUDGET_EXHAUSTED_SENTENCE } from '../src/plan/persist.js';
+import { PLAN_SOURCE_TOO_LARGE_SENTENCE, REQUEST_BUDGET_EXHAUSTED_SENTENCE } from '../src/plan/persist.js';
 import { isCorrectionComment, isSpecDiscussion, memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from '../src/plan/specTables.js';
 
 /** D#483 S3-c: the level-1 importer's pure parts: the reference-line rule, the file's shape and counting rule, the statuses, the owner decision. */
@@ -323,6 +323,15 @@ describe('level 2: Spec task tables', () => {
   it('takes a Discussion with a ## Spec heading or a SPEC_READY, IMPLEMENTING, REVIEWING or DONE status line, and no other', () => {
     expect(isSpecDiscussion('## Spec (Acceptance)\nx')).toBe(true);
     for (const st of ['SPEC_READY', 'IMPLEMENTING', 'REVIEWING', 'DONE']) expect(isSpecDiscussion(`STATUS: ${st}\n`), st).toBe(true);
+    for (const st of ['SPEC_READY', 'IMPLEMENTING', 'REVIEWING', 'DONE']) {
+      for (const prefix of ['> ', '>> ', '**', '__', '> **', '  - ', '\t* ', '\n\n']) {
+        expect(isSpecDiscussion(`intro\n${prefix}STATUS:** ${st}\n`), `${prefix} ${st}`).toBe(true);
+        expect(isSpecDiscussion(`${prefix}STATUS: ${st}`), `${prefix} ${st} bare`).toBe(true);
+      }
+      expect(isSpecDiscussion(`STATUS:\n${st}`), `${st} on the next line`).toBe(true);
+      expect(isSpecDiscussion(`> **STATUS:** ${st}`), `${st} blockquote bold`).toBe(true);
+      expect(isSpecDiscussion(`__STATUS__ ${st}`), `${st} underscore`).toBe(true);
+    }
     expect(isSpecDiscussion('STATUS: DRAFT\n')).toBe(false);
     expect(isSpecDiscussion('the status: DONE is mentioned mid-sentence')).toBe(false);
     expect(keys(parse([disc('| Task | Description |\n|---|---|\n| T1 | x |')]))).toEqual([]);
@@ -442,6 +451,14 @@ describe('level 2: Spec task tables', () => {
 describe('the thirteenth error sentence', () => {
   it('request_budget_exhausted has its Plan view sentence, for the view to render', () => {
     expect(REQUEST_BUDGET_EXHAUSTED_SENTENCE).toBe('Reading your repo took more requests than one import is allowed, so nothing was changed. Your previous plan is still shown.');
+  });
+});
+
+describe('the fourteenth error sentence', () => {
+  it('plan_source_too_large has its Plan view sentence, which names the undo path (hiding spam comments on GitHub)', () => {
+    expect(PLAN_SOURCE_TOO_LARGE_SENTENCE).toBe(
+      'Your repo has more planning Discussions or Correction comments than one import can read, so nothing was changed. Your previous plan is still shown. Hiding spam comments on GitHub brings the count back down.',
+    );
   });
 });
 

@@ -14,12 +14,14 @@ export interface PlanSourceFacts {
   dLines: readonly string[];
 }
 
+type DiscussionRow = { number: number; title: string; body: string; closed: boolean; authorLogin: string | null };
+
 export interface PlanSourceShape {
   head(): Promise<{ defaultBranch: string; sha: string }>;
   file(path: string, ref: string, maxBytes: number): Promise<string | null>;
   pulls(): Promise<{ pulls: PlanSourceFacts[]; truncated: boolean }>;
-  discussions(): Promise<{ discussions: Array<{ number: number; title: string; body: string; closed: boolean; authorLogin: string | null }>; truncated: boolean }>;
-  discussionComments(number: number): Promise<{ comments: Array<{ body: string; createdAt: string; authorLogin: string | null }>; truncated: boolean }>;
+  discussions(match: { isSpec(body: string): boolean }): Promise<{ discussions: DiscussionRow[]; specs: DiscussionRow[]; truncated: boolean }>;
+  discussionComments(number: number, match: { isCorrection(body: string): boolean }): Promise<{ comments: Array<{ body: string; createdAt: string; authorLogin: string | null }> }>;
   issues(): Promise<{ issues: Array<{ number: number; title: string; state: "open" | "closed" }>; truncated: boolean }>;
   authorPermission(login: string): Promise<RepoPermission>;
   evidence(): { requests: Array<{ method: string; path: string; status: number }>; tokenPermissions: Record<string, string> | null };
@@ -45,10 +47,10 @@ export function createPlanSourceFactory(deps: PlanReadDeps): (target: PlanReadTa
         if (r.budgetExhausted) throw new PlanReadError("request_budget_exceeded");
         return { pulls: r.pulls.map((p) => ({ number: p.number, title: p.title, state: p.state, dLines: p.dLines })), truncated: r.truncated };
       },
-      discussions: () => listDiscussions(client, repo),
-      async discussionComments(number) {
-        const r = await listDiscussionComments(client, repo, number);
-        return { comments: r.comments.map((c) => ({ body: c.body, createdAt: c.createdAt, authorLogin: c.authorLogin })), truncated: r.truncated };
+      discussions: (match) => listDiscussions(client, repo, { isSpec: match.isSpec }),
+      async discussionComments(number, match) {
+        const r = await listDiscussionComments(client, repo, number, { isCorrection: match.isCorrection });
+        return { comments: r.comments.map((c) => ({ body: c.body, createdAt: c.createdAt, authorLogin: c.authorLogin })) };
       },
       async issues() {
         const r = await list();

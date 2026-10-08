@@ -63,6 +63,7 @@ export type ImportErrorCode =
   | 'github_unavailable'
   | 'rate_limited_by_github'
   | 'request_budget_exhausted'
+  | 'plan_source_too_large'
   | 'plan_file_missing'
   | 'plan_file_shape'
   | 'interrupted'
@@ -71,6 +72,13 @@ export type ImportErrorCode =
 /** The Plan view's sentence for `request_budget_exhausted` (the thirteenth error sentence). S3-L2b renders it. */
 export const REQUEST_BUDGET_EXHAUSTED_SENTENCE =
   'Reading your repo took more requests than one import is allowed, so nothing was changed. Your previous plan is still shown.';
+
+/**
+ * The Plan view's sentence for `plan_source_too_large` (the fourteenth error sentence). S3-L2b renders it. Hiding spam
+ * comments on GitHub is the undo path: a minimized comment is skipped and not counted at the next import.
+ */
+export const PLAN_SOURCE_TOO_LARGE_SENTENCE =
+  'Your repo has more planning Discussions or Correction comments than one import can read, so nothing was changed. Your previous plan is still shown. Hiding spam comments on GitHub brings the count back down.';
 
 export interface ImportEvidence {
   requests: Array<{ method: string; path: string; status: number }>;

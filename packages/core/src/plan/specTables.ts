@@ -29,7 +29,7 @@ export interface SpecComment {
 }
 
 const SPEC_HEADING = /^##\s+Spec\b/m;
-const SPEC_STATUS = /^[\s>*_-]*STATUS:?[\s*_]*(?:SPEC_READY|IMPLEMENTING|REVIEWING|DONE)\b/m;
+const SPEC_STATUS = /^[ \t>*_-]*STATUS:?[\s*_]*(?:SPEC_READY|IMPLEMENTING|REVIEWING|DONE)\b/m;
 const CORRECTION_FIRST_LINE = /^#{2,3}\s+Correction\s+C\d+\b/;
 const ID_HEADERS = new Set(["task", "id", "pr", "#"]);
 const ID_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;

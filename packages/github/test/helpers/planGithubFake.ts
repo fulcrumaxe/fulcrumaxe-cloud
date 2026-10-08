@@ -43,7 +43,8 @@ export interface FakeDiscussion {
   closed: boolean;
   /** The Discussion's author (default `someone`). */
   login?: string;
-  comments: Array<{ databaseId: number; body: string; login: string }>;
+  /** `isMinimized` is true for a comment a maintainer hid (spam, off-topic and so on); default false. */
+  comments: Array<{ databaseId: number; body: string; login: string; isMinimized?: boolean }>;
 }
 
 export interface FakeGithubState {
@@ -83,6 +84,8 @@ export interface FakeGithubState {
     contentsStatus?: number;
     /** The default branch is missing from the GraphQL answer. */
     noDefaultBranch?: boolean;
+    /** The comments answer leaves `isMinimized` out of every node. */
+    commentsWithoutIsMinimized?: boolean;
   };
 }
 
@@ -228,6 +231,9 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
       });
     }
     if (op === "PlanDiscussionComments") {
+      // The import must know which comments a maintainer hid, so the fake refuses a comments document that does not ask for
+      // `isMinimized` (an allowlisted constant that stopped asking would otherwise read every comment as "not hidden").
+      if (!/\bisMinimized\b/.test(q)) return jsonReply(200, { data: null, errors: [{ type: "MISSING_FIELD", message: "The comments query must select isMinimized." }] });
       const d = state.discussions.find((x) => x.number === vars.number);
       if (!d) return jsonReply(200, { data: { repository: { discussion: null } } });
       const first = Math.min(100, Number(vars.first ?? 30));
@@ -240,7 +246,7 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
             discussion: {
               comments: {
                 pageInfo: { hasNextPage: end < d.comments.length, endCursor: Buffer.from(String(end)).toString("base64") },
-                nodes: slice.map((c) => ({ databaseId: c.databaseId, body: c.body, createdAt: "2026-01-02T00:00:00Z", author: { login: c.login } })),
+                nodes: slice.map((c) => ({ databaseId: c.databaseId, body: c.body, createdAt: "2026-01-02T00:00:00Z", ...(state.faults.commentsWithoutIsMinimized ? {} : { isMinimized: c.isMinimized === true }), author: { login: c.login } })),
               },
             },
           },
