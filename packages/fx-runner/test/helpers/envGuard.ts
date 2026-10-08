@@ -53,6 +53,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/processGroup.ts": [],
   "src/engines/claude/settingsFile.ts": ["fs", "path"],
   "src/engines/claude/stream.ts": ["fs", "path"],
+  // The host sandbox tier and the job runner: directories and paths on this machine, and the OS name for platform detection. No child processes.
+  "src/sandbox/platform.ts": ["os"],
+  "src/sandbox/select.ts": ["fs", "path"],
+  "src/sandbox/sandboxSettings.ts": ["path"],
 };
 
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.replace(/^node:/, "")]));

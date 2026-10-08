@@ -4,3 +4,6 @@ export * from "./job/roleTools.js";
 export * from "./job/verifyHashes.js";
 export { createClaudeEngine, outcomeOf } from "./engines/claude/engine.js";
 export type { EngineConfig, EngineStartOptions, RunOutcome } from "./engines/claude/engine.js";
+export * from "./sandbox/platform.js";
+export * from "./sandbox/sandboxSettings.js";
+export * from "./sandbox/select.js";
