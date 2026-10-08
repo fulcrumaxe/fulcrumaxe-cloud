@@ -96,6 +96,7 @@ export const githubRoutes: RouteEntry[] = [
       try {
         redirectUri = `${new URL(process.env.FX_GITHUB_CALLBACK_URL ?? "").origin}/api/github/create-repo/callback`;
       } catch {
+        // fx-swallow-ok: an unset or unparsable callback URL leaves redirectUri unset and the check below answers 503, which the dispatcher reports
         redirectUri = undefined;
       }
       if (!secret || Buffer.byteLength(secret, "utf8") < 32 || !clientId || !/^[A-Za-z0-9._-]{1,64}$/.test(clientId) || !redirectUri) {

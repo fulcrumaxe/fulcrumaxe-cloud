@@ -5,7 +5,8 @@ import { listRunEvents } from "@fx/core/src/events/read.js";
 import { verifySession } from "@fx/core/src/auth/session.js";
 import { getSessionEpochAndRevocation } from "@fx/core/src/auth/identity.js";
 import { NotFoundError, ForbiddenError } from "@fx/core/src/tenancy/errors.js";
-import { handleApiRequest } from "../handler.js";
+import { reportError } from "@fx/telemetry";
+import { handleApiRequest, pathOf } from "../handler.js";
 import { ApiError, CrossSiteRefusedError, InsufficientScopeError, SessionRequiredError, mapError } from "../errors.js";
 import { principalIdOf, resolvePrincipal, type Principal } from "../principal.js";
 import { enforceTokenRateLimits } from "../ratelimit/limits.js";
@@ -161,7 +162,10 @@ export async function handleEventsRequest(req: Request, target: StreamTarget, de
   try {
     return await openStream(req, target, deps, requestId);
   } catch (err) {
-    return errorResponse(err, requestId);
+    const res = errorResponse(err, requestId);
+    // A 4xx (a bad cursor, a missing run, a cap) is the caller's answer; a 5xx is ours.
+    if (res.status >= 500) reportError(err, { stage: "sse.open", route: pathOf(req) });
+    return res;
   }
 }
 
@@ -348,14 +352,14 @@ function buildStreamResponse(a: BuildArgs): Response {
       try {
         controller.enqueue(encoder.encode(finalFrame));
       } catch {
-        // Consumer already gone.
+        // fx-swallow-ok: the consumer is already gone, so there is nobody to send the final frame to
       }
     }
     shutDown();
     try {
       controller.close();
     } catch {
-      // Already closed or cancelled.
+      // fx-swallow-ok: the controller is already closed or cancelled; closing it twice is harmless
     }
   }
 
@@ -375,7 +379,7 @@ function buildStreamResponse(a: BuildArgs): Response {
     try {
       controller.error(new Error("stream consumer too slow"));
     } catch {
-      // Already errored or cancelled.
+      // fx-swallow-ok: the controller is already errored or cancelled; the drop has happened either way
     }
   }
 
@@ -384,6 +388,7 @@ function buildStreamResponse(a: BuildArgs): Response {
     try {
       controller.enqueue(encoder.encode(text));
     } catch {
+      // fx-swallow-ok: enqueue throws when the consumer has gone away; the stream finishes, which is the answer
       finish();
       return;
     }
@@ -463,7 +468,8 @@ function buildStreamResponse(a: BuildArgs): Response {
       } else {
         finish(frame({ event: "revoked", data: { reason: result === "lease_lost" ? "lease_lost" : "principal" } }));
       }
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "sse.recheck", route: "/api/v1/events" });
       finish(frame({ event: "error", data: { code: "internal_error" } }));
     } finally {
       rechecking = false;
@@ -529,6 +535,7 @@ function buildStreamResponse(a: BuildArgs): Response {
       }
     } catch (err) {
       if (closed) return;
+      if (!(err instanceof NotFoundError)) reportError(err, { stage: "sse.run_cycle", route: "/api/v1/runs/_/events" });
       // A missing run ends the stream at once; a transient failure is retried like the account poller does.
       if (err instanceof NotFoundError || ++runFailures >= RUN_CYCLE_MAX_FAILURES) {
         finish(frame({ event: "error", data: { code: err instanceof NotFoundError ? "not_found" : "internal_error" } }));
@@ -562,7 +569,8 @@ function buildStreamResponse(a: BuildArgs): Response {
         );
       }
       if (rows.some(isStreamVisible)) markActivity();
-    } catch {
+    } catch (err) {
+      reportError(err, { stage: "sse.account_events", route: "/api/v1/events" });
       finish(frame({ event: "error", data: { code: "internal_error" } }));
     }
   }

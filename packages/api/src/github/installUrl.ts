@@ -87,6 +87,7 @@ export function verifyInstallState(
   try {
     claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   } catch {
+    // fx-swallow-ok: a signed state whose payload is not JSON is refused like any other bad state (null); nothing failed
     return null;
   }
   if (typeof claims !== "object" || claims === null) return null;

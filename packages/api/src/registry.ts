@@ -183,6 +183,7 @@ export function matchRoute(
         try {
           params[routeSeg.slice(1, -1)] = decodeURIComponent(reqSeg);
         } catch {
+          // fx-swallow-ok: a malformed % escape (URIError) means this route does not match the path; routing goes on
           matched = false;
           break;
         }

@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { isPlanId, planFor, type PlanId } from "@fx/spend";
+import { reportError } from "@fx/telemetry";
 import { ApiError } from "../errors.js";
 import type { MembershipRole } from "../registry.js";
 
@@ -110,8 +111,9 @@ export async function releaseLease(pool: Pool, subject: LeaseSubject, leaseId: s
         [leaseId, subject.accountId, subject.kind, subject.principalKey],
       );
     });
-  } catch {
-    // Expires on its own.
+  } catch (err) {
+    // The row expires on its own; the failure is still counted so a database that refuses releases shows up.
+    reportError(err, { stage: "sse.lease_release", route: "/api/v1/events" });
   }
 }
 

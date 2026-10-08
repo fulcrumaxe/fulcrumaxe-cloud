@@ -240,6 +240,9 @@ importers:
       '@fx/spend':
         specifier: workspace:*
         version: link:../spend
+      '@fx/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       '@fx/webhooks':
         specifier: workspace:*
         version: link:../webhooks

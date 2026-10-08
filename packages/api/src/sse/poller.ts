@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { reportError } from "@fx/telemetry";
 import { realClock, type Clock } from "./clock.js";
 import { LISTENER_IDLE_CLOSE_MS, defaultNudgeSource, isAccountId, type NudgeSource } from "./nudge.js";
 
@@ -426,6 +427,7 @@ export class AccountPoller {
           rows.push(...result.rows);
           answered.push(...chunk);
         } catch (err) {
+          reportError(err, { stage: "sse.watermark" });
           for (const feed of chunk) this.noteFailure(feed, err, now);
         }
       }
@@ -445,6 +447,7 @@ export class AccountPoller {
           await this.readIfMoved(feed);
           feed.failures = 0;
         } catch (err) {
+          reportError(err, { stage: "sse.read_events" });
           this.noteFailure(feed, err, now);
         }
       }
@@ -462,8 +465,9 @@ export class AccountPoller {
     for (const sub of feed.subs) {
       try {
         sub.handlers.onFail(err);
-      } catch {
+      } catch (subscriberErr) {
         // A misbehaving subscriber must not stop the others hearing it.
+        reportError(subscriberErr, { stage: "sse.subscriber_fail" });
       }
     }
     feed.subs.clear();
@@ -493,8 +497,9 @@ export class AccountPoller {
         if (mine.length > 0) {
           try {
             sub.handlers.onEvents(mine);
-          } catch {
+          } catch (subscriberErr) {
             // The stream's own error handling closes it; the poller must keep serving the rest.
+            reportError(subscriberErr, { stage: "sse.subscriber_events" });
           }
         }
       }
