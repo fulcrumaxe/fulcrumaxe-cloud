@@ -82,3 +82,24 @@ Auto-merge on a runner repo's local reviews is off until an owner or admin turns
 (`repo_local_review_optin_set`, migration 0733). Turning it on needs the repo to be on a runner, and a repo cannot leave
 the runner mode while it is on: the route that changes a repo's mode (the next child) turns the opt-in off first, in the
 same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
+
+## Limits, the runner list and approvals (R2b)
+
+- **Limits.** The runner tier's figures are plan data (`runnerPlan` in the plan data, read with `runnerLimitsFor()` from
+  `@fx/spend`), never constants in code. The plan data may predate the tier; a reader then gets "unavailable" and the caller
+  refuses. `runner_register` (0757) enforces the number the caller passes (`deps.maxRunners`, for an account whose
+  `accounts.plan` is `runner`), under the account's advisory lock; any other account has no limit. `RunnerTarget.admit`
+  reads the day's cap through its `limits` port.
+- **The list.** `GET /api/runners` (session, any member) returns each runner's id, credential mode, who registered it,
+  binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below N-1), `offline` (no request for
+  120 s), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that order of precedence. It selects
+  no key, thumbprint, repo list or nonce. `getRunWaitReason(runId)` derives why a run waits (`waiting_for_runner`,
+  `waiting_for_approval`, `runner_lost_retrying`, `timed_out_waiting`, `paused_usage_limit`) from the rows. Nothing is stored.
+  `waiting_for_runner` means no live runner for the run's repo: live, and the repo in the runner's own `allowed_repo_ids` (an
+  empty list takes no repo, as in the claim).
+  A follow-up run waits for a reason only when its parent is a failed runner run whose last move to failed recorded
+  `runner_lost` or `usage_limit`; for a usage limit it is paused until its own `claimable_after`, then it waits like any run.
+- **Approvals.** `POST /api/runners/runs/:id/approve` lets the registrant of a live subscription runner approve a teammate's
+  pending run (`agent_run_approve`, 0757). Anyone else gets 403. `approved_by` is write-once. The approve definer and the
+  execution-mode audit definer are owned by the NOLOGIN role `runner_approval_definer` (column grants and row policies of its
+  own, EXECUTE for `app_user` alone); migration 0757 gives `platform_ops` nothing, and a test diffs its privileges.

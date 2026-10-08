@@ -222,7 +222,10 @@ describe('X-user-id amendment', () => {
     const offenders: string[] = [];
     for (const row of rows) {
       const expr = `${row.qual ?? ''} ${row.withcheck ?? ''}`;
-      if (expr.includes('app.user_id') && !expr.includes('account_members') && !expr.includes('partner_members')) {
+      // Exactly one policy is exempt, by table and name: runner_approval_definer_select on account_members (0757). Its row is the
+      // membership itself, so it cannot join the table to itself. Any other policy on that table is still checked.
+      const isMembershipRowPolicy = row.tablename === 'account_members' && row.policyname === 'runner_approval_definer_select';
+      if (!isMembershipRowPolicy && expr.includes('app.user_id') && !expr.includes('account_members') && !expr.includes('partner_members')) {
         offenders.push(`${row.tablename}.${row.policyname}`);
       }
     }

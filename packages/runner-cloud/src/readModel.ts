@@ -1,0 +1,187 @@
+import type { PoolClient } from "pg";
+import { COPY } from "@fulcrumaxe/runner-protocol";
+import { withTenant } from "@fx/db/src/withTenant.js";
+import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+
+/**
+ * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
+ *
+ * Every state here is derived from rows at read time, never stored, so it cannot go stale and has no stamp to clear:
+ *  - a runner is exactly one of `online_idle`, `busy`, `offline`, `outdated` or `revoked`;
+ *  - a run waiting on something is exactly one of five reasons, or none.
+ * Both read through the caller's tenant context, so another account's runner or run does not exist here.
+ */
+
+export const RUNNER_STATES = ["online_idle", "busy", "offline", "outdated", "revoked"] as const;
+export type RunnerState = (typeof RUNNER_STATES)[number];
+
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
+
+/** A runner that has made no request for this long is `offline` (criterion 13). */
+export const RUNNER_OFFLINE_AFTER_SECONDS = 120;
+
+/** What the classifier needs of one runner. `busy` is "holds a running run whose lease has not run out". */
+export interface RunnerFacts {
+  revokedAt: Date | null;
+  protocolVersion: number | null;
+  lastSeenAt: Date | null;
+  busy: boolean;
+}
+
+/**
+ * The one state of a runner. Precedence, highest first: `revoked` (nothing else matters once the key is dead),
+ * `outdated` (below N-1: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
+ * `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
+ * version and is not outdated: it is offline until it is heard from.
+ */
+export function classifyRunner(facts: RunnerFacts, now: Date, current: number = CURRENT_PROTOCOL_VERSION): RunnerState {
+  if (facts.revokedAt !== null) return "revoked";
+  if (facts.protocolVersion !== null && facts.protocolVersion < current - 1) return "outdated";
+  if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_OFFLINE_AFTER_SECONDS * 1000) return "offline";
+  return facts.busy ? "busy" : "online_idle";
+}
+
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "currentProtocolVersion">;
+
+export interface RunnerRow {
+  id: string;
+  credential_mode: "subscription" | "api_key";
+  registered_by: { id: string; name: string };
+  binary_version: string | null;
+  last_seen_at: string | null;
+  state: RunnerState;
+}
+
+interface RawRunner {
+  id: string;
+  credential_mode: "subscription" | "api_key";
+  registered_by: string;
+  registered_by_name: string;
+  binary_version: string | null;
+  protocol_version: number | null;
+  last_seen_at: Date | null;
+  revoked_at: Date | null;
+  busy: boolean;
+}
+
+/** Shown where a member has no name on record. Never an email, an id or the word null. */
+const UNNAMED_MEMBER = "A team member";
+
+async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
+  const now = (deps.now ?? (() => new Date()))();
+  const current = deps.currentProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
+  const read = async (client: PoolClient): Promise<RawRunner[]> =>
+    (
+      await client.query<RawRunner>(
+        `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
+                r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at,
+                EXISTS (SELECT 1 FROM agent_runs a
+                         WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy
+           FROM runners r LEFT JOIN users u ON u.id = r.registered_by
+          WHERE r.account_id = $1
+          ORDER BY r.created_at, r.id`,
+        [accountId, now, UNNAMED_MEMBER],
+      )
+    ).rows;
+  const rows =
+    userId === null
+      ? await withTenant(deps.appUserPool, accountId, read)
+      : await withTenant(deps.appUserPool, accountId, userId, async (client) => {
+          // A session route is for a member. The session already names an account the user belongs to; this keeps the read
+          // closed even if a caller ever pairs a user with an account they are not in.
+          const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
+          if (role === null || role === undefined) throw new RunnerHttpError(403, "forbidden", "you are not a member of this account");
+          return read(client);
+        });
+  return rows.map((r) => ({
+    id: r.id,
+    credential_mode: r.credential_mode,
+    registered_by: { id: r.registered_by, name: r.registered_by_name },
+    binary_version: r.binary_version,
+    last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
+    state: classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current),
+  }));
+}
+
+/** Each of the account's runners (revoked ones included, so the list can say so) with its one state. */
+export async function getRunnerStates(deps: ReadDeps, accountId: string): Promise<Array<{ id: string; state: RunnerState }>> {
+  return (await readRunners(deps, accountId, null)).map(({ id, state }) => ({ id, state }));
+}
+
+interface RawRun {
+  status: string;
+  runtime: string;
+  initiated_by: string | null;
+  approved_by: string | null;
+  own_reason: string | null;
+  parent_reason: string | null;
+  claimable_after: Date | null;
+  runnable_without_approval: boolean;
+  needs_approval_possible: boolean;
+  runner_online: boolean;
+}
+
+/**
+ * Why a run is waiting, or null when it is not waiting on anything this model names (running, finished, not a runner run,
+ * or about to be claimed because a runner that can take it is online). Derived on read from the run, its parent and the
+ * account's runners:
+ *  - `timed_out_waiting`: the run ended in `timed_out` with reason `queue_ttl`;
+ *  - `paused_usage_limit`: a pending follow-up whose parent failed with `usage_limit` and whose own `claimable_after` (the
+ *    reset time) is still ahead; `runner_lost_retrying`: a pending follow-up whose parent failed with `runner_lost`. The
+ *    parent counts only under the follow-up step test (a failed runner run whose last move to failed recorded one of the two);
+ *  - `waiting_for_approval`: pending, nobody has approved it, and the only runners that could take it are subscription
+ *    runners of other people (an `api_key` runner, or one registered by the person who started the run, can take it);
+ *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, heard from within 120 seconds, and with the
+ *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
+ *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as
+ *    "no repo" (only `allowed_roles` reads empty as "all"). The waiting notice in the worker uses the same test, so the two agree.
+ * The runner's roles are the claim's business and are not second-guessed here.
+ */
+export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId: string): Promise<RunWaitReason | null> {
+  const now = (deps.now ?? (() => new Date()))();
+  const row = await withTenant(deps.appUserPool, accountId, async (client) => {
+    const { rows } = await client.query<RawRun>(
+      `SELECT a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after,
+              (SELECT e.payload ->> 'failureReason' FROM run_events e WHERE e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload ->> 'to' = 'timed_out' ORDER BY e.seq DESC LIMIT 1) AS own_reason,
+              -- The follow-up step test (C22 section 5): the parent counts only when it is a failed runner run whose last move to
+              -- failed recorded one of the two follow-up reasons. Any other parent says nothing about why this run waits.
+              (SELECT x.reason FROM agent_runs pr
+                 CROSS JOIN LATERAL (SELECT e.payload ->> 'failureReason' AS reason FROM run_events e
+                                      WHERE e.run_id = pr.id AND e.kind = 'run.status_changed' AND e.payload ->> 'to' = 'failed'
+                                      ORDER BY e.seq DESC LIMIT 1) x
+                WHERE pr.account_id = a.account_id AND pr.id = a.parent_run_id AND pr.runtime = 'runner' AND pr.status = 'failed') AS parent_reason,
+              EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL
+                         AND (r.credential_mode = 'api_key' OR r.registered_by IN (a.initiated_by, a.approved_by))) AS runnable_without_approval,
+              EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.credential_mode = 'subscription') AS needs_approval_possible,
+              EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $3::timestamptz - make_interval(secs => $4)
+                         AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online
+         FROM agent_runs a WHERE a.account_id = $1 AND a.id = $2`,
+      [accountId, runId, now, RUNNER_OFFLINE_AFTER_SECONDS],
+    );
+    return rows[0];
+  });
+  if (!row || row.runtime !== "runner") return null;
+  if (row.status === "timed_out") return row.own_reason === "queue_ttl" ? "timed_out_waiting" : null;
+  if (row.status !== "pending") return null;
+  // A usage-limit follow-up waits for its own claimable_after (the reset time); once that has passed it waits like any other run.
+  if (row.parent_reason === "usage_limit" && row.claimable_after !== null && row.claimable_after.getTime() > now.getTime()) return "paused_usage_limit";
+  if (row.parent_reason === "runner_lost") return "runner_lost_retrying";
+  if (row.approved_by === null && row.initiated_by !== null && !row.runnable_without_approval && row.needs_approval_possible) return "waiting_for_approval";
+  if (!row.runner_online) return "waiting_for_runner";
+  return null;
+}
+
+/**
+ * GET /api/runners (a session route, any member of the account). The runners with their derived state, and the four copy
+ * strings the runner screens show, so the UI never retypes them. A runner's key, thumbprint, repo list and nonces are not
+ * selected, so they cannot be returned.
+ */
+export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
+  const runners = await readRunners(deps, principal.accountId, principal.userId);
+  return {
+    status: 200,
+    body: { runners, copy: { usageLimits: COPY.usageLimits, approval: COPY.approval, runner: COPY.runner, localOnly: COPY.localOnly } },
+    headers: { "cache-control": "no-store" },
+  };
+}

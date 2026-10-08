@@ -27,18 +27,13 @@ import type {
  *
  * `admit` refuses before anything is created, and every refusal is a member of the closed `AdmitDenyReason` set:
  *  - the role must be one a runner may run. Per the owner ruling (C12 section 1) that includes the four reviewer roles;
- *  - the account may start at most `RUNNER_RUNS_PER_DAY` runner runs in a UTC day;
+ *  - the account may start at most `limits.runsPerDay()` runner runs in a UTC day (the runner plan's data, injected: this
+ *    file may not import `@fx/spend`, and a figure written here would be a second copy of a private one);
  *  - the repo must be private. A public repo is refused, and so is a repo whose visibility could not be read.
  *
  * The account's runner count is capped where runners are created (`runner_register`, 0712), not here: `admit` has no
  * refusal reason to give for it and the count cannot change between registration and a run.
  */
-
-/** Runs a runner-plan account may start per UTC day. PROVISIONAL, D#6 R2b criterion 12 (source D#6 18502844). */
-export const RUNNER_RUNS_PER_DAY = 30;
-
-/** Runner runs an account may have `running` at once; claim hands out no more. PROVISIONAL like the figure above: R2b-3 part (ii) replaces both with the runner plan's data (`maxConcurrentRunnerJobs`). */
-export const RUNNER_MAX_CONCURRENT_JOBS = 1;
 
 /** How long a runner run may wait to be claimed: 72 hours. A constant of this class and nothing else (C12 section 3, from
  * body R3.7): no tenant, account or repo setting changes it. R2b's sweeper owns the `pending -> timed_out` move. */
@@ -75,12 +70,30 @@ export interface JobIssuer {
   issue(input: { run: ExecutionRun; continues?: RunContinues }): Promise<void>;
 }
 
+/**
+ * The runner tier's limits, as the target needs them. The composition root reads them from the plan data (D#6 R2b
+ * criterion 12). `runsPerDay` throws when the plan data is unavailable, and `admit` then refuses: a missing figure never
+ * becomes an unlimited one.
+ */
+export interface RunnerLimitsPort {
+  runsPerDay(): number;
+}
+
+/** Fails closed: every `admit` is refused as `runner_daily_limit`. For a composition root that has no plan data wired. */
+export const unwiredRunnerLimits: RunnerLimitsPort = {
+  runsPerDay: () => {
+    throw new Error("runner target: no limits are wired");
+  },
+};
+
 /** The runner target's own dependencies (C12 A7). No sandbox port, no spend, no model-key port. */
 export interface RunnerTargetDeps {
   /** The runner login's pool: it counts the day's runs under the run's tenant. */
   pool: Pool;
   issuer: JobIssuer;
   visibility: RepoVisibilityPort;
+  /** Required, like `visibility`: a root that has no plan data passes `unwiredRunnerLimits` explicitly, which fails closed (`admit` refuses every run). */
+  limits: RunnerLimitsPort;
 }
 
 /**
@@ -122,7 +135,15 @@ export class RunnerTarget implements ExecutionTarget {
     if (!isRunnerBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
     if (!RUNNER_TARGET_ROLES.has(run.role)) return { admitted: false, reason: "role_not_runner_eligible" };
 
-    if ((await this.runsToday(run.accountId)) > RUNNER_RUNS_PER_DAY) return { admitted: false, reason: "runner_daily_limit" };
+    // The limit is read first: when the plan data is unavailable the door stays shut and nothing is counted.
+    let perDay: number;
+    try {
+      perDay = this.deps.limits.runsPerDay();
+    } catch {
+      // fx-swallow-ok: unavailable plan data is a refusal (fail closed), not a crash; the composition root reports it when it loads the data
+      return { admitted: false, reason: "runner_daily_limit" };
+    }
+    if ((await this.runsToday(run.accountId)) > perDay) return { admitted: false, reason: "runner_daily_limit" };
 
     // A repo the port could not read is refused, whatever the cause: a throw is the same as "unknown".
     const seen: RepoVisibility = run.repoId

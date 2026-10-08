@@ -1,12 +1,14 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { RUNNER_ELIGIBLE_ROLES, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { insertRunnerEvent, type RepoVisibility } from "@fx/runner";
+import { resetPlanDataCache } from "@fx/plan-data";
+import { runnerLimitsFor } from "@fx/spend";
 import { RunActionRefusedError } from "../src/index.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "../src/runnerClaims.js";
 import { runnerLimits } from "../src/runnerLimits.js";
@@ -118,12 +120,15 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect((await row(id)).lease_generation).toBe(1);
     });
 
-    it("hands out nothing while the account already has its limit of running runner runs", async () => {
-      const first = await pending({ createdAt: T0 - 9000 });
-      await pending({ createdAt: T0 - 1000 });
-      await claimed(first);
-      const second = await newRunner();
-      expect((await claim(second)).kind).toBe("idle");
+    it("hands out nothing while the account already has the plan's limit of running runner runs", async () => {
+      // The figure is the runner plan's (the public fixture's here), read through the one limits function: N claims succeed and the (N+1)th gets no run.
+      const limit = runnerLimitsFor().maxConcurrentRunnerJobs;
+      expect(limit).toBeGreaterThan(0);
+      const ids: string[] = [];
+      for (let i = 0; i <= limit; i++) ids.push(await pending({ createdAt: T0 - 9000 + i }));
+      for (let i = 0; i < limit; i++) await claimed(ids[i]!);
+      expect((await claim(await newRunner())).kind).toBe("idle");
+      expect((await row(ids[limit]!)).status).toBe("pending");
     });
 
     it("answers retry_after 60 with nothing queued and 5 to 15 with work queued that it cannot take", async () => {
@@ -266,14 +271,15 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect((await row(id)).status).toBe("running");
     });
 
-    it("a run past two hours from its start is answered wall_clock", async () => {
+    it("a run past the plan's wall clock from its start is answered wall_clock", async () => {
       const id = await pending();
       const g = await claimed(id);
       const started = (await row(id)).started_at.getTime();
       await admin.query("UPDATE agent_runs SET lease_expires_at = to_timestamp($2 / 1000.0) WHERE id = $1", [id, started + 3 * 3_600_000]);
-      clock = started + 7_200_000 - 1;
+      const wall = runnerLimitsFor().maxRunWallClockMs;
+      clock = started + wall - 1;
       expect(await hb(id, g)).toMatchObject({ verdict: "ok" });
-      clock = started + 7_200_001; // started_at has microseconds; getTime() truncates them
+      clock = started + wall + 1; // started_at has microseconds; getTime() truncates them
       expect(await hb(id, g)).toEqual({ verdict: "wall_clock", reason: "wall_clock_limit" });
     });
 
@@ -436,8 +442,48 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(await mine(await newRunner())).toMatchObject({ kind: "claimed", runId: ids[3] });
     });
 
-    it("the default figure is one job at a time and a two hour wall clock", async () => {
-      expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 1, maxRunWallClockMs: 7_200_000 });
+    describe("the default reads the runner plan's data and fails closed without it", () => {
+      const saved = process.env.FX_PLAN_DATA;
+      afterEach(() => {
+        if (saved === undefined) delete process.env.FX_PLAN_DATA;
+        else process.env.FX_PLAN_DATA = saved;
+        resetPlanDataCache();
+      });
+      const withFigures = (over: Record<string, number>) => {
+        const data = JSON.parse(saved!);
+        data.runnerPlan.limits = { ...data.runnerPlan.limits, ...over };
+        process.env.FX_PLAN_DATA = JSON.stringify(data);
+        resetPlanDataCache();
+      };
+
+      it("gives the plan's two figures, and follows the data when it changes", () => {
+        const plan = runnerLimitsFor();
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: plan.maxConcurrentRunnerJobs, maxRunWallClockMs: plan.maxRunWallClockMs });
+        withFigures({ maxConcurrentRunnerJobs: 7, maxRunWallClockMs: 123_456 });
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 7, maxRunWallClockMs: 123_456 });
+      });
+
+      it("with a figure of N, the (N+1)th claim of the real facade gets no run", async () => {
+        withFigures({ maxConcurrentRunnerJobs: 2 });
+        const ids = [await pending({ createdAt: T0 - 3000 }), await pending({ createdAt: T0 - 2000 }), await pending({ createdAt: T0 - 1000 })];
+        for (const id of ids.slice(0, 2)) expect(await claim(await newRunner()), id).toMatchObject({ kind: "claimed", runId: id });
+        expect((await claim(await newRunner())).kind).toBe("idle");
+        expect((await row(ids[2]!)).status).toBe("pending");
+      });
+
+      it("with no plan data, or none for the runner tier, nothing is handed out and the wall clock stays at the class constant", async () => {
+        delete process.env.FX_PLAN_DATA;
+        resetPlanDataCache();
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
+        const id = await pending({ createdAt: T0 - 1000 });
+        expect((await claim(await newRunner())).kind).toBe("idle");
+        expect((await row(id)).status).toBe("pending");
+        const data = JSON.parse(saved!);
+        delete data.runnerPlan;
+        process.env.FX_PLAN_DATA = JSON.stringify(data);
+        resetPlanDataCache();
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
+      });
     });
 
     it("the wall clock the fence uses is the one the limits function gives for the account", async () => {

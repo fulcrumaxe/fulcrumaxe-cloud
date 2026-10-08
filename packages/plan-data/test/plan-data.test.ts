@@ -176,3 +176,25 @@ describe('fixture', () => {
     expect(fixture().fixture).toBe(true);
   });
 });
+
+describe('runnerPlan (D#6 R2b criterion 12)', () => {
+  it('is optional: data without it still loads', () => {
+    const d = fixture();
+    delete d.runnerPlan;
+    process.env.FX_PLAN_DATA = JSON.stringify(d);
+    process.env.NODE_ENV = 'test';
+    resetPlanDataCache();
+    expect(loadPlanData().runnerPlan).toBeUndefined();
+  });
+
+  it('is strict: an unknown limit, a missing limit and a wrong type are refused, naming the field but no value', () => {
+    for (const mutate of [
+      (d: Json) => ((d.runnerPlan.limits.seatsPerRunner = 9), d),
+      (d: Json) => (delete d.runnerPlan.limits.runsPerDay, d),
+      (d: Json) => ((d.runnerPlan.limits.previews = 'no'), d),
+      (d: Json) => ((d.runnerPlan.background = { kind: 'scaling' }), d),
+    ]) {
+      expect(fail(mutate(fixture())).message).toMatch(/runnerPlan/);
+    }
+  });
+});

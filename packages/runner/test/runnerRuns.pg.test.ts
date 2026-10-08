@@ -26,7 +26,7 @@ import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { RunnerTarget, unwiredJobIssuer, unwiredRepoVisibility } from "../src/targets/runnerTarget.js";
 import { seedAccount, seedMember, seedRepo } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
-import { createFakeJobIssuer, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
 /**
@@ -51,12 +51,12 @@ describe("runner runs through startAgentRun [pg]", () => {
     return { accountId, userId, repoId };
   }
 
-  function registryOf(visibility: "private" | "public" | "unknown" | "throw" = "private") {
+  function registryOf(visibility: "private" | "public" | "unknown" | "throw" = "private", runsPerDay = 1000) {
     const harness = createSandboxTargetHarness(db.runWriterPool);
     const issuer = createFakeJobIssuer();
     const registry: ExecutionTargetRegistry = {
       sandbox: new SandboxTarget(harness.deps),
-      runner_local: new RunnerTarget({ pool: db.runWriterPool, issuer, visibility: createFakeVisibility(visibility) }),
+      runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(runsPerDay), pool: db.runWriterPool, issuer, visibility: createFakeVisibility(visibility) }),
     };
     return { registry, harness, issuer };
   }
@@ -167,10 +167,11 @@ describe("runner runs through startAgentRun [pg]", () => {
       expect(issuer.calls).toHaveLength(0);
     });
 
-    it("the 31st run of the day is refused as runner_daily_limit, and the refused run does not count against the next", async () => {
+    it("the run after the plan's daily limit is refused as runner_daily_limit, and the refused run does not count against the next", async () => {
       const w = await world();
-      const { registry } = registryOf();
-      for (let i = 0; i < 30; i++) {
+      const perDay = 3;
+      const { registry } = registryOf("private", perDay);
+      for (let i = 0; i < perDay; i++) {
         expect(await startAgentRun(db.runWriterPool, registry, inputOf(w))).toMatchObject({ status: "pending" });
       }
       const over = await startAgentRun(db.runWriterPool, registry, inputOf(w));
@@ -189,7 +190,7 @@ describe("runner runs through startAgentRun [pg]", () => {
     it("the composition root's defaults refuse: unwired visibility reads every repo as unknown", async () => {
       const w = await world();
       const registry: ExecutionTargetRegistry = {
-        runner_local: new RunnerTarget({ pool: db.runWriterPool, issuer: unwiredJobIssuer, visibility: unwiredRepoVisibility }),
+        runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: unwiredJobIssuer, visibility: unwiredRepoVisibility }),
       };
       expect(await startAgentRun(db.runWriterPool, registry, inputOf(w))).toMatchObject({ status: "refused_spend", reason: "repo_visibility_unknown" });
     });
@@ -197,7 +198,7 @@ describe("runner runs through startAgentRun [pg]", () => {
     it("the unwired issuer fails the run instead of leaving it pending with no job behind it", async () => {
       const w = await world();
       const registry: ExecutionTargetRegistry = {
-        runner_local: new RunnerTarget({ pool: db.runWriterPool, issuer: unwiredJobIssuer, visibility: createFakeVisibility("private") }),
+        runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: unwiredJobIssuer, visibility: createFakeVisibility("private") }),
       };
       await expect(startAgentRun(db.runWriterPool, registry, inputOf(w))).rejects.toThrow(DispatchFailedError);
       const { rows } = await db.admin.query(`SELECT status FROM agent_runs WHERE account_id = $1`, [w.accountId]);

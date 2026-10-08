@@ -47,8 +47,8 @@ describe('runner identity writes (0712)', () => {
   }
 
   /** register as the runner would be called: a tenant session with no user. */
-  const register = (accountId: string, code: string, jwk: unknown, isolation: string | null = null): Promise<string> =>
-    withTenant(appPool, accountId, async (c) => (await c.query<{ id: string }>('SELECT runner_register($1, $2::jsonb, $3) AS id', [code, JSON.stringify(jwk), isolation])).rows[0]!.id);
+  const register = (accountId: string, code: string, jwk: unknown, isolation: string | null = null, maxRunners: number | null = null): Promise<string> =>
+    withTenant(appPool, accountId, async (c) => (await c.query<{ id: string }>('SELECT runner_register($1, $2::jsonb, $3, $4) AS id', [code, JSON.stringify(jwk), isolation, maxRunners])).rows[0]!.id);
   /** `as` is what the runner middleware would put in app.runner_id (default: the runner itself; null: unset). */
   const rotate = (accountId: string, runnerId: string, oldJkt: string, jwk: unknown, as: string | null = runnerId, userId?: string): Promise<string> => {
     const body = async (c: PoolClient): Promise<string> => {
@@ -144,7 +144,7 @@ describe('runner identity writes (0712)', () => {
       const code = await mintCode(f, f.o1);
       const client = await appPool.connect();
       try {
-        await refused('42501', () => client.query('SELECT runner_register($1, $2::jsonb, NULL)', [code, JSON.stringify(newKey())]), f.accountId);
+        await refused('42501', () => client.query('SELECT runner_register($1, $2::jsonb, NULL, NULL)', [code, JSON.stringify(newKey())]), f.accountId);
       } finally {
         client.release();
       }
@@ -196,30 +196,50 @@ describe('runner identity writes (0712)', () => {
       await refused('23505', () => register(g.accountId, again, key), f.accountId, g.accountId);
     });
 
-    it('limits an account whose plan is the string runner to 2 active runners; a revoked runner frees a slot', async () => {
+    // 0757 (D#6 R2b criterion 12): the caller passes the limit it read from the plan data; the function only enforces the number.
+    it('refuses the registration that would pass the limit it is given; a revoked runner frees a slot', async () => {
       const f = await freshAccount();
-      await admin.query(`UPDATE accounts SET plan = 'runner' WHERE id = $1`, [f.accountId]);
-      const first = await register(f.accountId, await mintCode(f, f.o1), newKey());
-      await register(f.accountId, await mintCode(f, f.o1), newKey());
+      const first = await register(f.accountId, await mintCode(f, f.o1), newKey(), null, 2);
+      await register(f.accountId, await mintCode(f, f.o1), newKey(), null, 2);
       const third = await mintCode(f, f.o1);
-      await refused('53400', () => register(f.accountId, third, newKey()), f.accountId);
+      await refused('53400', () => register(f.accountId, third, newKey(), null, 2), f.accountId);
       expect((await admin.query('SELECT used_at FROM runner_registration_codes WHERE code_sha256 = $1', [third])).rows[0].used_at).toBeNull();
       await revoke(f.accountId, f.o1, first);
-      await register(f.accountId, third, newKey());
+      await register(f.accountId, third, newKey(), null, 2);
     });
 
-    it('does not apply the limit to an account whose plan is not the string runner (temporary seam: D#6 R2b criterion 12 and C9 section 3 replace it with plan data)', async () => {
+    it('does not read accounts.plan any more: a plan of the string runner with no limit given is not limited, and a limit of 0 refuses the first', async () => {
       const f = await freshAccount();
+      await admin.query(`UPDATE accounts SET plan = 'runner' WHERE id = $1`, [f.accountId]);
       for (let i = 0; i < 3; i++) await register(f.accountId, await mintCode(f, f.o1), newKey());
       expect((await admin.query('SELECT count(*)::int AS n FROM runners WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(3);
+      const g = await freshAccount();
+      const code = await mintCode(g, g.o1);
+      await refused('53400', () => register(g.accountId, code, newKey(), null, 0), g.accountId);
+    });
+
+    it('has no default for the limit: a three-argument call finds no function (42883) instead of registering without a cap', async () => {
+      const f = await freshAccount();
+      const code = await mintCode(f, f.o1);
+      const call = (): Promise<unknown> =>
+        withTenant(appPool, f.accountId, async (c) => c.query('SELECT runner_register($1, $2::jsonb, NULL) AS id', [code, JSON.stringify(newKey())]));
+      await refused('42883', call, f.accountId);
+      expect((await admin.query('SELECT used_at FROM runner_registration_codes WHERE code_sha256 = $1', [code])).rows[0].used_at).toBeNull();
+      expect((await admin.query('SELECT count(*)::int AS n FROM runners WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(0);
+    });
+
+    it('refuses a negative limit as an invalid argument and leaves the code unused', async () => {
+      const f = await freshAccount();
+      const code = await mintCode(f, f.o1);
+      await refused('22023', () => register(f.accountId, code, newKey(), null, -1), f.accountId);
+      expect((await admin.query('SELECT used_at FROM runner_registration_codes WHERE code_sha256 = $1', [code])).rows[0].used_at).toBeNull();
     });
 
     it('holds the limit when registrations race', async () => {
       const f = await freshAccount();
-      await admin.query(`UPDATE accounts SET plan = 'runner' WHERE id = $1`, [f.accountId]);
       const codes: string[] = [];
       for (let i = 0; i < 6; i++) codes.push(await mintCode(f, f.o1));
-      const results = await Promise.allSettled(codes.map((code) => register(f.accountId, code, newKey())));
+      const results = await Promise.allSettled(codes.map((code) => register(f.accountId, code, newKey(), null, 2)));
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
       expect(results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.code)).toEqual(['53400', '53400', '53400', '53400']);
       expect((await admin.query('SELECT count(*)::int AS n FROM runners WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(2);
@@ -245,7 +265,7 @@ describe('runner identity writes (0712)', () => {
         try {
           await reg.query('BEGIN');
           await reg.query(`SELECT set_config('app.account_id', $1, true)`, [f.accountId]);
-          const id = (await reg.query<{ id: string }>('SELECT runner_register($1, $2::jsonb, NULL) AS id', [code, JSON.stringify(newKey())])).rows[0]!.id;
+          const id = (await reg.query<{ id: string }>('SELECT runner_register($1, $2::jsonb, NULL, NULL) AS id', [code, JSON.stringify(newKey())])).rows[0]!.id;
           // The registration is open and uncommitted. A demotion of the minter cannot proceed.
           await other.query(`SET lock_timeout = '400ms'`);
           let refusedByLock: { code?: string } | undefined;

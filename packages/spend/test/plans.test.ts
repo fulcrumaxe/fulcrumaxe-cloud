@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadPlanData } from '@fx/plan-data';
+import { PlanDataMissingError, loadPlanData, resetPlanDataCache } from '@fx/plan-data';
 import {
   apiLimitsFor,
   backgroundBudgetUsd,
@@ -9,6 +9,9 @@ import {
   planFor,
   planIds,
   webhookEndpointLimitFor,
+  runnerLimitsFor,
+  runnerPlanFor,
+  RUNNER_PLAN_ID,
 } from '../src/plans.js';
 
 // The plan data under test is the public scaled fixture (FX_PLAN_DATA, set by the test setup): invented figures.
@@ -57,5 +60,45 @@ describe('plans: compute split read from the plan data', () => {
     expect(apiLimitsFor('team')).toEqual({ perTokenPerMinute: 110, perTenantPerMinute: 430 });
     expect(webhookEndpointLimitFor('scale')).toBe(22);
     expect(planFor('scale').computeCapUsdPerMonth).toBe(loadPlanData().plans.scale.computeCapUsdPerMonth);
+  });
+});
+
+describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
+  it('reads the six limits, the compute split and the provisional mark from the data (invented fixture figures)', () => {
+    expect(runnerLimitsFor()).toEqual({
+      maxRunners: 4,
+      maxConcurrentRunnerJobs: 3,
+      runsPerDay: 9,
+      maxRunWallClockMs: 3_600_000,
+      fullClonesPerRepoPerDay: 5,
+      previews: false,
+    });
+    const plan = runnerPlanFor();
+    expect(plan.id).toBe(RUNNER_PLAN_ID);
+    expect(plan.id).toBe('runner');
+    expect(plan.foreground).toEqual({ kind: 'flat', usdPerMonth: 8 });
+    expect(plan.background).toEqual({ kind: 'flat', usdPerMonth: 0 });
+    expect(plan.provisional).toBe(true);
+    expect(plan.source.length).toBeGreaterThan(0);
+  });
+
+  it('plan data that predates the runner tier answers "unavailable", never a default', () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const without = JSON.parse(saved ?? '{}') as Record<string, unknown>;
+      delete without.runnerPlan;
+      process.env.FX_PLAN_DATA = JSON.stringify(without);
+      resetPlanDataCache();
+      expect(() => runnerLimitsFor()).toThrow(PlanDataMissingError);
+      expect(planIds()).toEqual(['starter', 'team', 'scale']);
+    } finally {
+      process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
+  it('is not one of the three subscription plans: the Stripe-backed list is unchanged', () => {
+    expect(planIds()).toEqual(['starter', 'team', 'scale']);
+    expect(isPlanId('runner')).toBe(false);
   });
 });

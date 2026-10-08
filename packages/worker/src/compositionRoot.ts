@@ -1,8 +1,9 @@
 import { envKekSource, type KekSource } from "@fx/model-connection";
+import { outsideMeterOn, runnerLimitsFor } from "@fx/spend";
 import type { HostLookup } from "@fx/net-guard";
-import { outsideMeterOn } from "@fx/spend";
 import {
   RunnerTarget,
+  type RunnerLimitsPort,
   createJobIssuer,
   createPgJobContext,
   SandboxTarget,
@@ -92,6 +93,8 @@ export interface WorkerPorts {
   jobIssuer?: JobIssuer;
   /** D#6 R3a: reads whether a repo is private (apps/web supplies the live GitHub read, R3b). Absent, every repo reads as unknown and a runner run is refused. */
   repoVisibility?: RepoVisibilityPort;
+  /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
+  runnerLimits?: RunnerLimitsPort;
 }
 
 export interface CreateWorkerOptions {
@@ -256,7 +259,8 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
     const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool) }) : unwiredJobIssuer);
-    const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility });
+    const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor().runsPerDay };
+    const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits });
     const registry: ExecutionTargetRegistry = Object.freeze({ sandbox: guardWorkdir(sandboxTarget), runner_local: guardWorkdir(runnerTarget) });
     // The runner's workflow steps and the follower's bodies reach the pool and the registry through this, never through arguments.
     configureAgentRunWiring({ pool: pools.runnerPool, registry });

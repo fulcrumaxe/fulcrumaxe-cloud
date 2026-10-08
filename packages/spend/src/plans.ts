@@ -1,4 +1,4 @@
-import { loadPlanData } from '@fx/plan-data';
+import { PlanDataMissingError, loadPlanData } from '@fx/plan-data';
 import type { PlanId } from './types.js';
 
 /**
@@ -99,4 +99,45 @@ export function backgroundBudgetUsd(plan: PlanId, repoCount: number): number {
 
 export function foregroundBudgetUsd(plan: PlanId): number {
   return loadPlanData().plans[plan].foreground.usdPerMonth;
+}
+
+/**
+ * D#6 R2b criterion 12: the runner tier's limits. The tier is for customers whose agent runs on their own machine; it
+ * holds no model spend of ours (their own plan pays for the model), so these cap runners and work, not money.
+ */
+export interface RunnerLimits {
+  maxRunners: number;
+  maxConcurrentRunnerJobs: number;
+  runsPerDay: number;
+  maxRunWallClockMs: number;
+  fullClonesPerRepoPerDay: number;
+  previews: boolean;
+}
+
+export interface RunnerPlan {
+  id: 'runner';
+  /** Compute for cloud-verified review in our sandbox. */
+  foreground: FlatComputeBudget;
+  background: FlatComputeBudget;
+  limits: RunnerLimits;
+  provisional: boolean;
+  source: string;
+}
+
+/** The value of `accounts.plan` for a runner-tier account (0711 added it to the column's CHECK). */
+export const RUNNER_PLAN_ID = 'runner' as const;
+
+/**
+ * The runner tier. Throws PlanDataMissingError when the plan data is unavailable or predates the runner tier: a caller
+ * answers "unavailable", never a default figure, so a missing figure cannot quietly become a limit of zero or of infinity.
+ */
+export function runnerPlanFor(): RunnerPlan {
+  const runnerPlan = loadPlanData().runnerPlan;
+  if (runnerPlan === undefined) throw new PlanDataMissingError('the plan data has no runner plan');
+  return { id: RUNNER_PLAN_ID, ...runnerPlan };
+}
+
+/** The one place the runner routes and the runner target read their limits from. */
+export function runnerLimitsFor(): RunnerLimits {
+  return runnerPlanFor().limits;
 }

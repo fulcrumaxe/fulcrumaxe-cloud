@@ -6,6 +6,7 @@ import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RUNNER_LEASE_SWEEP_BATCH, createRunnerLeaseSweeper, type RunnerLeaseSweepDeps } from "../src/runnerLeaseSweep.js";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
+import { runnerLimitsFor } from "@fx/spend";
 
 /**
  * [pg] D#6 R2b-3: the lease and wall-clock sweep against the real lister and fence (0754), the real compare-and-set writer and a
@@ -21,7 +22,7 @@ describe("runner lease sweep [pg]", () => {
   let runnerB: string;
   const T0 = Date.parse("2026-10-10T12:00:00Z");
   const HOUR = 3_600_000;
-  const WALL = 2 * HOUR;
+  const WALL = runnerLimitsFor().maxRunWallClockMs; // the runner plan's figure (the public fixture's here)
   const sweeper = (now: number, over: RunnerLeaseSweepDeps = {}) => createRunnerLeaseSweeper(writerPool, { now: () => now, ...over });
 
   beforeAll(async () => {

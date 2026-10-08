@@ -17,7 +17,7 @@ import {
 import type { AdmitResult, ExecutionTarget, ExecutionTargetRegistry, HookResult } from "../../src/executionTarget.js";
 import { QueuedRunNotSupportedError, type StartAgentRunInput } from "../../src/startAgentRun.js";
 import { RunnerTarget } from "../../src/targets/runnerTarget.js";
-import { createFakeJobIssuer, createFakeVisibility } from "../helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "../helpers/runnerTargetFakes.js";
 import type { CreateSandboxOptions, SandboxHandle, SandboxPort, StartDetachedOptions, StartDetachedResult } from "../../src/sandboxPort.js";
 import { seedAccount, seedRepo } from "../helpers/seed.js";
 import { createSandboxTargetHarness } from "../helpers/sandboxTargetFakes.js";
@@ -195,7 +195,7 @@ describe("agentRunWorkflow (D#2 H09b2-wf, H09.7 watchdog) [pg]", () => {
     const { accountId, repoId } = await seedRepoFixture();
     await db.admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [repoId]);
     const registry: ExecutionTargetRegistry = {
-      runner_local: new RunnerTarget({ pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility("private") }),
+      runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility("private") }),
     };
     configureAgentRunWiring({ pool: db.runWriterPool, registry });
     await expect(dispatchStep(baseInput(accountId, repoId))).rejects.toThrow(QueuedRunNotSupportedError);

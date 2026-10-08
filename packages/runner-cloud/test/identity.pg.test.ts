@@ -123,15 +123,42 @@ describe("runner identity routes [pg]", () => {
       expect((await register(newKey(), minted)).status).toBe(401);
     });
 
-    it("answers 409 runner_limit to a third runner on a runner-plan account only", async () => {
+    // D#6 R2b criterion 12: the limit is the plan data's (the fixture's invented figure), reached through deps.maxRunners.
+    it("answers 409 runner_limit to a runner past the plan data's limit, on a runner-plan account only", async () => {
       const f = await fresh();
       await h.admin.query("UPDATE accounts SET plan = 'runner' WHERE id = $1", [f.accountId]);
-      for (let i = 0; i < 2; i++) expect((await register(newKey(), await insertCode(h.admin, f.accountId, f.a1))).status).toBe(201);
+      const deps = { maxRunners: () => 2 };
+      for (let i = 0; i < 2; i++) expect((await register(newKey(), await insertCode(h.admin, f.accountId, f.a1), { deps })).status).toBe(201);
       const third = await insertCode(h.admin, f.accountId, f.a1);
-      expect((await register(newKey(), third)).status).toBe(409);
-      expect(((await register(newKey(), third)).body as { error: { code: string } }).error.code).toBe("runner_limit");
+      const refused = await register(newKey(), third, { deps });
+      expect(refused.status).toBe(409);
+      expect((refused.body as { error: { code: string } }).error.code).toBe("runner_limit");
       await h.admin.query("UPDATE accounts SET plan = 'starter' WHERE id = $1", [f.accountId]);
-      expect((await register(newKey(), third)).status).toBe(201);
+      expect((await register(newKey(), third, { deps })).status).toBe(201);
+    });
+
+    it("takes the limit from the figure it is given: a larger one admits the third, and the figure is read only for a runner-plan account", async () => {
+      const f = await fresh();
+      await h.admin.query("UPDATE accounts SET plan = 'runner' WHERE id = $1", [f.accountId]);
+      for (let i = 0; i < 3; i++) expect((await register(newKey(), await insertCode(h.admin, f.accountId, f.a1), { deps: { maxRunners: () => 3 } })).status).toBe(201);
+      expect((await register(newKey(), await insertCode(h.admin, f.accountId, f.a1), { deps: { maxRunners: () => 3 } })).status).toBe(409);
+      const g = await fresh();
+      let asked = 0;
+      expect((await register(newKey(), await insertCode(h.admin, g.accountId, g.a1), { deps: { maxRunners: () => (asked++, 0) } })).status).toBe(201);
+      expect(asked).toBe(0);
+    });
+
+    it("answers 503 plan_unavailable, and registers nothing, when a runner-plan account's limit cannot be read", async () => {
+      const f = await fresh();
+      await h.admin.query("UPDATE accounts SET plan = 'runner' WHERE id = $1", [f.accountId]);
+      const code = await insertCode(h.admin, f.accountId, f.a1);
+      for (const deps of [{}, { maxRunners: () => { throw new Error("plan data is not set"); } }, { maxRunners: () => Number.NaN }, { maxRunners: () => -1 }]) {
+        const res = await register(newKey(), code, { deps });
+        expect(res.status).toBe(503);
+        expect((res.body as { error: { code: string } }).error.code).toBe("plan_unavailable");
+      }
+      expect((await h.admin.query("SELECT count(*)::int AS n FROM runners WHERE account_id = $1", [f.accountId])).rows[0].n).toBe(0);
+      expect((await h.admin.query("SELECT used_at FROM runner_registration_codes WHERE account_id = $1", [f.accountId])).rows[0].used_at).toBeNull();
     });
   });
 

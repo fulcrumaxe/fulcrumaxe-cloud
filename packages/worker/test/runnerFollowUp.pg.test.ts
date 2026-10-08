@@ -13,6 +13,7 @@ import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerLeaseSweeper, type RunnerLeaseSweepResult } from "../src/runnerLeaseSweep.js";
 import { createFollowUpPorts, requestFollowUp, type FollowUpPorts, type FollowUpPortsDeps } from "../src/runnerFollowUp.js";
 import { createAdvanceModule, FOLLOW_UP_CHAIN_MAX_RUNS } from "../src/advance.js";
+import { createFakeRunnerLimits } from "../../runner/test/helpers/runnerTargetFakes.js";
 
 /**
  * [pg] D#6 R2b-3 (C21 section 4): the run that follows a lost lease or a usage limit, against the real definer
@@ -827,7 +828,7 @@ describe("runner follow-up runs [pg]", () => {
         context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, issueNumber }) },
         now: () => new Date(clock),
       });
-      const target = new RunnerTarget({ pool: writerPool, issuer, visibility: { visibility: async () => "private" } });
+      const target = new RunnerTarget({ limits: createFakeRunnerLimits(30), pool: writerPool, issuer, visibility: { visibility: async () => "private" } });
       return { registry: { runner_local: target } as unknown as ExecutionTargetRegistry, target };
     }
     const jobOf = async (runId: string) => ((await admin.query("SELECT job_signed FROM agent_runs WHERE id = $1", [runId])).rows[0].job_signed as { job: Job }).job;

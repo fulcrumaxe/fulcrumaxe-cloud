@@ -14,5 +14,7 @@ export { followStatusBody, followTimeoutBody, type FollowStatus } from "@fx/runn
 export { operatorMode } from "@fx/runner";
 // D#6 R3b: a pure factory (no pool, no secret); apps/web builds the live repository-visibility read with it and passes it in as a port.
 export { createGithubRepoVisibility, type RepoReadHttp } from "@fx/runner";
+// D#6 R2b: the runner tier's limits, read from the plan data (a pure read, no pool or secret); apps/web passes the register limit from it.
+export { runnerLimitsFor } from "@fx/spend";
 export { createVercelKeepAlive } from "./keepAlive.js";
 export type { AdvanceFacade, AdvanceStartArgs, AdvanceTriageInput, AdvanceTriageResult, AdvanceRunRequest, AdvanceRunStart, AdvanceRunOutcome, AdvanceItem, AdvanceStepPorts, AdvanceStepResult, AdvanceStepWho, AdvanceReviewContext, AdvanceReviewLoad, AdvanceReviewDeps, AdvanceRoundInput, AdvanceRoundResult, AdvanceVerdictInput, AdvanceFixRequest, AdvanceMergeGateResult } from "./advance.js";

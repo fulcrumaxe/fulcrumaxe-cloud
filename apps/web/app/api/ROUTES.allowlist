@@ -26,6 +26,8 @@ runner/rotate/route.ts
 runners/[id]/revoke/route.ts
 runners/registration-codes/route.ts
 runners/revoke-all/route.ts
+runners/route.ts
+runners/runs/[id]/approve/route.ts
 shell/session/route.ts
 stripe/webhook/route.ts
 system/mode/route.ts

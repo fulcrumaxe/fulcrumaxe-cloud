@@ -308,7 +308,7 @@ describe("D#2 H09b2: key failure and mid-run spend kill [pg]", () => {
     expect(row.rows[0].status).toBe("killed_spend");
   });
 
-  // ~$30 on haiku-4.5 -- wildly over any small cap used below.
+  // A very large usage event on haiku-4.5 -- wildly over any small cap used below.
   const bigUsageEvent: NormalizedEvent = {
     runId: "placeholder",
     role: "code-reviewer",
@@ -459,7 +459,7 @@ describe("D#2 H09b2: key failure and mid-run spend kill [pg]", () => {
   it("D#2 H09b2 fix round 2 MUST (double-settle race, CWE-362/840): a cancel() racing a metered kill's own settle produces exactly one ledger row", async () => {
     const { accountId, repoId } = await seedRepoFixture();
     // perSpawnCapUsd=5: the tiny first event stays well under it ("continue"),
-    // the ~$30 second event blows straight through it ("kill"). Two events on
+    // the very large second event blows straight through it ("kill"). Two events on
     // ONE run so `bk.cumulativeModelUsd` is still the FIRST event's tiny,
     // already-settled-elsewhere value (>0, so `cancel()` believes there is
     // something real to settle) at the moment `cancel()` races the second

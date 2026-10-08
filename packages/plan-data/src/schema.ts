@@ -35,6 +35,31 @@ const planSchema = z
   })
   .strict();
 
+/**
+ * The runner tier (D#6): a plan for customers who run the agent on their own machine. It is not one of the three
+ * subscription plans above (those carry the Stripe price mapping and the rate limits), so it sits beside them and is
+ * optional: data that predates it still loads, and a caller that needs it gets an "unavailable" answer, never a default.
+ * Every figure is provisional until the owner fixes the tier; `source` says where it came from.
+ */
+const runnerPlanSchema = z
+  .object({
+    foreground: flatBudget,
+    background: flatBudget,
+    limits: z
+      .object({
+        maxRunners: count,
+        maxConcurrentRunnerJobs: count,
+        runsPerDay: count,
+        maxRunWallClockMs: count,
+        fullClonesPerRepoPerDay: count,
+        previews: z.boolean(),
+      })
+      .strict(),
+    provisional: z.boolean(),
+    source: z.string().min(1),
+  })
+  .strict();
+
 const modelRate = z
   .object({
     inputUsdPerMTok: usd,
@@ -55,6 +80,7 @@ export const planDataSchema = z
     /** True only in the public fixture. The loader refuses it in production. */
     fixture: z.boolean().optional(),
     plans: z.object({ starter: planSchema, team: planSchema, scale: planSchema }).strict(),
+    runnerPlan: runnerPlanSchema.optional(),
     pricing: z
       .object({
         fetchedAt: z.string().min(1),
