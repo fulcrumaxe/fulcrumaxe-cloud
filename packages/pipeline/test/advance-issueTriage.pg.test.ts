@@ -50,6 +50,16 @@ describe("triageIssueItem [pg]", () => {
     expect(open.rows.map((r) => r.id)).toEqual([root]);
   });
 
+  it("DP-C6: a halted webhook row is not retired behind the customer's halt: it stays triaged and no transition is written", async () => {
+    const w = await world();
+    await h.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [w.workItemId, randomUUID()]);
+    const out = await triageIssueItem(h.runWriterPool, w.accountId, w.input({ category: "bug" }));
+    expect(out).toMatchObject({ status: "triaged" });
+    expect((await item(w.workItemId)).stage).toBe("triaged");
+    const t = await h.admin.query(`SELECT count(*)::int AS n FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'closed'`, [w.workItemId]);
+    expect(t.rows[0].n).toBe(0);
+  });
+
   it("a bug stays at triaged (no panel) with the repo and number; the webhook's row still retires", async () => {
     const w = await world();
     const out = await triageIssueItem(h.runWriterPool, w.accountId, w.input({ category: "bug" }));

@@ -171,6 +171,7 @@ export async function startReviewerBody(
   const started: AdvanceRunStart = await worker.advanceStartRun({
     accountId: who.accountId,
     workItemId: who.workItemId,
+    haltEpoch: who.haltEpoch,
     step: `review:${pr.headSha}:${role}`,
     role,
     prompt,
@@ -220,7 +221,8 @@ export interface GatheredInput {
 export async function recordRoundBody(worker: ReviewWorker | null, who: StepWho, input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: GatheredInput[] }): Promise<RoundOut> {
   if (!worker) return { decision: "refused", round: 0, nextRound: null, recorded: [] };
   const out = await worker.advanceRecordRound(who, input);
-  if (out.decision === "refused") return { decision: "refused", round: 0, nextRound: null, recorded: [] };
+  // A halt is its own answer, so the workflow can record one stop and end instead of treating it as a failed round.
+  if (out.decision === "refused") return { decision: "reason" in out && (out.reason === "item_halted" || out.reason === "halted_since_approval") ? "halted" : "refused", round: 0, nextRound: null, recorded: [] };
   const done = out as Exclude<typeof out, { decision: "refused"; reason: string }>;
   return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`) };
 }

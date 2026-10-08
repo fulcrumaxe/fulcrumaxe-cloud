@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import type { DiscussionsContext } from "./principals.js";
 import { accountIdOf, actorForWrite, kindOf, redactIfNeeded, runIdOf } from "./principals.js";
 import { assertAllowed, assertUuidOrNotFound, rejectAccountIdInInput, DiscussionsError } from "./operations.js";
@@ -34,6 +35,7 @@ export interface SpecCorrection {
 
 interface WorkItemRow {
   stage: string;
+  halted: boolean;
 }
 
 /** Locks (`FOR UPDATE`) the work item. Serializes concurrent publishers
@@ -43,7 +45,7 @@ interface WorkItemRow {
  * NotFoundError, same as a missing one. */
 async function lockWorkItem(client: PoolClient, workItemId: string): Promise<WorkItemRow> {
   const { rows } = await client.query<WorkItemRow>(
-    `SELECT stage FROM work_items WHERE id = $1 FOR UPDATE`,
+    `SELECT stage, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1 FOR UPDATE`,
     [workItemId],
   );
   if (rows.length === 0) {
@@ -74,6 +76,9 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
 
   return withTenant(ctx.pool, accountIdOf(ctx.principal), async (client) => {
     const workItem = await lockWorkItem(client, workItemId);
+    // A halted item gets no Spec from the pipeline (a person may still write one). Checked here and not only in recordStage:
+    // an item already at spec_ready is not moved, so recordStage would never see it. Nothing is written.
+    if (workItem.halted && actor.kind === "system") throw new WorkItemHaltedError(workItemId);
 
     // D#2 C58 G8: a question is answered in its thread and never gets a Spec,
     // so it can never reach `spec_ready`. Read from the discussion, not the input.
@@ -122,6 +127,7 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
         at: new Date(),
         source: "control_plane",
         sourceRef: `spec_version:${specVersionId}`,
+        actor: actor.kind === "user" ? "person" : "automatic",
       });
       stage = "spec_ready";
     }

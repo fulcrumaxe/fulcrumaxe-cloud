@@ -27,7 +27,7 @@ const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ROOT = "66666666-6666-4666-8666-666666666666";
-const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444" };
+const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
 const ITEM_OK: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null };
 const issue = (over: Partial<Extract<IssueReadResult, { status: "found" }>> = {}): IssueReadResult => ({ status: "found", title: "T", body: "B", login: "owner-1", state: "open", labels: [], ...over });
 const maint = (name: string) => ({ name, actorLogin: "maint", actorPermission: "maintain" as const });

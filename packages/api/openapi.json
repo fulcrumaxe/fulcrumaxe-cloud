@@ -3058,7 +3058,7 @@
       "get": {
         "operationId": "getWorkItemActivity",
         "summary": "What the pipeline is doing for one work item",
-        "description": "Session only, member. The stage, the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
+        "description": "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
         "security": [
           {
             "session": []
@@ -3085,6 +3085,9 @@
                   "properties": {
                     "stage": {
                       "type": "string"
+                    },
+                    "halted": {
+                      "type": "boolean"
                     },
                     "repo": {
                       "anyOf": [
@@ -3354,6 +3357,7 @@
                   },
                   "required": [
                     "stage",
+                    "halted",
                     "repo",
                     "issue_number",
                     "pr_number",
@@ -9892,7 +9896,7 @@
       "post": {
         "operationId": "cancelWorkItem",
         "summary": "Ask for a work item's runs to be cancelled",
-        "description": "Answers 202 `{ action_id, state }`, not a 200 with settled amounts: the final state arrives as the `run.status_changed` event and through `GET /api/v1/run-actions/{id}`. A second cancel of the same live target returns the same `action_id`. A request carrying an `Idempotency-Key` that was already used replays its original `action_id` (with `Idempotent-Replayed: true`) and current `state`, even after the target has stopped. 409 `not_cancellable`: nothing left to cancel. Clients should treat it as already stopped. A work item with no pending, running or paused run is refused.",
+        "description": "Answers 202 `{ action_id, state }`, not a 200 with settled amounts: the final state arrives as the `run.status_changed` event and through `GET /api/v1/run-actions/{id}`. A second cancel of the same live target returns the same `action_id`. A request carrying an `Idempotency-Key` that was already used replays its original `action_id` (with `Idempotent-Replayed: true`) and current `state`, even after the target has stopped. 409 `not_cancellable`: nothing left to cancel. Clients should treat it as already stopped. A work item with no pending, running or paused run is refused. The halt also marks the item: nothing starts a run of it until an owner or admin approves it again (Approve, Build again, Back to discussion, Treat as a feature).",
         "security": [
           {
             "session": []

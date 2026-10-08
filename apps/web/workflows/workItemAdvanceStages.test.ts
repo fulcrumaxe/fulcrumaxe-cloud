@@ -22,7 +22,7 @@ const ACCOUNT = "11111111-1111-4111-8111-111111111111";
 const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ROOT = "66666666-6666-4666-8666-666666666666";
-const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444" };
+const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
 const TRIAGED: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null };
 const AT_SPEC: AdvanceItem = { ...TRIAGED, stage: "spec_ready", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3 };
 /** What the build tests see once the pull request is open and the review starts: the review stops at once, so these tests stay about the build (the review has its own file). */
@@ -91,9 +91,9 @@ describe("the panel and the Spec after triage", () => {
   it("a critical, feature or project item that triage moved to Discussing gets the panel step and then the Spec step, on the pipeline's root item", async () => {
     const w = setup();
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "spec_ready" });
-    expect(w.advancePanel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT });
+    expect(w.advancePanel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 });
     // The approval names this attempt's PM run.
-    expect(w.advanceSpec).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT }, ARGS.actionId);
+    expect(w.advanceSpec).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, ARGS.actionId);
     expect(w.advancePanel.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceSpec.mock.invocationCallOrder[0]!);
     expect(events()).toEqual(["advance.classified", "advance.triaged", "advance.panelled", "advance.spec_ready"]);
     expect(logs[3]).toMatchObject({ work_item_id: ROOT, at: "spec", version: 1, stage: "spec_ready" });
@@ -164,7 +164,7 @@ describe("the build for an item at Spec ready", () => {
     });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
     // The build is pinned to the Spec version read when the workflow started.
-    expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM }, ARGS.actionId, 3);
+    expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, ARGS.actionId, 3);
     expect(w.advanceLoadReview).toHaveBeenCalledTimes(1);
     expect(world.sleeps).toBe(2);
     expect(w.advanceBuildFailed).not.toHaveBeenCalled();
@@ -201,7 +201,7 @@ describe("the build for an item at Spec ready", () => {
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: `build_${status}` });
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", `run_${status}`);
     expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "build", reason: `run_${status}`, recorded: "recorded" });
-    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM }, { kind: "stopped", dedupeKey: "build:run-b", code: `build_run_${status}`, runId: "run-b" });
+    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, { kind: "stopped", dedupeKey: "build:run-b", code: `build_run_${status}`, runId: "run-b" });
   });
 
   it("a run that succeeded but opened no pull request is recorded after the grace period", async () => {
@@ -210,7 +210,7 @@ describe("the build for an item at Spec ready", () => {
     expect(world.sleeps).toBe(9); // nine 20 second looks at the item: three minutes
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "no_pull_request");
     // The run SUCCEEDED (the Spec said not buildable and the executor correctly made no pull request): the reason is its summary, found through the run this fact names.
-    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM }, { kind: "stopped", dedupeKey: "build:run-b", code: "build_no_pull_request", runId: "run-b" });
+    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, { kind: "stopped", dedupeKey: "build:run-b", code: "build_no_pull_request", runId: "run-b" });
   });
 
   it("a pull request that arrives late (the webhook is a moment behind) is not a failure", async () => {
@@ -232,7 +232,7 @@ describe("the build for an item at Spec ready", () => {
     expect(world.sleeps).toBe(250);
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "wait_timeout");
     // The run does not keep going behind a card that says Needs human: it is cancelled through the existing path.
-    expect(w.advanceCancel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM }, "run-b");
+    expect(w.advanceCancel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, "run-b");
     expect(w.advanceCancel.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceBuildFailed.mock.invocationCallOrder[0]!);
   });
 
@@ -315,9 +315,9 @@ describe("the short Spec for a small, bug or doc item (no panel)", () => {
     expect(pm[0]!.prompt).toContain(`triaged as "${category}"`);
     expect(pm[0]!.prompt).toContain("<<UNTRUSTED EXTERNAL CONTENT>>");
     expect(w.advancePanel).not.toHaveBeenCalled();
-    expect(w.advanceLightSpec).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT }, "run-1", ARGS.actionId);
+    expect(w.advanceLightSpec).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, "run-1", ARGS.actionId);
     // The build is of the pipeline's card for the issue, pinned to the version just published.
-    expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT }, ARGS.actionId, 4);
+    expect(w.advanceBuild).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, ARGS.actionId, 4);
   });
 
   it("a request the PM judges not feasible stops BEFORE anything is published or built; the PM's text is never logged or returned", async () => {
@@ -372,6 +372,44 @@ describe("the short Spec for a small, bug or doc item (no panel)", () => {
     expect(w.advancePanel).not.toHaveBeenCalled();
     expect(logs.at(-1)).toMatchObject({ event: "advance.stopped", reason: "project_not_specified" });
     expect(logs.some((l) => l.event === "advance.failed")).toBe(false);
-    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT }, { kind: "stopped", dedupeKey: `project:${ARGS.actionId}`, code: "project_not_specified" });
+    expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ROOT, haltEpoch: 0 }, { kind: "stopped", dedupeKey: `project:${ARGS.actionId}`, code: "project_not_specified" });
+  });
+});
+
+describe("a halt ends the workflow (DP-C6)", () => {
+  const stopEvent = (w: ReturnType<typeof setup>) => (w.advanceRecordEvent.mock.calls as unknown as unknown[][]).map((c) => c[1]).find((e) => (e as { kind: string }).kind === "stopped");
+
+  it("a build the database refused (item_halted) records one stopped event with code halted, waits for nothing and ends", async () => {
+    const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "item_halted" } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(stopEvent(w)).toMatchObject({ kind: "stopped", code: "halted" });
+    expect(world.sleeps).toBe(0);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+  });
+
+  it("a panel refused halted_since_approval (the item was halted and resumed after this workflow started) ends the same way", async () => {
+    const w = setup({ panel: { status: "refused", reason: "halted_since_approval" } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(stopEvent(w)).toMatchObject({ code: "halted" });
+    expect(w.advanceSpec).not.toHaveBeenCalled();
+  });
+
+  it("the epoch the approval started under is on every start and step", async () => {
+    const w = setup({ item: AT_SPEC });
+    const args = { ...ARGS, haltEpoch: 4 };
+    await workItemAdvanceWorkflow(args);
+    expect((w.advanceBuild.mock.calls as unknown as unknown[][])[0]![0]).toMatchObject({ haltEpoch: 4 });
+    const classify = setup();
+    await workItemAdvanceWorkflow(args);
+    expect(classify.advanceStartRun.mock.calls[0]![0]).toMatchObject({ haltEpoch: 4 });
+    expect((classify.advancePanel.mock.calls as unknown as unknown[][])[0]![0]).toMatchObject({ haltEpoch: 4 });
+  });
+
+  it("a workflow that was already running when the marker shipped (no haltEpoch in its arguments) replays as epoch 0, not as undefined", async () => {
+    const w = setup();
+    const { haltEpoch: _gone, ...old } = ARGS;
+    await workItemAdvanceWorkflow(old as AdvanceStartArgs);
+    expect(w.advanceStartRun.mock.calls[0]![0]).toMatchObject({ haltEpoch: 0 });
+    expect((w.advancePanel.mock.calls as unknown as unknown[][])[0]![0]).toMatchObject({ haltEpoch: 0 });
   });
 });

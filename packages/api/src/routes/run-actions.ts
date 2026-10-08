@@ -284,7 +284,7 @@ export const runActionRoutes: RouteEntry[] = [
     path: "/api/v1/work-items/{id}/cancel",
     operationId: "cancelWorkItem",
     summary: "Ask for a work item's runs to be cancelled",
-    description: ACCEPTED_TEXT + STOPPED_TEXT + "A work item with no pending, running or paused run is refused.",
+    description: ACCEPTED_TEXT + STOPPED_TEXT + "A work item with no pending, running or paused run is refused. The halt also marks the item: nothing starts a run of it until an owner or admin approves it again (Approve, Build again, Back to discussion, Treat as a feature).",
     extraResponses: { "409": "Error `not_cancellable`: the work item has no cancellable run.", "503": UNAVAILABLE_TEXT },
     handler: (ctx, input) => cancel(ctx, "cancel_work_item", input.params.id!),
   },

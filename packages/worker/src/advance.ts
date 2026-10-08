@@ -3,9 +3,9 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/advance.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import { IllegalStageTransitionError } from "@fx/core/src/work-items/stages.js";
+import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, failClosedOnQueued, PREVIEW_WORKDIR, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -48,6 +48,12 @@ export interface AdvanceStartArgs {
   workItemId: string;
   actionId: string;
   /**
+   * The item's halt epoch when the approval was performed (after any halt it resumed from). Every step of the workflow
+   * carries it; a step that finds a different epoch was started before a halt and is refused (`halted_since_approval`).
+   * A workflow started before this field existed replays it as 0.
+   */
+  haltEpoch: number;
+  /**
    * The newest published Spec's version when the approval was performed (null: none yet). The build and the review are
    * pinned to it: a newer version appearing after the person approved refuses them (`spec_changed`), so what is built and
    * reviewed is what was approved.
@@ -60,7 +66,7 @@ export interface AdvanceStartArgs {
  * cannot name another. Structurally the pipeline's `AdvanceRunPorts`.
  */
 export interface AdvanceStepPorts {
-  startRun(req: Omit<AdvanceRunRequest, "accountId" | "workItemId">): Promise<AdvanceRunStart>;
+  startRun(req: Omit<AdvanceRunRequest, "accountId" | "workItemId" | "haltEpoch">): Promise<AdvanceRunStart>;
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path, as the approver (so the cancel is audited as theirs and needs their membership to still be active). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
@@ -85,6 +91,8 @@ export interface AdvanceStepWho {
   accountId: string;
   userId: string;
   workItemId: string;
+  /** The halt epoch the workflow was started under (AdvanceStartArgs.haltEpoch). */
+  haltEpoch: number;
 }
 
 /** The triage step's input: everything it needs, as plain data. The classifier's category is a string the pipeline's own parser validates. */
@@ -218,6 +226,8 @@ export interface AdvanceRunRequest {
   exclusive?: boolean;
   /** Reviewer runs: the pull request head the review is for. Stored on the run (`head_sha`), which is what the merge gate reads. */
   headSha?: string;
+  /** The halt epoch the caller's workflow was started under. A start under an older epoch is refused (`halted_since_approval`). */
+  haltEpoch: number;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };
@@ -374,7 +384,22 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       return refused(seat.reason);
     }
 
-    await deps.startAdvance({ accountId, userId, workItemId, actionId, specVersion: item.spec_version === null ? null : Number(item.spec_version) });
+    // The one place a halt is lifted: a person's approval that was requested AFTER the halt. An approval pressed before the
+    // halt and performed after it is not a resume (the person's latest act was the halt), so the item stays halted.
+    const lifted = await withTenant(runnerPool, accountId, userId, async (client) => {
+      await client.query(
+        `UPDATE work_items SET halted_at = NULL, halt_action_id = NULL
+          WHERE id = $1 AND account_id = $2 AND halted_at IS NOT NULL
+            AND halted_at < (SELECT q.created_at FROM run_action_requests q WHERE q.id = $3 AND q.account_id = $2)`,
+        [workItemId, accountId, actionId],
+      );
+      const r = await client.query<{ halted: boolean; halt_epoch: number }>("SELECT halted_at IS NOT NULL AS halted, halt_epoch FROM work_items WHERE id = $1 AND account_id = $2", [workItemId, accountId]);
+      return r.rows[0];
+    });
+    if (!lifted) return refused("target_not_found");
+    if (lifted.halted) return refused("item_halted");
+
+    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version) });
     console.info(JSON.stringify({ event: "advance.started", work_item_id: workItemId, action_id: actionId }));
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
   }
@@ -416,12 +441,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!UUID_RE.test(req.accountId) || !UUID_RE.test(req.workItemId) || !/^[a-z0-9:_.-]{1,128}$/i.test(req.step)) return { ok: false, reason: "invalid_input" };
     if (!deps.starter) return { ok: false, reason: "starter_unavailable" };
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
-    const seat = await deps.resolveRunSeat({ accountId: req.accountId, role: req.role, workItemId: req.workItemId });
-    if (!seat.ok) return { ok: false, reason: seat.reason };
     const key = `advance:${req.workItemId}:${req.step}`;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
-      const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null }>(
-        "SELECT w.repo_id, r.gh_owner, r.gh_name FROM work_items w LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
+      const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null; halted: boolean; halt_epoch: number }>(
+        "SELECT w.repo_id, w.halted_at IS NOT NULL AS halted, w.halt_epoch, r.gh_owner, r.gh_name FROM work_items w LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
         [req.workItemId, req.accountId],
       );
       // `exclusive`: refuse when another run of the item is live and this step's own run is not already claimed. A
@@ -441,8 +464,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       return { row: r.rows[0], busy };
     });
     const repo = found.row;
+    // Advisory, and read before the seat and the environment so a halted item pays for neither: the authority is the
+    // trigger on agent_runs (0750), which refuses the insert itself. The epoch fences a workflow started before a halt.
+    if (repo?.halted) return { ok: false, reason: "item_halted" };
+    if (repo && repo.halt_epoch !== req.haltEpoch) return { ok: false, reason: "halted_since_approval" };
     if (!repo?.repo_id) return { ok: false, reason: "no_repo" };
     if (found.busy) return { ok: false, reason: "already_running" };
+    const seat = await deps.resolveRunSeat({ accountId: req.accountId, role: req.role, workItemId: req.workItemId });
+    if (!seat.ok) return { ok: false, reason: seat.reason };
     const cloneFrom = req.clone === true ? (repo.gh_owner && repo.gh_name ? { owner: repo.gh_owner, name: repo.gh_name } : null) : undefined;
     if (cloneFrom === null) return { ok: false, reason: "no_repo" };
     const input: StartAgentRunInput = {
@@ -466,6 +495,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // The database allows one live executor per pull request (the unique index). Two approvals racing to build, or a
       // build racing a fix round, lose here: the loser is told, and nothing is left behind. This is the lock.
       if (err instanceof DuplicateExecutorRunError) return { ok: false, reason: "already_running" };
+      if (err instanceof WorkItemHaltedError) return { ok: false, reason: "item_halted" };
       throw err;
     }
     console.info(JSON.stringify({ event: "advance.run_started", work_item_id: req.workItemId, step: req.step, role: req.role, run_id: started.runId, refused: started.refused ?? null }));
@@ -526,7 +556,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   /** The ports one step gets: bound to one account and item, so the step cannot name another. */
   function portsFor(who: AdvanceStepWho): AdvanceStepPorts {
     return {
-      startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId }),
+      startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId, haltEpoch: who.haltEpoch }),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
       cancel: (runId) => cancelItemRun(who, runId),
     };
@@ -539,6 +569,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!item) return { status: "refused", reason: "target_not_found" };
     // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
     if (item.provenance !== "internal") return { status: "refused", reason: "external_requires_human" };
+    // A halt is lifted only by a person's later approval, which starts a NEW workflow under the new epoch: this one, started
+    // before the halt, stops here whether the halt still stands or has been resumed since.
+    const halt = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ halted: boolean; halt_epoch: number }>("SELECT halted_at IS NOT NULL AS halted, halt_epoch FROM work_items WHERE id = $1 AND account_id = $2", [who.workItemId, who.accountId]);
+      return r.rows[0];
+    });
+    if (halt?.halted) return { status: "refused", reason: "item_halted" };
+    if (halt && halt.halt_epoch !== who.haltEpoch) return { status: "refused", reason: "halted_since_approval" };
     return null;
   }
 
@@ -610,6 +648,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       try {
         recorded = (await recordStage(client, { workItemId: who.workItemId, toStage: "pr_opened", at: new Date(), source: "control_plane", sourceRef: `pr_found:${prNumber}` })).recorded;
       } catch (err) {
+        if (err instanceof StageHaltedError) return { status: "unchanged", reason: "item_halted", stage: before };
         if (!(err instanceof IllegalStageTransitionError)) throw err;
       }
       return { status: recorded ? "recorded" : "unchanged", stage: await stageNow() };
@@ -732,6 +771,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           recordStage(client, { workItemId: who.workItemId, toStage: "changes_requested", reviewer: req.reviewer, at: new Date(), source: "control_plane", sourceRef: `fix-round:${req.failingRunId}` }),
         );
       } catch (err) {
+        if (err instanceof StageHaltedError) return refuse("item_halted");
         if (!(err instanceof IllegalStageTransitionError)) throw err;
         return refuse("stage_changed");
       }
@@ -769,6 +809,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         if (won) return started(won);
       }
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
+      if (err instanceof WorkItemHaltedError) return refuse("item_halted");
       return refuse("resume_failed");
     }
     if (out.status === "refused_spend") return refuse("refused_spend");

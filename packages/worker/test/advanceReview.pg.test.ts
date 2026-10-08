@@ -135,7 +135,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
     return row.action_id;
   }
-  const who = (a: SeedRefs, workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId });
+  const who = (a: SeedRefs, workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 });
   /** The executor run the build left behind, with its session. */
   async function buildRun(a: SeedRefs, workItemId: string, status: "succeeded" | "running" = "succeeded"): Promise<string> {
     const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: a.repoId, dispatchPrNumber: await numberOf(workItemId) });
@@ -392,7 +392,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const t = build();
-      await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, step: `review:${HEAD}:code-reviewer`, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD });
+      await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, haltEpoch: 0, step: `review:${HEAD}:code-reviewer`, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD });
       expect(t.inputs[0]).toMatchObject({ headSha: HEAD, role: "code-reviewer", cloneRepo: { owner: "acme", name: "widgets" }, idempotency: { key: `advance:${w}:review:${HEAD}:code-reviewer` } });
     });
 
@@ -406,7 +406,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
           },
         },
       });
-      expect(await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, step: "build:v1:x", role: "executor", prompt: "p", clone: true, pr: 7 })).toEqual({ ok: false, reason: "already_running" });
+      expect(await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, haltEpoch: 0, step: "build:v1:x", role: "executor", prompt: "p", clone: true, pr: 7 })).toEqual({ ok: false, reason: "already_running" });
     });
   });
 
@@ -768,7 +768,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(await t.module.advanceLoadSpecText(who(a, w), 0)).toBeNull();
       expect(await t.module.advanceLoadSpecText({ ...who(a, w), workItemId: "nope" }, 1)).toBeNull();
       const other = await seedAccount(admin, randomUUID());
-      expect(await t.module.advanceLoadSpecText({ accountId: other.accountId, userId: other.userId, workItemId: w }, 1)).toBeNull();
+      expect(await t.module.advanceLoadSpecText({ accountId: other.accountId, userId: other.userId, workItemId: w, haltEpoch: 0 }, 1)).toBeNull();
     });
   });
 
@@ -875,7 +875,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const b = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const t = build();
-      await expect(t.module.advanceRecordEvent({ accountId: b.accountId, userId: b.userId, workItemId: w }, { kind: "stopped", dedupeKey: "x" })).rejects.toThrow();
+      await expect(t.module.advanceRecordEvent({ accountId: b.accountId, userId: b.userId, workItemId: w, haltEpoch: 0 }, { kind: "stopped", dedupeKey: "x" })).rejects.toThrow();
       expect(await events(w)).toEqual([]);
     });
 

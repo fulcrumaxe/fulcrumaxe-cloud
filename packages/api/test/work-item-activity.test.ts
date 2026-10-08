@@ -128,7 +128,20 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     expect(res.status).toBe(200);
     const body = (await res.json()) as Activity;
     expect(activityResponseSchema.parse(body)).toEqual(body);
-    expect(body).toMatchObject({ stage: 'triaged', repo: null, pr_number: null, auto_merge: false, comments: [], spec: null, runs: [], steps: [], runs_truncated: false, comments_truncated: false, notice: null });
+    expect(body).toMatchObject({ stage: 'triaged', halted: false, repo: null, pr_number: null, auto_merge: false, comments: [], spec: null, runs: [], steps: [], runs_truncated: false, comments_truncated: false, notice: null });
+  });
+
+  it('halted is the marker, not the stage: true at triaged, discussing and spec_ready once halted, false again once the marker is cleared', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    for (const stage of ['triaged', 'discussing', 'spec_ready']) {
+      const { itemId } = await seedItem(accountId, { withRepo: false, stage });
+      expect(((await (await get(itemId, { accountId, userId })).json()) as Activity & { halted: boolean }).halted).toBe(false);
+      await admin.query('UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1', [itemId, randomUUID()]);
+      const body = (await (await get(itemId, { accountId, userId })).json()) as Activity & { halted: boolean };
+      expect(body).toMatchObject({ stage, halted: true });
+      await admin.query('UPDATE work_items SET halted_at = NULL, halt_action_id = NULL WHERE id = $1', [itemId]);
+      expect(((await (await get(itemId, { accountId, userId })).json()) as Activity & { halted: boolean }).halted).toBe(false);
+    }
   });
 
   describe('notice: why the pipeline stopped (restored from the live driver)', () => {

@@ -1,10 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import type { WorkItemTransitionReviewer } from "@fx/core/src/work-items/stages.js";
+import { WorkItemHaltedError, type WorkItemTransitionReviewer } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
-import { failClosedOnQueued, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { failClosedOnQueued, WorkItemHaltedError as RunWorkItemHaltedError, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { resumeAgentRun, type ResumeAgentRunResult } from "./resumeAgentRun.js";
 import { labelsForVerdict, isFixRequired } from "./verdictLabels.js";
 import type { LabelDiff, ReviewVerdict } from "./types.js";
@@ -76,7 +76,9 @@ export type RecordReviewVerdictResult =
   | { outcome: "passed"; labels: LabelDiff }
   | { outcome: "fix_dispatched"; labels: LabelDiff; roundNumber: number; resume: ResumeAgentRunResult }
   | { outcome: "fix_needed"; labels: LabelDiff }
-  | { outcome: "escalated"; labels: LabelDiff; roundNumber: number };
+  | { outcome: "escalated"; labels: LabelDiff; roundNumber: number }
+  /** The item is halted: nothing was recorded, no label diff applies, no fix round started. */
+  | { outcome: "halted"; labels: LabelDiff };
 
 async function countChangesRequestedRounds(client: PoolClient, accountId: string, workItemId: string): Promise<number> {
   const { rows } = await client.query<{ count: string }>(
@@ -143,7 +145,9 @@ export async function recordReviewVerdict(
     input.role === "debater" ? REVIEWER_TO_TRANSITION[requireDebatedRole(input)] : REVIEWER_TO_TRANSITION[input.role];
 
   const toStage = needsFix ? "changes_requested" : "review_passed";
-  const { recorded, roundNumber } = await withTenant(pool, input.accountId, async (client) => {
+  let stored: { recorded: boolean; roundNumber: number };
+  try {
+    stored = await withTenant(pool, input.accountId, async (client) => {
     const result = await recordStage(client, {
       workItemId: input.workItemId,
       toStage,
@@ -160,7 +164,13 @@ export async function recordReviewVerdict(
       await escalate(client, input.accountId, input.workItemId, input.runId, at);
     }
     return { recorded: true, roundNumber };
-  });
+    });
+  } catch (err) {
+    // A review that was still running when the customer halted must not take the item out of the halt: nothing is written.
+    if (err instanceof WorkItemHaltedError) return { outcome: "halted", labels: { add: [], remove: [] } };
+    throw err;
+  }
+  const { recorded, roundNumber } = stored;
 
   if (!recorded) {
     return { outcome: "duplicate", labels };
@@ -180,16 +190,23 @@ export async function recordReviewVerdict(
   }
   // A fix round queued for a runner is not one this loop can wait on (no hook, and it may sit pending for days):
   // it is cancelled and the round fails rather than being reported as dispatched.
-  const resume = await failClosedOnQueued(
-    pool,
-    input.accountId,
-    await resumeAgentRun(pool, registry, {
-      ...input.resumeInput,
-      accountId: input.accountId,
-      workItemId: input.workItemId,
-      role: "executor",
-    }),
-  );
+  let resume;
+  try {
+    resume = await failClosedOnQueued(
+      pool,
+      input.accountId,
+      await resumeAgentRun(pool, registry, {
+        ...input.resumeInput,
+        accountId: input.accountId,
+        workItemId: input.workItemId,
+        role: "executor",
+      }),
+    );
+  } catch (err) {
+    // Halted between the stage write and the resume: the database refused the run.
+    if (err instanceof RunWorkItemHaltedError) return { outcome: "halted", labels: { add: [], remove: [] } };
+    throw err;
+  }
   return { outcome: "fix_dispatched", labels, roundNumber, resume };
 }
 

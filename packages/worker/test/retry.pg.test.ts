@@ -124,6 +124,19 @@ describe("retry_run performer [pg]", { timeout: 60_000 }, () => {
     expect(await keyRows(a, id)).toBe(1);
   });
 
+  it("DP-C6 criterion 2: a retry of a run on a halted item is refused item_halted: no run, no claim, no sandbox call; the person resumes with Approve or Build again", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await item(a);
+    const failed = await run(a, w.id, "failed");
+    await admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [w.id, randomUUID()]);
+    const id = await action(a, failed);
+    const t = stubTarget();
+    expect(await module(t, fakeSeats().seats).performRetryRun(id)).toEqual({ result: "refused", errorCode: "item_halted" });
+    expect(t.admitted).toEqual([]);
+    expect(await retried(a)).toBe(0);
+    expect(await keyRows(a, id)).toBe(0);
+  });
+
   it("D#6 R3a: a retry the target queues for a runner is cancelled, not reported as started; nothing is left to be claimed and the action's key is free again", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);

@@ -1,8 +1,9 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { DiscussionsError, isBuildableKind } from "@fx/discussions";
-import { DuplicateExecutorRunError, failClosedOnQueued, startAgentRun, type ExecutionTargetRegistry, type StartAgentRunInput, type StartAgentRunResult } from "@fx/runner";
+import { DuplicateExecutorRunError, WorkItemHaltedError as RunHaltedError, failClosedOnQueued, startAgentRun, type ExecutionTargetRegistry, type StartAgentRunInput, type StartAgentRunResult } from "@fx/runner";
 import { requiredReviewers, shouldDispatchDebater, type RequiredReviewersInput } from "./requiredReviewers.js";
 import type { ReviewerAgentRole } from "./types.js";
 
@@ -48,7 +49,7 @@ export async function dispatchSpecReadyExecutor(
   pool: Pool,
   registry: ExecutionTargetRegistry,
   input: DispatchSpecReadyInput,
-): Promise<StartAgentRunResult | AlreadyDispatched> {
+): Promise<StartAgentRunResult | AlreadyDispatched | ItemHalted> {
   const at = input.at ?? new Date();
   // D#2 C58 G8/G9: a question or a project never gets an executor run, whatever stage it is at.
   const kind = await withTenant(pool, input.accountId, async (client) => {
@@ -90,6 +91,8 @@ export async function dispatchSpecReadyExecutor(
     // in between), nothing of ours is running: rethrow as a failed dispatch.
     // A loser still reports already_dispatched if its winner later ends
     // refused or timed out; the winner's own caller surfaces that.
+    // A halted item gets no executor: the database refused the insert, so nothing exists.
+    if (err instanceof RunHaltedError) return { status: "item_halted" };
     if (!(err instanceof DuplicateExecutorRunError)) throw err;
     const holder = await withTenant(pool, input.accountId, async (client) => {
       const { rows } = await client.query<{ id: string; work_item_id: string }>(
@@ -112,15 +115,21 @@ export async function dispatchSpecReadyExecutor(
   // -- the item's stage stays wherever it already was, and the caller's
   // Workflow step is expected to surface the refusal/timeout itself.
   if (result.status === "running") {
-    await withTenant(pool, input.accountId, (client) =>
-      recordStage(client, {
-        workItemId: input.workItemId,
-        toStage: "in_progress",
-        at,
-        source: "control_plane",
-        sourceRef: result.id,
-      }),
-    );
+    try {
+      await withTenant(pool, input.accountId, (client) =>
+        recordStage(client, {
+          workItemId: input.workItemId,
+          toStage: "in_progress",
+          at,
+          source: "control_plane",
+          sourceRef: result.id,
+        }),
+      );
+    } catch (err) {
+      // Halted after the run was created: the halt cancels that run; the stage stays where the halt left it.
+      if (err instanceof WorkItemHaltedError) return { status: "item_halted" };
+      throw err;
+    }
   }
   return result;
 }
@@ -134,6 +143,11 @@ export interface DispatchReviewersInput extends RequiredReviewersInput {
    * per packages/roles/src/manifest.ts's per-role defaults) while sharing
    * the same dispatch loop below. */
   buildInput: (role: ReviewerAgentRole) => Omit<StartAgentRunInput, "accountId" | "workItemId" | "role" | "headSha">;
+}
+
+/** The item is halted: no executor was dispatched (or the one that was is the halt's to cancel). */
+export interface ItemHalted {
+  status: "item_halted";
 }
 
 /**

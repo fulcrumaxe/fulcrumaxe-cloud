@@ -1,5 +1,6 @@
 {
   "stage": "review_passed",
+  "halted": false,
   "repo": {
     "owner": "acme",
     "name": "docs"

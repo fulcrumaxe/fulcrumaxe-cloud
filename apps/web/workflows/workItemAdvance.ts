@@ -108,9 +108,9 @@ export async function advanceLoadStep(accountId: string, workItemId: string): Pr
   return loadBody(await getWorker(), getIssueReader(), accountId, workItemId);
 }
 
-export async function advanceStartClassifyStep(accountId: string, workItemId: string, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
+export async function advanceStartClassifyStep(accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
   "use step";
-  return startClassifyBody(await getWorker(), accountId, workItemId, actionId, loaded);
+  return startClassifyBody(await getWorker(), accountId, workItemId, haltEpoch, actionId, loaded);
 }
 
 export async function advanceRunOutcomeStep(accountId: string, runId: string): Promise<ClassifyOutcome> {
@@ -124,21 +124,21 @@ export async function advanceTriageStep(accountId: string, workItemId: string, l
 }
 
 /** The panel: round 1 and, if a seat asks for it or dissents, the one challenge round. */
-export async function advancePanelStep(accountId: string, userId: string, workItemId: string): Promise<StepOutcome> {
+export async function advancePanelStep(accountId: string, userId: string, workItemId: string, haltEpoch: number): Promise<StepOutcome> {
   "use step";
-  return panelBody(await getWorker(), { accountId, userId, workItemId });
+  return panelBody(await getWorker(), { accountId, userId, workItemId, haltEpoch });
 }
 
 /** The pipeline's Spec step: re-enters the panel (all finished), runs the PM, publishes the Spec. `actionId` names this attempt's PM run. */
-export async function advanceSpecStep(accountId: string, userId: string, workItemId: string, actionId: string): Promise<StepOutcome> {
+export async function advanceSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string): Promise<StepOutcome> {
   "use step";
-  return specBody(await getWorker(), { accountId, userId, workItemId }, actionId);
+  return specBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId);
 }
 
 /** Starts the executor and records Spec ready -> In progress once the run exists. `pinned` is the Spec version the person approved. */
-export async function advanceBuildStep(accountId: string, userId: string, workItemId: string, actionId: string, pinned: number | null): Promise<StepOutcome> {
+export async function advanceBuildStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string, pinned: number | null): Promise<StepOutcome> {
   "use step";
-  return buildBody(await getWorker(), { accountId, userId, workItemId }, actionId, pinned);
+  return buildBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId, pinned);
 }
 
 export async function advanceBuildOutcomeStep(accountId: string, runId: string): Promise<BuildRunOutcome> {
@@ -160,7 +160,7 @@ export async function advanceBuildFailedStep(accountId: string, workItemId: stri
 /** Stops a live run of the item (the wait for it ran out). The existing cancel path, as the approver. Safe on a finished run. */
 export async function advanceCancelStep(accountId: string, userId: string, workItemId: string, runId: string): Promise<void> {
   "use step";
-  return cancelRunBody(await getWorker(), { accountId, userId, workItemId }, runId);
+  return cancelRunBody(await getWorker(), { accountId, userId, workItemId, haltEpoch: 0 }, runId);
 }
 
 /** One structured line: a fixed event code and ids/codes. Never text from the issue or from a model. */
@@ -174,27 +174,27 @@ type EventFields = Parameters<typeof eventBody>[2];
 /** One recorded fact of the item (the fixed vocabulary of @fx/core's driverEvents). A repeat of the same key writes nothing. */
 export async function advanceEventStep(accountId: string, userId: string, workItemId: string, event: EventFields): Promise<void> {
   "use step";
-  return eventBody(await getWorker(), { accountId, userId, workItemId }, event);
+  return eventBody(await getWorker(), { accountId, userId, workItemId, haltEpoch: 0 }, event);
 }
 
 // ---- the short Spec (small, bug, doc: no panel) ---------------------------------------------------------------------
 
-export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, input: { category: string; title: string; body: string }, actionId: string): Promise<AdvanceRunStart> {
+export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { category: string; title: string; body: string }, actionId: string): Promise<AdvanceRunStart> {
   "use step";
-  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId }, input, actionId);
+  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input, actionId);
 }
 
 /** Publishes the short Spec from the finished PM run. The PM's text stays in the run. */
-export async function advanceLightSpecPublishStep(accountId: string, userId: string, workItemId: string, runId: string, actionId: string): Promise<LightPublished> {
+export async function advanceLightSpecPublishStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string, actionId: string): Promise<LightPublished> {
   "use step";
-  return publishLightSpecBody(await getWorker(), { accountId, userId, workItemId }, runId, actionId);
+  return publishLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId, actionId);
 }
 
 // ---- review steps ---------------------------------------------------------------------------------------------------
 
-export async function advanceReviewLoadStep(accountId: string, userId: string, workItemId: string, pinned: number | null): Promise<ReviewLoaded> {
+export async function advanceReviewLoadStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, pinned: number | null): Promise<ReviewLoaded> {
   "use step";
-  return reviewLoadBody(await getWorker(), { accountId, userId, workItemId }, pinned);
+  return reviewLoadBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, pinned);
 }
 
 export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue">): Promise<PrLookup> {
@@ -203,27 +203,28 @@ export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" 
 }
 
 /** "Check the build" found the pull request while the item sits at In progress: records PR opened so the review can record. Answers the stage after. */
-export async function advancePrFoundStep(accountId: string, userId: string, workItemId: string, prNumber: number): Promise<string | null> {
+export async function advancePrFoundStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<string | null> {
   "use step";
-  return prFoundBody(await getWorker(), { accountId, userId, workItemId }, prNumber);
+  return prFoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, prNumber);
 }
 
-export async function advanceReviewPlanStep(accountId: string, userId: string, workItemId: string, ctx: Pick<ReviewCtx, "tier" | "debaterEnabled">, pr: { number: number; headSha: string; securityCodes: string[] }, flagged: boolean): Promise<ReviewPlanOut> {
+export async function advanceReviewPlanStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, ctx: Pick<ReviewCtx, "tier" | "debaterEnabled">, pr: { number: number; headSha: string; securityCodes: string[] }, flagged: boolean): Promise<ReviewPlanOut> {
   "use step";
-  return reviewPlanBody(await getWorker(), { accountId, userId, workItemId }, ctx, pr, flagged);
+  return reviewPlanBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, flagged);
 }
 
 export async function advanceStartReviewerStep(
   accountId: string,
   userId: string,
   workItemId: string,
+  haltEpoch: number,
   ctx: ReviewCtx,
   pr: { number: number; headSha: string; baseRef: string },
   role: string,
   prior: Array<{ role: string; runId: string }>,
 ): Promise<StartedReviewer> {
   "use step";
-  return startReviewerBody(await getWorker(), { accountId, userId, workItemId }, ctx, pr, role, prior);
+  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior);
 }
 
 export async function advanceReviewerOutcomeStep(accountId: string, runId: string): Promise<ReviewerOutcome> {
@@ -235,16 +236,18 @@ export async function advanceRecordRoundStep(
   accountId: string,
   userId: string,
   workItemId: string,
+  haltEpoch: number,
   input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string }> },
 ): Promise<RoundOut> {
   "use step";
-  return recordRoundBody(await getWorker(), { accountId, userId, workItemId }, input);
+  return recordRoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
 }
 
 export async function advanceStartFixStep(
   accountId: string,
   userId: string,
   workItemId: string,
+  haltEpoch: number,
   ctx: ReviewCtx,
   pr: { number: number; headSha: string },
   actionId: string,
@@ -252,18 +255,20 @@ export async function advanceStartFixStep(
   failing: Array<{ role: string; runId: string }>,
 ): Promise<FixOut> {
   "use step";
-  return startFixBody(await getWorker(), { accountId, userId, workItemId }, ctx, pr, actionId, round, failing);
+  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing);
 }
 
-export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, prNumber: number): Promise<GateOut> {
+export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
   "use step";
-  return mergeGateBody(await getWorker(), { accountId, userId, workItemId }, prNumber);
+  return mergeGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, prNumber);
 }
 
 type Result = { status: string; detail?: string };
 
-export async function workItemAdvanceWorkflow(args: AdvanceStartArgs): Promise<Result> {
+export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promise<Result> {
   "use workflow";
+  // A workflow started before the halt marker existed replays without a haltEpoch: read as 0, the epoch of an item never halted.
+  const args: AdvanceStartArgs = { ...started, haltEpoch: (started as { haltEpoch?: number }).haltEpoch ?? 0 };
   const { accountId, workItemId, actionId } = args;
 
   const loaded = await advanceLoadStep(accountId, workItemId);
@@ -291,8 +296,9 @@ export async function workItemAdvanceWorkflow(args: AdvanceStartArgs): Promise<R
     category = loaded.decided;
     await advanceLogStep("advance.label_decided", { work_item_id: workItemId, category });
   } else {
-    const started = await advanceStartClassifyStep(accountId, workItemId, actionId, loaded);
+    const started = await advanceStartClassifyStep(accountId, workItemId, args.haltEpoch, actionId, loaded);
     if (!started.ok) {
+      if (isHaltReason(started.reason)) return haltedEnd(args, "classify_start");
       await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "classify_start", reason: started.reason });
       return { status: "failed", detail: `classify_refused:${started.reason}` };
     }
@@ -349,7 +355,7 @@ export async function workItemAdvanceWorkflow(args: AdvanceStartArgs): Promise<R
 async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result> {
   const { accountId, userId, actionId } = args;
 
-  const panel = await advancePanelStep(accountId, userId, rootId);
+  const panel = await advancePanelStep(accountId, userId, rootId, args.haltEpoch);
   await advanceLogStep(panel.status === "completed" ? "advance.panelled" : "advance.failed", {
     work_item_id: rootId,
     at: "panel",
@@ -359,14 +365,16 @@ async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result
     missing: panel.missing,
   });
   // A seat that did not post is not a failure here: the Spec records it as "DID NOT POST". Only a refusal ends the run.
+  if (isHaltReason(panel.reason)) return haltedEnd(args, "panel");
   if (panel.status !== "completed") return { status: "failed", detail: `panel_${panel.status}:${panel.reason ?? "none"}` };
 
-  const spec = await advanceSpecStep(accountId, userId, rootId, actionId);
+  const spec = await advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId);
   if (spec.status === "published") {
     await advanceLogStep("advance.spec_ready", { work_item_id: rootId, at: "spec", version: spec.version, stage: spec.stage });
     return { status: "spec_ready" };
   }
   await advanceLogStep(spec.status === "refused" ? "advance.failed" : "advance.stopped", { work_item_id: rootId, at: "spec", status: spec.status, reason: spec.reason });
+  if (isHaltReason(spec.reason)) return haltedEnd(args, "spec");
   // needs_owner_action (the Spec is too large to store) and external_requires_human are the pipeline's own outcomes.
   if (spec.status === "refused") return { status: "failed", detail: `spec_${spec.reason ?? "none"}` };
   return { status: spec.status, detail: spec.reason ?? undefined };
@@ -380,8 +388,9 @@ async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result
  */
 async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { category: string; title: string; body: string }): Promise<Result> {
   const { accountId, userId, actionId } = args;
-  const started = await advanceStartLightSpecStep(accountId, userId, rootId, issue, actionId);
+  const started = await advanceStartLightSpecStep(accountId, userId, rootId, args.haltEpoch, issue, actionId);
   if (!started.ok) {
+    if (isHaltReason(started.reason)) return haltedEnd(args, "light_spec_start");
     await advanceLogStep("advance.failed", { work_item_id: rootId, at: "light_spec_start", reason: started.reason });
     return { status: "failed", detail: `light_spec_refused:${started.reason}` };
   }
@@ -404,11 +413,12 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: `run_${outcome.status}` });
     return { status: "light_spec_failed", detail: `run_${outcome.status}` };
   }
-  const published = await advanceLightSpecPublishStep(accountId, userId, rootId, started.runId, actionId);
+  const published = await advanceLightSpecPublishStep(accountId, userId, rootId, args.haltEpoch, started.runId, actionId);
   if (published.status === "not_feasible") {
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "not_feasible" });
     return { status: "not_feasible" };
   }
+  if (isHaltReason(published.reason)) return haltedEnd(args, "light_spec");
   if (published.status !== "published") {
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: published.reason ?? "refused" });
     return { status: "light_spec_refused", detail: published.reason ?? undefined };
@@ -443,7 +453,8 @@ async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo:
 async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
-  const started = await advanceBuildStep(accountId, userId, workItemId, actionId, pinned);
+  const started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+  if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");
   if (started.status !== "started" || started.runId === null) {
     // Nothing was spent and the item did not move: it stays at Spec ready, where it can be approved again. The refusal is
     // recorded as a fact of the item (by the worker).
@@ -508,7 +519,8 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
  */
 async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, executorRunId: string | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
-  const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, pinned);
+  const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, args.haltEpoch, pinned);
+  if (!loaded.ok && isHaltReason(loaded.reason)) return haltedEnd(args, "check_build_load");
   if (!loaded.ok) {
     await stopped(args, "check_build_load", CHECK_UNAVAILABLE);
     return { status: "failed", detail: `check_build_${loaded.reason}` };
@@ -516,7 +528,7 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
   const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) {
-    const stage = await advancePrFoundStep(accountId, userId, workItemId, found.number);
+    const stage = await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number);
     await advanceLogStep("advance.build_checked", { work_item_id: workItemId, found: true, pr: found.number, stage });
     // Only an item now at a pull-request stage can be reviewed; anything else (closed meanwhile) is left alone.
     if (stage !== "pr_opened" && stage !== "changes_requested" && stage !== "review_passed") return { status: "unchanged", detail: stage ?? undefined };
@@ -571,7 +583,7 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
 /** Starts the given roles in parallel (each keyed by head and role) and waits for each; a role that could not start has no verdict. */
 async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number): Promise<{ verdicts: Verdict[]; refused: string[] }> {
   const { accountId, userId, workItemId } = args;
-  const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, ctx, pr, role, prior)));
+  const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior)));
   await advanceLogStep("advance.review_started", {
     work_item_id: workItemId,
     round,
@@ -587,9 +599,19 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role) };
 }
 
+/** The two answers a step gives when the item was halted: still halted, or halted and resumed since this workflow started. */
+const isHaltReason = (reason: string | null | undefined): boolean => reason === "item_halted" || reason === "halted_since_approval";
+
+/** A halt ends this workflow with one recorded stop. It never retries and never polls: only a person's later approval starts a new one. */
+async function haltedEnd(args: AdvanceStartArgs, at: string): Promise<Result> {
+  await stopped(args, at, "halted");
+  return { status: "stopped", detail: "halted" };
+}
+
 /** A fact of the item: the driver stopped, and why. One per approval and reason. */
 async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: { head?: string; pr?: number; round?: number } = {}): Promise<void> {
   const { accountId, userId, workItemId, actionId } = args;
+  if (isHaltReason(code)) code = "halted";
   await advanceLogStep("advance.stopped", { work_item_id: workItemId, at, reason: code });
   await advanceEventStep(accountId, userId, workItemId, {
     kind: "stopped",
@@ -609,7 +631,8 @@ async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: 
 async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
-  const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, pinned);
+  const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, args.haltEpoch, pinned);
+  if (!loaded.ok && isHaltReason(loaded.reason)) return haltedEnd(args, "review_load");
   if (!loaded.ok) {
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
@@ -626,7 +649,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // Who must review this head: code and acceptance always; security when the item is critical, the diff touches a
     // security surface, or (below) the code reviewer asks for it; the debater when the repo's role setting allows it.
-    let plan = await advanceReviewPlanStep(accountId, userId, workItemId, ctx, found, false);
+    let plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, false);
     const roundOne = plan.roles.filter((r) => r !== "debater");
     const first = await runReviewers(args, ctx, pr, roundOne, [], attempt);
     const verdicts = [...first.verdicts];
@@ -634,7 +657,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // The code reviewer's "security review needed" flag adds the security reviewer for this head.
     if (verdicts.some((v) => v.role === "code-reviewer" && v.securityNeeded)) {
-      plan = await advanceReviewPlanStep(accountId, userId, workItemId, ctx, found, true);
+      plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, true);
       const extra = plan.roles.filter((r) => r !== "debater" && !roundOne.includes(r));
       if (extra.length > 0) {
         const more = await runReviewers(args, ctx, pr, extra, [], attempt);
@@ -655,7 +678,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     }
 
     // Every verdict is in: record them, passes first and non-passes last, in ONE step.
-    const round = await advanceRecordRoundStep(accountId, userId, workItemId, {
+    const round = await advanceRecordRoundStep(accountId, userId, workItemId, args.haltEpoch, {
       headSha: pr.headSha,
       prNumber: pr.number,
       // The debater is required only once it has been started: it runs after everyone else passed, so a needs-fix from
@@ -666,8 +689,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     });
     await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
 
+    if (round.decision === "halted") return haltedEnd(args, "review");
     if (round.decision === "all_passed") {
-      const gate = await advanceMergeGateStep(accountId, userId, workItemId, pr.number);
+      const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
       await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
       // The head moved while the gate ran: review the new head.
       if (gate.outcome === "head_moved") continue;
@@ -690,7 +714,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
-    const fix = await advanceStartFixStep(accountId, userId, workItemId, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing);
+    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing);
+    if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
     if (!fix.ok || fix.runId === null) {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
       return { status: "fix_refused", detail: fix.reason ?? undefined };

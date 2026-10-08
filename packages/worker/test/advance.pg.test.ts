@@ -111,8 +111,8 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     const out = await t.module.performAdvanceWorkItem(await action(a, w));
     expect(out).toEqual({ result: "done", outcome: { work_item_id: w, advance: "started" } });
     expect(t.started).toHaveLength(1);
-    expect(t.started[0]).toMatchObject({ accountId: a.accountId, userId: a.userId, workItemId: w });
-    expect(Object.keys(t.started[0]!).sort()).toEqual(["accountId", "actionId", "specVersion", "userId", "workItemId"]);
+    expect(t.started[0]).toMatchObject({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
+    expect(Object.keys(t.started[0]!).sort()).toEqual(["accountId", "actionId", "haltEpoch", "specVersion", "userId", "workItemId"]);
     expect((t.started[0] as { specVersion?: number | null }).specVersion).toBeNull();
   });
 
@@ -201,7 +201,7 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await world(a);
     const t = build();
-    const req = { accountId: a.accountId, workItemId: w, step: "classify:abc", role: "project-manager", prompt: "p" };
+    const req = { accountId: a.accountId, workItemId: w, haltEpoch: 0, step: "classify:abc", role: "project-manager", prompt: "p" };
     const first = await t.module.advanceStartRun(req);
     const second = await t.module.advanceStartRun(req);
     expect(first).toEqual(second);
@@ -215,7 +215,7 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
   it("advanceStartRun answers a refusal as data: a seat refusal, no starter, a refused admit, an item with no repo, a bad step", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await world(a);
-    const req = { accountId: a.accountId, workItemId: w, step: "classify", role: "project-manager", prompt: "p" };
+    const req = { accountId: a.accountId, workItemId: w, haltEpoch: 0, step: "classify", role: "project-manager", prompt: "p" };
     expect(await build({ resolveRunSeat: async () => ({ ok: false, reason: "no_model" }) }).module.advanceStartRun(req)).toEqual({ ok: false, reason: "no_model" });
     expect(await build({ starter: null }).module.advanceStartRun(req)).toEqual({ ok: false, reason: "starter_unavailable" });
     expect(await build({ starter: fakeStarter("refused_spend").starter }).module.advanceStartRun(req)).toEqual({ ok: false, reason: "refused_spend" });

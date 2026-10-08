@@ -50,6 +50,24 @@ describe("specs.ts [pg]", () => {
     expect(rows[0]).toMatchObject({ created_by_kind: "user", created_by_user_id: (t.owner as { userId: string }).userId });
   });
 
+  it("DP-C6: on a halted item a signed-in person's Spec is recorded and moves the stage, and the marker stays; a system publish writes nothing at any of the three stages", async () => {
+    const t = await seedTenant(db.admin);
+    for (const stage of ["triaged", "discussing", "spec_ready"]) {
+      const person = await seedWorkItemAt(db.admin, t.accountId, stage);
+      const system = await seedWorkItemAt(db.admin, t.accountId, stage);
+      for (const wi of [person, system]) {
+        await db.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [wi, randomUUID()]);
+      }
+      await expect(publishSpec(ctx(t.system), { workItemId: system, body: "from the pipeline" })).rejects.toMatchObject({ name: "WorkItemHaltedError" });
+      expect(await specRows(system)).toHaveLength(0);
+      expect((await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [system])).rows[0].stage).toBe(stage);
+
+      await expect(publishSpec(ctx(t.owner), { workItemId: person, body: "from a person" })).resolves.toMatchObject({ version: 1 });
+      const { rows } = await db.admin.query(`SELECT stage, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1`, [person]);
+      expect(rows[0]).toEqual({ stage: "spec_ready", halted: true });
+    }
+  });
+
   it("criterion 6: every stage other than triaged/discussing/spec_ready is spec_frozen and writes nothing", async () => {
     const t = await seedTenant(db.admin);
     for (const stage of ["in_progress", "pr_opened", "changes_requested", "review_passed", "needs_human", "merged", "closed_unmerged", "closed"]) {
