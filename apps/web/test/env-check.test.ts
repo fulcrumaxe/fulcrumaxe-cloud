@@ -70,6 +70,11 @@ const CASES: Record<Validation["type"], { validation: Validation; good: string[]
     good: ["11111111-1111-4111-8111-111111111111", "11111111-1111-4111-8111-111111111111, 22222222-2222-4222-8222-222222222222"],
     bad: [["not-a-uuid", "not_a_uuid_list"], ["11111111-1111-4111-8111-111111111111,oops", "not_a_uuid_list"], ["11111111-1111-4111-8111-111111111111,", "not_a_uuid_list"]],
   },
+  "iso-timestamp": {
+    validation: { type: "iso-timestamp" },
+    good: ["2026-11-01T00:00:00Z", "2026-11-01T02:00:00+02:00", "2026-11-01T00:00:00.500Z"],
+    bad: [["2026-11-01T00:00:00", "not_an_iso_timestamp"], ["2026-11-01", "not_an_iso_timestamp"], ["1793000000", "not_an_iso_timestamp"], ["2026-13-45T00:00:00Z", "not_an_iso_timestamp"], ["tomorrow", "not_an_iso_timestamp"]],
+  },
   "subscription-token": {
     validation: { type: "subscription-token" },
     good: ["sk-ant-oat01-FAKE-FIXTURE-VALUE-NOT-A-CREDENTIAL"],

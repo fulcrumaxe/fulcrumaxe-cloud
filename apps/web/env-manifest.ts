@@ -52,7 +52,8 @@ export type Validation =
   | { type: "oidc-issuer" }
   | { type: "oidc-jwks-url" }
   | { type: "uuid-list" }
-  | { type: "subscription-token" };
+  | { type: "subscription-token" }
+  | { type: "iso-timestamp" };
 
 /**
  * request_fails: the code that needs it throws, so the request answers 5xx.
@@ -106,6 +107,10 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "FX_SESSION_SECRET", scope: "web", requiredIn: SP, secret: true, feature: "Sign-in sessions", validation: { type: "min-chars", n: 32 }, whenMissing: "request_fails", note: "Cookies cannot be signed or verified; sign-in fails" },
   { name: "FX_SESSION_IDLE_SECONDS", scope: "web", requiredIn: NONE, secret: false, feature: "Sign-in sessions", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Idle limit is 24 hours; an invalid value is ignored" },
   { name: "FX_SESSION_ABSOLUTE_SECONDS", scope: "web", requiredIn: NONE, secret: false, feature: "Sign-in sessions", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Absolute limit is 30 days; an invalid value is ignored" },
+  { name: "FX_STABLE_ID_SECRET", scope: "web", requiredIn: SP, secret: true, feature: "Storage namespace and opaque user id", validation: { type: "min-chars", n: 32 }, whenMissing: "default_used", note: "Falls back to FX_SESSION_SECRET (logged once), so rotating the session secret would change every storage namespace and opaque user id. Set it to the current session secret's value before the first rotation, then never change it" },
+  { name: "FX_SESSION_SECRET_PREVIOUS", scope: "web", requiredIn: NONE, secret: true, feature: "Session secret rotation", validation: { type: "min-chars", n: 32 }, whenMissing: "none", note: "Only the current secret verifies session cookies. Set together with FX_SESSION_SECRET_PREVIOUS_UNTIL and FX_SESSION_SECRET_ROTATED_AT while rotating; remove all three once the window has passed. One without the others, or an expired one still set, is a health error" },
+  { name: "FX_SESSION_SECRET_PREVIOUS_UNTIL", scope: "web", requiredIn: NONE, secret: true, feature: "Session secret rotation", validation: { type: "iso-timestamp" }, whenMissing: "none", note: "End of the previous secret's window, ISO 8601 with a zone (2026-11-01T00:00:00Z). A value further out than FX_SESSION_SECRET_ROTATED_AT plus the absolute session lifetime (FX_SESSION_ABSOLUTE_SECONDS) is a health error and the previous secret is not used. After it the previous secret is ignored even if still set" },
+  { name: "FX_SESSION_SECRET_ROTATED_AT", scope: "web", requiredIn: NONE, secret: true, feature: "Session secret rotation", validation: { type: "iso-timestamp" }, whenMissing: "none", note: "When the rotation was made, ISO 8601 with a zone (2026-10-11T12:00:00Z). Set together with FX_SESSION_SECRET_PREVIOUS and FX_SESSION_SECRET_PREVIOUS_UNTIL; the window ends no later than this plus the absolute session lifetime. Missing while either of them is set, or set without them, or later than now, is a health error and the previous secret is not used" },
   { name: "FX_APP_ORIGIN", scope: "web", requiredIn: SP, secret: false, feature: "Sign-in, CSRF origin check and the runner API", validation: { type: "origin" }, whenMissing: "request_fails", note: "Browser requests that rely on the Origin header are refused, sign-in does not hop to the canonical host, and every /api/runner/* route answers 503 not_configured (the runner API checks request signatures against this origin). Must equal the browser's Origin exactly: no trailing slash" },
   { name: "FX_SIGNIN_ALLOWLIST", scope: "web", requiredIn: NONE, secret: false, feature: "Sign-in allowlist", validation: any, whenMissing: "default_used", note: "No restriction: any GitHub login may sign in" },
   { name: "FX_GITHUB_CLIENT_ID", scope: "web", requiredIn: SP, secret: false, feature: "GitHub sign-in", validation: any, whenMissing: "request_fails", note: "GitHub sign-in throws on start" },

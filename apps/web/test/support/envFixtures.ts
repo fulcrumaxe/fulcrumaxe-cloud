@@ -56,6 +56,8 @@ export function validValue(validation: Validation): string {
       return "11111111-1111-4111-8111-111111111111, 22222222-2222-4222-8222-222222222222";
     case "subscription-token":
       return "sk-ant-oat01-FAKE-FIXTURE-VALUE-NOT-A-CREDENTIAL";
+    case "iso-timestamp":
+      return "2026-11-01T00:00:00Z";
   }
 }
 
