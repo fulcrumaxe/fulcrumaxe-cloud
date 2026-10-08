@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { MAX_CREATED_SKEW_SECONDS, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
+import type { RunPullRequestPort } from "./runPullRequest.js";
 
 /** The framework-free request and response the runner handlers speak. apps/web adapts `Request` and `NextResponse` to these. */
 export interface RunnerHttpRequest {
@@ -79,6 +80,12 @@ export interface RunnerCloudDeps {
    * 503). They write `agent_runs`, which only the worker's login may do, so this package never holds that login.
    */
   leases?: RunnerLeaseOps | null;
+  /**
+   * The GitHub side of a runner's `done` for an executor run (D#6 R2b-3f): the one object that talks to GitHub about a `runner_local`
+   * repository, through the local-only allowlist. Null while it is not configured; an executor's `done` is then 503 `not_configured`
+   * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
+   */
+  pullRequests?: RunPullRequestPort | null;
   /** The clock. Tests inject a fixed one. */
   now?: () => Date;
   /** The protocol version `hello` is judged against. Defaults to the constant. */
@@ -115,6 +122,32 @@ export interface RunnerLeaseOps {
     | { outcome: "seq_not_increasing"; lastAcceptedSeq: number }
     | { outcome: "fenced"; reason: StopReason }
   >;
+  /** `done`, first half: the fence, with the lease extended. `proceed`, a stop, or the verdict this runner's earlier `done` stored. */
+  beginRunnerDone(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    { kind: "proceed" } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }
+  >;
+  /** `done`, second half: records the cloud's verdict under the fence, in one transaction. */
+  finishRunnerDone(input: {
+    accountId: string;
+    runnerId: string;
+    runId: string;
+    leaseGeneration: number;
+    verdict: RunnerDoneStored;
+    sessionId?: string;
+    agentOutput?: Record<string, unknown>;
+  }): Promise<{ kind: "recorded"; verdict: RunnerDoneStored } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }>;
+}
+
+/** What a finished-by-`done` run stored (the shape of packages/worker `RunnerDoneVerdict`, which this package cannot import). */
+export interface RunnerDoneStored {
+  outcome: "succeeded" | "failed";
+  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | null;
+  prNumber: number | null;
+  /** The run branch the verdict was judged on (`fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise); set exactly when `prNumber` is (C25 section 1.2). */
+  branch?: string;
+  prHttpStatus?: number;
+  /** Why a `scope_unknown` ended the run, where that matters to the words shown: a renamed file, or a change type GitHub reported that the port does not know. */
+  detail?: "renamed" | "unknown_change_type";
 }
 
 /** The leases object, or 503 when the worker is not configured. */

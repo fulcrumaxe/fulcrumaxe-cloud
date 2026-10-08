@@ -13,7 +13,7 @@ import {
 } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toolsForRole } from "../agentConfig.js";
-import { writeRunnerJob } from "../runStatusWriter.js";
+import { RUNNER_RUN_BRANCH, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
 import type { ExecutionRun } from "../executionTarget.js";
 import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type RepoVisibilityPort, type RunContinues } from "./runnerTarget.js";
 
@@ -46,15 +46,23 @@ export type JobIssueErrorCode =
   | "continues_session_invalid"
   | "continues_without_branch"
   | "continues_branch_mismatch"
+  | "continues_base_unavailable"
+  | "continues_role_not_executor"
   | "job_invalid"
   | "job_not_recorded";
 
 export class JobIssueError extends Error {
   readonly code: JobIssueErrorCode;
-  constructor(code: JobIssueErrorCode) {
+  /**
+   * True only when the refusal came from a failure that may pass (GitHub could not be reached to read a continuation's branch head). The
+   * follow-up dispatch leaves such a child pending for the sweeper's retry instead of failing it. Every other refusal is final.
+   */
+  readonly retryable: boolean;
+  constructor(code: JobIssueErrorCode, options: { retryable?: boolean } = {}) {
     super(`job issuer: ${code}`);
     this.name = "JobIssueError";
     this.code = code;
+    this.retryable = options.retryable === true;
   }
 }
 
@@ -76,8 +84,6 @@ export function createJobSigner(input: { keyId: string; privateKey: KeyObject })
 
 /** The branch prefix of every run branch the executor works on. */
 export const RUNNER_BRANCH_PREFIX = "fx/";
-/** The branch the executor's work for an issue lives on. The pipeline's `branchFor` names the same string (a pipeline test pins that). */
-export const runnerBranchFor = (issueNumber: number): string => `${RUNNER_BRANCH_PREFIX}issue-${issueNumber}`;
 
 /** The SHA-256 of the role's tool allow list, as the runner must compute it from its own table: sorted, canonical JSON. */
 export function roleToolsDigest(role: string): string {
@@ -88,31 +94,36 @@ export function roleToolsDigest(role: string): string {
 export interface JobContext {
   repo: { owner: string; name: string };
   spec: { discussion: number; version: number; sha256: string; text: string } | null;
-  /** The issue number of the run's work item, which names the branch a fix round continues. */
-  issueNumber: number | null;
+  /**
+   * The run branch that `done` recorded for the run named by `load`'s `parentRunId` (C25 section 1.2), or null when there is none. This is where a
+   * fix round's branch comes from: it is never derived from the issue.
+   */
+  parentBranch: string | null;
 }
 
 export interface JobContextPort {
-  /** Throws `JobIssueError` when the repository is unknown. */
-  load(run: ExecutionRun): Promise<JobContext>;
+  /**
+   * Throws `JobIssueError` when the repository is unknown. `parentRunId` names the run whose recorded branch to read into `parentBranch`;
+   * without it, `parentBranch` is null.
+   */
+  load(run: ExecutionRun, options?: { parentRunId?: string | null }): Promise<JobContext>;
 }
 
 /** Reads the job context from the database, under the run's tenant. */
 export function createPgJobContext(pool: Pool): JobContextPort {
   return {
-    async load(run) {
+    async load(run, options = {}) {
       if (!run.repoId) throw new JobIssueError("no_repository");
       return withTenant(pool, run.accountId, async (client) => {
         const { rows } = await client.query<{
           gh_owner: string | null;
           gh_name: string | null;
-          gh_number: string | null;
           version: number | null;
           body: string | null;
           body_sha256: string | null;
           discussion_number: string | null;
         }>(
-          `SELECT r.gh_owner, r.gh_name, w.gh_number, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number
+          `SELECT r.gh_owner, r.gh_name, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number
              FROM agent_runs ar
              LEFT JOIN repos r ON r.account_id = ar.account_id AND r.id = $3
              LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
@@ -134,11 +145,21 @@ export function createPgJobContext(pool: Pool): JobContextPort {
           if (!Number.isSafeInteger(discussion) || discussion < 1) throw new JobIssueError("spec_without_discussion");
           spec = { discussion, version: Number(row.version), sha256: row.body_sha256, text: row.body };
         }
-        const issue = row.gh_number === null ? Number.NaN : Number(row.gh_number);
-        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, issueNumber: Number.isSafeInteger(issue) && issue >= 1 ? issue : null };
+        const parentBranch = options.parentRunId ? await readRecordedRunnerBranch(client, { accountId: run.accountId, runId: options.parentRunId }) : null;
+        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch };
       });
     },
   };
+}
+
+/**
+ * D#6 R2b-3f (C21 section 5.3, C22 section 2): reads the head of a continuation's branch from GitHub at the run's own dispatch, so `done` can
+ * require that the run added a commit of its own. The live implementation is the runner-cloud GitHub port (a `RunBranchState` read, which
+ * is allowlist entry A1); this package cannot import it, so it is a port here.
+ */
+export interface ContinuationBasePort {
+  /** The branch's head object id, or null when the branch does not exist yet. A throw is a failure to find out; one carrying `retryable: true` (GitHub unreachable) may pass, any other is final. */
+  headOid(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<string | null>;
 }
 
 export interface JobIssuerDeps {
@@ -147,6 +168,11 @@ export interface JobIssuerDeps {
   signer: JobSigner;
   visibility: RepoVisibilityPort;
   context: JobContextPort;
+  /**
+   * Required to issue a continuation (a fix round, or a follow-up of one): without it, or when it cannot answer, the continuation is
+   * refused (`continues_base_unavailable`) and nothing is recorded, so no continuation is ever queued whose `done` could not be judged.
+   */
+  continuationBase?: ContinuationBasePort;
   /** Tests pass a fixed clock and id source. */
   now?: () => Date;
   newId?: () => string;
@@ -170,23 +196,39 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       const role = run.role;
       if (!(RUNNER_ELIGIBLE_ROLES as readonly string[]).includes(role)) throw new JobIssueError("role_not_runner_eligible");
       if (!run.repoId) throw new JobIssueError("no_repository");
+      // Only the executor continues a run (C25 section 3.2): no other role has a branch of its own to continue, and none pushes to one.
+      if (input.continues && role !== "executor") throw new JobIssueError("continues_role_not_executor");
 
       // Asked again here: admit read it earlier, and a repo can be made public in between. Anything but "private" stops.
       const seen = await deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch(() => "unknown" as const);
       if (seen === "public") throw new JobIssueError("public_repo");
       if (seen !== "private") throw new JobIssueError("repo_visibility_unknown");
 
-      const context = await deps.context.load(run);
+      // A fix round the pipeline started has no branch of its own to carry: it continues the branch recorded for the run it fixes (C25 section 1.2).
+      const needsRecordedBranch = input.continues !== undefined && input.continues.branch === undefined;
+      const context = await deps.context.load(run, { parentRunId: needsRecordedBranch ? (input.continues?.parentRunId ?? null) : null });
 
       let continues: Job["continues"] = null;
+      let continuationHead: { oid: string | null } | null = null;
       if (input.continues) {
+        if (!deps.continuationBase) throw new JobIssueError("continues_base_unavailable");
         if (!input.continues.parentRunId) throw new JobIssueError("continues_without_parent");
         if (!SESSION_ID_PATTERN.test(input.continues.sessionId)) throw new JobIssueError("continues_session_invalid");
-        if (context.issueNumber === null) throw new JobIssueError("continues_without_branch");
-        const branch = runnerBranchFor(context.issueNumber);
-        // A follow-up of a fix round must push to the branch the lost round was on, so its pull request is updated and not replaced.
-        if (input.continues.branch !== undefined && input.continues.branch !== branch) throw new JobIssueError("continues_branch_mismatch");
+        // A follow-up of a fix round carries the branch the lost round was on, unchanged; a fix round the pipeline started continues the branch
+        // recorded at `done` for the run it fixes. Never derived from the issue. Either way it must be a run branch, so a continuation can only
+        // ever push to a branch some runner run's lease named.
+        const branch = input.continues.branch ?? context.parentBranch;
+        if (branch === null) throw new JobIssueError("continues_without_branch");
+        if (!RUNNER_RUN_BRANCH.test(branch)) throw new JobIssueError("continues_branch_mismatch");
         continues = { parent_run_id: input.continues.parentRunId, session_id: input.continues.sessionId, branch };
+        // The branch head NOW, at this run's own dispatch: never the parent's recorded value (a lost parent may have pushed since).
+        try {
+          continuationHead = { oid: await deps.continuationBase.headOid({ repo: { id: run.repoId, owner: context.repo.owner, name: context.repo.name }, branch }) };
+        } catch (error) {
+          // fx-swallow-ok: a failure to read the branch is a refusal to issue; the cause can carry a name or a token, so only the code survives.
+          // Only an error that says it may pass (`retryable: true`, as the GitHub port's "unreachable" does) is marked so.
+          throw new JobIssueError("continues_base_unavailable", { retryable: typeof error === "object" && error !== null && (error as { retryable?: unknown }).retryable === true });
+        }
       }
 
       const issuedAt = now();
@@ -216,6 +258,9 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       } catch {
         throw new JobIssueError("job_invalid");
       }
+
+      // Recorded before the job, so a continuation's job never exists without its base; a base recorded for a job that then fails to write is harmless.
+      if (continuationHead) await recordRunnerDispatchBase(deps.pool, { accountId: run.accountId, runId: run.id, headOid: continuationHead.oid });
 
       // The definer writes once, to a pending runner_local runner run; `false` means nothing was written.
       const recorded = await writeRunnerJob(deps.pool, { accountId: run.accountId, runId: run.id, job: signed as unknown as Record<string, unknown> });

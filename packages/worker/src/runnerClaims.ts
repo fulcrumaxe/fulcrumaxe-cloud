@@ -181,7 +181,7 @@ export const leaseVerdict = async (client: PoolClient, i: HeartbeatRunnerRunInpu
   return rows[0]!.verdict;
 };
 
-function requireLease(input: HeartbeatRunnerRunInput): void {
+export function requireLease(input: HeartbeatRunnerRunInput): void {
   if (typeof input !== "object" || input === null) throw new RunActionInputError();
   requireUuid(input.accountId);
   requireUuid(input.runnerId);

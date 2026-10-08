@@ -34,6 +34,17 @@ export const COPY = {
   pullRequestBody: "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
   /** The pull request title when the work item has none. */
   pullRequestTitleFallback: "Changes from your runner",
+  /** D#6 R2b-3f: why an executor run ended `scope_unknown` when the Spec's file scope could not be read (no scope on record, or one the matcher cannot parse). */
+  scopeUnknown:
+    "This work's file scope could not be read, so the changes were not checked and no pull request was opened. The branch is kept so you can open the PR yourself.",
+  /** D#6 R2b-3f (C23 section 3): the one `scope_unknown` variant for a renamed file. It names no path. */
+  scopeUnknownRenamed:
+    "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",
+  /** D#6 R2b-3f (C23 section 4): `pr_rejected` with the HTTP status GitHub answered. Never any GitHub message text. */
+  prRejected: "GitHub refused to open the pull request (HTTP {status}). The branch is kept so you can open the PR yourself.",
+  /** D#6 R2b-3f: `pr_rejected` when no HTTP status exists, because an open pull request on the run's branch was not opened by fulcrumaxe and was left untouched. */
+  prRejectedForeign:
+    "GitHub already has an open pull request for this branch that fulcrumaxe did not open, so it was left alone. The branch is kept so you can open the PR yourself.",
   pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
 } as const;
 

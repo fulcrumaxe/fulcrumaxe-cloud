@@ -55,10 +55,10 @@ describe("both ids present", () => {
     expect([options.vercel.teamId, options.vercel.projectId]).toEqual(["team_1", "prj_1"]);
     // No request context in a test process, and no environment fallback: no token.
     await expect(options.vercel.getToken()).rejects.toThrow("worker: no usable Vercel OIDC token in this invocation");
-    // Only the hooks, author-check, follower and (D#6 R3b) repository-visibility ports are supplied; every other port is the production body.
+    // Only the hooks, author-check, follower, (D#6 R3b) repository-visibility and continuation-base ports are supplied; every other port is the production body.
     // The author check is the SAME function the /api/v1 route registers (D#31 AUTHOR-CHECK-WIRE).
     expect(options.ports.authorCheck).toBe(runActionDeps.getAuthorCheck);
-    expect(Object.keys(options.ports)).toEqual(["hooks", "authorCheck", "follow", "repoVisibility"]);
+    expect(Object.keys(options.ports)).toEqual(["hooks", "authorCheck", "follow", "repoVisibility", "continuationBase"]);
     expect(typeof options.ports.repoVisibility?.visibility).toBe("function");
     expect(Object.keys(options.ports.hooks)).toEqual(["resume"]);
     expect(typeof options.ports.follow).toBe("function");

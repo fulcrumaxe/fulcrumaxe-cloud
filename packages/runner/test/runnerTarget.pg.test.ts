@@ -222,10 +222,10 @@ describe("RunnerTarget [pg]", () => {
     it("resume passes the branch a follow-up of a fix round must stay on (C22 section 2), and only when the run names one", async () => {
       const w = await world();
       const parentRunId = randomUUID();
-      const run = { ...(await insertRun(w, { role: "executor" })), parentRunId, continuesBranch: "fx/issue-12" };
+      const run = { ...(await insertRun(w, { role: "executor" })), parentRunId, continuesBranch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" };
       const t = target(db.runWriterPool);
       await t.target.resume(run, "session-1");
-      expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1", branch: "fx/issue-12" } }]);
+      expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1", branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" } }]);
     });
 
     describe("tells the runner sweeper when the queue time ends (D#6 R2b, the cron's no-database marker)", () => {

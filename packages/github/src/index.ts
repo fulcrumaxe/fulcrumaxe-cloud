@@ -25,6 +25,7 @@ export * from './webhookGate.js';
 export * from './userInstallations.js';
 export * from './installCallback.js';
 export * from './installationRecheck.js';
+export * from './appBotLogin.js';
 export * from './installerRecord.js';
 export * from './syncInstallationRepos.js';
 export * from './repoName.js';

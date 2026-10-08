@@ -31,6 +31,13 @@ describe("the runner copy (D#6 R2b)", () => {
       pullRequestBody:
         "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
       pullRequestTitleFallback: "Changes from your runner",
+      scopeUnknown:
+        "This work's file scope could not be read, so the changes were not checked and no pull request was opened. The branch is kept so you can open the PR yourself.",
+      scopeUnknownRenamed:
+        "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",
+      prRejected: "GitHub refused to open the pull request (HTTP {status}). The branch is kept so you can open the PR yourself.",
+      prRejectedForeign:
+        "GitHub already has an open pull request for this branch that fulcrumaxe did not open, so it was left alone. The branch is kept so you can open the PR yourself.",
       pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
     });
   });
@@ -57,6 +64,6 @@ describe("the runner copy (D#6 R2b)", () => {
       expect(text.length, key).toBeGreaterThan(0);
       for (const match of text.matchAll(/\{([a-z]+)\}/g)) placeholders.add(match[1]!);
     }
-    expect([...placeholders].sort()).toEqual(["detail", "item", "machine", "n", "person", "repo", "run", "size", "time"]);
+    expect([...placeholders].sort()).toEqual(["detail", "item", "machine", "n", "person", "repo", "run", "size", "status", "time"]);
   });
 });

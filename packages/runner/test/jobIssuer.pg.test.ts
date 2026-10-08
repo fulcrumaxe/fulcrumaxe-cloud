@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import { RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
-import { JobIssueError, RUNNER_BRANCH_PREFIX, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, runnerBranchFor, type JobContextPort } from "../src/targets/jobIssuer.js";
+import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
 import { RUNNER_QUEUE_TTL_MS, RunnerTarget } from "../src/targets/runnerTarget.js";
-import { insertAgentRun } from "../src/runStatusWriter.js";
+import { RUNNER_DISPATCH_BASE_KIND, insertAgentRun } from "../src/runStatusWriter.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -45,13 +45,33 @@ describe("JobIssuer [pg]", () => {
     return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, roleCard: CARD, prompt: PROMPT, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
-  function issuer(over: { visibility?: "private" | "public" | "unknown" | "throw"; context?: JobContextPort } = {}) {
+  function issuer(over: { visibility?: "private" | "public" | "unknown" | "throw"; context?: JobContextPort; base?: ContinuationBasePort | null } = {}) {
     const visibility = createFakeVisibility(over.visibility ?? "private");
-    return { visibility, issuer: createJobIssuer({ pool: db.runWriterPool, signer, visibility, context: over.context ?? createPgJobContext(db.runWriterPool), now: () => NOW, newId: () => "7b9d1c6e-4f0a-4c53-9a58-2f0d5b6c3a11" }) };
+    const base = over.base === undefined ? { headOid: async () => "a".repeat(40) } : over.base;
+    return {
+      visibility,
+      issuer: createJobIssuer({ pool: db.runWriterPool, signer, visibility, context: over.context ?? createPgJobContext(db.runWriterPool), ...(base ? { continuationBase: base } : {}), now: () => NOW, newId: () => "7b9d1c6e-4f0a-4c53-9a58-2f0d5b6c3a11" }),
+    };
   }
 
   const stored = async (id: string) => (await db.admin.query(`SELECT job_signed FROM agent_runs WHERE id = $1`, [id])).rows[0].job_signed;
   const codeOf = async (p: Promise<unknown>) => p.then(() => "returned", (e) => (e instanceof JobIssueError ? e.code : `other:${String(e)}`));
+
+  /** The branch `done` records next to the pull request number (C25 section 1.2): written the way the verdict writer writes it. */
+  const FIRST_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+  async function recordDone(w: { accountId: string }, run: ExecutionRun, payload: Record<string, unknown> = { viaRunnerDone: true, prNumber: 7, branch: FIRST_BRANCH }): Promise<void> {
+    await db.admin.query(
+      `INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, (SELECT COALESCE(max(seq), 0) + 1 FROM run_events WHERE run_id = $2), 'run.status_changed', $3::jsonb)`,
+      [w.accountId, run.id, JSON.stringify({ from: "running", to: "succeeded", ...payload })],
+    );
+  }
+  /** A finished executor run with its recorded branch, and a fix round that continues it. */
+  async function fixPair(w: Parameters<typeof runnerRun>[0] & { accountId: string }, branch = FIRST_BRANCH) {
+    const parent = await runnerRun(w, "executor");
+    await recordDone(w, parent, { viaRunnerDone: true, prNumber: 7, branch });
+    const run = await runnerRun(w, "executor", parent.id);
+    return { parent, run };
+  }
 
   it("builds the job from the run, signs it, and records the signed job: a runner can verify it with the public key", async () => {
     const w = await world();
@@ -102,51 +122,195 @@ describe("JobIssuer [pg]", () => {
       await issuer().issuer.issue({ run });
       kinds[role] = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW }).task.kind;
     }
+    await recordDone(w, parent);
     const fixRun = await runnerRun(w, "executor", parent.id);
     await issuer().issuer.issue({ run: fixRun, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
     kinds["executor+continues"] = verifyJob(await stored(fixRun.id), { "job-key-1": publicKey }, { now: NOW }).task.kind;
     expect(kinds).toEqual({ executor: "implement", "code-reviewer": "review", debater: "review", "docs-writer": "advise", "executor+continues": "fix" });
   });
 
-  it("a fix round carries the parent run, the session and the issue's branch (C12 section 2.8)", async () => {
+  it("a fix round carries the parent run, the session and the branch recorded for the run it fixes, never one derived from the issue (C25 section 1.2)", async () => {
     const w = await world({ issue: 12 });
-    const parent = await runnerRun(w, "executor");
-    const run = await runnerRun(w, "executor", parent.id);
+    const { parent, run } = await fixPair(w);
     await issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab" } });
     const job = verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
-    expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab", branch: "fx/issue-12" });
-    expect(runnerBranchFor(12)).toBe(`${RUNNER_BRANCH_PREFIX}issue-12`);
+    expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab", branch: FIRST_BRANCH });
+    expect(job.continues?.branch).not.toContain("issue-12");
   });
 
-  it("a follow-up of a fix round is issued only for the branch the lost round was on (C22 section 2)", async () => {
+  it("a two-round chain keeps the first run's branch: the second fix round continues the first fix round, whose done recorded the fresh run's branch", async () => {
+    const w = await world();
+    const { run: first } = await fixPair(w);
+    await recordDone(w, first, { viaRunnerDone: true, prNumber: 7, branch: FIRST_BRANCH });
+    const second = await runnerRun(w, "executor", first.id);
+    await issuer().issuer.issue({ run: second, continues: { parentRunId: first.id, sessionId: "sess-2" } });
+    expect(verifyJob(await stored(second.id), { "job-key-1": publicKey }, { now: NOW }).continues?.branch).toBe(FIRST_BRANCH);
+  });
+
+  it("treats a recorded value that is not a run branch as no record", async () => {
+    const w = await world();
+    const parent = await runnerRun(w, "executor");
+    await recordDone(w, parent, { viaRunnerDone: true, prNumber: 7, branch: "fx/issue-12" });
+    const run = await runnerRun(w, "executor", parent.id);
+    expect(await codeOf(issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } }))).toBe("continues_without_branch");
+  });
+
+  it("a run with no recorded branch is refused continues_without_branch, and nothing is recorded or asked of GitHub", async () => {
+    const w = await world();
+    const parent = await runnerRun(w, "executor");
+    const noBranch = await runnerRun(w, "executor", parent.id);
+    let asked = 0;
+    expect(await codeOf(issuer({ base: { headOid: async () => (asked++, "a".repeat(40)) } }).issuer.issue({ run: noBranch, continues: { parentRunId: parent.id, sessionId: "sess-1" } }))).toBe("continues_without_branch");
+    // A done that named a pull request-less verdict records no branch either.
+    const other = await runnerRun(w, "executor");
+    await recordDone(w, other, { viaRunnerDone: true, prNumber: null });
+    const run = await runnerRun(w, "executor", other.id);
+    expect(await codeOf(issuer().issuer.issue({ run, continues: { parentRunId: other.id, sessionId: "sess-1" } }))).toBe("continues_without_branch");
+    expect(await stored(noBranch.id)).toBeNull();
+    expect(asked).toBe(0);
+  });
+
+  it("a follow-up of a fix round carries the parent job's branch unchanged, and refuses anything that is not a run branch (C22 section 2, C25 section 1.2)", async () => {
     const w = await world({ issue: 12 });
     const parent = await runnerRun(w, "executor");
     const same = await runnerRun(w, "executor", parent.id);
-    await issuer().issuer.issue({ run: same, continues: { parentRunId: parent.id, sessionId: "sess-1", branch: "fx/issue-12" } });
+    await issuer().issuer.issue({ run: same, continues: { parentRunId: parent.id, sessionId: "sess-1", branch: FIRST_BRANCH } });
     const job = verifyJob(await stored(same.id), { "job-key-1": publicKey }, { now: NOW });
     expect(job.task.kind).toBe("fix");
-    expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "sess-1", branch: "fx/issue-12" });
-    // The issue's number changed or the parent was on another branch: refused, nothing recorded.
-    const parent2 = await runnerRun(w, "executor");
-    const other = await runnerRun(w, "executor", parent2.id);
-    expect(await codeOf(issuer().issuer.issue({ run: other, continues: { parentRunId: parent2.id, sessionId: "sess-1", branch: "fx/issue-13" } }))).toBe("continues_branch_mismatch");
-    expect(await stored(other.id)).toBeNull();
+    expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "sess-1", branch: FIRST_BRANCH });
+    // The uuid in the branch need not equal the parent's id: a second fix round's parent is the first fix round.
+    expect(job.continues?.branch).not.toContain(parent.id);
+    for (const bad of ["main", "fx/issue-12", "fx/issue-13", "refs/heads/x", "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g0", "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g01", "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1234567890", "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1/x", "fx/../5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1", "xx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1", "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1\n"]) {
+      const parent2 = await runnerRun(w, "executor");
+      const other = await runnerRun(w, "executor", parent2.id);
+      expect(await codeOf(issuer().issuer.issue({ run: other, continues: { parentRunId: parent2.id, sessionId: "sess-1", branch: bad } })), bad).toBe("continues_branch_mismatch");
+      expect(await stored(other.id), bad).toBeNull();
+    }
   });
 
-  it("a continuation with no parent, a bad session id or no issue number is refused and nothing is recorded", async () => {
+  it("only the executor continues a run: any other role with continues is refused continues_role_not_executor before anything is read, recorded or asked", async () => {
     const w = await world();
-    const noIssue = await world({ issue: null });
+    for (const role of ["docs-writer", "code-reviewer", "security-reviewer", "acceptance-tester", "debater"]) {
+      const parent = await runnerRun(w, "executor");
+      const run = await runnerRun(w, role, parent.id);
+      let asked = 0;
+      const counting = issuer({ base: { headOid: async () => (asked++, "a".repeat(40)) } });
+      expect(await codeOf(counting.issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1", branch: FIRST_BRANCH } })), role).toBe("continues_role_not_executor");
+      expect(counting.visibility.calls, role).toHaveLength(0);
+      expect(asked, role).toBe(0);
+      expect(await stored(run.id), role).toBeNull();
+      // The same role without continues is issued as before.
+      await issuer().issuer.issue({ run: await runnerRun(w, role) });
+    }
+  });
+
+  it("a continuation with no parent or a bad session id is refused and nothing is recorded", async () => {
+    const w = await world();
     const cases: Array<[string, ExecutionRun, { parentRunId: string | null; sessionId: string }, string]> = [];
     const a = await runnerRun(w, "executor");
     cases.push(["no parent", a, { parentRunId: null, sessionId: "s1" }, "continues_without_parent"]);
     const b = await runnerRun(w, "executor");
     cases.push(["bad session", b, { parentRunId: randomUUID(), sessionId: "s 1;rm" }, "continues_session_invalid"]);
-    const c = await runnerRun(noIssue, "executor");
-    cases.push(["no issue", c, { parentRunId: randomUUID(), sessionId: "s1" }, "continues_without_branch"]);
     for (const [label, run, continues, code] of cases) {
       expect(await codeOf(issuer().issuer.issue({ run, continues })), label).toBe(code);
       expect(await stored(run.id), label).toBeNull();
     }
+  });
+
+  describe("a continuation records the branch head read at its own dispatch (D#6 R2b-3f, C22 section 2)", () => {
+    const baseEvents = async (id: string) => (await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = $2 ORDER BY seq`, [id, RUNNER_DISPATCH_BASE_KIND])).rows.map((r) => r.payload);
+
+    it("reads the head of the recorded branch of this run's repository, records it, then writes the job", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      const asked: unknown[] = [];
+      const base: ContinuationBasePort = { headOid: async (input) => (asked.push(input), "d".repeat(40)) };
+      await issuer({ base }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+      expect(asked).toEqual([{ repo: { id: w.repoId, owner: "acme", name: "widgets" }, branch: FIRST_BRANCH }]);
+      expect(await baseEvents(run.id)).toEqual([{ head_oid: "d".repeat(40) }]);
+      expect(await stored(run.id)).not.toBeNull();
+    });
+
+    it("a branch that does not exist yet is recorded as null: the record exists, the head does not", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      await issuer({ base: { headOid: async () => null } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+      expect(await baseEvents(run.id)).toEqual([{ head_oid: null }]);
+    });
+
+    it("each dispatch of the run records its own reading, so a retried dispatch is judged against the newest", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      await issuer({ base: { headOid: async () => "1".repeat(40) } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+      await issuer({ base: { headOid: async () => "2".repeat(40) } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } }).catch(() => undefined);
+      expect((await baseEvents(run.id)).map((p) => p.head_oid)).toEqual(["1".repeat(40), "2".repeat(40)]);
+    });
+
+    it("without the port, or when it cannot answer, the continuation is refused and nothing is recorded or queued", async () => {
+      const w = await world();
+      for (const [label, base] of [
+        ["no port", null],
+        ["a port that throws", { headOid: async () => Promise.reject(new Error("ECONNRESET api.github.com token=ghs_secret")) }],
+      ] as const) {
+        const { parent: own, run } = await fixPair(w);
+        const error = await issuer({ base }).issuer.issue({ run, continues: { parentRunId: own.id, sessionId: "sess-1" } }).then(() => null, (e: unknown) => e);
+        expect(error, label).toBeInstanceOf(JobIssueError);
+        expect((error as JobIssueError).code, label).toBe("continues_base_unavailable");
+        expect((error as Error).message, label).not.toContain("ghs_secret");
+        expect(await baseEvents(run.id), label).toEqual([]);
+        expect(await stored(run.id), label).toBeNull();
+      }
+    });
+
+    it("marks the refusal retryable only when the port says its failure may pass (GitHub unreachable); every other failure is final", async () => {
+      const w = await world();
+      const cases: Array<[string, unknown, boolean]> = [
+        ["unreachable", Object.assign(new Error("unavailable"), { retryable: true }), true],
+        ["rejected", Object.assign(new Error("rejected"), { retryable: false }), false],
+        ["a plain error", new Error("boom"), false],
+        ["a non-boolean flag", Object.assign(new Error("x"), { retryable: "true" }), false],
+        ["a thrown string", "ECONNRESET", false],
+      ];
+      for (const [label, thrown, retryable] of cases) {
+        const { parent, run } = await fixPair(w);
+        const error = await issuer({ base: { headOid: async () => Promise.reject(thrown) } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } }).then(() => null, (e: unknown) => e);
+        expect((error as JobIssueError).code, label).toBe("continues_base_unavailable");
+        expect((error as JobIssueError).retryable, label).toBe(retryable);
+        expect(await stored(run.id), label).toBeNull();
+      }
+      // No port at all is final, not retryable.
+      const { parent, run } = await fixPair(w);
+      const none = await issuer({ base: null }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "s" } }).then(() => null, (e: unknown) => e);
+      expect((none as JobIssueError).retryable).toBe(false);
+    });
+
+    it("a run that continues nothing never asks GitHub and records no base", async () => {
+      const w = await world();
+      const run = await runnerRun(w, "executor");
+      let asked = 0;
+      await issuer({ base: { headOid: async () => (asked++, "a".repeat(40)) } }).issuer.issue({ run });
+      expect(asked).toBe(0);
+      expect(await baseEvents(run.id)).toEqual([]);
+    });
+
+    it("a job that fails its own checks records no base (the branch mismatch is refused before GitHub is asked)", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      let asked = 0;
+      const code = await codeOf(issuer({ base: { headOid: async () => (asked++, "a".repeat(40)) } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1", branch: "fx/issue-99" } }));
+      expect(code).toBe("continues_branch_mismatch");
+      expect(asked).toBe(0);
+      expect(await baseEvents(run.id)).toEqual([]);
+    });
+
+    it("rejects a head that is not a git object id", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      const error = await issuer({ base: { headOid: async () => "refs/heads/main" } }).issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } }).then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(TypeError);
+      expect(await baseEvents(run.id)).toEqual([]);
+      expect(await stored(run.id)).toBeNull();
+    });
   });
 
   describe("the repo must be private, asked again at issue time", () => {
@@ -178,7 +342,6 @@ describe("JobIssuer [pg]", () => {
     const run = { ...(await runnerRun(w)), role: "researcher" as never };
     const i = issuer();
     expect(await codeOf(i.issuer.issue({ run }))).toBe("role_not_runner_eligible");
-    expect(i.visibility.calls).toHaveLength(0);
   });
 
   it("refuses a run with no repo, and a repo with no GitHub coordinates", async () => {

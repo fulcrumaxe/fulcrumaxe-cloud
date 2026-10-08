@@ -404,6 +404,41 @@ export async function writeRunnerJob(pool: Pool, p: { accountId: string; runId: 
   });
 }
 
+/** The `run_events` kind that records a continuation's branch head at dispatch (D#6 R2b-3f, C22 section 2). */
+export const RUNNER_DISPATCH_BASE_KIND = "runner.dispatch_base";
+
+/**
+ * D#6 R2b-3f (C21 section 5.3, C22 section 2): the head of the branch a continuation (a fix round, or the follow-up of one) works
+ * on, read from GitHub at THIS run's own dispatch and never copied from the parent's. `done` requires the branch head to differ
+ * from it, so a run that adds no commit of its own ends `no_commit`. `headOid` is null when the branch did not exist yet. One
+ * row per dispatch; `done` reads the newest.
+ */
+export async function recordRunnerDispatchBase(pool: Pool, p: { accountId: string; runId: string; headOid: string | null }): Promise<void> {
+  if (p.headOid !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(p.headOid)) throw new TypeError("recordRunnerDispatchBase: headOid must be a git object id or null");
+  await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, RUNNER_DISPATCH_BASE_KIND, { head_oid: p.headOid }));
+}
+
+/**
+ * D#6 R2b-3f (C25 section 1.2): the shape of every branch a runner run pushes, and so of every branch a continuation may continue:
+ * `fx/<run id>-g<lease generation>`. The generation is a positive integer of at most nine digits. The issuer, `done` and the verdict
+ * writer all check this one pattern.
+ */
+export const RUNNER_RUN_BRANCH = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
+
+/**
+ * The run branch a finished runner run's `done` recorded next to its pull request number (C25 section 1.2), or null when the run has none
+ * (it was finished some other way, or it named no pull request). Read from the run's `run.status_changed` event written by `done`; a value
+ * that is not a run branch is treated as absent. `client` must be under the run's tenant.
+ */
+export async function readRecordedRunnerBranch(client: PoolClient, p: { accountId: string; runId: string }): Promise<string | null> {
+  const { rows } = await client.query<{ branch: string | null }>(
+    `SELECT payload->>'branch' AS branch FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.status_changed' AND payload->>'viaRunnerDone' = 'true' ORDER BY seq DESC LIMIT 1`,
+    [p.accountId, p.runId],
+  );
+  const branch = rows[0]?.branch;
+  return typeof branch === "string" && RUNNER_RUN_BRANCH.test(branch) ? branch : null;
+}
+
 export interface WriteRunStatusParams {
   accountId: string;
   runId: string;
@@ -432,6 +467,11 @@ export interface WriteRunStatusParams {
      * terminal `NormalizedEvent` it already collects either way. */
     sessionId?: string;
   };
+  /** D#6 R2b-3f: set only by a runner's `done`. The cloud's verdict on the run is stored on the `run.status_changed` event itself, in the same
+   * transaction as the status write, so a repeat `done` for the same run and generation can replay it (no column, no migration). `prNumber` is
+   * the pull request the verdict is about (null when none exists); `prHttpStatus` is the status GitHub refused the pull request with (a number
+   * only: never a GitHub message). */
+  runnerDone?: { prNumber: number | null; branch?: string; prHttpStatus?: number; detail?: "renamed" | "unknown_change_type" };
   /** D#2 H14c-5b-2a (C48 LIMIT-END): a limit ended this run resumably. Only
    * `running -> timed_out` with `run_time`/`model_calls`/`turns`/`silence`, or
    * `running -> killed_spend` with `per_run_usd`; anything else throws before
@@ -527,11 +567,20 @@ function checkRunStatusParams(params: WriteRunStatusParams): void {
 }
 
 /** The `run.status_changed` `run_events` row of one status move, with the failure reason when there is one. */
-async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason">): Promise<void> {
+async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason" | "runnerDone">): Promise<void> {
   await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
     from: params.from,
     to: params.to,
     ...(params.failureReason ? { failureReason: params.failureReason } : {}),
+    ...(params.runnerDone
+      ? {
+          viaRunnerDone: true,
+          prNumber: params.runnerDone.prNumber,
+          ...(params.runnerDone.branch === undefined ? {} : { branch: params.runnerDone.branch }),
+          ...(params.runnerDone.prHttpStatus === undefined ? {} : { prHttpStatus: params.runnerDone.prHttpStatus }),
+          ...(params.runnerDone.detail === undefined ? {} : { detail: params.runnerDone.detail }),
+        }
+      : {}),
   });
 }
 

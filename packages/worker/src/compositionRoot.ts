@@ -37,6 +37,7 @@ import {
   type ExecutionTargetRegistry,
   type GithubForwardConfig,
   type HookResumePort,
+  type ContinuationBasePort,
   type JobIssuer,
   type ModelConnectionPort,
   type RepoVisibilityPort,
@@ -55,6 +56,7 @@ import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.
 import { createRunnerNoticeSweeper, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
+import { createRunnerDoneFacade, type RunnerDoneFacade } from "./runnerDone.js";
 import { createRunnerLeaseSweeper, type RunnerLeaseSweeper } from "./runnerLeaseSweep.js";
 import { createFollowUpPorts } from "./runnerFollowUp.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
@@ -97,6 +99,8 @@ export interface WorkerPorts {
   jobIssuer?: JobIssuer;
   /** D#6 R3a: reads whether a repo is private (apps/web supplies the live GitHub read, R3b). Absent, every repo reads as unknown and a runner run is refused. */
   repoVisibility?: RepoVisibilityPort;
+  /** D#6 R2b-3f: reads a continuation's branch head at dispatch (apps/web supplies the live GitHub read). Absent, a continuation (a fix round or a follow-up of one) cannot be issued. */
+  continuationBase?: ContinuationBasePort;
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
   runnerLimits?: RunnerLimitsPort;
 }
@@ -135,7 +139,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerQueueSweeper, RunnerLeaseSweeper, RunnerNoticeSweeper, PreviewFacade, RetryFacade, AdvanceFacade {
+export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerQueueSweeper, RunnerLeaseSweeper, RunnerNoticeSweeper, PreviewFacade, RetryFacade, AdvanceFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -264,7 +268,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#6 R3b: the job-signing key is read here, once, and goes straight into the signer. Without it the issuer stays unwired and a runner run cannot be dispatched.
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
-    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool) }) : unwiredJobIssuer);
+    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}) }) : unwiredJobIssuer);
     const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor().runsPerDay };
     const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits });
     const registry: ExecutionTargetRegistry = Object.freeze({ sandbox: guardWorkdir(sandboxTarget), runner_local: guardWorkdir(runnerTarget) });
@@ -285,6 +289,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.
     const followUp = createFollowUpPorts({ pool: pools.runnerPool, registry, buildFailed: (accountId, workItemId, runId, code) => advance.advanceBuildFailed(accountId, workItemId, runId, code) });
     const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })) });
+    const runnerDone = createRunnerDoneFacade(pools.runnerPool);
     const runnerLeaseSweep = createRunnerLeaseSweeper(pools.runnerPool, { followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.lease_sweep_failed", run_id: runId })) });
     const runSweepComputeSettle = async (): Promise<ComputeSettleSweepResult & { lost: LostSweepResult; outside: OutsideMeterResult }> => {
       // The lost-run check goes first and spends part of the tick's time; the settle gets what is left of its budget.
@@ -311,7 +316,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerLeaseSweep, ...runnerQueue, ...runnerNotices, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerLeaseSweep, ...runnerQueue, ...runnerNotices, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -331,7 +336,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -350,6 +355,8 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         claimRunnerRun,
         heartbeatRunnerRun,
         ingestRunnerEvents,
+        beginRunnerDone,
+        finishRunnerDone,
         sweepRunnerLeases,
         sweepRunnerQueue,
         sweepRunnerNotices,
