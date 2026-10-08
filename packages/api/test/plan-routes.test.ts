@@ -45,6 +45,19 @@ function fakeSource(files: Record<string, string>, pulls: Array<{ number: number
     async pulls() {
       return { pulls, truncated: false };
     },
+    // Levels 2 and 3 are not exercised by the routes: a repo with no roadmap file here has no Discussions and no issues.
+    async discussions() {
+      return { discussions: [], truncated: false };
+    },
+    async discussionComments() {
+      return { comments: [], truncated: false };
+    },
+    async issues() {
+      return { issues: [], truncated: false };
+    },
+    async authorPermission() {
+      return 'none';
+    },
     evidence() {
       return { requests: [{ method: 'GET', path: '/repos/acme/widgets/issues', status: 200 }], tokenPermissions: { metadata: 'read', contents: 'read', issues: 'read', discussions: 'read' } };
     },

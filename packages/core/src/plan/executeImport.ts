@@ -1,24 +1,32 @@
 import type { Pool } from 'pg';
+import type { RepoPermission } from '@fx/trust';
 import { computePlan, type ComputedPlan, type PullFacts } from './computePlan.js';
-import { decideOwnerProcess } from './ownerProcess.js';
+import { buildIssuesLevel, type DiscussionFacts, type IssueFacts, type ItemProposal } from './issuesLevel.js';
+import { decideOwnerProcess, type OwnerProcess } from './ownerProcess.js';
+import { isSpecDiscussion, parseSpecTables, trustedCorrectionAuthors, type SpecComment } from './specTables.js';
 import {
   ImportNotRunningError,
+  type ImportLevel,
   writeFailedImport,
   writeSucceededImport,
   type ImportErrorCode,
   type ImportEvidence,
   type ImportPrincipal,
 } from './persist.js';
-import { MAX_PLAN_TASKS, PlanFileInconsistentError, PlanFileShapeError, parseRoadmapFile } from './roadmapFile.js';
+import { MAX_PLAN_TASKS, PlanFileInconsistentError, PlanFileShapeError, parseRoadmapFile, type ParsedPlan } from './roadmapFile.js';
 
 /**
  * D#483 S3 level 1: run one import that `beginPlanImport` has started. It reads everything first (through the PlanSource,
  * which can only read), decides, and then writes in one transaction. It never writes to GitHub (the source has no way to) and
  * starts nothing (the write transaction runs as the import's own database role, which has no grant on work items or runs).
  *
- * Level 1 only: a roadmap file read from the default branch. When there is none, or it is the wrong shape, the import ends
- * as failed with `plan_file_missing` or `plan_file_shape` and says why; the Spec's fall-through to Spec task tables and to
- * issues and Discussions is the permanent build's (S3-c2 and later).
+ * It picks the first level the repo supports and records which one it used:
+ *   1. a roadmap file on the default branch (`roadmap_file`);
+ *   2. Spec task tables in the repo's Discussions, with their trusted Corrections (`spec_tables`);
+ *   3. open issues and Discussions, one proposal each (`issues_discussions`).
+ * A missing roadmap file falls through. So does a file of the wrong shape, and the import keeps the shape problem ("roadmap.json
+ * didn't match the expected shape: ...") as the note shown with the level it ended at. A file that contradicts itself
+ * (`plan_file_inconsistent`) does NOT fall through: it fails, naming the key, and the earlier import's data stays.
  */
 export const ROADMAP_PATHS: readonly string[] = ['.fulcrumaxe/roadmap.json', '.autonomous-team/roadmap.json', 'roadmap.json'];
 /** The marker that the engine loop (the repo's own development loop) is installed. */
@@ -33,6 +41,14 @@ export interface PlanSource {
   file(path: string, ref: string, maxBytes: number): Promise<string | null>;
   /** Every pull request of the repository, with the facts the counting rule needs. `truncated` when a bound stopped the read. */
   pulls(): Promise<{ pulls: PullFacts[]; truncated: boolean }>;
+  /** Level 2 and 3: every Discussion (oldest first), bounded. `discussions_disabled` and `app_permission_missing` are thrown as codes. */
+  discussions(): Promise<{ discussions: Array<DiscussionFacts & { authorLogin: string | null }>; truncated: boolean }>;
+  /** Level 2: one Discussion's comments, bounded. */
+  discussionComments(number: number): Promise<{ comments: SpecComment[]; truncated: boolean }>;
+  /** Level 3: the repository's issues (pull requests already split off). Shares one read with `pulls()`. */
+  issues(): Promise<{ issues: IssueFacts[]; truncated: boolean }>;
+  /** A login's real permission on the repository (a person who is not a collaborator is `none`). */
+  authorPermission(login: string): Promise<RepoPermission>;
   /** What was asked of GitHub and what the minted token could do (acceptance A2). Read after the reads. */
   evidence(): ImportEvidence;
 }
@@ -46,7 +62,7 @@ export interface ExecuteInput {
 }
 
 export type ImportOutcome =
-  | { state: 'succeeded'; importId: string; computed: ComputedPlan; truncated: boolean; sourcePath: string; sourceSha: string; maxMergedPr: number; evidence: ImportEvidence }
+  | { state: 'succeeded'; importId: string; level: ImportLevel; computed: ComputedPlan; truncated: boolean; sourcePath: string | null; sourceSha: string; maxMergedPr: number; evidence: ImportEvidence }
   | { state: 'failed'; importId: string; code: ImportErrorCode; detail: string | null };
 
 const FAILURE_CODES: ReadonlySet<string> = new Set([
@@ -81,55 +97,82 @@ export async function executePlanImport(input: ExecuteInput): Promise<ImportOutc
 
   try {
     const head = await source.head();
-    let sourcePath: string | null = null;
-    let text: string | null = null;
-    for (const path of ROADMAP_PATHS) {
-      text = await source.file(path, head.sha, MAX_ROADMAP_BYTES);
-      if (text !== null) {
-        sourcePath = path;
-        break;
-      }
-    }
-    if (text === null || sourcePath === null) return await fail('plan_file_missing', `none of ${ROADMAP_PATHS.join(', ')} exists on the default branch`);
-
-    let plan;
-    try {
-      plan = parseRoadmapFile(text);
-    } catch (err) {
-      if (err instanceof PlanFileShapeError) return await fail('plan_file_shape', err.message);
-      if (err instanceof PlanFileInconsistentError) return await fail('plan_file_inconsistent', err.message);
-      throw err;
-    }
     let truncated = false;
-    if (plan.tasks.length > MAX_PLAN_TASKS) {
+    const finish = async (w: { level: ImportLevel; sourcePath: string | null; plan: ParsedPlan; computed: ComputedPlan; maxMergedPr: number; fallbackNote: string | null; itemProposals?: ItemProposal[] }, owner: OwnerProcess): Promise<ImportOutcome> => {
+      const evidence = source.evidence();
+      await writeSucceededImport(pool, principal, { importId, repoId, sourceSha: head.sha, owner, truncated, evidence, ...w });
+      return { state: 'succeeded', importId, level: w.level, computed: w.computed, truncated, sourcePath: w.sourcePath, sourceSha: head.sha, maxMergedPr: w.maxMergedPr, evidence };
+    };
+    const hasLoop = async (): Promise<boolean> => (await source.file(ENGINE_LOOP_MARKER, head.sha, ENGINE_MARKER_MAX_BYTES)) !== null;
+    /** A read that runs into the request budget ends the import as partial, not as failed: what was read so far is used. */
+    const tolerant = async <T>(read: () => Promise<T>, empty: T): Promise<T> => {
+      try {
+        return await read();
+      } catch (err) {
+        if ((err as { code?: unknown } | null)?.code !== 'request_budget_exceeded') throw err;
+        truncated = true;
+        return empty;
+      }
+    };
+    const cap = (plan: ParsedPlan): ParsedPlan => {
+      if (plan.tasks.length <= MAX_PLAN_TASKS) return plan;
       // A bound is counted, never guessed: the first MAX_PLAN_TASKS tasks are kept and the import says it is partial.
-      const keep = new Set(plan.tasks.slice(0, MAX_PLAN_TASKS).map((t) => t.key));
-      plan = { milestones: plan.milestones.map((m) => ({ ...m, taskKeys: m.taskKeys.filter((k) => keep.has(k)) })), tasks: plan.tasks.slice(0, MAX_PLAN_TASKS) };
       truncated = true;
+      const keep = new Set(plan.tasks.slice(0, MAX_PLAN_TASKS).map((t) => t.key));
+      return { milestones: plan.milestones.map((m) => ({ ...m, taskKeys: m.taskKeys.filter((k) => keep.has(k)) })), tasks: plan.tasks.slice(0, MAX_PLAN_TASKS) };
+    };
+    const countPulls = (pulls: readonly PullFacts[]): number => pulls.reduce((max, p) => (p.state === 'merged' && p.number > max ? p.number : max), 0);
+
+    // Level 1: a roadmap file.
+    let fallbackNote: string | null = null;
+    for (const path of ROADMAP_PATHS) {
+      const text = await source.file(path, head.sha, MAX_ROADMAP_BYTES);
+      if (text === null) continue;
+      let plan: ParsedPlan;
+      try {
+        plan = parseRoadmapFile(text);
+      } catch (err) {
+        if (err instanceof PlanFileShapeError) {
+          fallbackNote = err.message;
+          break;
+        }
+        if (err instanceof PlanFileInconsistentError) return await fail('plan_file_inconsistent', err.message);
+        throw err;
+      }
+      plan = cap(plan);
+      const owner = decideOwnerProcess({ repoHasEngineLoop: await hasLoop(), kind: 'task' });
+      const read = await source.pulls();
+      if (read.truncated) truncated = true;
+      return await finish({ level: 'roadmap_file', sourcePath: path, plan, computed: computePlan(plan, read.pulls), maxMergedPr: countPulls(read.pulls), fallbackNote: null }, owner);
     }
 
-    const loop = await source.file(ENGINE_LOOP_MARKER, head.sha, ENGINE_MARKER_MAX_BYTES);
-    const owner = decideOwnerProcess({ repoHasEngineLoop: loop !== null, kind: 'task' });
-
-    const read = await source.pulls();
+    // Level 2: Spec task tables in the Discussions.
+    const read = await tolerant(() => source.discussions(), { discussions: [], truncated: true });
     if (read.truncated) truncated = true;
-    const computed = computePlan(plan, read.pulls);
-    const maxMergedPr = read.pulls.reduce((max, p) => (p.state === 'merged' && p.number > max ? p.number : max), 0);
-    const evidence = source.evidence();
+    const specs = read.discussions.filter((d) => isSpecDiscussion(d.body));
+    const comments = new Map<number, SpecComment[]>();
+    for (const d of specs) {
+      const c = await tolerant(() => source.discussionComments(d.number), null);
+      if (c === null) break;
+      if (c.truncated) truncated = true;
+      comments.set(d.number, c.comments);
+    }
+    const trusted = await trustedCorrectionAuthors(comments, source, () => (truncated = true));
+    const specPlan = cap(parseSpecTables(specs, comments, trusted));
+    if (specPlan.tasks.length > 0) {
+      const owner = decideOwnerProcess({ repoHasEngineLoop: await hasLoop(), kind: 'task' });
+      const pulls = await tolerant(() => source.pulls(), { pulls: [], truncated: true });
+      if (pulls.truncated) truncated = true;
+      return await finish({ level: 'spec_tables', sourcePath: null, plan: specPlan, computed: computePlan(specPlan, pulls.pulls), maxMergedPr: countPulls(pulls.pulls), fallbackNote }, owner);
+    }
 
-    await writeSucceededImport(pool, principal, {
-      importId,
-      repoId,
-      sourcePath,
-      sourceSha: head.sha,
-      plan,
-      computed,
-      owner,
-      truncated,
-      maxMergedPr,
-      evidence,
-    });
-    return { state: 'succeeded', importId, computed, truncated, sourcePath, sourceSha: head.sha, maxMergedPr, evidence };
+    // Level 3: issues and Discussions.
+    const issues = await tolerant(() => source.issues(), { issues: [], truncated: true });
+    if (issues.truncated) truncated = true;
+    const loop = await hasLoop();
+    const level3 = buildIssuesLevel(issues.issues, read.discussions, loop);
+    if (level3.truncated) truncated = true;
+    return await finish({ level: 'issues_discussions', sourcePath: null, plan: { milestones: [], tasks: [] }, computed: level3.computed, maxMergedPr: 0, fallbackNote, itemProposals: level3.proposals }, decideOwnerProcess({ repoHasEngineLoop: loop, kind: 'task' }));
   } catch (err) {
     // The row was closed by someone else (the interrupted rule): there is nothing of ours left to write.
     if (err instanceof ImportNotRunningError) throw err;

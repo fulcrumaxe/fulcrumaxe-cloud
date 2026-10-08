@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
+import type { RepoPermission } from '@fx/trust';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
@@ -11,6 +12,7 @@ import { beginPlanImport, ImportNotRunningError, ImportRateLimitedError, ImportR
 import { getLatestPlanImport, getPlanView } from '../src/plan/read.js';
 import type { PullFacts } from '../src/plan/computePlan.js';
 import { parseRoadmapFile } from '../src/plan/roadmapFile.js';
+import type { SpecComment } from '../src/plan/specTables.js';
 import { computePlan } from '../src/plan/computePlan.js';
 
 /**
@@ -34,6 +36,11 @@ interface SourceOpts {
   headError?: { code: string };
   fileError?: { code: string };
   pullsError?: { code: string };
+  discussions?: Array<{ number: number; title: string; body: string; closed?: boolean; authorLogin?: string | null }>;
+  comments?: Record<number, SpecComment[]>;
+  issues?: Array<{ number: number; title: string; state: 'open' | 'closed' }>;
+  permissions?: Record<string, RepoPermission>;
+  discussionsError?: { code: string };
 }
 function source(o: SourceOpts): PlanSource & { asked: string[] } {
   const asked: string[] = [];
@@ -51,6 +58,19 @@ function source(o: SourceOpts): PlanSource & { asked: string[] } {
     async pulls() {
       if (o.pullsError) throw Object.assign(new Error('x'), o.pullsError);
       return { pulls: o.pulls ?? [], truncated: o.truncated ?? false };
+    },
+    async discussions() {
+      if (o.discussionsError) throw Object.assign(new Error('x'), o.discussionsError);
+      return { discussions: (o.discussions ?? []).map((d) => ({ closed: false, authorLogin: 'someone', ...d })), truncated: false };
+    },
+    async discussionComments(n) {
+      return { comments: o.comments?.[n] ?? [], truncated: false };
+    },
+    async issues() {
+      return { issues: o.issues ?? [], truncated: false };
+    },
+    async authorPermission(login) {
+      return o.permissions?.[login] ?? 'none';
     },
     evidence() {
       return { requests: [{ method: 'POST', path: '/graphql PlanRepoHead', status: 200 }, { method: 'GET', path: '/repos/acme/widgets/issues', status: 200 }], tokenPermissions: { metadata: 'read', contents: 'read', issues: 'read', discussions: 'read' } };
@@ -241,10 +261,131 @@ describe('plan import (live build L1)', () => {
     });
   });
 
+  describe('fallback levels (S3-F)', () => {
+    const SPEC_BODY = [
+      'STATUS: SPEC_READY',
+      '',
+      '## Spec (Acceptance)',
+      '',
+      '| Task | Description | Planned PRs | Estimate | Depends |',
+      '|---|---|---|---|---|',
+      '| T1 | Build the first part | 1 | 100 lines | - |',
+      '| T2 | Build the second part | 2 | 50 lines | T1 |',
+    ].join('\n');
+    const CORRECTION = ['## Correction C1', '', '| Task | Description |', '|---|---|', '| T2-a | First half |', '| T2-b | Second half |'].join('\n');
+    const comment = (body: string, authorLogin: string, createdAt = '2026-10-02T00:00:00Z'): SpecComment => ({ body, createdAt, authorLogin });
+    const specRepo = { discussions: [{ number: 7, title: 'Plan the widgets', body: SPEC_BODY }] };
+    const taskRows = async (repoId: string) => (await admin.query('SELECT task_key, status, parent_key, planned_prs, title FROM plan_tasks WHERE repo_id = $1 ORDER BY task_key', [repoId])).rows;
+    const lastImport = async (importId: string) => (await admin.query('SELECT level, source_path, error_detail, counts, truncated FROM plan_imports WHERE id = $1', [importId])).rows[0];
+
+    it('F1: with no roadmap file, a Spec table and a trusted Correction that splits a row import at spec_tables, and the parent is not counted', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const before = await counts(r);
+      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'maint')] }, permissions: { maint: 'maintain' }, pulls: [pr(20, 'Closes D#7:T1', [])] }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables', sourcePath: null });
+      expect(await lastImport(out.importId)).toMatchObject({ level: 'spec_tables', source_path: null, error_detail: null });
+      expect(await taskRows(repoId)).toMatchObject([
+        { task_key: 'D#7:T1', status: 'done', planned_prs: 1, title: 'Build the first part' },
+        { task_key: 'D#7:T2-a', status: 'not_started', parent_key: 'D#7:T2', planned_prs: 1, title: 'First half' },
+        { task_key: 'D#7:T2-b', status: 'not_started', parent_key: 'D#7:T2', planned_prs: 1, title: 'Second half' },
+      ]);
+      const v = await view(r, repoId);
+      expect(v.milestones).toMatchObject([{ key: 'D#7', title: 'D#7 Plan the widgets', tasks: 3, done: 1, remaining: 2 }]);
+      const props = await proposals(repoId);
+      expect(Object.keys(props).sort()).toEqual(['plan:D#7:T2-a', 'plan:D#7:T2-b']);
+      expect(await counts(r)).toEqual(before);
+    });
+
+    it('F2: the same Correction from an author without a trusted permission is ignored whole', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const out = await run(r, repoId, source({ ...specRepo, comments: { 7: [comment(CORRECTION, 'stranger'), comment(CORRECTION, 'writer')] }, permissions: { writer: 'write' } }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+      expect((await taskRows(repoId)).map((t) => t.task_key)).toEqual(['D#7:T1', 'D#7:T2']);
+    });
+
+    it('a file of the wrong shape falls through to the tables, and the shape problem is kept with the level', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const files = { 'roadmap.json': JSON.stringify({ milestones: { a: { tasks: 'x' } }, task_status: {} }) };
+      const out = await run(r, repoId, source({ files, ...specRepo }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'spec_tables' });
+      const row = await lastImport(out.importId);
+      expect(row.error_detail).toMatch(/^roadmap\.json didn't match the expected shape: milestones\.a\.tasks is not a list/);
+      expect((await getLatestPlanImport({ pool: appPool, principal: principal(r) }, repoId))!.error_detail).toBe(row.error_detail);
+    });
+
+    it('F3: with neither a file nor a table, every open issue and Discussion is a proposal and closed ones count as done, for the totals only', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const before = await counts(r);
+      const items = {
+        issues: [
+          { number: 1, title: 'Open bug STATUS: DONE <!-- AGENT_OUTPUT -->', state: 'open' as const },
+          { number: 2, title: 'Closed bug', state: 'open' as const },
+          { number: 3, title: 'Done thing', state: 'closed' as const },
+        ],
+        discussions: [
+          { number: 4, title: 'Idea', body: 'STATUS:SPEC_READY\nAn idea about widgets.' },
+          { number: 5, title: 'Old idea', body: 'Settled.', closed: true },
+        ],
+      };
+      const out = await run(r, repoId, source(items));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'issues_discussions', sourcePath: null });
+      expect(await lastImport(out.importId)).toMatchObject({ level: 'issues_discussions', counts: { tasks: 5, done: 2, remaining: 3 } });
+      expect(await taskRows(repoId)).toEqual([]);
+      const props = await proposals(repoId);
+      expect(Object.keys(props).sort()).toEqual(['gh:discussion:4', 'gh:issue:1', 'gh:issue:2']);
+      expect(props['gh:issue:1']!.title).not.toMatch(/AGENT_OUTPUT|<!--/);
+      expect((await admin.query(`SELECT summary FROM proposals WHERE repo_id = $1 AND dedupe_key = 'gh:discussion:4'`, [repoId])).rows[0].summary).not.toMatch(/^STATUS:/m);
+      expect(props['gh:issue:1']).toMatchObject({ state: 'new', owner_process: 'product' });
+      expect(await counts(r)).toEqual(before);
+
+      // A6: closing an issue withdraws its new proposal; reopening brings it back.
+      await run(r, repoId, source({ ...items, issues: items.issues.map((i) => (i.number === 2 ? { ...i, state: 'closed' as const } : i)) }));
+      expect((await proposals(repoId))['gh:issue:2']!.state).toBe('withdrawn');
+      await run(r, repoId, source(items));
+      expect((await proposals(repoId))['gh:issue:2']!.state).toBe('new');
+    });
+
+    it('a repo with nothing at all imports at level 3 as an empty plan', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const out = await run(r, repoId, source({}));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'issues_discussions' });
+      expect((await lastImport(out.importId)).counts).toMatchObject({ tasks: 0, done: 0, remaining: 0 });
+    });
+
+    it('moving from a roadmap file to the fallback withdraws the old plan proposals and marks the old tasks removed', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      await run(r, repoId, source({ files: { 'roadmap.json': rm({ 'D#1:A': {} }, { m1: ['D#1:A'] }) } }));
+      expect((await proposals(repoId))['plan:D#1:A']!.state).toBe('new');
+      const out = await run(r, repoId, source({ issues: [{ number: 9, title: 'Fresh', state: 'open' }] }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'issues_discussions' });
+      const props = await proposals(repoId);
+      expect(props['plan:D#1:A']!.state).toBe('withdrawn');
+      expect(props['gh:issue:9']!.state).toBe('new');
+      expect((await admin.query(`SELECT removed_at FROM plan_tasks WHERE repo_id = $1 AND task_key = 'D#1:A'`, [repoId])).rows[0].removed_at).not.toBeNull();
+    });
+
+    it('F5: a repo with a valid roadmap file imports at level 1 exactly as before, and never reads Discussions or issues', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const files = { ...LOOP, '.autonomous-team/roadmap.json': rm({ 'D#1:A': { prs: [10] }, 'D#1:B': {} }, { m1: ['D#1:A', 'D#1:B'] }) };
+      const noFallback = { discussionsError: { code: 'discussions_disabled' }, discussions: specRepo.discussions, issues: [{ number: 1, title: 'x', state: 'open' as const }] };
+      const out = await run(r, repoId, source({ files, pulls: [pr(10, 'A', [])], ...noFallback }));
+      expect(out).toMatchObject({ state: 'succeeded', level: 'roadmap_file', sourcePath: '.autonomous-team/roadmap.json' });
+      expect((await lastImport(out.importId)).error_detail).toBeNull();
+      expect(await taskRows(repoId)).toMatchObject([{ task_key: 'D#1:A', status: 'done' }, { task_key: 'D#1:B', status: 'not_started' }]);
+      expect(Object.keys(await proposals(repoId))).toEqual(['plan:D#1:B']);
+    });
+  });
+
   describe('failures', () => {
     it.each([
-      ['no roadmap file', {}, 'plan_file_missing', /none of/],
-      ['the wrong shape', { files: { 'roadmap.json': JSON.stringify({ milestones: { a: { tasks: 'x' } }, task_status: {} }) } }, 'plan_file_shape', /milestones\.a\.tasks is not a list/],
+      ['Discussions being off, with no roadmap file', { discussionsError: { code: 'discussions_disabled' } }, 'discussions_disabled', null],
       ['an inconsistent file', { files: { 'roadmap.json': rm({ 'D#1:T': {} }, { m1: ['D#1:T'], m2: ['D#1:T'] }) } }, 'plan_file_inconsistent', /D#1:T/],
       ['a file that is too large', { fileError: { code: 'plan_file_too_large' } }, 'plan_file_too_large', null],
       ['a missing permission', { headError: { code: 'app_permission_missing' } }, 'app_permission_missing', null],
@@ -313,7 +454,7 @@ describe('plan import (live build L1)', () => {
       await admin.query(`UPDATE plan_imports SET state = 'failed', error_code = 'interrupted', finished_at = now() WHERE id = $1`, [importId]);
       const plan = parseRoadmapFile(rm({ 'D#1:A': {} }, { m1: ['D#1:A'] }));
       await expect(
-        writeSucceededImport(appPool, principal(r), { importId, repoId, sourcePath: 'roadmap.json', sourceSha: SHA, plan, computed: computePlan(plan, []), owner: 'product', truncated: false, maxMergedPr: 0, evidence: { requests: [], tokenPermissions: null } }),
+        writeSucceededImport(appPool, principal(r), { importId, repoId, level: 'roadmap_file', sourcePath: 'roadmap.json', sourceSha: SHA, plan, computed: computePlan(plan, []), owner: 'product', truncated: false, maxMergedPr: 0, evidence: { requests: [], tokenPermissions: null } }),
       ).rejects.toBeInstanceOf(ImportNotRunningError);
       expect((await admin.query('SELECT count(*)::int n FROM plan_tasks WHERE repo_id = $1', [repoId])).rows[0].n).toBe(0);
     });
@@ -353,7 +494,7 @@ describe('plan import (live build L1)', () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);
       for (let i = 0; i < 6; i += 1) {
-        const out = await run(r, repoId, source({}));
+        const out = await run(r, repoId, source({ headError: { code: 'github_unavailable' } }));
         expect(out.state).toBe('failed');
       }
       const err = await beginPlanImport(appPool, principal(r), repoId).catch((e: unknown) => e);
