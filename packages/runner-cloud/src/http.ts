@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { MAX_CREATED_SKEW_SECONDS } from "@fulcrumaxe/runner-protocol";
+import { MAX_CREATED_SKEW_SECONDS, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 
 /** The framework-free request and response the runner handlers speak. apps/web adapts `Request` and `NextResponse` to these. */
@@ -74,6 +74,11 @@ export interface RunnerCloudDeps {
   origin: string | undefined;
   /** The worker's lease-fail method, or null while no worker is configured. Called after a revoke has committed. */
   failRunnerLeases: FailRunnerLeases | null;
+  /**
+   * The worker's claim, heartbeat and events methods (D#6 R2b-3), or null while no worker is configured (the routes then answer
+   * 503). They write `agent_runs`, which only the worker's login may do, so this package never holds that login.
+   */
+  leases?: RunnerLeaseOps | null;
   /** The clock. Tests inject a fixed one. */
   now?: () => Date;
   /** The protocol version `hello` is judged against. Defaults to the constant. */
@@ -87,6 +92,41 @@ export interface RunnerCloudDeps {
 }
 
 export type FailRunnerLeases = (input: { accountId: string; runnerId: string; reason: "runner_revoked" }) => Promise<{ runIds: string[]; complete: boolean }>;
+
+/**
+ * What the lease routes ask of the worker, as plain data (the shapes of packages/worker `RunnerClaimFacade`, which this
+ * package cannot import: the worker depends on it). `accountId` and `runnerId` are always the verified runner's.
+ */
+export interface RunnerLeaseOps {
+  claimRunnerRun(input: { accountId: string; runnerId: string }): Promise<
+    { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number } | { kind: "idle"; retryAfter: number }
+  >;
+  heartbeatRunnerRun(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    { verdict: "ok"; leaseExpiresAt: Date } | { verdict: string; reason: StopReason }
+  >;
+  ingestRunnerEvents(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; events: readonly LocalOnlyEvent[] }): Promise<
+    | { outcome: "accepted"; stored: number; duplicates: number; leaseExpiresAt: Date }
+    | { outcome: "seq_order" }
+    | { outcome: "seq_not_increasing"; lastAcceptedSeq: number }
+    | { outcome: "fenced"; reason: StopReason }
+  >;
+}
+
+/** The leases object, or 503 when the worker is not configured. */
+export function requireLeases(deps: RunnerCloudDeps): RunnerLeaseOps {
+  if (!deps.leases) throw new RunnerHttpError(503, "not_configured", "the runner API has no worker configured");
+  return deps.leases;
+}
+
+/** A refusal the worker made on purpose (42501: the runner is gone or revoked) is the same 401 as any unverified request. */
+export async function asRunner<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (pgCode(error) === "42501") throw new RunnerHttpError(401, "unauthorized", "the request is not signed by a registered runner");
+    throw error;
+  }
+}
 
 /** The body as JSON, or 400. */
 export function parseJsonBody(req: RunnerHttpRequest): unknown {

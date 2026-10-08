@@ -1,0 +1,386 @@
+import { describe, expect, it } from "vitest";
+import {
+  GITHUB_GRAPHQL_DOCUMENTS,
+  LOCAL_ONLY_ALLOWLIST,
+  LocalOnlyGithubError,
+  localOnlyGithub,
+  localOnlyViolation,
+  type GithubClient,
+  type GithubRequest,
+} from "../src/localOnlyGithub.js";
+
+const R = "/repos/acme/app";
+const NOT = "not_allowlisted";
+
+function recorder(): { client: GithubClient; seen: GithubRequest[] } {
+  const seen: GithubRequest[] = [];
+  return { seen, client: { request: async (req) => (seen.push(req), { status: 200, body: {} }) } };
+}
+
+/** Sends `req` through the wrapper. Answers the rule it was refused under, or `"sent"`; and whether `inner` was reached. */
+async function attempt(req: GithubRequest): Promise<{ result: string; reached: boolean }> {
+  const { client, seen } = recorder();
+  const result = await localOnlyGithub(client).request(req).then(
+    () => "sent",
+    (e: unknown) => (e instanceof LocalOnlyGithubError ? e.rule : `other:${String(e)}`),
+  );
+  return { result, reached: seen.length > 0 };
+}
+
+const DOC = GITHUB_GRAPHQL_DOCUMENTS;
+const branchState = { owner: "acme", name: "app", head: "fx/run-g1", base: "main" };
+const graphql = (query: string, variables: unknown): GithubRequest => ({ method: "POST", path: "/graphql", body: { query, variables } });
+const pr = { title: "Add the footer", head: "fx/run-g1", base: "main", body: "Run r1, work item w1.", draft: true };
+
+/** The calls the run path makes: each is one entry of the allowlist. */
+const ALLOWED: Array<[string, GithubRequest]> = [
+  ["A1 RunBranchState", graphql(DOC.RunBranchState, branchState)],
+  ["A1 PullRequestFiles", graphql(DOC.PullRequestFiles, { owner: "acme", name: "app", number: 12, cursor: null })],
+  ["A1 PullRequestFiles, next page", graphql(DOC.PullRequestFiles, { owner: "acme", name: "app", number: 12, cursor: "Y3Vyc29yOnYyOpHOAAAB" })],
+  ["A1 PullRequestFiles, no cursor key", graphql(DOC.PullRequestFiles, { owner: "acme", name: "app", number: 12 })],
+  ["A1 MarkReady", graphql(DOC.MarkReady, { id: "PR_kwDOAbCd123" })],
+  ["A2 the repository", { method: "GET", path: R }],
+  ["A2 the repository by id", { method: "GET", path: "/repositories/1234567" }],
+  ["A3 the open pull request for the run branch", { method: "GET", path: `${R}/pulls`, query: { head: "acme:fx/run-g1", base: "main", state: "open", per_page: 5 } }],
+  ["A3 with no query", { method: "GET", path: `${R}/pulls` }],
+  ["A4 opening the draft", { method: "POST", path: `${R}/pulls`, body: pr }],
+  ["A5 closing it", { method: "PATCH", path: `${R}/pulls/12`, body: { state: "closed" } }],
+  ["A6 an installation token", { method: "POST", path: "/app/installations/99/access_tokens" }],
+  ["A6 an installation token with an empty body", { method: "POST", path: "/app/installations/99/access_tokens", body: {} }],
+  ["A6 an installation token for one repository", { method: "POST", path: "/app/installations/99/access_tokens", body: { repository_ids: [1234567] } }],
+  ["a JSON Accept", { method: "GET", path: R, headers: { accept: "application/vnd.github+json" } }],
+  ["a v3 JSON Accept", { method: "GET", path: R, headers: { Accept: "application/vnd.github.v3+json" } }],
+  ["a trailing slash and doubled slashes read as the same path", { method: "GET", path: "//repos//acme/app/" }],
+  ["a mixed-case owner", { method: "GET", path: "/repos/Acme/App" }],
+];
+
+describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 section 6)", () => {
+  it("holds exactly the entries of the Spec's table, A1 to A6, and nothing else", () => {
+    expect(LOCAL_ONLY_ALLOWLIST).toEqual([
+      { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
+      { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
+      { id: "A3", method: "GET", paths: ["/repos/{owner}/{repo}/pulls"], query: ["head", "base", "state", "per_page"], body: "none" },
+      { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: true }" },
+      { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
+      { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
+    ]);
+    expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
+  });
+
+  for (const [name, req] of ALLOWED) {
+    it(`lets ${name} through, untouched`, async () => {
+      const { client, seen } = recorder();
+      await localOnlyGithub(client).request(req);
+      expect(seen).toEqual([req]);
+      expect(localOnlyViolation(req)).toBeNull();
+    });
+  }
+
+  it("a fixture run, from the claim's visibility read to the pull request, makes only A1 to A6 calls, with zero refusals", async () => {
+    const { client, seen } = recorder();
+    const wrapped = localOnlyGithub(client);
+    const calls: GithubRequest[] = [
+      { method: "GET", path: "/repositories/1234567" }, // A2: the visibility re-read at claim and issue
+      { method: "GET", path: R }, // A2: the default branch at done
+      graphql(DOC.RunBranchState, branchState), // A1: the run branch at dispatch and at done
+      { method: "POST", path: "/app/installations/99/access_tokens", body: { repository_ids: [1234567] } }, // A6: the installation token
+      { method: "GET", path: `${R}/pulls`, query: { head: "acme:fx/run-g1", state: "open", per_page: 1 } }, // A3: idempotent open
+      { method: "POST", path: `${R}/pulls`, body: pr }, // A4: the draft
+      graphql(DOC.PullRequestFiles, { owner: "acme", name: "app", number: 12, cursor: null }), // A1: the changed paths
+      graphql(DOC.MarkReady, { id: "PR_kwDOAbCd123" }), // A1: mark ready
+      { method: "PATCH", path: `${R}/pulls/12`, body: { state: "closed" } }, // A5: close on scope_violation
+    ];
+    const refusals: unknown[] = [];
+    for (const call of calls) await wrapped.request(call).catch((e: unknown) => refusals.push(e));
+    expect(refusals).toEqual([]);
+    expect(seen).toEqual(calls);
+  });
+
+  describe("refuses everything the deny list let through, and everything it already refused", () => {
+    const refused: Array<[string, GithubRequest]> = [
+      // The old deny list's cases.
+      ["contents", { method: "GET", path: `${R}/contents/src/a.ts` }],
+      ["the contents root listing", { method: "GET", path: `${R}/contents` }],
+      ["git/blobs", { method: "GET", path: `${R}/git/blobs/abc123` }],
+      ["git/trees", { method: "GET", path: `${R}/git/trees/abc123` }],
+      ["a git commit object", { method: "GET", path: `${R}/git/commits/abc123` }],
+      ["a git ref", { method: "GET", path: `${R}/git/ref/heads/fx/run-g1` }],
+      ["compare", { method: "GET", path: `${R}/compare/main...fx/branch` }],
+      ["pulls/files", { method: "GET", path: `${R}/pulls/12/files` }],
+      [".diff", { method: "GET", path: `${R}/pulls/12.diff` }],
+      [".patch", { method: "GET", path: `${R}/commits/abc.patch` }],
+      ["a percent-encoded contents", { method: "GET", path: `${R}/%63ontents/a.ts` }],
+      ["a double-encoded dot", { method: "GET", path: `${R}/pulls/12%252ediff` }],
+      ["a mixed-case segment", { method: "GET", path: `${R}/Git/Trees/abc` }],
+      ["repeated slashes", { method: "GET", path: `${R}//git//blobs/abc` }],
+      ["a backslash separator", { method: "GET", path: `${R}\\contents\\a.ts` }],
+      // C21 section 6: the single commit returns files[].patch.
+      ["a single commit by sha", { method: "GET", path: `${R}/commits/0a1b2c3d4e5f60718293a4b5c6d7e8f901234567` }],
+      ["a single commit by branch name", { method: "GET", path: `${R}/commits/main` }],
+      ["a single commit with a query string", { method: "GET", path: `${R}/commits/main?per_page=1` }],
+      ["a single commit, mixed case and doubled slashes", { method: "GET", path: `${R}//Commits//Main` }],
+      ["a single commit whose ref has an encoded slash", { method: "GET", path: `${R}/commits/fx%2Frun-g1` }],
+      ["a single commit whose ref has a double-encoded slash", { method: "GET", path: `${R}/commits/fx%252Frun-g1` }],
+      ["a single commit by repository id", { method: "GET", path: "/repositories/1234/commits/main" }],
+      ["a single commit whose encoded-slash ref ends like a sub-resource", { method: "GET", path: `${R}/commits/fx%2Fcheck-runs` }],
+      ["a single commit by repository id with an encoded-slash ref and a file path", { method: "GET", path: "/repositories/1234/commits/fx%2Frun-g1/src%2Fa.ts" }],
+      ["a single commit with a trailing sub-path that is a file name", { method: "GET", path: `${R}/commits/fx%2Frun-g1/src%2Fa.ts` }],
+      // The gaps the security review found.
+      ["the tarball", { method: "GET", path: `${R}/tarball/main` }],
+      ["the zipball", { method: "GET", path: `${R}/zipball/main` }],
+      ["the tarball with no ref", { method: "GET", path: `${R}/tarball` }],
+      ["the readme", { method: "GET", path: `${R}/readme` }],
+      ["the readme of a directory", { method: "GET", path: `${R}/readme/docs` }],
+      ["a pull request's review comments (they carry diff hunks)", { method: "GET", path: `${R}/pulls/12/comments` }],
+      ["every review comment of the repository", { method: "GET", path: `${R}/pulls/comments` }],
+      ["a pull request's reviews", { method: "GET", path: `${R}/pulls/12/reviews` }],
+      ["an issue's comments", { method: "GET", path: `${R}/issues/12/comments` }],
+      ["the license", { method: "GET", path: `${R}/license` }],
+      ["code search", { method: "GET", path: "/search/code", query: { q: "repo:acme/app secret" } }],
+      ["a pull request read (it is not on the list)", { method: "GET", path: `${R}/pulls/12` }],
+      ["a branch read", { method: "GET", path: `${R}/branches/main` }],
+      ["the commit list", { method: "GET", path: `${R}/commits` }],
+      ["a commit's check runs", { method: "GET", path: `${R}/commits/abc123/check-runs` }],
+      ["the repository by id with contents", { method: "GET", path: "/repositories/1234/contents/x" }],
+      ["a full URL in the path", { method: "GET", path: `https://api.github.com${R}` }],
+      ["a path holding a query mark after decoding", { method: "GET", path: `${R}%3Fx=1` }],
+      ["a path holding a fragment mark after decoding", { method: "GET", path: `${R}%23x` }],
+      ["a path with a dot segment as the repository", { method: "GET", path: "/repos/acme/.." }],
+      ["a path with a dot segment as the owner", { method: "GET", path: "/repos/../app" }],
+      ["a path with a single dot as the owner", { method: "GET", path: "/repos/./app" }],
+      ["a path with an encoded dot segment as the owner", { method: "GET", path: "/repos/%2e%2e/app" }],
+      ["a path with a double-encoded dot segment as the repository", { method: "GET", path: "/repos/acme/%252e%252e" }],
+      ["a pull request path that climbs out of the repository", { method: "PATCH", path: `${R}/pulls/12/../../contents/x`, body: { state: "closed" } }],
+      ["a path with a control character", { method: "GET", path: `${R}%00` }],
+      ["an empty path", { method: "GET", path: "" }],
+      ["the root", { method: "GET", path: "/" }],
+    ];
+    for (const [name, req] of refused) {
+      it(`refuses ${name}, and the request never reaches GitHub`, async () => {
+        expect(await attempt(req)).toEqual({ result: NOT, reached: false });
+      });
+    }
+
+    it("refuses a raw GraphQL query: the fixed documents are the only GraphQL there is", async () => {
+      for (const query of ["{ viewer { login } }", "query { repository(owner: \"a\", name: \"b\") { object(expression: \"HEAD:src/a.ts\") { ... on Blob { text } } } }", "", `${DOC.RunBranchState} `, `${DOC.RunBranchState}\n`, ` ${DOC.PullRequestFiles}`, `${DOC.MarkReady}}`, DOC.MarkReady.replace("MarkReady", "Mark")]) {
+        expect(await attempt(graphql(query, { id: "PR_kwDOAbCd123" })), JSON.stringify(query)).toEqual({ result: NOT, reached: false });
+      }
+    });
+
+    it("refuses a fixed document plus one extra character, in every position of every document", async () => {
+      for (const [op, vars] of [
+        ["RunBranchState", branchState],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: 12 }],
+        ["MarkReady", { id: "PR_kwDOAbCd123" }],
+      ] as const) {
+        const doc = DOC[op];
+        for (const at of [0, 1, Math.floor(doc.length / 2), doc.length - 1, doc.length]) {
+          const changed = `${doc.slice(0, at)}x${doc.slice(at)}`;
+          expect((await attempt(graphql(changed, vars))).result, `${op} at ${at}`).toBe(NOT);
+        }
+      }
+    });
+
+    it("refuses a fixed document with variables outside its schema", async () => {
+      const cases: Array<[string, unknown]> = [
+        ["RunBranchState", { ...branchState, extra: "x" }],
+        ["RunBranchState", { owner: "acme", name: "app", head: "fx/run-g1" }],
+        ["RunBranchState", { ...branchState, head: "../../etc" }],
+        ["RunBranchState", { ...branchState, owner: ".." }],
+        ["RunBranchState", { ...branchState, name: 5 }],
+        ["RunBranchState", null],
+        ["RunBranchState", []],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: "12" }],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: 0 }],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: 1.5 }],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: 12, cursor: "has space" }],
+        ["PullRequestFiles", { owner: "acme", name: "app", number: 12, first: 100 }],
+        ["MarkReady", { id: "PR id with spaces" }],
+        ["MarkReady", { id: "PR_x", extra: 1 }],
+        ["MarkReady", {}],
+      ];
+      for (const [op, variables] of cases) {
+        expect((await attempt(graphql(DOC[op as keyof typeof DOC], variables))).result, `${op} ${JSON.stringify(variables)}`).toBe(NOT);
+      }
+    });
+
+    it("refuses a GraphQL body with a key beyond query and variables, a missing key, or the wrong method or path", async () => {
+      const ok = graphql(DOC.MarkReady, { id: "PR_kwDOAbCd123" });
+      const body = ok.body as Record<string, unknown>;
+      expect((await attempt({ ...ok, body: { ...body, operationName: "MarkReady" } })).result).toBe(NOT);
+      expect((await attempt({ ...ok, body: { query: DOC.MarkReady } })).result).toBe(NOT);
+      expect((await attempt({ ...ok, body: undefined })).result).toBe(NOT);
+      expect((await attempt({ ...ok, body: JSON.stringify(body) })).result).toBe(NOT);
+      expect((await attempt({ ...ok, method: "GET" })).result).toBe(NOT);
+      expect((await attempt({ ...ok, path: "/graphql/extra" })).result).toBe(NOT);
+      expect((await attempt({ ...ok, path: "/api/graphql" })).result).toBe(NOT);
+      expect((await attempt({ ...ok, path: "/graphql", query: { x: "1" } })).result).toBe(NOT);
+    });
+
+    it("refuses a method other than the one listed, on every entry", async () => {
+      const cases: GithubRequest[] = [
+        { method: "POST", path: R },
+        { method: "PATCH", path: R, body: { state: "closed" } },
+        { method: "DELETE", path: R },
+        { method: "GET", path: "/graphql" },
+        { method: "PUT", path: `${R}/pulls`, body: pr },
+        { method: "PATCH", path: `${R}/pulls`, body: pr },
+        { method: "DELETE", path: `${R}/pulls` },
+        { method: "GET", path: `${R}/pulls/12` },
+        { method: "POST", path: `${R}/pulls/12`, body: { state: "closed" } },
+        { method: "PUT", path: `${R}/pulls/12`, body: { state: "closed" } },
+        { method: "DELETE", path: `${R}/pulls/12` },
+        { method: "GET", path: "/app/installations/99/access_tokens" },
+        { method: "PUT", path: "/app/installations/99/access_tokens" },
+        { method: "get", path: R },
+        { method: "patch", path: `${R}/pulls/12`, body: { state: "closed" } },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+
+    it("refuses an extra segment on any entry, and a missing one", async () => {
+      const cases: GithubRequest[] = [
+        { method: "GET", path: `${R}/extra` },
+        { method: "GET", path: "/repos/acme" },
+        { method: "GET", path: "/repos/acme/app/pulls/extra" },
+        { method: "GET", path: "/repositories/1234/extra" },
+        { method: "GET", path: "/repositories" },
+        { method: "POST", path: `${R}/pulls/extra`, body: pr },
+        { method: "PATCH", path: `${R}/pulls/12/extra`, body: { state: "closed" } },
+        { method: "PATCH", path: `${R}/pulls`, body: { state: "closed" } },
+        { method: "PATCH", path: `${R}/pulls/abc`, body: { state: "closed" } },
+        { method: "PATCH", path: `${R}/pulls/${"9".repeat(20)}`, body: { state: "closed" } },
+        { method: "POST", path: "/app/installations/99/access_tokens/extra" },
+        { method: "POST", path: "/app/installations/access_tokens" },
+        { method: "POST", path: "/app/installations/abc/access_tokens" },
+        { method: "POST", path: "/graphql/extra", body: { query: DOC.MarkReady, variables: { id: "x" } } },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+
+    it("refuses an unknown query key on A3, on any other entry, and a value of the wrong shape", async () => {
+      const cases: GithubRequest[] = [
+        { method: "GET", path: `${R}/pulls`, query: { head: "acme:fx/run-g1", sort: "created" } },
+        { method: "GET", path: `${R}/pulls`, query: { page: 2 } },
+        { method: "GET", path: `${R}/pulls?sort=created` },
+        { method: "GET", path: `${R}/pulls?state=open&direction=asc` },
+        { method: "GET", path: `${R}/pulls`, query: { state: "everything" } },
+        { method: "GET", path: `${R}/pulls`, query: { per_page: 1000 } },
+        { method: "GET", path: `${R}/pulls`, query: { per_page: 0 } },
+        { method: "GET", path: `${R}/pulls`, query: { head: "../x" } },
+        { method: "GET", path: `${R}/pulls`, query: { HEAD: "x" } },
+        // A key that is valid on A3 is still not valid on an entry that lists none.
+        { method: "GET", path: R, query: { state: "open" } },
+        { method: "GET", path: "/repositories/1234", query: { head: "main" } },
+        { method: "POST", path: `${R}/pulls`, query: { head: "main" }, body: pr },
+        { method: "PATCH", path: `${R}/pulls/12`, query: { state: "closed" }, body: { state: "closed" } },
+        { method: "POST", path: "/app/installations/99/access_tokens", query: { per_page: 1 } },
+        { method: "GET", path: `${R}?state=open` },
+        // Keys are read as a server reads them: once decoded, so a doubly-encoded key is not the key it spells after two decodes.
+        { method: "GET", path: `${R}/pulls?%2568ead=main` },
+        { method: "GET", path: `${R}/pulls?%68ead=%2e%2e` },
+        { method: "GET", path: `${R}?ref=main` },
+        { method: "GET", path: R, query: { ref: "main" } },
+        { method: "POST", path: `${R}/pulls`, query: { x: "1" }, body: pr },
+        { method: "PATCH", path: `${R}/pulls/12`, query: { x: "1" }, body: { state: "closed" } },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.path} ${JSON.stringify(req.query)}`).toBe(NOT);
+    });
+
+    it("refuses an A4 body that is not exactly title, head, base, body and draft: true", async () => {
+      const bad: unknown[] = [
+        undefined,
+        null,
+        "title",
+        [],
+        { ...pr, draft: false },
+        { ...pr, draft: "true" },
+        { ...pr, draft: undefined },
+        { title: pr.title, head: pr.head, base: pr.base, body: pr.body },
+        { ...pr, maintainer_can_modify: true },
+        { ...pr, issue: 12 },
+        { ...pr, title: "" },
+        { ...pr, title: "t".repeat(257) },
+        { ...pr, title: 5 },
+        { ...pr, head: "../x" },
+        { ...pr, base: 5 },
+        { ...pr, body: null },
+        { ...pr, body: "b".repeat(65537) },
+        { head: pr.head, base: pr.base, body: pr.body, draft: true },
+      ];
+      for (const body of bad) expect((await attempt({ method: "POST", path: `${R}/pulls`, body })).result, JSON.stringify(body)).toBe(NOT);
+    });
+
+    it("refuses an A5 body that is not exactly { state: \"closed\" }", async () => {
+      const bad: unknown[] = [undefined, null, {}, [], "closed", { state: "open" }, { state: "Closed" }, { state: "closed", title: "x" }, { state: "closed", base: "main" }, { title: "x" }, { state: ["closed"] }, { draft: false }];
+      for (const body of bad) expect((await attempt({ method: "PATCH", path: `${R}/pulls/12`, body })).result, JSON.stringify(body)).toBe(NOT);
+    });
+
+    it("refuses an A6 body that is not empty or exactly one repository id, and A2 or A3 with any body", async () => {
+      const bad: unknown[] = [[], "x", { repository_ids: [] }, { repository_ids: [1, 2] }, { repository_ids: ["1"] }, { repository_ids: [0] }, { repository_ids: [1], permissions: { contents: "read" } }, { permissions: { contents: "read" } }, { repositories: ["app"] }];
+      for (const body of bad) expect((await attempt({ method: "POST", path: "/app/installations/99/access_tokens", body })).result, JSON.stringify(body)).toBe(NOT);
+      expect((await attempt({ method: "GET", path: R, body: {} })).result).toBe(NOT);
+      expect((await attempt({ method: "GET", path: `${R}/pulls`, body: { a: 1 } })).result).toBe(NOT);
+    });
+  });
+
+  describe("the Accept rule (C21 section 5)", () => {
+    it("refuses a diff or patch media type in the Accept header, whatever the header's case, on a call that is otherwise allowed", async () => {
+      for (const accept of ["application/vnd.github.diff", "application/vnd.github.v3.diff", "application/vnd.github.patch", "Application/VND.GitHub.v3.Patch", "application/json, application/vnd.github.diff", "application/vnd.github.raw", "application/vnd.github.v3.raw", "application/json", "*/*", ""]) {
+        for (const name of ["accept", "Accept", "ACCEPT"]) {
+          expect(await attempt({ method: "GET", path: R, headers: { [name]: accept } }), `${name}: ${accept}`).toEqual({ result: "accept", reached: false });
+        }
+      }
+    });
+
+    it("also holds for GraphQL and for writes", async () => {
+      expect((await attempt({ ...graphql(DOC.MarkReady, { id: "PR_x" }), headers: { accept: "application/vnd.github.diff" } })).result).toBe("accept");
+      expect((await attempt({ method: "POST", path: `${R}/pulls`, body: pr, headers: { Accept: "application/vnd.github.patch" } })).result).toBe("accept");
+    });
+
+    it("a call that is not allowed is refused as not allowed, whatever its Accept", async () => {
+      expect((await attempt({ method: "GET", path: `${R}/pulls/12`, headers: { accept: "application/vnd.github+json" } })).result).toBe(NOT);
+    });
+  });
+
+  describe("the GraphQL documents", () => {
+    it("are the three named in the Spec, and nothing else", () => {
+      expect(Object.keys(GITHUB_GRAPHQL_DOCUMENTS)).toEqual(["RunBranchState", "PullRequestFiles", "MarkReady"]);
+      expect(Object.isFrozen(GITHUB_GRAPHQL_DOCUMENTS)).toBe(true);
+      for (const [op, document] of Object.entries(GITHUB_GRAPHQL_DOCUMENTS)) expect(document).toMatch(new RegExp(`^(?:query|mutation) ${op}\\(`));
+    });
+
+    it("select no patch, diff, text, blob, contents or body", () => {
+      for (const [op, document] of Object.entries(GITHUB_GRAPHQL_DOCUMENTS)) {
+        for (const word of ["patch", "diff", "text", "blob", "contents", "body", "object", "tree", "readme", "message"]) {
+          expect(document.toLowerCase(), `${op} selects ${word}`).not.toMatch(new RegExp(`\\b${word}\\b`));
+        }
+      }
+    });
+
+    it("PullRequestFiles reads paths and change types only, paginated, with the total", () => {
+      expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("nodes { path changeType }");
+      expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("totalCount");
+      expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("hasNextPage");
+    });
+
+    it("RunBranchState reads the run branch's oid, how far it is ahead of the base, and the default branch", () => {
+      for (const part of ["defaultBranchRef", "aheadBy", "oid"]) expect(GITHUB_GRAPHQL_DOCUMENTS.RunBranchState).toContain(part);
+    });
+  });
+
+  it("names the rule and never the path in the error", async () => {
+    const { client } = recorder();
+    const error = (await localOnlyGithub(client).request({ method: "GET", path: `${R}/contents/secrets/.env` }).catch((e: unknown) => e)) as LocalOnlyGithubError;
+    expect(error).toBeInstanceOf(LocalOnlyGithubError);
+    expect(error.message).not.toContain("secrets");
+    expect(error.message).not.toContain("acme");
+    expect(error.rule).toBe(NOT);
+  });
+
+  it("localOnlyViolation is null for an allowed call and names the rule otherwise", () => {
+    expect(localOnlyViolation({ method: "GET", path: R })).toBeNull();
+    expect(localOnlyViolation({ method: "GET", path: `${R}/commits/main` })).toBe(NOT);
+    expect(localOnlyViolation({ method: "GET", path: R, headers: { accept: "application/vnd.github.diff" } })).toBe("accept");
+  });
+});

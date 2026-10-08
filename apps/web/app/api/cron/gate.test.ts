@@ -338,13 +338,17 @@ describe("compute-settle-sweep", () => {
 describe("runner-sweeper (D#6 R2b)", () => {
   const HOUR = 60 * MIN;
   const none = { listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null as number | null };
+  const noLeases = { leasesListed: 0, lost: 0, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0, joblessRetried: 0, joblessFailed: 0, joblessErrors: 0, revoked: 0, wallClockTimedOut: 0, held: 0, leasesSkipped: 0, leasesFailed: 0, nextDueAt: null as number | null };
   const sweepRunnerQueue = vi.fn(async () => none);
-  const getWorker = vi.fn(async () => ({ sweepRunnerQueue }) as { sweepRunnerQueue: typeof sweepRunnerQueue } | null);
+  const sweepRunnerLeases = vi.fn(async () => noLeases);
+  const getWorker = vi.fn(async () => ({ sweepRunnerQueue, sweepRunnerLeases }) as { sweepRunnerQueue: typeof sweepRunnerQueue; sweepRunnerLeases: typeof sweepRunnerLeases } | null);
   const deps = () => ({ cronSecret: SECRET, getWorker, log: vi.fn() });
   beforeEach(() => {
     getWorker.mockClear();
     sweepRunnerQueue.mockReset();
     sweepRunnerQueue.mockResolvedValue(none);
+    sweepRunnerLeases.mockReset();
+    sweepRunnerLeases.mockResolvedValue(noLeases);
   });
 
   it("with no pending work builds no worker and sweeps nothing", async () => {
@@ -389,7 +393,7 @@ describe("runner-sweeper (D#6 R2b)", () => {
     vi.setSystemTime(clock.value);
     sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 1, expired: 1 });
     const due = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
-    expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, waiting: 0, skipped: 0, failed: 0 });
+    expect(await due.json()).toEqual({ configured: true, listed: 1, expired: 1, waiting: 0, skipped: 0, failed: 0, leases: (({ nextDueAt: _n, ...rest }) => rest)(noLeases) });
     // A marker younger than a minute is kept, as its writer may not have committed; the next tick finds nothing and clears it.
     advance(6 * MIN);
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
@@ -397,6 +401,82 @@ describe("runner-sweeper (D#6 R2b)", () => {
     getWorker.mockClear();
     expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
     expect(getWorker).not.toHaveBeenCalled();
+  });
+
+  describe("the two halves of the tick do not stop each other (review suggestion on the cron handler)", () => {
+    const run = async (log = vi.fn()) => runnerSweeperHandler(cronRequest("runner-sweeper"), { cronSecret: SECRET, getWorker, log });
+
+    it("a queue sweep that throws still lets the lease sweep run, and the failure is named, not described", async () => {
+      await run(); // the first tick is overdue and connects with nothing to do
+      sweepRunnerQueue.mockClear();
+      sweepRunnerLeases.mockClear();
+      advance(20 * MIN);
+      await markWorkPending("runner-sweeper");
+      advance(2 * MIN);
+      sweepRunnerQueue.mockRejectedValueOnce(new Error("connection reset: secret-detail"));
+      sweepRunnerLeases.mockResolvedValueOnce({ ...noLeases, leasesListed: 2, lost: 1, held: 1, nextDueAt: null });
+      const log = vi.fn();
+      const res = await run(log);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(sweepRunnerLeases).toHaveBeenCalledTimes(1);
+      expect(body).toMatchObject({ configured: true, failed: 1, sweepFailures: ["queue"], leases: { leasesListed: 2, lost: 1 } });
+      expect(JSON.stringify(body)).not.toContain("secret-detail");
+      expect(log).toHaveBeenCalledWith("runner sweeper: queue sweep failed");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret-detail");
+      // The tick comes back soon: not yet at 3 minutes, again after 5.
+      advance(3 * MIN);
+      getWorker.mockClear();
+      await run();
+      expect(getWorker).not.toHaveBeenCalled();
+      advance(3 * MIN);
+      await run();
+      expect(getWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it("a lease sweep that throws leaves the queue sweep's work reported", async () => {
+      await run();
+      sweepRunnerQueue.mockClear();
+      sweepRunnerLeases.mockClear();
+      advance(20 * MIN);
+      await markWorkPending("runner-sweeper");
+      advance(2 * MIN);
+      sweepRunnerQueue.mockResolvedValueOnce({ ...none, listed: 3, expired: 3 });
+      sweepRunnerLeases.mockRejectedValueOnce(new Error("lease list failed"));
+      const log = vi.fn();
+      const body = (await (await run(log)).json()) as Record<string, unknown>;
+      expect(sweepRunnerQueue).toHaveBeenCalledTimes(1);
+      expect(body).toMatchObject({ configured: true, listed: 3, expired: 3, sweepFailures: ["leases"], leases: { leasesFailed: 1 } });
+      expect(log).toHaveBeenCalledWith("runner sweeper: lease sweep failed");
+    });
+
+    it("when both throw the tick fails as before: the marker is untouched and the next tick connects", async () => {
+      await run();
+      sweepRunnerQueue.mockClear();
+      sweepRunnerLeases.mockClear();
+      advance(20 * MIN);
+      await markWorkPending("runner-sweeper");
+      advance(2 * MIN);
+      sweepRunnerQueue.mockRejectedValueOnce(new Error("queue down"));
+      sweepRunnerLeases.mockRejectedValueOnce(new Error("lease down"));
+      await expect(run()).rejects.toThrow("queue down");
+      expect(sweepRunnerLeases).toHaveBeenCalledTimes(1);
+      advance(1 * MIN);
+      getWorker.mockClear();
+      await run();
+      expect(getWorker).toHaveBeenCalledTimes(1);
+    });
+
+    it("a clean tick is unchanged: no failure key in the result", async () => {
+      await run();
+      sweepRunnerQueue.mockClear();
+      sweepRunnerLeases.mockClear();
+      advance(20 * MIN);
+      await markWorkPending("runner-sweeper");
+      advance(2 * MIN);
+      const body = (await (await run()).json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("sweepFailures");
+    });
   });
 
   it("a failed run keeps the next tick coming soon instead of dropping the marker", async () => {
@@ -413,6 +493,34 @@ describe("runner-sweeper (D#6 R2b)", () => {
     advance(3 * MIN);
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
     expect(getWorker).toHaveBeenCalledTimes(1); // after the delay it tries again
+  });
+
+  it("a claimed run's lease end is a marker: the tick before it skips, the first tick at or after it sweeps the leases and keeps the next end due", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(20 * MIN);
+    const leaseEnd = clock.value + 90_000;
+    await markWorkPending("runner-sweeper", { since: leaseEnd }); // what a claim does
+    clock.value = leaseEnd - 1;
+    vi.setSystemTime(clock.value);
+    getWorker.mockClear();
+    sweepRunnerLeases.mockClear();
+    sweepRunnerQueue.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
+    clock.value = leaseEnd;
+    vi.setSystemTime(clock.value);
+    const nextEnd = leaseEnd + 90_000;
+    sweepRunnerLeases.mockResolvedValueOnce({ ...noLeases, leasesListed: 1, held: 1, nextDueAt: nextEnd });
+    const res = await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    expect(sweepRunnerLeases).toHaveBeenCalledTimes(1);
+    expect(sweepRunnerQueue).toHaveBeenCalledTimes(1);
+    expect(await res.json()).toMatchObject({ configured: true, leases: { leasesListed: 1, held: 1 } });
+    // The earliest of the two sweeps' due times is kept: nothing connects before it.
+    clock.value = nextEnd - 1;
+    vi.setSystemTime(clock.value);
+    getWorker.mockClear();
+    expect(await (await runnerSweeperHandler(cronRequest("runner-sweeper"), deps())).json()).toEqual({ skipped: true, reason: "no_pending_work" });
+    expect(getWorker).not.toHaveBeenCalled();
   });
 
   it("an unauthenticated call builds no worker and reads no cache", async () => {
