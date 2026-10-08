@@ -21,6 +21,7 @@
   "devDependencies": {
     "@fx/billing": "workspace:*",
     "@fx/github": "workspace:*",
+    "@fx/model-connection": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",
     "@fx/webhooks": "workspace:*",

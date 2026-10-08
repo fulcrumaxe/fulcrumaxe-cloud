@@ -26,7 +26,8 @@ export { remove } from './remove.js';
 
 export { getStatus } from './summary.js';
 
-export { test } from './validate.js';
+export type { HealthCheckCtx, HealthCheckResult } from './validate.js';
+export { test, healthCheck } from './validate.js';
 
 export type { BrokenConnectionCode, ConnectionStatusPort } from './markBroken.js';
 export { markBroken, markBrokenWithClient, createConnectionStatusPort } from './markBroken.js';

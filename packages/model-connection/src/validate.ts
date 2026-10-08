@@ -1,11 +1,13 @@
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { getMemberRole } from '@fx/core/src/tenancy/authorize.js';
 import { emitDomainEvent } from '@fx/core/src/domain-events/emit.js';
 import { NotFoundError } from './errors.js';
+import { markBrokenWithClient, type BrokenConnectionCode } from './markBroken.js';
+import type { KekSource } from './kek.js';
 import { open, type Sealed } from './crypto.js';
-import type { ValidationOutcome } from './httpClient.js';
+import type { ValidationHttpClient, ValidationOutcome } from './httpClient.js';
 import { buildAad, type ModelConnectionCtx, type Provider } from './types.js';
 
 interface LockedRow {
@@ -109,7 +111,7 @@ async function writeOutcomeRows(
   if (outcome.kind === 'ok') {
     await client.query(
       `UPDATE model_connections
-         SET status = 'ok', last_validated_at = now(), last_error_code = NULL
+         SET status = 'ok', last_validated_at = now(), last_error_code = NULL, health_strikes = 0
        WHERE id = $1`,
       [connectionId],
     );
@@ -138,6 +140,42 @@ async function writeOutcomeRows(
     `UPDATE model_connections SET last_error_code = $2 WHERE id = $1`,
     [connectionId, outcome.code],
   );
+}
+
+interface SealedRow extends Sealed {
+  id: string;
+  provider: Provider;
+  key_nonce: Buffer;
+  kek_version: number;
+}
+
+/**
+ * Reads the account's sealed key as app_user (tenant-scoped) and opens it. The plaintext lives only in the returned
+ * local, for one validation call. Throws NotFoundError when the account has no connection.
+ */
+async function readAndOpenKey(
+  pool: Pool,
+  kek: KekSource,
+  accountId: string,
+): Promise<{ encrypted: SealedRow; plaintextKey: string }> {
+  const encrypted = await withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<SealedRow>(
+      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce, wrapped_dek AS "wrappedDek", kek_version
+         FROM model_connections WHERE account_id = $1`,
+      [accountId],
+    );
+    return rows[0] ?? null;
+  });
+  if (!encrypted) {
+    throw new NotFoundError(`model_connections: no connection for account ${accountId}`);
+  }
+  const kekBytes = kek.keyFor(encrypted.kek_version);
+  const aad = buildAad(accountId, encrypted.id);
+  const plaintextKey = open(
+    { kek: kekBytes, aad },
+    { ciphertext: encrypted.ciphertext, nonce: encrypted.key_nonce, wrappedDek: encrypted.wrappedDek },
+  );
+  return { encrypted, plaintextKey };
 }
 
 /**
@@ -178,24 +216,7 @@ export async function test(ctx: ModelConnectionCtx): Promise<ValidationOutcome> 
     throw new NotFoundError(`model_connections: no connection for account ${accountId}`);
   }
 
-  const encrypted = await withTenant(ctx.pool, accountId, async (client) => {
-    const { rows } = await client.query<{ id: string; provider: Provider } & Sealed & { key_nonce: Buffer; kek_version: number }>(
-      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce, wrapped_dek AS "wrappedDek", kek_version
-         FROM model_connections WHERE account_id = $1`,
-      [accountId],
-    );
-    return rows[0] ?? null;
-  });
-  if (!encrypted) {
-    throw new NotFoundError(`model_connections: no connection for account ${accountId}`);
-  }
-
-  const kekBytes = ctx.kek.keyFor(encrypted.kek_version);
-  const aad = buildAad(accountId, encrypted.id);
-  const plaintextKey = open(
-    { kek: kekBytes, aad },
-    { ciphertext: encrypted.ciphertext, nonce: encrypted.key_nonce, wrappedDek: encrypted.wrappedDek },
-  );
+  const { encrypted, plaintextKey } = await readAndOpenKey(ctx.pool, ctx.kek, accountId);
   const outcome = await ctx.httpClient.validate({ provider: encrypted.provider, plaintextKey });
 
   await withPlatformOps(ctx.platformOpsPool, async (opsClient) => {
@@ -267,5 +288,93 @@ export async function recordInitialValidation(
     }
 
     await writeOutcome(opsClient, ctx.principal.accountId, locked.id, outcome);
+  });
+}
+
+/**
+ * What the health job needs: the same four dependencies as a ModelConnectionCtx, with no principal. The job is the
+ * platform acting on every account, not a member acting on their own.
+ */
+export interface HealthCheckCtx {
+  /** app_user pool: the sealed key is read through withTenant. */
+  pool: Pool;
+  /** platform_ops pool: the only role that writes status or strikes. */
+  platformOpsPool: Pool;
+  httpClient: ValidationHttpClient;
+  kek: KekSource;
+}
+
+/** What one health check did to the row, for the job's own accounting. Never carries the key or a provider message. */
+export type HealthCheckResult =
+  | { action: 'cleared' }
+  | { action: 'strike' }
+  | { action: 'broken' }
+  | { action: 'unchanged' }
+  | { action: 'skipped' };
+
+/**
+ * H2e's entry point (D#454 C1): checks one account's stored key once. Same shape as test() -- read the sealed key
+ * through withTenant, open it, make ONE validation call, then take the row lock and re-check `id` and `key_nonce` so a
+ * key rotated or replaced meanwhile gets no write at all (strikes included) -- without the member-role check.
+ *
+ *  - ok: the existing writeOutcome ok path (clears key_broken_at, health_strikes, emits `changed`).
+ *  - rejected: first one is a strike and nothing else changes; a second marks the key broken (status, last_error_code,
+ *    key_broken_at, and `model_connection.changed` with state broken, all in this transaction). A connection that is
+ *    already broken is left alone, so a daily check does not re-announce it.
+ *  - network_error (5xx, 429, timeout, a gateway 403): nothing is written. Strikes are neither added nor reset.
+ *
+ * Returns null when the account has no connection, or when `connectionId` is given and is not the row found.
+ */
+export async function healthCheck(
+  ctx: HealthCheckCtx,
+  accountId: string,
+  connectionId?: string,
+): Promise<HealthCheckResult | null> {
+  let read: Awaited<ReturnType<typeof readAndOpenKey>>;
+  try {
+    read = await readAndOpenKey(ctx.pool, ctx.kek, accountId);
+  } catch (err) {
+    if (err instanceof NotFoundError) return null;
+    throw err;
+  }
+  const { encrypted, plaintextKey } = read;
+  if (connectionId !== undefined && encrypted.id !== connectionId) return null;
+
+  const outcome = await ctx.httpClient.validate({ provider: encrypted.provider, plaintextKey });
+
+  return withPlatformOps(ctx.platformOpsPool, async (opsClient): Promise<HealthCheckResult> => {
+    await applyStuckHolderTimeouts(opsClient);
+    const locked = await lockConnectionRow(opsClient, accountId);
+    if (locked.id !== encrypted.id || !locked.key_nonce.equals(encrypted.key_nonce)) {
+      // Rotated or replaced since the read: this outcome belongs to a key nobody can reach anymore.
+      return { action: 'skipped' };
+    }
+    if (outcome.kind === 'network_error') {
+      return { action: 'unchanged' };
+    }
+    if (outcome.kind === 'ok') {
+      await writeOutcome(opsClient, accountId, locked.id, outcome);
+      return { action: 'cleared' };
+    }
+
+    const { rows } = await opsClient.query<{ health_strikes: number; status: string }>(
+      `SELECT health_strikes, status FROM model_connections WHERE id = $1`,
+      [locked.id],
+    );
+    const row = rows[0];
+    if (!row) return { action: 'skipped' };
+    if (row.health_strikes < 1) {
+      await opsClient.query(`UPDATE model_connections SET health_strikes = 1 WHERE id = $1`, [locked.id]);
+      return { action: 'strike' };
+    }
+    if (row.status === 'broken') return { action: 'unchanged' };
+    await markBrokenWithClient(opsClient, accountId, Number(outcome.code) as BrokenConnectionCode);
+    await emitDomainEvent(opsClient, {
+      type: 'model_connection.changed',
+      accountId,
+      subjectId: locked.id,
+      payload: { state: 'broken' },
+    });
+    return { action: 'broken' };
   });
 }

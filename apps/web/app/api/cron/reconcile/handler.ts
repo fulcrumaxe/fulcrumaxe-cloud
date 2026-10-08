@@ -6,8 +6,10 @@ import { reportError } from "@fx/telemetry";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
 import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
+import { envKekSource, fetchValidationHttpClient, healthCheck } from "@fx/model-connection";
 import {
   buildReconcileJobs,
+  createModelKeyHealthJob,
   createStripeSubscriptionsJob,
   runTick,
   type ReconcileJob,
@@ -45,6 +47,36 @@ export function stripeSubscriptionsJobFromEnv(pool: TickDeps["pool"], report: Re
   return createStripeSubscriptionsJob({
     stripe: reconcileStripeClient(key),
     apply: (subscription, clock) => applyFetchedSubscription({ platformOpsPool: pool, livemode }, subscription, clock),
+    reportError: report,
+  });
+}
+
+let cachedAppUserPool: ReturnType<typeof createPool> | undefined;
+
+/**
+ * The model-key health job. It opens each customer's key as app_user (through the tenant scope) and writes through the
+ * platform_ops pool, so it needs DATABASE_URL_APP_USER and the key-encryption key. With either absent the job still
+ * exists and records `not_configured` on each tick; the app pool is only opened when the job first has a key to check.
+ */
+export function modelKeyHealthJobFromEnv(pool: TickDeps["pool"], report: ReportError): ReconcileJob {
+  // The key-encryption source is asked for its current key once: it throws for a version below 1, an unset key and a
+  // key that is not 32 bytes, and any of those means this job cannot run (and must not bring the tick down).
+  let kek: ReturnType<typeof envKekSource> | null = null;
+  try {
+    const source = envKekSource();
+    source.keyFor(source.currentVersion());
+    kek = source;
+  } catch {
+    // fx-swallow-ok: an unusable key-encryption key is the not_configured case, and the error text names no value
+  }
+  if (!process.env.DATABASE_URL_APP_USER || !kek) return createModelKeyHealthJob({ check: null, reportError: report });
+  const readyKek = kek;
+  const httpClient = fetchValidationHttpClient();
+  return createModelKeyHealthJob({
+    check: async (accountId, connectionId) => {
+      cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
+      return healthCheck({ pool: cachedAppUserPool, platformOpsPool: pool, httpClient, kek: readyKek }, accountId, connectionId);
+    },
     reportError: report,
   });
 }
@@ -101,6 +133,7 @@ export async function reconcileHandler(
       jobs: buildReconcileJobs({
         githubInstallations: githubInstallationsJobFromEnv(deps.platformOpsPool, deps.reportError),
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
+        modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
       }),
       enabled: deps.enabled,
       reportError: deps.reportError,
