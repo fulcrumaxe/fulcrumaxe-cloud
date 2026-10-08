@@ -74,7 +74,7 @@ describe("who may set app.runner_id, and who may use the runner door (D#6 R2a, C
   });
 
   it("only runner-cloud's own code opens a runner session or verifies a runner request", () => {
-    const allowed = ["packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-protocol/src/httpSignature.ts"];
+    const allowed = ["packages/runner-cloud/src/claim.ts", "packages/runner-cloud/src/heartbeat.ts", "packages/runner-cloud/src/hello.ts", "packages/runner-cloud/src/index.ts", "packages/runner-cloud/src/ingestEvents.ts", "packages/runner-cloud/src/register.ts", "packages/runner-cloud/src/revoke.ts", "packages/runner-cloud/src/rotate.ts", "packages/runner-cloud/src/verifyRunnerRequest.ts", "packages/runner-protocol/src/httpSignature.ts"];
     expect(filesWith(/withRunnerSession|verifyRunnerRequest|verifySelfSignedRequest/)).toEqual(allowed);
   });
 
