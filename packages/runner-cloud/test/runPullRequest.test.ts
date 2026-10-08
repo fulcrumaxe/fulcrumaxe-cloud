@@ -3,7 +3,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { LocalOnlyGithubError } from "../src/localOnlyGithub.js";
 import { MAX_FILE_PAGES, READY_FALLBACK_LINE, RunPullRequestError, TITLE_MAX, createRunPullRequestPort, pullRequestBody, pullRequestTitle, type PullRequestRepo } from "../src/runPullRequest.js";
 import { pathsOutsideScope, parseAcceptanceScope } from "../src/acceptanceScope.js";
-import { FakeGithub, StrictFakeError, type FakeChangeType, type FakeRepo } from "./helpers/githubFake.js";
+import { FAKE_APP_LOGIN, FakeGithub, StrictFakeError, type FakeChangeType, type FakeRepo } from "./helpers/githubFake.js";
 
 /**
  * D#6 R2b-3e: the `done` pull request port against a strict fake of GitHub that refuses anything outside A1 to A5. The happy path
@@ -19,7 +19,7 @@ function setup(over: { drafts?: boolean; branchFiles?: Array<{ path: string; cha
   const repo: FakeRepo = fake.addRepo("acme", "widgets", { supportsDrafts: over.drafts ?? true });
   if (over.branch !== false) fake.pushBranch(repo, BRANCH, { files: over.branchFiles ?? files(2), aheadBy: over.aheadBy ?? 1 });
   const opened: PullRequestRepo[] = [];
-  const port = createRunPullRequestPort({ open: async (r) => (opened.push(r), fake) });
+  const port = createRunPullRequestPort({ open: async (r) => (opened.push(r), fake), appLogin: async () => FAKE_APP_LOGIN });
   return { fake, repo, port, opened };
 }
 const labels = (f: FakeGithub) => f.calls.map((c) => c.label);
@@ -70,7 +70,7 @@ describe("defaultBranch (A2)", () => {
   it("answers the repository's default branch, whatever it is called", async () => {
     const fake = new FakeGithub();
     fake.addRepo("acme", "widgets", { defaultBranch: "trunk" });
-    expect(await createRunPullRequestPort({ open: async () => fake }).defaultBranch(REPO)).toBe("trunk");
+    expect(await createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN }).defaultBranch(REPO)).toBe("trunk");
   });
 
   it("a repository GitHub does not know is rejected; an answer about another repository, or without a branch, is malformed", async () => {
@@ -165,7 +165,7 @@ describe("openDraft (A3, A4)", () => {
   it("reuses the oldest of several open pull requests for the branch, and a closed one is not reused", async () => {
     const { fake, repo, port } = setup();
     fake.pushBranch(repo, "release", { files: [] });
-    const pr = (n: number, base: string, state: "open" | "closed") => repo.pulls.push({ number: n, nodeId: `PR_kwDOold${n}`, head: BRANCH, base, state, draft: true, title: "t", body: "b" });
+    const pr = (n: number, base: string, state: "open" | "closed") => repo.pulls.push({ number: n, nodeId: `PR_kwDOold${n}`, head: BRANCH, base, state, draft: true, title: "t", body: "b", author: { login: FAKE_APP_LOGIN, type: "Bot" } });
     pr(5, "main", "open");
     pr(7, "release", "open");
     pr(3, "main", "closed");
@@ -197,7 +197,7 @@ describe("openDraft (A3, A4)", () => {
   it("when another attempt opens it between our look and our create, GitHub says 422 and the port reuses theirs", async () => {
     const { fake, repo, port } = setup();
     fake.before = (req) => {
-      if (req.method === "POST" && repo.pulls.length === 0) repo.pulls.push({ number: 41, nodeId: "PR_kwDOraced", head: BRANCH, base: "main", state: "open", draft: true, title: "t", body: "b" });
+      if (req.method === "POST" && repo.pulls.length === 0) repo.pulls.push({ number: 41, nodeId: "PR_kwDOraced", head: BRANCH, base: "main", state: "open", draft: true, title: "t", body: "b", author: { login: FAKE_APP_LOGIN, type: "Bot" } });
     };
     // The first A3 finds nothing; the hook fires on the A4 and the fake then refuses it as a duplicate.
     expect(await port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN })).toMatchObject({ number: 41, reused: true });
@@ -208,7 +208,7 @@ describe("openDraft (A3, A4)", () => {
   it("a reused pull request must target the run's base: the look asks for it, and one on another base is not reused even if GitHub returned it", async () => {
     const { fake, repo, port } = setup();
     fake.pushBranch(repo, "release", { files: [] });
-    repo.pulls.push({ number: 7, nodeId: "PR_kwDOold7", head: BRANCH, base: "release", state: "open", draft: true, title: "t", body: "b" });
+    repo.pulls.push({ number: 7, nodeId: "PR_kwDOold7", head: BRANCH, base: "release", state: "open", draft: true, title: "t", body: "b", author: { login: FAKE_APP_LOGIN, type: "Bot" } });
     expect(await port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN })).toMatchObject({ number: 1, reused: false });
     expect(fake.calls[0]!.query).toEqual({ head: `acme:${BRANCH}`, base: "main", state: "open", per_page: 100 });
     // A listing that ignores `base` (or answers wrongly) cannot get a pull request on another base reused.
@@ -586,7 +586,7 @@ describe("failures from GitHub", () => {
   });
 
   describe("a client that cannot be opened", () => {
-    const failing = (make: () => unknown) => createRunPullRequestPort({ open: async () => { throw make(); } });
+    const failing = (make: () => unknown) => createRunPullRequestPort({ open: async () => { throw make(); }, appLogin: async () => FAKE_APP_LOGIN });
     const withReason = (reason: string) => Object.assign(new Error(`installationHttp: ${reason} for acme/widgets ghs_secret`), { reason });
     const withCode = (code: string) => Object.assign(new Error(`${code} for acme/widgets`), { code });
 

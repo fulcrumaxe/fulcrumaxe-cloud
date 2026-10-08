@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { SignedJobSchema } from "@fulcrumaxe/runner-protocol";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
+import { JobIssueError, resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
 
 /**
  * D#6 R2b-3 (C21 section 4): the run that follows a runner run which ended `runner_lost` or `usage_limit`.
@@ -113,8 +113,9 @@ export interface FollowUpPortsDeps {
  * column is not written.
  *
  * A parent whose job continued an earlier run (a fix round, `continues` set) has a child that continues it too: the child is
- * resumed with the parent's session id, and the job issuer refuses it unless the branch it derives is the parent's own, so the
- * lost round's pushes stay on one branch (C22 section 2). A parent that was a fresh `implement` run has a fresh child.
+ * resumed with the parent's session id and the parent's own signed branch, which the issuer carries unchanged after checking that it is a
+ * run branch, so the lost round's pushes stay on one branch (C22 section 2, C25 section 1.2). A parent that was a fresh `implement` run has a
+ * fresh child. If GitHub cannot be reached to read that branch's head, the child stays pending and the sweeper tries again.
  *
  * Dispatching a child that already has its job does nothing, and a dispatch that fails while the job has meanwhile been written
  * (a slow first dispatch racing the sweeper's retry; the job is written once only) is a success. Otherwise a child that cannot be
@@ -155,7 +156,7 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           model: job.model_hint ?? "",
           capUsd: 0,
           spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" },
-          // The branch the lost round was on: the issuer refuses the child unless the branch it derives is this one.
+          // The branch the lost round was on, carried unchanged (the issuer checks it is a run branch).
           ...(job.continues ? { continuesBranch: job.continues.branch } : {}),
         };
         const target = resolveExecutionTarget("runner_local", deps.registry);
@@ -168,6 +169,9 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           return rows.length > 0;
         }).catch(() => false);
         if (written) return;
+        // GitHub could not be reached to read the branch head: the child stays pending with no job, and the sweeper's retry (after
+        // JOBLESS_RETRY_AFTER_MS, until JOBLESS_FAIL_AFTER_MS) asks again. A transient error must not fail a child that a later try would issue.
+        if (error instanceof JobIssueError && error.retryable) throw error;
         // fx-swallow-ok: the child is failed so it cannot sit queued without a job; the original error is rethrown for the caller to count
         await writeRunStatus(deps.pool, { accountId, runId, from: "pending", to: "failed", failureReason: "internal_error" }).catch(() => undefined);
         throw error;

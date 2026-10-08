@@ -9,6 +9,7 @@ export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from ".
 export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";
+export { DISPATCH_BASE_KIND, donePath, doneRun } from "./done.js";
 export {
   GITHUB_GRAPHQL_DOCUMENTS,
   LOCAL_ONLY_ALLOWLIST,

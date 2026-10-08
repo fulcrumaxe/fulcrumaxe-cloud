@@ -903,12 +903,13 @@ describe("runner follow-up runs [pg]", () => {
     const built = (registry: ExecutionTargetRegistry, buildFailed: FollowUpPortsDeps["buildFailed"] = async () => ({ status: "recorded", stage: "needs_human" })) => createFollowUpPorts({ pool: writerPool, registry, buildFailed });
 
     /** The real chain: `RunnerTarget` over the real job issuer, signer and `agent_run_set_runner_job`; only the repo and issue lookup is a stand-in. */
-    function realRegistry(issueNumber: number | null = 7) {
+    function realRegistry(headOid: () => Promise<string | null> = async () => "a".repeat(40)) {
       const issuer = createJobIssuer({
         pool: writerPool,
         signer: createJobSigner({ keyId: "k1", privateKey: key }),
         visibility: { visibility: async () => "private" },
-        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, issueNumber }) },
+        continuationBase: { headOid },
+        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, parentBranch: null }) },
         now: () => new Date(clock),
       });
       const target = new RunnerTarget({ limits: createFakeRunnerLimits(30), pool: writerPool, issuer, visibility: { visibility: async () => "private" } });
@@ -920,7 +921,8 @@ describe("runner follow-up runs [pg]", () => {
       const made = (await askFor(parent)) as { childRunId: string };
       return { parent, childId: made.childRunId };
     };
-    const FIX_PARENT: Partial<Job> = { task: { kind: "fix", prompt: "the task", prompt_sha256: sha256Text("the task") }, continues: { parent_run_id: randomUUID(), session_id: "sess-fix-1", branch: "fx/issue-7" } };
+    const FIX_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+    const FIX_PARENT: Partial<Job> = { task: { kind: "fix", prompt: "the task", prompt_sha256: sha256Text("the task") }, continues: { parent_run_id: randomUUID(), session_id: "sess-fix-1", branch: FIX_BRANCH } };
 
     it("the child's issued job carries the parent's model hint verbatim: a hint stays, and a null stays null (C22 section 1)", async () => {
       const withHint = await childOf({ model_hint: "sonnet-5" });
@@ -935,27 +937,43 @@ describe("runner follow-up runs [pg]", () => {
 
     it("a follow-up of a lost fix round is a fix again: the parent's branch and session, and the lost run as its parent (C22 section 2)", async () => {
       const { parent, childId } = await childOf(FIX_PARENT);
-      await built(realRegistry(7).registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      await built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId });
       const issued = await jobOf(childId);
       expect(issued.task.kind).toBe("fix");
-      expect(issued.continues).toEqual({ parent_run_id: parent, session_id: "sess-fix-1", branch: "fx/issue-7" });
+      expect(issued.continues).toEqual({ parent_run_id: parent, session_id: "sess-fix-1", branch: FIX_BRANCH });
     });
 
     it("a follow-up of a lost fresh run stays a fresh run (continues is null)", async () => {
       const { childId } = await childOf();
-      await built(realRegistry(7).registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      await built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId });
       const issued = await jobOf(childId);
       expect(issued.task.kind).toBe("implement");
       expect(issued.continues).toBeNull();
     });
 
-    it("a follow-up whose branch is not the lost round's is failed internal_error, with no job (C22 section 2)", async () => {
-      const { childId } = await childOf(FIX_PARENT);
-      // The issue's number is 8 now, so the branch the issuer derives is fx/issue-8, not the parent's fx/issue-7.
-      await expect(built(realRegistry(8).registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_branch_mismatch/);
+    it("a follow-up whose parent job's branch is not a run branch is failed internal_error, with no job (C22 section 2, C25 section 1.2)", async () => {
+      const { childId } = await childOf({ ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: "sess-fix-1", branch: "fx/issue-7" } });
+      await expect(built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_branch_mismatch/);
       const row = (await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0];
       expect(row).toEqual({ status: "failed", job_signed: null });
       expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' ORDER BY seq", [childId])).rows.map((r) => r.payload)).toEqual([{ from: "pending", to: "failed", failureReason: "internal_error" }]);
+    });
+
+    it("GitHub unreachable while the follow-up's branch head is read leaves the child PENDING with no job, for the sweeper's retry; the retry then issues it (C22 section 3)", async () => {
+      const { childId } = await childOf(FIX_PARENT);
+      const unreachable = Object.assign(new Error("run pull request: unavailable"), { retryable: true });
+      await expect(built(realRegistry(async () => Promise.reject(unreachable)).registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_base_unavailable/);
+      expect((await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0]).toEqual({ status: "pending", job_signed: null });
+      expect((await admin.query("SELECT 1 FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' AND payload->>'to' = 'failed'", [childId])).rows).toEqual([]);
+      await built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      expect((await jobOf(childId)).continues?.branch).toBe(FIX_BRANCH);
+    });
+
+    it("a refusal that cannot pass (GitHub rejected the read) still fails the child internal_error", async () => {
+      const { childId } = await childOf(FIX_PARENT);
+      const rejected = Object.assign(new Error("run pull request: rejected"), { retryable: false });
+      await expect(built(realRegistry(async () => Promise.reject(rejected)).registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_base_unavailable/);
+      expect((await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0]).toEqual({ status: "failed", job_signed: null });
     });
 
     it("a follow-up is exempt from the daily run limit, and still counts toward the day: the next fresh run is refused runner_daily_limit (C22 section 4)", async () => {

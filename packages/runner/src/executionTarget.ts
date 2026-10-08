@@ -68,6 +68,8 @@ export type FailureReason =
   | "wall_clock_limit"
   /** D#6 R2b-3 (C21 section 7): an executor's changes could not be checked against the Spec's file scope (no scope on record, or one the matcher cannot read), so no pull request is opened. */
   | "scope_unknown"
+  /** D#6 R2b-3f (C23 section 4): GitHub permanently refused to open the pull request for an executor's branch (a 422 on create that is not the draft-unsupported one, or an open pull request on the branch that our App did not open). No pull request exists; the branch is kept. */
+  | "pr_rejected"
   /** A caller that cannot wait for a runner to claim a run was handed a queued one and cancelled it (`failClosedOnQueued`). */
   | "queued_not_supported"
   /** D#6 R4a-2 (C24 section 1): the runner refused the job it was given (a key or hash mismatch with the cloud), or saw it twice. The runner's closed `detail` is kept on the stored `run_ended` event. */

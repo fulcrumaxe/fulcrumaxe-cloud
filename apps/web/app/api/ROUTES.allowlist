@@ -25,6 +25,7 @@ runner/hello/route.ts
 runner/register/route.ts
 runner/revoke/route.ts
 runner/rotate/route.ts
+runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
 runners/[id]/revoke/route.ts
 runners/registration-codes/route.ts

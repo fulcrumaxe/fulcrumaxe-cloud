@@ -2,13 +2,14 @@ import type { NextRequest } from "next/server";
 import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, toResponse } from "@fx/runner-cloud";
-import type { FailRunnerLeases, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, SessionPrincipal } from "@fx/runner-cloud";
+import type { FailRunnerLeases, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
 import { runnerLimitsFor } from "@fx/worker";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { getWorker } from "./worker";
+import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
 /**
@@ -28,7 +29,12 @@ const leases: RunnerLeaseOps = {
   claimRunnerRun: async (input) => (await requireWorker()).claimRunnerRun(input),
   heartbeatRunnerRun: async (input) => (await requireWorker()).heartbeatRunnerRun(input),
   ingestRunnerEvents: async (input) => (await requireWorker()).ingestRunnerEvents(input),
+  beginRunnerDone: async (input) => (await requireWorker()).beginRunnerDone(input),
+  finishRunnerDone: async (input) => (await requireWorker()).finishRunnerDone(input),
 };
+
+/** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */
+let pullRequests: RunPullRequestPort | undefined;
 
 async function requireWorker() {
   const worker = await getWorker();
@@ -41,7 +47,7 @@ const liveVisibility = (): ReturnType<typeof createAppRepoVisibility> => (visibi
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

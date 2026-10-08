@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runnerBranchFor } from "@fx/runner";
 import { createGitHubMergeGatePort } from "../../src/build/githubMergePort.js";
 import { hasRepoOwnCi, isCiGreen, type CiSnapshot } from "../../src/build/mergeGate.js";
-import { branchFor } from "../../src/advance/build.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "../review/helpers/fakeGitHubRest.js";
 
 /** D#6 R3b: the snapshot says whether the base branch is protected, and what counts as the repository's own CI. */
@@ -72,11 +70,5 @@ describe("hasRepoOwnCi", () => {
   });
   it("a commit status counts only when it is success", () => {
     for (const state of ["pending", "failure", "error"]) expect(hasRepoOwnCi({ ...base, checkRuns: [], statuses: [{ context: "buildkite/ci", state }] }), state).toBe(false);
-  });
-});
-
-describe("the run branch name", () => {
-  it("the runner's job names the same branch the pipeline's executor works on", () => {
-    for (const n of [1, 7, 4096]) expect(runnerBranchFor(n)).toBe(branchFor(n));
   });
 });

@@ -57,11 +57,15 @@ export interface RepoVisibilityPort {
   visibility(repo: { accountId: string; repoId: string }): Promise<RepoVisibility>;
 }
 
-/** What a run continues when it is a fix round: the earlier run and its session. The branch is the issuer's to derive. */
+/** What a run continues when it is a fix round: the earlier run and its session. */
 export interface RunContinues {
   parentRunId: string | null;
   sessionId: string;
-  /** When set, the issuer refuses the job unless the branch it derives equals this one (a follow-up of a fix round, C22 section 2). */
+  /**
+   * The branch of the pull request being fixed, carried unchanged by a follow-up of a fix round (C22 section 2). When it is not set, the issuer
+   * reads the branch `done` recorded for `parentRunId` (C25 section 1.2); it never derives one from the issue. Either way the issuer checks it
+   * is a run branch (`fx/<run>-g<generation>`).
+   */
   branch?: string;
 }
 

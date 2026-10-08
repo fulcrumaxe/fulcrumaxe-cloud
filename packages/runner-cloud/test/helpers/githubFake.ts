@@ -46,7 +46,11 @@ export interface FakePullRequest {
   draft: boolean;
   title: string;
   body: string;
+  /** Who opened it, as GitHub's `user`: the App's bot (`<slug>[bot]`, type `Bot`) for ours, a person's login (type `User`) otherwise. */
+  author: { login: string; type: "Bot" | "User" };
 }
+/** The login the fake gives pull requests opened through `POST /pulls`: our App, as GitHub names a bot. */
+export const FAKE_APP_LOGIN = "fulcrumaxe-runner[bot]";
 export interface FakeRepo {
   id: number;
   owner: string;
@@ -96,6 +100,23 @@ export class FakeGithub implements GithubClient {
     const made: FakeBranch = { oid: branch.oid ?? "b".repeat(40), aheadBy: branch.aheadBy ?? 1, files: branch.files };
     repo.branches.set(name, made);
     return made;
+  }
+
+  /** An open pull request somebody else opened for `head` into `base`, the way a person (or an agent with the customer's credentials) would. */
+  addForeignPull(repo: FakeRepo, o: { head: string; base?: string; author?: { login: string; type: "Bot" | "User" }; draft?: boolean }): FakePullRequest {
+    const pr: FakePullRequest = {
+      number: this.nextPr++,
+      nodeId: `PR_kwDOFake${this.nextPr}`,
+      head: o.head,
+      base: o.base ?? repo.defaultBranch,
+      state: "open",
+      draft: o.draft ?? false,
+      title: "by hand",
+      body: "",
+      author: o.author ?? { login: "octocat", type: "User" },
+    };
+    repo.pulls.push(pr);
+    return pr;
   }
 
   async request(req: GithubRequest): Promise<GithubResponse> {
@@ -162,7 +183,7 @@ export class FakeGithub implements GithubClient {
   }
 
   private pullJson(repo: FakeRepo, pr: FakePullRequest) {
-    return { number: pr.number, node_id: pr.nodeId, state: pr.state, draft: pr.draft, title: pr.title, head: { ref: pr.head, repo: { full_name: `${repo.owner}/${repo.name}` } }, base: { ref: pr.base } };
+    return { number: pr.number, node_id: pr.nodeId, state: pr.state, draft: pr.draft, title: pr.title, user: { login: pr.author.login, type: pr.author.type, id: 4242 }, head: { ref: pr.head, repo: { full_name: `${repo.owner}/${repo.name}` } }, base: { ref: pr.base } };
   }
 
   private listPulls(owner: string, name: string, query: Record<string, string | number>): GithubResponse {
@@ -187,7 +208,7 @@ export class FakeGithub implements GithubClient {
     if (body.draft && !repo.supportsDrafts) return unprocessable("Draft pull requests are not supported in this repository.");
     if (repo.pulls.some((p) => p.state === "open" && p.head === body.head && p.base === body.base)) return unprocessable(`A pull request already exists for ${repo.owner}:${body.head}.`);
     if (head.aheadBy === 0) return unprocessable(`No commits between ${body.base} and ${body.head}`);
-    const pr: FakePullRequest = { number: this.nextPr++, nodeId: `PR_kwDOFake${this.nextPr}`, head: body.head, base: body.base, state: "open", draft: body.draft, title: body.title, body: body.body };
+    const pr: FakePullRequest = { number: this.nextPr++, nodeId: `PR_kwDOFake${this.nextPr}`, head: body.head, base: body.base, state: "open", draft: body.draft, title: body.title, body: body.body, author: { login: FAKE_APP_LOGIN, type: "Bot" } };
     repo.pulls.push(pr);
     return ok(this.pullJson(repo, pr), 201);
   }

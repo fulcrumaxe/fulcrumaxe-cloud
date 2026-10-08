@@ -41,7 +41,11 @@ export interface PullRequestRepo {
 
 export type RunPullRequestFailure = "unavailable" | "rejected" | "malformed";
 export class RunPullRequestError extends Error {
-  constructor(readonly reason: RunPullRequestFailure) {
+  /** `status` is the HTTP status GitHub answered, when the failure came from a response. A number only: never a GitHub message (C23 section 4). */
+  constructor(
+    readonly reason: RunPullRequestFailure,
+    readonly status?: number,
+  ) {
     super(`run pull request: ${reason}`);
     this.name = "RunPullRequestError";
   }
@@ -145,7 +149,7 @@ function checkStatus(res: GithubResponse, ok: readonly number[]): void {
   if (ok.includes(res.status)) return;
   const message = isObject(res.body) && typeof res.body.message === "string" ? res.body.message : "";
   if (res.status >= 500 || res.status === 429 || (res.status === 403 && /rate limit|abuse/i.test(message))) throw new RunPullRequestError("unavailable");
-  throw new RunPullRequestError("rejected");
+  throw new RunPullRequestError("rejected", res.status);
 }
 
 /**
@@ -207,7 +211,15 @@ function pullRequestRef(raw: unknown, branch: string, repo: PullRequestRepo, reu
 }
 
 /** Builds the port over `open`, which answers a client for one repository (the App's installation token for it; for the app, see apps/web). */
-export function createRunPullRequestPort(deps: { open(repo: PullRequestRepo): Promise<GithubClient> }): RunPullRequestPort {
+export function createRunPullRequestPort(deps: {
+  open(repo: PullRequestRepo): Promise<GithubClient>;
+  /**
+   * The login GitHub gives pull requests opened by OUR App for this repository (`<app slug>[bot]`). An open pull request on the run's
+   * branch is reused only if its author is this login and its type is `Bot`; any other author is `rejected` (fail closed: the branch is
+   * kept and no second pull request is attempted). A throw is a failure to find out, so it is `unavailable`; an empty answer is `rejected`.
+   */
+  appLogin(repo: PullRequestRepo): Promise<string>;
+}): RunPullRequestPort {
   const client = async (repo: PullRequestRepo): Promise<LocalOnlyGithub> => {
     let inner: GithubClient;
     try {
@@ -226,10 +238,26 @@ export function createRunPullRequestPort(deps: { open(repo: PullRequestRepo): Pr
     if (!Array.isArray(res.body)) return malformed();
     // A pull request whose head is a fork's branch of the same name is not ours; only a head in this repository counts. A reused one
     // must also target the run's base (the query asks for it; this holds the answer to it too), or the scope check would read another diff.
-    const mine = (res.body as unknown[])
-      .filter((item) => isObject(item) && isObject(item.head) && item.head.ref === branch && isObject(item.head.repo) && sameRepo(item.head.repo.full_name, repo) && isObject(item.base) && item.base.ref === base)
-      .map((item) => pullRequestRef(item, branch, repo, true));
-    return mine.sort((a, b) => a.number - b.number)[0] ?? null;
+    const mine = (res.body as unknown[]).filter(
+      (item) => isObject(item) && isObject(item.head) && item.head.ref === branch && isObject(item.head.repo) && sameRepo(item.head.repo.full_name, repo) && isObject(item.base) && item.base.ref === base,
+    );
+    if (mine.length === 0) return null;
+    // Reusing a pull request means the scope check reads ITS files and `markReady` publishes it: only one our App opened qualifies. Somebody
+    // else's (a person's, or the agent's own with the customer's credentials) is never touched, and nothing replaces it.
+    let login: string;
+    try {
+      login = await deps.appLogin(repo);
+    } catch {
+      // fx-swallow-ok: the cause can carry a name or a token; a failure to learn our own login is a failure to ask GitHub, so it is retried
+      throw new RunPullRequestError("unavailable");
+    }
+    if (typeof login !== "string" || login.length === 0) throw new RunPullRequestError("rejected");
+    const wanted = login.toLowerCase();
+    for (const item of mine) {
+      const user = (item as Record<string, unknown>).user;
+      if (!isObject(user) || user.type !== "Bot" || typeof user.login !== "string" || user.login.toLowerCase() !== wanted) throw new RunPullRequestError("rejected");
+    }
+    return mine.map((item) => pullRequestRef(item, branch, repo, true)).sort((a, b) => a.number - b.number)[0]!;
   }
 
   return {

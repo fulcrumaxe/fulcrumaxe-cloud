@@ -38,6 +38,13 @@ describe("lease routes [pg]", () => {
       if (refuse) throw refuse;
       return ingestResult;
     },
+    // `done` has its own suite (done.pg.test.ts); these routes' tests never reach it.
+    beginRunnerDone: async () => {
+      throw new Error("not used by these tests");
+    },
+    finishRunnerDone: async () => {
+      throw new Error("not used by these tests");
+    },
   };
   const deps = (over: Partial<RunnerCloudDeps> = {}): RunnerCloudDeps => h.deps({ leases, ...over });
   const run = (fn: () => Promise<{ status: number; body: unknown; headers?: Record<string, string> }>) => toResponse(fn);
