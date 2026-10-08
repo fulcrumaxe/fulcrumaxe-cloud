@@ -17,7 +17,7 @@ import {
   type ReconcileJob,
   type ReportError,
 } from '../src/index.js';
-import { startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
+import { APP_SLUGS, startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
 
 /**
  * D#454 H2c against real Postgres and a strict GitHub fake reached over real TLS: the repo re-sync reconciler. It runs the
@@ -472,6 +472,7 @@ describe('github repo re-sync reconcile job', () => {
       const api = (k: InstallationKind) => createGithubAppApi(() => mintAppJwt(String(gh.keys[k].appId), gh.keys[k].privateKeyPem), { port: gh.port, ca: gh.ca, lookup: gh.lookup });
       return createGithubInstallationsJob({
         api,
+        slug: (k) => APP_SLUGS[k],
         reportError: report,
         ...(opts.callsPerRun ? { callsPerRun: opts.callsPerRun } : {}),
         apply: (change, meter) =>
