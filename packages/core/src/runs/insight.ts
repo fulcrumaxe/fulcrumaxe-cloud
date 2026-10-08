@@ -71,6 +71,12 @@ export interface RunInsight {
   parent: LinkedRun | null;
   escalated_from: LinkedRun | null;
   children: LinkedRun[];
+  /**
+   * D#221 OM-2c: the outside meter's verdict for this run, one of five states, never null. `off` is a run that was never
+   * tagged (the setting was off, or it is not on the AI Gateway). `added_usd` is the true-up posted, when one was. The sentence is
+   * made from these by the API (it holds the wording); the tag itself is never read here.
+   */
+  outside_meter: { state: 'pending' | 'matches' | 'higher' | 'unavailable' | 'off'; reason: string | null; added_usd: number | null };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -103,10 +109,24 @@ interface RunRow {
   branch: string | null;
   env_pr: string | null;
   findings: unknown;
+  om_state: string | null;
+  om_reason: string | null;
+  om_true_up_usd: string | null;
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const num = (v: string | null): number | null => (v === null ? null : Number(v));
+const OM_STATES = ['pending', 'matches', 'higher', 'unavailable'] as const;
+function outsideMeterOf(r: Pick<RunRow, 'om_state' | 'om_reason' | 'om_true_up_usd'>): RunInsight['outside_meter'] {
+  const state = OM_STATES.find((s) => s === r.om_state);
+  if (state === undefined) return { state: 'off', reason: null, added_usd: null };
+  const added = num(r.om_true_up_usd);
+  return {
+    state,
+    reason: state === 'unavailable' ? (r.om_reason ?? 'unknown') : null,
+    added_usd: (state === 'higher' || state === 'unavailable') && added !== null && added > 0 ? added : null,
+  };
+}
 const costSource = (s: string): CostSource | null => (COST_SOURCES.includes(s) ? (s as CostSource) : null);
 
 export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunInsight> {
@@ -129,7 +149,8 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
                                         WHEN jsonb_typeof(f) = 'object' THEN left(COALESCE(f->>'text', f->>'message', f->>'title', f->>'description'), $3::int)
                                    END)
                     FROM (SELECT f FROM jsonb_array_elements(envelope->'findings') AS f LIMIT $4::int) s
-                ) END AS findings
+                ) END AS findings,
+                om_state, om_reason, om_true_up_usd
            FROM agent_runs WHERE id = $1::uuid`,
         [id, ACTIVITY_LIMITS.maxSummaryChars + 1, INSIGHT_LIMITS.maxFindingChars + 1, INSIGHT_LIMITS.maxFindings + 1],
       )
@@ -235,6 +256,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       parent,
       escalated_from: escalatedFrom,
       children,
+      outside_meter: outsideMeterOf(r),
     };
   });
 }

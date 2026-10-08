@@ -143,6 +143,9 @@ importers:
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../../packages/runner-cloud
+      '@fx/spend':
+        specifier: workspace:*
+        version: link:../../packages/spend
       '@fx/telemetry':
         specifier: workspace:*
         version: link:../../packages/telemetry

@@ -27,6 +27,7 @@
     "@fx/reconcile": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/runner-cloud": "workspace:*",
+    "@fx/spend": "workspace:*",
     "@fx/telemetry": "workspace:*",
     "@fx/webhooks": "workspace:*",
     "@fx/worker": "workspace:*",

@@ -24,8 +24,16 @@ describe("GET /api/health", () => {
   it("answers 200 for a complete production environment, with no detail for an anonymous caller", async () => {
     const res = await call(completeEnv("production"));
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: null });
+    expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", outside_meter: "off", deploy_env: null });
     expect(res.cache).toBe("no-store");
+  });
+
+  it("reports outside_meter on only for exactly 'on'; unset or anything else is off, and no value is echoed", async () => {
+    for (const [v, want] of [["on", "on"], [undefined, "off"], ["", "off"], ["off", "off"], ["ON", "off"], ["1", "off"], ["true", "off"], ["on ", "off"]] as const) {
+      const res = await call({ ...completeEnv("production"), FX_OUTSIDE_METER: v });
+      expect(res.body.outside_meter, String(v)).toBe(want);
+    }
+    expect(JSON.stringify((await call({ FX_OUTSIDE_METER: "on" })).body)).not.toContain("FX_OUTSIDE_METER");
   });
 
   it("reports planData missing, without any value, when FX_PLAN_DATA is unset; the verdict itself is unchanged", async () => {
@@ -35,7 +43,7 @@ describe("GET /api/health", () => {
       resetPlanDataCache();
       const res = await call(completeEnv("production"));
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ok: true, config: "ok", planData: "missing", deploy_env: null });
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "missing", outside_meter: "off", deploy_env: null });
       expect(JSON.stringify(res.body)).not.toContain("FX_PLAN_DATA");
     } finally {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
@@ -48,7 +56,7 @@ describe("GET /api/health", () => {
     delete env.FX_CURSOR_KEY_V1;
     const res = await call(env);
     expect(res.status).toBe(503);
-    expect(res.body).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
+    expect(res.body).toEqual({ ok: false, config: "incomplete", planData: "ok", outside_meter: "off", deploy_env: null });
     expect(JSON.stringify(res.body)).not.toContain("FX_CURSOR_KEY");
   });
 
@@ -56,7 +64,7 @@ describe("GET /api/health", () => {
     const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
     delete env.FX_CURSOR_KEY_V1;
     for (const auth of [bearer("wrong"), bearer(""), OPERATOR_SECRET, `Basic ${OPERATOR_SECRET}`, bearer(`${OPERATOR_SECRET}x`)]) {
-      expect((await call(env, auth)).body, auth).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
+      expect((await call(env, auth)).body, auth).toEqual({ ok: false, config: "incomplete", planData: "ok", outside_meter: "off", deploy_env: null });
     }
   });
 
@@ -124,7 +132,7 @@ describe("GET /api/health", () => {
     it("on staging gives deploy_env, project_id and commit, to an anonymous caller too", async () => {
       const res = await call({ ...completeEnv("staging"), FX_DEPLOY_ENV: "staging", ...ids });
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, commit: ids.VERCEL_GIT_COMMIT_SHA });
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", outside_meter: "off", deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, commit: ids.VERCEL_GIT_COMMIT_SHA });
     });
 
     it("on staging reports a field Vercel did not set as null, so a reader can fail closed", async () => {
@@ -134,7 +142,7 @@ describe("GET /api/health", () => {
 
     it("on production gives deploy_env only: no project id and no commit, even when the platform sets them", async () => {
       const res = await call({ ...completeEnv("production"), FX_DEPLOY_ENV: "production", ...ids });
-      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", deploy_env: "production" });
+      expect(res.body).toEqual({ ok: true, config: "ok", planData: "ok", outside_meter: "off", deploy_env: "production" });
       const text = JSON.stringify(res.body);
       expect(text).not.toContain(ids.VERCEL_PROJECT_ID);
       expect(text).not.toContain(ids.VERCEL_GIT_COMMIT_SHA);
@@ -161,7 +169,7 @@ describe("GET /api/health", () => {
       for (const [key, value] of Object.entries({ ...completeEnv("staging"), FX_DEPLOY_ENV: "staging", ...ids })) vi.stubEnv(key, value);
       expect(await GET(new NextRequest("https://example.test/api/health")).json()).toMatchObject({ deploy_env: "staging", project_id: ids.VERCEL_PROJECT_ID, commit: ids.VERCEL_GIT_COMMIT_SHA });
       vi.stubEnv("FX_DEPLOY_ENV", "production");
-      expect(Object.keys((await GET(new NextRequest("https://example.test/api/health")).json()) as Record<string, unknown>).sort()).toEqual(["config", "deploy_env", "ok", "planData"]);
+      expect(Object.keys((await GET(new NextRequest("https://example.test/api/health")).json()) as Record<string, unknown>).sort()).toEqual(["config", "deploy_env", "ok", "outside_meter", "planData"]);
     });
   });
 
@@ -170,7 +178,7 @@ describe("GET /api/health", () => {
     vi.stubEnv("FX_CURSOR_KEY_V1", "");
     const anonymous = GET(new NextRequest("https://example.test/api/health"));
     expect(anonymous.status).toBe(503);
-    expect(await anonymous.json()).toEqual({ ok: false, config: "incomplete", planData: "ok", deploy_env: null });
+    expect(await anonymous.json()).toEqual({ ok: false, config: "incomplete", planData: "ok", outside_meter: "off", deploy_env: null });
     const operator = GET(new NextRequest("https://example.test/api/health", { headers: { authorization: bearer(OPERATOR_SECRET) } }));
     expect(await operator.json()).toMatchObject({ missing: ["FX_CURSOR_KEY_V1"] });
   });

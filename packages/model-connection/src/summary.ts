@@ -52,3 +52,27 @@ export async function getStatus(ctx: ModelConnectionCtx): Promise<ConnectionStat
     };
   });
 }
+
+/**
+ * D#221 OM-2c: what the outside meter has recorded for the connection's plan, for the connection page's label. `keyChanged` is
+ * true when the entitlement was recorded under a different key than the one stored now (the sweep's key reference: a sha256 of
+ * the connection id, ':' and the sealed key bytes), so the caller treats it as unknown. Reads no key material out of the
+ * database: the hash is computed there and only a boolean comes back. Null when the account has no connection.
+ */
+export async function getOutsideMeterEntitlement(
+  ctx: ModelConnectionCtx,
+): Promise<{ value: 'unknown' | 'yes' | 'no'; setAt: Date | null; keyChanged: boolean } | null> {
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    await assertActiveMembership(client, accountId, userId);
+    const { rows } = await client.query<{ value: 'unknown' | 'yes' | 'no'; set_at: Date | null; key_changed: boolean }>(
+      `SELECT outside_meter_entitlement AS value, outside_meter_entitlement_at AS set_at,
+              (outside_meter_key_ref IS NOT NULL
+               AND outside_meter_key_ref <> encode(sha256(convert_to(id::text, 'UTF8') || convert_to(':', 'UTF8') || key_ciphertext), 'hex')) AS key_changed
+         FROM model_connections WHERE account_id = $1`,
+      [accountId],
+    );
+    const row = rows[0];
+    return row ? { value: row.value, setAt: row.set_at, keyChanged: row.key_changed } : null;
+  });
+}

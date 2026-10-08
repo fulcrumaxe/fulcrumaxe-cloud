@@ -3,5 +3,10 @@
   "fingerprint": "a3f9",
   "status": "broken",
   "last_validated_at": "2026-09-29T10:15:30.000Z",
-  "last_error_code": "401"
+  "last_error_code": "401",
+  "outside_meter": {
+    "note": "Outside checks use this key's Custom Reporting at about $0.03 a run, and need a Vercel Pro or Enterprise team.",
+    "label": "beta",
+    "reason": "flag_off"
+  }
 }

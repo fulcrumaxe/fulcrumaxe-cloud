@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { NotFoundError } from '../../src/tenancy/errors.js';
-import { getTenantRowOrNotFound, type ScopedTable } from '../../src/tenancy/scopedAccess.js';
+import { AGENT_RUN_COLUMNS, getTenantRowOrNotFound, type ScopedTable } from '../../src/tenancy/scopedAccess.js';
 
 /**
  * H06 pass/fail item 3 (CWE-639): "a route handler test where account
@@ -75,6 +75,18 @@ describe('CWE-639: cross-account row access returns NotFoundError, never a permi
     await expect(
       getTenantRowOrNotFound(appUserPool, refsA.accountId, refsA.userId, 'run_events', runEventId),
     ).rejects.toThrow(NotFoundError);
+  });
+
+  it('the agent_runs row never carries the outside meter tag or key reference, and the column list is the table less those two', async () => {
+    await admin.query(`UPDATE agent_runs SET gateway_report_tag = $2, om_key_ref = $3 WHERE id = $1`, [refsA.runId, 'fxr_' + 'a'.repeat(26), 'b'.repeat(64)]);
+    const row = await getTenantRowOrNotFound<Record<string, unknown>>(appUserPool, refsA.accountId, refsA.userId, 'agent_runs', refsA.runId);
+    expect(row.id).toBe(refsA.runId);
+    expect(Object.keys(row)).not.toContain('gateway_report_tag');
+    expect(Object.keys(row)).not.toContain('om_key_ref');
+    expect(JSON.stringify(row)).not.toMatch(/fxr_a{26}|b{64}/);
+    const cols = (await admin.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_runs'`)).rows.map((r) => r.column_name);
+    const listed = AGENT_RUN_COLUMNS.split(',').map((c) => c.trim());
+    expect([...listed].sort()).toEqual(cols.filter((c) => c !== 'gateway_report_tag' && c !== 'om_key_ref').sort());
   });
 
   it('a genuinely nonexistent id also gets NotFoundError (same error as the cross-account case)', async () => {

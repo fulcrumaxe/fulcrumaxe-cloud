@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { installModelCallGuard } from "../../test-guard/src/guard.js";
 import {
-  GATEWAY_BASE_URL, MAX_READS, TAG_PATTERN, compareToMeter, effectiveEntitlement, interpretRead, isFinal, mintGatewayTag,
+  GATEWAY_BASE_URL, MAX_READS, OUTSIDE_METER_NOTE, TAG_PATTERN, type EndReason, compareToMeter, effectiveEntitlement, interpretRead, isFinal, mintGatewayTag,
   nextReadDueAt, outsideMeterLabel, outsideMeterOn, outsideMeterStatus, overheadUsd, readGatewayReport, reportUrl, type ReportRow,
 } from "../src/gatewayMeter.js";
 import { startGatewayReportFake, type FakeReport } from "./fakes/gatewayReport.js";
@@ -200,5 +200,14 @@ describe("overhead, entitlement, read outcomes, labels (C6 3.7, 3.8, 3.10)", () 
     ];
     expect(lines).toEqual(["Checking with the AI Gateway", "Matches the gateway", "Gateway figure higher: $0.50 added", "Outside check unavailable: not stable", "Outside check off"]);
     for (const l of lines) expect(l).not.toMatch(/null|undefined/);
+  });
+  it("the end reasons the sweep adds have named lines, and an unmet floor says what was added when a true-up was posted", () => {
+    const reasons: EndReason[] = ["not_stable", "no_rows", "plan_not_entitled", "auth_failed", "bad_request", "flag_off", "connection_changed", "contract_mismatch", "gateway_error", "no_metered_figure", "floor_unmet", "trueup_over_ceiling"];
+    for (const reason of reasons) expect(outsideMeterLabel({ state: "unavailable", reason })).toMatch(/^Outside check unavailable: [a-z ]+$/);
+    expect(outsideMeterLabel({ state: "unavailable", reason: "floor_unmet" })).toBe("Outside check unavailable: gateway saw fewer calls than the meter");
+    expect(outsideMeterLabel({ state: "unavailable", reason: "floor_unmet", addedUsd: 1 })).toBe("Outside check unavailable: gateway saw fewer calls than the meter. $1.00 added");
+    expect(outsideMeterLabel({ state: "unavailable", reason: "trueup_over_ceiling" })).toBe("Outside check unavailable: gateway figure held for review");
+    expect(outsideMeterLabel({ state: "unavailable", reason: "gateway_error" })).toBe("Outside check unavailable: gateway error");
+    expect(OUTSIDE_METER_NOTE).not.toMatch(/vck_|fxr_/);
   });
 });

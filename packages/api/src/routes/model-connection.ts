@@ -6,6 +6,7 @@ import {
   connect,
   envKekSource,
   fetchValidationHttpClient,
+  getOutsideMeterEntitlement,
   getStatus,
   InvalidModelKeyError,
   remove,
@@ -15,6 +16,7 @@ import {
   type ModelConnectionCtx,
   type ValidationHttpClient,
 } from "@fx/model-connection";
+import { OUTSIDE_METER_NOTE, effectiveEntitlement, outsideMeterOn, outsideMeterStatus } from "@fx/spend";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { SESSION_LIMITS } from "../ratelimit/session.js";
 import { ApiError } from "../errors.js";
@@ -49,6 +51,15 @@ export const modelConnectionResponseSchema = z.object({
   status: z.enum(["unvalidated", "ok", "broken"]),
   last_validated_at: z.string().nullable(),
   last_error_code: z.string().nullable(),
+  // D#221 OM-2c: for an ai_gateway key, the one line about outside checks and whether this connection counts as GA for the
+  // opencode backend (flag on and a plan that is not known to lack Custom Reporting); null for any other provider.
+  outside_meter: z
+    .object({
+      note: z.string(),
+      label: z.enum(["ga", "beta"]),
+      reason: z.enum(["flag_off", "plan_not_entitled"]).nullable(),
+    })
+    .nullable(),
 });
 
 const putModelConnectionBodySchema = z.object({
@@ -109,7 +120,22 @@ function serviceCtx(ctx: RouteContext): ModelConnectionCtx {
   };
 }
 
-function toDto(view: ConnectionStatusView): z.infer<typeof modelConnectionResponseSchema> {
+type ConnectionDto = z.infer<typeof modelConnectionResponseSchema>;
+
+/** The outside-meter line and label for a connection. Shows no key and no tag. */
+async function outsideMeterOf(ctx: ModelConnectionCtx, provider: ConnectionDto["provider"]): Promise<ConnectionDto["outside_meter"]> {
+  if (provider !== "ai_gateway") return null;
+  const e = await getOutsideMeterEntitlement(ctx);
+  const entitlement = e ? effectiveEntitlement({ value: e.value, setAt: e.setAt }, new Date(), e.keyChanged) : "unknown";
+  const s = outsideMeterStatus(outsideMeterOn(process.env.FX_OUTSIDE_METER), entitlement);
+  return { note: OUTSIDE_METER_NOTE, label: s.label, reason: s.label === "beta" ? s.reason : null };
+}
+
+async function present(ctx: ModelConnectionCtx, view: ConnectionStatusView): Promise<ConnectionDto> {
+  return { ...toDto(view), outside_meter: await outsideMeterOf(ctx, view.provider) };
+}
+
+function toDto(view: ConnectionStatusView): Omit<ConnectionDto, "outside_meter"> {
   return {
     provider: view.provider,
     fingerprint: view.fingerprint,
@@ -138,12 +164,12 @@ function invalidKeyError(err: InvalidModelKeyError): ApiError {
   return new ApiError(422, "invalid_model_key", "the model key was not accepted", [{ path: "key", code }]);
 }
 
-async function currentDto(ctx: ModelConnectionCtx): Promise<z.infer<typeof modelConnectionResponseSchema>> {
+async function currentDto(ctx: ModelConnectionCtx): Promise<ConnectionDto> {
   const view = await getStatus(ctx);
   if (!view) {
     throw new NotFoundError("no model connection");
   }
-  return toDto(view);
+  return present(ctx, view);
 }
 
 export const modelConnectionRoutes: RouteEntry[] = [
@@ -178,7 +204,7 @@ export const modelConnectionRoutes: RouteEntry[] = [
       const body = input.body as z.infer<typeof putModelConnectionBodySchema>;
       const svc = serviceCtx(ctx);
       try {
-        return toDto(await connect(svc, { provider: body.provider, key: body.key }));
+        return await present(svc, await connect(svc, { provider: body.provider, key: body.key }));
       } catch (err) {
         if (err instanceof InvalidModelKeyError) {
           throw invalidKeyError(err);

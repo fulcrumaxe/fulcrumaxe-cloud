@@ -57,5 +57,11 @@
     "created_at": "2026-10-03T09:40:00.000Z"
   },
   "escalated_from": null,
-  "children": []
+  "children": [],
+  "outside_meter": {
+    "state": "off",
+    "reason": null,
+    "added_usd": null,
+    "text": "Outside check off"
+  }
 }

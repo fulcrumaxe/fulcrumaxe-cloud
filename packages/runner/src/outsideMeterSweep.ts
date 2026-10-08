@@ -4,7 +4,7 @@ import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import {
   GATEWAY_PRICES, MAX_READS, MAX_TAGS_PER_QUERY, compareToMeter, effectiveEntitlement, interpretRead, isFinal, mintGatewayTag, nextReadDueAt,
-  readGatewayReport, roundUsd, type Entitlement, type ReportRow, type UnavailableReason,
+  readGatewayReport, roundUsd, type Entitlement, type EndReason, type ReportRow,
 } from "@fx/spend";
 import type { DecryptTenantKey, EncryptedTenantKey } from "./firewallPolicy.js";
 
@@ -77,8 +77,7 @@ export interface OutsideMeterDeps {
 
 export interface OutsideMeterResult { listed: number; waiting: number; read: number; final: number; unavailable: number; failed: number; skipped: number; late?: number }
 
-/** Reasons this sweep ends a run with, beyond @fx/spend's: the last read was a transient failure, or the run's settled model figure never turned up. */
-type EndReason = UnavailableReason | "gateway_error" | "no_metered_figure" | "floor_unmet" | "trueup_over_ceiling";
+export type { EndReason };
 
 /** Every flag this sweep (and the late-finalize backstop, and @fx/spend's contract break) raises. `outside_meter_flag_counts` counts exactly these; a test holds the two equal. */
 export const FLAG = {
@@ -89,20 +88,18 @@ export const FLAG = {
 
 /**
  * The most a true-up may post on its own: twice the run's per-run dollar cap for each spawn, never under a fixed floor. The number of spawns a
- * run took is not stored, so it is 1 plus the most resumes its limits allow. If the limits cannot be read the cap counts as 0, so the
+ * run took is not stored, so it is 1 plus the most resumes its limits allow. If the limits are not usable numbers the cap counts as 0, so the
  * fixed floor holds: a held true-up goes to the owner, a wrongly posted one is a charge.
  */
 export async function trueUpCeilingUsd(pool: Pool, r: { account_id: string; run_id: string }): Promise<number> {
-  try {
-    const limits = await withTenant(pool, r.account_id, async (c) => {
-      const role = (await c.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [r.account_id, r.run_id])).rows[0]?.role ?? "";
-      return resolveRunLimits(c, { accountId: r.account_id, role });
-    });
-    return Math.max(5, 2 * limits.per_run_usd * (1 + limits.max_resumes));
-  } catch {
-    // fx-swallow-ok: unreadable limits (or plan data) mean the fixed floor, the safe side: the true-up is held for the owner
-    return 5;
-  }
+  // A database failure is not caught: it propagates, the run stays pending and the next tick tries again (a held true-up is an owner escalation, not a retry).
+  // A persistent throw here re-reads the gateway on every tick for that run (about $0.005 a read) until the database answers; that is the price of never posting a charge blind.
+  const limits = await withTenant(pool, r.account_id, async (c) => {
+    const role = (await c.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [r.account_id, r.run_id])).rows[0]?.role ?? "";
+    return resolveRunLimits(c, { accountId: r.account_id, role });
+  });
+  const cap = 2 * limits.per_run_usd * (1 + limits.max_resumes);
+  return Number.isFinite(cap) ? Math.max(5, cap) : 5;
 }
 
 const TICK_BUDGET_MS = 300_000;
@@ -115,7 +112,15 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
   const out: OutsideMeterResult = { listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 };
   // Backstop (OM-2b2): a tagged run that has been terminal for over 10 minutes with no clock started is finalized now, at its own end time, and flagged.
   out.late = 0;
-  for (const u of (await deps.pool.query<{ account_id: string; run_id: string }>(`SELECT * FROM outside_meter_list_unfinalized($1)`, [200])).rows) {
+  let unfinalized: { account_id: string; run_id: string }[] = [];
+  try {
+    unfinalized = (await deps.pool.query<{ account_id: string; run_id: string }>(`SELECT * FROM outside_meter_list_unfinalized($1)`, [200])).rows;
+  } catch (err) {
+    // fx-swallow-ok: counted as failed and handed to onError; the due reads below still run and the next tick looks again
+    out.failed++;
+    deps.onError?.(null, err);
+  }
+  for (const u of unfinalized) {
     try {
       const done = await withTenant(deps.pool, u.account_id, (c) => c.query<{ ok: boolean }>(`SELECT agent_run_outside_meter_late_finalize($1::uuid, $2::uuid) AS ok`, [u.account_id, u.run_id]));
       if (done.rows[0]?.ok) out.late++;
@@ -224,7 +229,7 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
             await withTenant(deps.pool, first.payer_account_id, (c) => c.query(`SELECT outside_meter_set_entitlement($1::uuid, $2::uuid, $3, $4)`, [first.payer_account_id, conn!.connectionId, verdict.entitlement, keyRef]));
           }
           // A transient failure (5xx, timeout) changes no state and costs nothing, but it is a read: the schedule moves on, and on the last one the run ends.
-          if (outcome.kind === "transient") return last ? finish(r, "gateway_error", reads, [FLAG.unavailable]) : record(r, { state: "pending", reads, next: nextReadDueAt(r.finalized_at, reads) });
+          if (outcome.kind === "transient") return last ? finish(r, "gateway_error", reads, [FLAG.unavailable]) : record(r, { state: "pending", reads, next: nextReadDueAt(r.finalized_at, reads), row: r.last_count === null ? undefined : { tag: r.tag, totalCost: Number(r.last_cost), surchargeCost: 0, requestCount: r.last_count } });
           const flags = verdict.flag ? [verdict.flag] : [];
           if (typeof verdict.run === "object") return finish(r, verdict.run.unavailable, reads, verdict.run.flag ? [FLAG.badRequest] : flags);
           const next = nextReadDueAt(r.finalized_at, reads);
@@ -249,7 +254,7 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
           const held = cmp.trueUpUsd > (await trueUpCeilingUsd(deps.pool, r));
           const f = [
             ...(r.metered_calls === null ? [FLAG.noCount] : []), ...(cmp.disagree ? [FLAG.disagree] : []), ...(cmp.escalate ? [FLAG.escalate] : []),
-            ...(held ? [FLAG.trueupHeld] : floorUnmet ? [FLAG.floorUnmet] : []),
+            ...(held ? [FLAG.trueupHeld] : []), ...(floorUnmet ? [FLAG.floorUnmet] : []),
           ];
           // The lines first (each unique per run, so a repeat is a no-op), then the result: a crash between them re-reads and finds both done.
           if (cmp.trueUpUsd > 0 && !held) await postLine(r, cmp.trueUpUsd, "outside_meter");

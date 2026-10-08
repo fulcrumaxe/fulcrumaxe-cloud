@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
+import { createHash } from 'node:crypto';
+import { OUTSIDE_METER_NOTE } from '@fx/spend';
 import { createPool } from '@fx/db/src/pool.js';
 import { insertApiToken } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
@@ -35,6 +37,7 @@ interface Dto {
   status: string;
   last_validated_at: string | null;
   last_error_code: string | null;
+  outside_meter: { note: string; label: string; reason: string | null } | null;
 }
 
 interface ErrorBody {
@@ -179,7 +182,7 @@ describe('D#31 API-2: model-connection routes', () => {
     const putRes = await put(owner, key);
     expect(putRes.status).toBe(200);
     const putDto = (await putRes.json()) as Dto;
-    expect(Object.keys(putDto).sort()).toEqual(['fingerprint', 'last_error_code', 'last_validated_at', 'provider', 'status']);
+    expect(Object.keys(putDto).sort()).toEqual(['fingerprint', 'last_error_code', 'last_validated_at', 'outside_meter', 'provider', 'status']);
     expect(putDto.provider).toBe('ai_gateway');
     expect(putDto.status).toBe('ok');
     expect(putDto.fingerprint).toMatch(/^[0-9a-f]{4}$/);
@@ -314,7 +317,7 @@ describe('D#31 API-2: model-connection routes', () => {
 
     const getRes = await dispatch(bearer('GET'));
     expect(getRes.status).toBe(200);
-    expect(Object.keys((await getRes.json()) as Dto).sort()).toEqual(['fingerprint', 'last_error_code', 'last_validated_at', 'provider', 'status']);
+    expect(Object.keys((await getRes.json()) as Dto).sort()).toEqual(['fingerprint', 'last_error_code', 'last_validated_at', 'outside_meter', 'provider', 'status']);
 
     for (const req of [bearer('PUT', '', { provider: 'ai_gateway', key: freshKey() }), bearer('DELETE'), bearer('POST', '/test')]) {
       const res = await dispatch(req);
@@ -493,5 +496,50 @@ describe('D#31 API-2: model-connection routes', () => {
   it('criterion 6: no apps/web/app/api/model-connection route file exists (the catch-all owns the path)', () => {
     const file = path.join(__dirname, '..', '..', '..', 'apps', 'web', 'app', 'api', 'model-connection', 'route.ts');
     expect(() => readFileSync(file)).toThrow();
+  });
+
+  // D#221 OM-2c: the outside-meter line on an ai_gateway connection, and its GA / beta label (R3-3 reads it).
+  describe('outside meter line', () => {
+    afterEach(() => {
+      delete process.env.FX_OUTSIDE_METER;
+    });
+    const setEntitlement = async (accountId: string, value: string, ageDays: number, stale = false) => {
+      const c = (await admin.query<{ id: string; key_ciphertext: Buffer }>(`SELECT id, key_ciphertext FROM model_connections WHERE account_id = $1`, [accountId])).rows[0]!;
+      const ref = createHash('sha256').update(c.id).update(':').update(c.key_ciphertext).digest('hex');
+      await admin.query(
+        `UPDATE model_connections SET outside_meter_entitlement = $2, outside_meter_entitlement_at = now() - make_interval(days => $3), outside_meter_key_ref = $4 WHERE account_id = $1`,
+        [accountId, value, ageDays, stale ? 'f'.repeat(64) : ref],
+      );
+    };
+    const line = async (id: Identity) => ((await (await call(id, 'GET')).json()) as Dto).outside_meter;
+
+    it('says what the checks cost and need, never shows a key or a tag, and labels beta with a named reason or GA', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      const key = freshKey();
+      const res = await put(owner, key);
+      const dto = (await res.json()) as Dto;
+      expect(dto.outside_meter).toEqual({ note: OUTSIDE_METER_NOTE, label: 'beta', reason: 'flag_off' });
+      expect(OUTSIDE_METER_NOTE).toContain('$0.03 a run');
+      expect(JSON.stringify(dto)).not.toMatch(new RegExp(`${key}|fxr_`));
+      process.env.FX_OUTSIDE_METER = 'on';
+      expect(await line(owner)).toMatchObject({ label: 'ga', reason: null });
+      await setEntitlement(owner.accountId, 'no', 1);
+      expect(await line(owner)).toMatchObject({ label: 'beta', reason: 'plan_not_entitled' });
+      await setEntitlement(owner.accountId, 'no', 8); // forgotten after 7 days
+      expect(await line(owner)).toMatchObject({ label: 'ga' });
+      await setEntitlement(owner.accountId, 'no', 1, true); // recorded under another key
+      expect(await line(owner)).toMatchObject({ label: 'ga' });
+      process.env.FX_OUTSIDE_METER = 'ON';
+      expect(await line(owner)).toMatchObject({ label: 'beta', reason: 'flag_off' });
+    });
+
+    it('a connection on another provider has no line', async () => {
+      const owner = await seedAccountWithMember(admin, { role: 'owner' });
+      await admin.query(
+        `INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint) VALUES ($1, 'anthropic', '\x01', '\x02', '\x03', 1, 'abcd')`,
+        [owner.accountId],
+      );
+      expect(await line(owner)).toBeNull();
+    });
   });
 });
