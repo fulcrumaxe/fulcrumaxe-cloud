@@ -8,6 +8,15 @@ import type { SpawnFn } from "../../../src/engines/claude/capture.js";
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 export const DEFAULT_VERSION = "2.1.289";
 
+/** A run id as the job schema types it: a uuid. */
+export const RUN_ID = "3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";
+
+/**
+ * What the fake prints on stderr when `unknown-option` is set. Synthetic, not captured: no real build was made to reject
+ * a flag, so the wording is invented. The engine's backstop only needs the phrase "unknown option" to be in it.
+ */
+export const SYNTHETIC_UNKNOWN_OPTION_STDERR = "error: unknown option '--permission-prompts'";
+
 /** The real `claude --help` of the captured build (2.1.289). */
 export const FULL_HELP = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "help.2.1.289.txt"), "utf8");
 
@@ -42,12 +51,16 @@ export interface Fake {
   envText(): string;
   set(file: string, text: string): void;
   spawnCount(): number;
+  /** The pid of the background process the fake started, once it has. */
+  grandchildPid(): number | undefined;
 }
 
 /**
  * A shell script standing in for the installed binary. `--version`, `--help` and `auth status` answer from files in `dir`; any other
  * call records its argv, standard input and environment, then prints `stream.jsonl` (and stderr.txt) and exits, or
- * replaces itself with a long sleep when `hang` exists, so a signal ends it.
+ * replaces itself with a long sleep when `hang` exists, so a signal ends it. When `grandchild` exists it first starts a
+ * background process in the same group that ignores SIGTERM (its pid goes to grandchild.pid), like a tool call's
+ * leftover process.
  */
 export function makeFake(opts: { stream?: string; auth?: string; version?: string; help?: string } = {}): Fake {
   const dir = mkdtempSync(path.join(tmpdir(), "r4b12_fake-"));
@@ -61,7 +74,9 @@ case "$1" in
   --help) cat "$D/help.txt"; exit 0;;
   auth) [ -f "$D/auth.sleep" ] && exec sleep 30; cat "$D/auth.json"; [ -f "$D/auth.fail" ] && exit 1; exit 0;;
 esac
-[ -f "$D/unknown-option" ] && { echo "error: unknown option '--permission-prompts'" >&2; exit 1; }
+# synthetic, not captured (see SYNTHETIC_UNKNOWN_OPTION_STDERR in harness.ts)
+[ -f "$D/unknown-option" ] && { echo "${SYNTHETIC_UNKNOWN_OPTION_STDERR}" >&2; exit 1; }
+[ -f "$D/grandchild" ] && { (trap '' TERM; exec sleep 60) & echo $! > "$D/grandchild.pid"; }
 printf '%s\\n' "$@" > "$D/argv.txt"
 env > "$D/env.txt"
 cat > "$D/stdin.txt"
@@ -81,6 +96,10 @@ exit "$(cat "$D/exit-code" 2>/dev/null || echo 0)"
     envText: () => readFileSync(path.join(dir, "env.txt"), "utf8"),
     set: (file, text) => writeFileSync(path.join(dir, file), text),
     spawnCount: () => fake.calls().length,
+    grandchildPid: () => {
+      const file = path.join(dir, "grandchild.pid");
+      return existsSync(file) ? Number(readFileSync(file, "utf8").trim()) || undefined : undefined;
+    },
   };
   fake.set("stream.jsonl", opts.stream ?? (existsSync(path.join(FIXTURES, "stream.subscription.jsonl")) ? fixtureText("stream.subscription.jsonl") : ""));
   fake.set("help.txt", opts.help ?? FULL_HELP);

@@ -12,6 +12,14 @@ the daemon come in later changes.
   is the last thing in it. Nothing in this package runs a string that came from a job.
 - `src/job/cleanEnv.ts`: builds the agent's environment from a fixed list of names. The host environment is never
   copied as a whole, so an API key, a cloud token or a git token in your shell cannot reach the agent.
+- `src/engines/claude/`: the engine that starts the agent CLI you have installed. It does not pin or hash the binary:
+  it uses the absolute path stored when you ran setup. Before each job it checks that the binary at that path is at least
+  the minimum supported version, that its `--help` lists every flag the engine passes, and (by asking the binary) that a
+  login of the right kind exists. It then spawns the binary itself (no shell, an explicit argument list, the clean
+  environment as its whole environment, its own process group so that a stop ends everything the agent started) with the
+  prompt on standard input. It refuses a run id that is not a uuid and a sandbox block that is not switched on, checks
+  where the binary says its credential came from before it processes any output, keeps the raw stream only in
+  `~/.fx-runner/logs/<run>.jsonl` (0600, credential values removed) and reports metadata-only events.
 
 ## Boundaries
 

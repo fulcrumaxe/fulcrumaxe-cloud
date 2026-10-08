@@ -10,3 +10,5 @@ export * from "./job.js";
 export * from "./jobSignature.js";
 export * from "./httpSignature.js";
 export * from "./copy.js";
+export { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "./streamJson.js";
+export { normalizeRepoPath } from "./toolActivity.js";

@@ -23,6 +23,18 @@ import ts from "typescript";
  */
 export const ENV_READER_FILE = "src/job/cleanEnv.ts";
 
+/**
+ * The one other file that may name `process`: it signals the agent's process group, which only `process.kill` can do.
+ * There `process` is allowed as the object of a non-optional `.kill` or `.platform` access and nowhere else, so it
+ * still cannot read the environment.
+ */
+export const PROCESS_GROUP_FILE = "src/engines/claude/processGroup.ts";
+
+function isGroupSignalUse(node: ts.Identifier): boolean {
+  const access = node.parent;
+  return ts.isPropertyAccessExpression(access) && access.expression === node && !access.questionDotToken && (access.name.text === "kill" || access.name.text === "platform");
+}
+
 const ENGINE_FILES = ["src/engines/claude/capture.ts", "src/engines/claude/engine.ts"];
 
 /**
@@ -34,7 +46,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/pin.ts": ["fs", "path"],
-  "src/engines/claude/session.ts": ["fs", "path"],
+  "src/engines/claude/session.ts": ["crypto", "fs", "path"], // crypto: random temp-file names for the index write
+  "src/engines/claude/processGroup.ts": [],
   "src/engines/claude/settingsFile.ts": ["fs", "path"],
   "src/engines/claude/stream.ts": ["fs", "path"],
 };
@@ -167,7 +180,9 @@ export function envAccessViolations(text: string, file: string = ENV_READER_FILE
     if (ts.isIdentifier(node)) {
       const name = node.text;
       if (name === "process") {
-        if (file !== ENV_READER_FILE) found.add("process outside the environment reader");
+        if (file === PROCESS_GROUP_FILE) {
+          if (!isGroupSignalUse(node)) found.add("process used other than as process.kill or process.platform");
+        } else if (file !== ENV_READER_FILE) found.add("process outside the environment reader");
         else if (!isNamedLookup(node)) found.add("process used other than as process.env.NAME or process.env[name]");
       } else if (name === "globalThis" || name === "global") {
         found.add("globalThis or global");
