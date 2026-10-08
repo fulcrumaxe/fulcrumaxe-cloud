@@ -77,3 +77,27 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
   }
   return env;
 }
+
+/**
+ * What the runner's own git commands start with. The same shape as the agent's environment, minus every credential the
+ * agent holds, plus the two names git needs to find the user's own setup: `XDG_CONFIG_HOME` (where git looks for the user's
+ * config, and with it their credential helper) and `SSH_AUTH_SOCK` (for an ssh remote). Looked up by name like the rest.
+ */
+export const GIT_ENV_ALLOWLIST: readonly string[] = Object.freeze([...HOST_ENV_ALLOWLIST, "XDG_CONFIG_HOME", "SSH_AUTH_SOCK"]);
+
+/** Set on every git command: a helper that would ask on a terminal fails instead of waiting for someone who is not there. */
+export const GIT_FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ GIT_TERMINAL_PROMPT: "0" });
+
+/** Builds the environment for a git command. Never holds the subscription token or the API key. */
+export function gitEnv(options: CleanEnvOptions = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of GIT_ENV_ALLOWLIST) {
+    const value = process.env[name];
+    if (typeof value === "string" && value !== "") env[name] = value;
+  }
+  const widened = withDirs(env.PATH, options.extraPathDirs ?? []);
+  if (widened !== undefined) env.PATH = widened;
+  else delete env.PATH;
+  Object.assign(env, GIT_FIXED_ENV);
+  return env;
+}

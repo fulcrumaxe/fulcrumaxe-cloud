@@ -36,6 +36,8 @@ export interface HostSandboxConfig {
   binaryDir: string;
   /** The repository's declared registry hosts, none by default. */
   registries?: readonly string[];
+  /** Where the repo mirrors live (git path B, C25 section 2): never writable, and open to a job only for one mirror's `objects` directory, passed as the job's `extraReadPaths`. */
+  mirrorsRoot?: string;
 }
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
@@ -141,6 +143,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       tempRoot: config.tempRoot,
       ...(config.extraRoots === undefined ? {} : { extraRoots: config.extraRoots }),
       ...(config.registries === undefined ? {} : { registries: config.registries }),
+      ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
+      ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
       extraDomains: opts.networkPolicy.map((rule) => rule.host),
     });
     assertEnabledSandbox(sandbox);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256Text } from "@fulcrumaxe/runner-protocol";
 import { verifyJob } from "../../src/daemon/verifyJob.js";
+import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { KEYRING, NOW, OTHER_KEYRING, jobFor, signRaw, signedJob } from "../helpers/signedJob.js";
 
 const check = (signed: unknown, keyring = KEYRING, now = NOW) => verifyJob(signed, keyring, now);
@@ -55,6 +56,19 @@ describe("verifyJob refuses, with a closed reason, every job it should not run",
     expect(check(signRaw({ ...base, role_tools_sha256: sha256Text("Bash") }))).toEqual({ ok: false, reason: "role_tools_mismatch" });
     // the control: the same job with matching digests passes
     expect(check(signRaw(base)).ok).toBe(true);
+  });
+});
+
+describe("only an executor job continues an earlier run (C25 section 3.2)", () => {
+  const continues = { parent_run_id: "22222222-2222-4222-8222-222222222222", session_id: "s1", branch: "fx/22222222-2222-4222-8222-222222222222-g1" };
+  it("a continuation on any other role is refused as continues_wrong_role, with the signature and the digests good", () => {
+    for (const role of ["code-reviewer", "docs-writer", "security-reviewer", "project-manager"] as const) {
+      expect(check(signRaw(jobFor({ role, role_tools_sha256: roleToolsDigest(role), continues }))), role).toEqual({ ok: false, reason: "continues_wrong_role" });
+    }
+  });
+  it("the executor's continuation, and any other role without one, pass", () => {
+    expect(check(signRaw(jobFor({ continues }))).ok).toBe(true);
+    expect(check(signRaw(jobFor({ role: "docs-writer", role_tools_sha256: roleToolsDigest("docs-writer") }))).ok).toBe(true);
   });
 });
 

@@ -65,6 +65,13 @@ export interface SandboxInput {
   extraReadPaths?: readonly string[];
   extraWritePaths?: readonly string[];
   extraDomains?: readonly string[];
+  /**
+   * The directory the repo mirrors live in (D#6 R4a-3, C25 section 2), absolute. It is a runner-owned root that no write may
+   * reach (it is in `denyWrite`, and unreadable like the home directory), and the only grant under it is ONE read-only
+   * `<mirrors root>/<id>.git/objects` in `extraReadPaths`: what a workspace made with `--reference` needs, and nothing else of any mirror.
+   * It may not overlap the state directory, the binary directory, the workspace and temp roots, the credential floor or a persistence target.
+   */
+  mirrorsRoot?: string;
 }
 
 const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -113,7 +120,7 @@ function realOf(value: string): string {
 }
 
 /** Two paths overlap if either contains the other, as written or once symlinks are followed. */
-function overlaps(a: string, b: string): boolean {
+export function pathsOverlap(a: string, b: string): boolean {
   for (const x of [a, realOf(a)]) for (const y of [b, realOf(b)]) if (inside(x, y, true) || inside(y, x, true)) return true;
   return false;
 }
@@ -122,12 +129,29 @@ function assertGrantable(label: string, value: string, home: string, guarded: re
   if (!path.isAbsolute(value) || value.split(path.sep).includes("..") || value !== path.normalize(value)) throw new SandboxGrantRefused(`sandboxSettings: ${label} must be a normalised absolute path`);
   const trimmed = value.length > 1 && value.endsWith(path.sep) ? value.slice(0, -1) : value;
   if ((inside(trimmed, home, true) && inside(home, trimmed, true)) || NEVER_GRANTED.includes(trimmed) || /\.sock$/.test(trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} may not be the home directory, a system directory or a socket`);
-  for (const protectedPath of guarded) if (overlaps(protectedPath, trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} overlaps a protected location`);
+  for (const protectedPath of guarded) if (pathsOverlap(protectedPath, trimmed)) throw new SandboxGrantRefused(`sandboxSettings: ${label} overlaps a protected location`);
   // An allowlist, compared exactly (no case folding): the grant, and where it really lands once symlinks are followed,
   // must both be strictly under a runner-owned root. A grant equal to a root is the root itself, not a child of it.
   const under = (root: string, grant: string): boolean => inside(root, grant) && (mayEqualRoot || path.relative(root, grant) !== "");
   if (!roots.some((root) => under(root, trimmed) && under(realOf(root), realOf(trimmed)))) throw new SandboxGrantRefused(`sandboxSettings: ${label} is not under a runner-owned root`);
   return trimmed;
+}
+
+const MIRROR_OBJECTS = /^[^/\\]+\.git[/\\]objects$/;
+
+/**
+ * Under the mirrors root the only grant is one read of one repo's `objects` directory. Refused: any write, the root or a parent of it,
+ * a mirror's `config`, `hooks`, `refs` or `packed-refs`, a second mirror, and an `objects` directory that is a link to somewhere else.
+ */
+function assertMirrorGrants(mirrorsRoot: string, reads: readonly string[], writes: readonly string[]): void {
+  if (writes.some((value) => pathsOverlap(mirrorsRoot, value))) throw new SandboxGrantRefused("sandboxSettings: extra write path overlaps the mirrors root");
+  const under = reads.filter((value) => pathsOverlap(mirrorsRoot, value));
+  if (under.length > 1) throw new SandboxGrantRefused("sandboxSettings: only one mirror may be read");
+  for (const value of under) {
+    const rel = path.relative(mirrorsRoot, value);
+    const real = path.relative(realOf(mirrorsRoot), realOf(value));
+    if (!MIRROR_OBJECTS.test(rel) || real !== rel) throw new SandboxGrantRefused("sandboxSettings: the only read allowed in the mirrors root is one mirror's objects directory");
+  }
 }
 
 /**
@@ -158,9 +182,11 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const guarded = [...listed.noAccess, ...listed.noEdit];
   const workspace = assertGrantable("workspace", input.workspace, home, guarded, [path.normalize(input.workspaceRoot)]);
   const tempDir = assertGrantable("tempDir", input.tempDir, home, guarded, [path.normalize(input.tempRoot)]);
-  const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true))];
+  const mirrorsRoot = input.mirrorsRoot === undefined ? undefined : assertGrantable("mirrors root", input.mirrorsRoot, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot)], [input.mirrorsRoot], true);
+  const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true)), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])];
   const extraRead = (input.extraReadPaths ?? []).map((value) => assertGrantable("extra read path", value, home, guarded, roots));
   const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded, roots));
+  if (mirrorsRoot !== undefined) assertMirrorGrants(mirrorsRoot, extraRead, extraWrite);
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
   const unique = (values: string[]): string[] => [...new Set(values)];
   return {
@@ -174,8 +200,8 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
     filesystem: {
       disabled: false,
       allowWrite: unique([workspace, tempDir, ...extraWrite]),
-      denyWrite: [path.normalize(input.stateDir), path.normalize(input.binaryDir)],
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir)]),
+      denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
       allowRead: unique([workspace, tempDir, ...extraRead]),
     },
     credentials: { files: floor.map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },

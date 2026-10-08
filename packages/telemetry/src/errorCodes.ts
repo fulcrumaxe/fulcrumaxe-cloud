@@ -110,6 +110,16 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "bad_segment",
   // Local runner (D#6): the daemon ledger is held by another process.
   "ledger_locked",
+  // Local runner (D#6 R4a-3): the git path (mirror, workspace, push) failed, or refused a ref or a run it will not push.
+  "mirror_failed",
+  "mirror_dir_insecure",
+  "workspace_failed",
+  "push_failed",
+  "push_ref_refused",
+  "continuation_unsupported",
+  // Local runner (D#6 R4a-3 fix round 3): the copy of the workspace's git files was refused, or git is older than the minimum.
+  "snapshot_refused",
+  "git_version_unsupported",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

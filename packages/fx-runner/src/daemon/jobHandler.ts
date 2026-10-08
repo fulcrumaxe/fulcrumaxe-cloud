@@ -8,12 +8,17 @@
  *  - the daemon is shutting down: one best-effort `run_ended` `runner_shutdown`, given 5 seconds;
  *  - the run failed: the queued events are flushed first, then `run_ended` goes last (never for a credential mismatch);
  *  - the process dies, or `done` is never confirmed: nothing can be sent, and the lease runs out as before.
- * The push of the run's branch (git path B) belongs between the run and `done`; it is a later change's step.
+ * Git path B (D#6 R4a-3) surrounds the run: before it, `git.check` refuses a job it will not push and the fresh workspace is filled from the
+ * repo's mirror; after it, the agent's commit is pushed to the run's branch, outside the sandbox, so `done` finds it. A git failure ends the
+ * run like any setup failure: a closed code, `run_ended` `runner_setup`.
  */
 import { DONE_RETRY_AFTER_SECONDS, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import type { SandboxPort } from "../sandbox/port.js";
+import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
+import { GitPathError } from "./git.js";
+import type { GitPath } from "./gitPath.js";
 import { startLease, type Clock, type Lease, type LeaseEnd, type createEventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
@@ -43,6 +48,8 @@ export interface JobHandlerDeps {
   run: Omit<RunJobDeps, "sandbox" | "ledger">;
   sandbox: SandboxPort;
   ledger: JobLedger;
+  /** Git path B: the mirror, the workspace and the push. */
+  git: GitPath;
   events: ReturnType<typeof createEventRelay>;
   /** Writes the local session index the next fix round reads (the engine's own recorder, bound to its file). */
   recordSession: (sessionId: string, workspace: string) => Promise<void>;
@@ -53,6 +60,16 @@ export interface JobHandlerDeps {
   heartbeatMs?: number;
   flushMs?: number;
   doneAttempts?: number;
+}
+
+/** A port whose every start carries these read grants (git path B: the repo mirror's `objects` directory). The host sandbox's builder checks each one again. */
+function withReadGrants(port: SandboxPort, paths: readonly string[]): SandboxPort {
+  const grant = <T extends { extraReadPaths?: readonly string[] | undefined }>(opts: T): T => ({ ...opts, extraReadPaths: [...(opts.extraReadPaths ?? []), ...paths] });
+  return {
+    ...port,
+    startDetached: (handle, opts) => port.startDetached(handle, grant(opts)),
+    resume: (handle, sessionId, prompt, opts) => port.resume(handle, sessionId, prompt, grant(opts)),
+  };
 }
 
 /** A port whose sandbox is stopped as soon as `signal` aborts, which ends the agent and so the run. */
@@ -118,7 +135,19 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const detach = deps.events.attach((event) => lease.push(event));
     let abandonSend = false;
     try {
-      const result = await run(job, { ...deps.run, sandbox: stopOnAbort(deps.sandbox, stopRun), ledger: deps.ledger });
+      const started: { base?: string } = {};
+      let result: RunJobResult;
+      try {
+        deps.git.check(job, claimed);
+        const fill = async (workspace: string): Promise<void> => {
+          started.base = (await deps.git.prepare(job, claimed, workspace)).base;
+        };
+        result = await run(job, { ...deps.run, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, deps.git.readGrants(job)), stopRun), ledger: deps.ledger });
+      } catch (error) {
+        // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
+        if (!(error instanceof GitPathError)) throw error;
+        result = { status: "failed", reason: error.code };
+      }
       if (result.status === "duplicate") {
         // A ledger that refused because it could not record the id (damaged file, failed write) has not seen this job before, so it is
         // not a repeat: nothing is sent, and the lease path decides, as it did before the report existed.
@@ -145,6 +174,17 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         const end = lease.saw("credential_mismatch") ? null : endOfFailure(result.reason);
         if (end !== null) await reportEnd(lease, end);
         return { status: "failed", reason: result.reason };
+      }
+      try {
+        if (started.base === undefined) throw new GitPathError("push_failed");
+        await deps.git.publish(job, claimed, result.workspace, started.base);
+      } catch (error) {
+        if (!(error instanceof GitPathError)) throw error;
+        await lease.flush();
+        const stopped = lease.ended();
+        if (stopped !== undefined) return stoppedBy(stopped);
+        await reportEnd(lease, endOfFailure(error.code)!);
+        return { status: "failed", reason: error.code };
       }
       await lease.flush();
       const sent = await sendDone(claimed, result, lease);
@@ -176,6 +216,24 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     }
     return { status: "unconfirmed" };
   }
+}
+
+/** A store whose `create` also fills the new directory; a directory that cannot be filled is removed and the error passes on. */
+function filledWith(store: WorkspaceStore, fill: (workspace: string) => Promise<void>): WorkspaceStore {
+  return {
+    owns: (dir) => store.owns(dir),
+    discard: (dir) => store.discard(dir),
+    async create(runId) {
+      const dir = await store.create(runId);
+      try {
+        await fill(dir);
+      } catch (error) {
+        await store.discard(dir).catch(() => undefined); // fx-swallow-ok: the fill's own error is the one that matters
+        throw error;
+      }
+      return dir;
+    },
+  };
 }
 
 const stoppedBy = (ended: LeaseEnd): JobResult => ({ status: "stopped", reason: ended.kind === "stopped" ? ended.reason : "lease_lost" });
