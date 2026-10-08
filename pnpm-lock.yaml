@@ -595,6 +595,9 @@ importers:
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner
+      '@fx/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0

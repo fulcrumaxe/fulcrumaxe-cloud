@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("cleanEnv allowlist", () => {
   it("is a constant list, deep-equal to the documented one", () => {
     expect([...HOST_ENV_ALLOWLIST]).toEqual(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ"]);
-    expect(FIXED_ENV).toEqual({ DISABLE_UPDATES: "1", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
+    expect(FIXED_ENV).toEqual({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
     expect(Object.isFrozen(HOST_ENV_ALLOWLIST)).toBe(true);
   });
 
@@ -174,6 +174,15 @@ describe("cleanEnv allowlist", () => {
     expect(envAccessViolations("const s = opts.spawn;", "src/engines/claude/pin.ts")).not.toEqual([]);
   });
 
+  it("the guard requires a spawn-prefixed name for anything typed SpawnFn or typeof spawn", () => {
+    const capture = "src/engines/claude/capture.ts";
+    const head = "import type { spawn } from 'node:child_process';\nexport type SpawnFn = typeof spawn;\n";
+    expect(envAccessViolations(head + "export function a(spawnFn: SpawnFn, o: { spawn: SpawnFn }) {}", capture)).toEqual([]);
+    expect(envAccessViolations(head + "export function a(run: SpawnFn) {}", capture)).toEqual(["a spawn-typed name that does not start with spawn"]);
+    expect(envAccessViolations(head + "export function a(o: { launch: typeof spawn }) {}", capture)).toEqual(["a spawn-typed name that does not start with spawn"]);
+    expect(envAccessViolations(head + "let go: SpawnFn;", capture)).toEqual(["a spawn-typed name that does not start with spawn"]);
+  });
+
   it.each(SPAWN_BAD)("the guard flags a spawn problem in the engine files: %s", (_name, call) => {
     expect(envAccessViolations(SPAWN_IMPORT + call, CAPTURE), call).not.toEqual([]);
   });
@@ -222,7 +231,7 @@ describe("cleanEnv in subscription mode", () => {
     const allowed = new Set<string>([...HOST_ENV_ALLOWLIST, ...Object.keys(FIXED_ENV), SUBSCRIPTION_TOKEN_VAR]);
     expect(Object.keys(env).filter((name) => !allowed.has(name))).toEqual([]);
     for (const name of STRAY) expect(env, name).not.toHaveProperty(name);
-    expect(env).toMatchObject({ HOME: "/home/someone", PATH: "/usr/bin", DISABLE_UPDATES: "1", [SUBSCRIPTION_TOKEN_VAR]: "host-oauth-value" });
+    expect(env).toMatchObject({ HOME: "/home/someone", PATH: "/usr/bin", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", [SUBSCRIPTION_TOKEN_VAR]: "host-oauth-value" });
   });
 
   it("copies nothing else a shell could hold, and returns a fresh object each time", () => {
@@ -246,7 +255,8 @@ describe("cleanEnv in API-key mode", () => {
     expect(env).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
     for (const name of STRAY.filter((n) => n !== "ANTHROPIC_API_KEY")) expect(env, name).not.toHaveProperty(name);
     expect(Object.values(env)).not.toContain("host-anthropic_api_key");
-    expect(env.DISABLE_UPDATES).toBe("1");
+    expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe("1");
+    expect(env).not.toHaveProperty("DISABLE_UPDATES");
   });
 
   it("refuses an empty key and an unknown mode", () => {

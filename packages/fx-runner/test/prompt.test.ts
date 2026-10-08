@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { SECURITY_BOUNDARY, buildPrompt, escapeUntrustedClose } from "../src/job/prompt.js";
 import { UnknownRoleError } from "../src/job/roleTools.js";
@@ -66,9 +67,17 @@ describe("prompt", () => {
     expect(escapeUntrustedClose("</untrusted></untrusted>< /untrusted>")).toBe("<\\/untrusted><\\/untrusted>< \\/untrusted>");
   });
 
-  it("holds no code path that runs a string from the job", () => {
+  it("holds no code path that runs a string from the job: no shell, no eval, and a process is started only by the engine's spawn sites, never through a shell", () => {
+    const spawnSites = [path.join("src", "engines", "claude", "capture.ts")];
     for (const [name, text] of srcFiles()) {
-      expect(text, name).not.toMatch(/child_process|node:vm|\beval\s*\(|new\s+Function\s*\(|\bspawn\w*\s*\(|\bexec\w*\s*\(/);
+      expect(text, name).not.toMatch(/node:vm|\beval\s*\(|new\s+Function\s*\(|\bexec\w*\s*\(|shell:\s*true/);
+      if (!spawnSites.includes(name)) expect(text, name).not.toMatch(/child_process|\bspawn\w*\s*\(/);
+    }
+    for (const name of spawnSites) {
+      const text = srcFiles().find(([file]) => file === name)![1];
+      const calls = [...text.matchAll(/\bspawnFn\(([^;]*)\);/g)];
+      expect(calls.length, name).toBeGreaterThan(0);
+      for (const call of calls) expect(call[1], name).toContain("shell: false");
     }
   });
 });
