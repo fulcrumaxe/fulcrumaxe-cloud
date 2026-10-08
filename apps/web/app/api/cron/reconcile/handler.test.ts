@@ -2,10 +2,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { RECONCILE_JOBS, type JobContext, type TickDeps, type TickSummary } from "@fx/reconcile";
+import { RECONCILE_JOBS, type JobContext, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
 import { defaultReconcileDeps, modelKeyHealthJobFromEnv, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
+import { getWorker } from "../../../../lib/worker";
 
 /**
  * Route-layer test only, like the other cron handlers: no real Postgres, a fake tick in its place. The lease, budget,
@@ -66,9 +67,12 @@ describe("GET /api/cron/reconcile: the tick", () => {
     expect(await res.json()).toEqual(summary);
     const tick = runTickFn.mock.calls[0]![0];
     expect(tick).toMatchObject({ pool: deps.platformOpsPool, enabled: true, reportError: deps.reportError });
-    // The fixed jobs first, then the GitHub, Stripe and model-key jobs, which the route builds from its environment.
+    // The fixed jobs first, then the sandbox reaper's (built over the worker), then the GitHub, Stripe and model-key jobs, which the route builds from its environment.
     expect(tick.jobs.map((job) => job.name)).toEqual([
       ...RECONCILE_JOBS.map((job) => job.name),
+      "sandbox_reap_terminal",
+      "sandbox_reap_ephemeral",
+      "sandbox_inventory",
       "github_installations",
       "github_repos",
       "stripe_subscriptions",
@@ -97,6 +101,7 @@ describe("the real dependencies", () => {
       const deps = defaultReconcileDeps();
       expect(deps.enabled).toBe(true);
       expect(deps.reportError).toBe(reportError);
+      expect(deps.getWorker).toBe(getWorker);
     } finally {
       if (saved.url === undefined) delete process.env.DATABASE_URL_PLATFORM_OPS; else process.env.DATABASE_URL_PLATFORM_OPS = saved.url;
       if (saved.on === undefined) delete process.env.FX_RECONCILE_ENABLED; else process.env.FX_RECONCILE_ENABLED = saved.on;
@@ -182,18 +187,105 @@ describe("the model-key health job's environment", () => {
 });
 
 describe("the schedule", () => {
-  it("vercel.json has the reconcile cron at 7 */6 * * * next to the sweeps at their gated cadence (see vercel-crons.test.ts)", () => {
+  it("vercel.json has the reconcile cron every 15 minutes (7,22,37,52) next to the sweeps at their gated cadence (see vercel-crons.test.ts)", () => {
     const config = JSON.parse(readFileSync(path.join(__dirname, "../../../../vercel.json"), "utf8")) as { crons: { path: string; schedule: string }[] };
     expect(config.crons).toEqual([
       { path: "/api/cron/api-sweep", schedule: "*/5 * * * *" },
       { path: "/api/cron/run-action-sweep", schedule: "*/5 * * * *" },
       { path: "/api/cron/compute-settle-sweep", schedule: "*/10 * * * *" },
       { path: "/api/cron/runner-sweeper", schedule: "*/5 * * * *" },
-      { path: "/api/cron/reconcile", schedule: "7 */6 * * *" },
+      { path: "/api/cron/reconcile", schedule: "7,22,37,52 * * * *" },
     ]);
   });
 
   it("the route allows 300 s, above the tick's 240 s budget", () => {
     expect(maxDuration).toBe(300);
+  });
+});
+
+describe("the sandbox reaper's wiring (C82 sections 2 and 3)", () => {
+  const SANDBOX_JOBS = ["sandbox_reap_terminal", "sandbox_reap_ephemeral", "sandbox_inventory"];
+  const ctx = (): JobContext => ({ pool: {} as never, cursor: null, signal: new AbortController().signal, calls: { limit: 60, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
+
+  function worker() {
+    const sweeps: SandboxReapSweepInput[] = [];
+    const inventories: { now: number }[] = [];
+    const w: SandboxReapWorker = {
+      sweepSandboxReap: async (input) => (sweeps.push(input), { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0 }),
+      sandboxInventory: async (input) => (inventories.push(input), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [] }),
+    };
+    return { w, sweeps, inventories };
+  }
+  /** Runs the handler once with a captured tick, then runs each sandbox job the handler built. */
+  async function drive(over: Partial<ReconcileHandlerDeps>, reports: { code?: string }[] = []) {
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+    const deps = fakeDeps({ reportError: (_err, c) => void reports.push({ code: c.code }), ...over });
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+    expect(res.status).toBe(200);
+    const jobs = runTickFn.mock.calls[0]![0].jobs.filter((j) => SANDBOX_JOBS.includes(j.name));
+    const results = [];
+    for (const job of jobs) results.push([job.name, (await job.run(ctx())).code ?? "ran"]);
+    return results;
+  }
+
+  it.each([
+    ["unset", undefined, "dry_run"],
+    ["dry_run", "dry_run", "dry_run"],
+    ["on", "on", "on"],
+  ])("FX_SANDBOX_REAP_MODE %s: the worker is asked for once and the passes run with mode %s", async (_label, raw, mode) => {
+    const { w, sweeps, inventories } = worker();
+    const getWorkerSpy = vi.fn(async () => w);
+    expect(await drive({ sandboxReapMode: raw, getWorker: getWorkerSpy })).toEqual(SANDBOX_JOBS.map((n) => [n, "ran"]));
+    expect(getWorkerSpy).toHaveBeenCalledTimes(1);
+    expect(sweeps.map((s) => [s.pass, s.mode])).toEqual([["terminal", mode], ["ephemeral", mode]]);
+    expect(inventories).toHaveLength(1);
+  });
+
+  it.each([
+    ["off", "off"],
+    ["an invalid value", "ON"],
+    ["a typo", "dry-run"],
+  ])("%s: the worker is never even asked for, the jobs answer disabled, and an invalid value is reported", async (_label, raw) => {
+    const { w, sweeps, inventories } = worker();
+    const getWorkerSpy = vi.fn(async () => w);
+    const reports: { code?: string }[] = [];
+    expect(await drive({ sandboxReapMode: raw, getWorker: getWorkerSpy }, reports)).toEqual(SANDBOX_JOBS.map((n) => [n, "disabled"]));
+    expect(getWorkerSpy).not.toHaveBeenCalled();
+    expect(sweeps).toEqual([]);
+    expect(inventories).toEqual([]);
+    expect(reports.filter((r) => r.code === "sandbox_reap_mode_invalid")).toHaveLength(raw === "off" ? 0 : SANDBOX_JOBS.length);
+  });
+
+  it("FX_RECONCILE_ENABLED=0: the worker is not asked for either", async () => {
+    const getWorkerSpy = vi.fn(async () => worker().w);
+    await drive({ enabled: false, sandboxReapMode: "on", getWorker: getWorkerSpy });
+    expect(getWorkerSpy).not.toHaveBeenCalled();
+  });
+
+  it("a null worker (not configured): each sandbox job reports sandbox_reap_unconfigured, and the tick still runs", async () => {
+    const reports: { code?: string }[] = [];
+    expect(await drive({ sandboxReapMode: "on", getWorker: async () => null }, reports)).toEqual(SANDBOX_JOBS.map((n) => [n, "not_configured"]));
+    expect(reports.filter((r) => r.code === "sandbox_reap_unconfigured")).toHaveLength(SANDBOX_JOBS.length);
+  });
+
+  it("a worker that fails to build costs the sandbox jobs their run and nothing else: the tick still runs, the failure is reported", async () => {
+    const stages: string[] = [];
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+    const deps = fakeDeps({ sandboxReapMode: "on", getWorker: async () => { throw new Error("pools guard refused"); }, reportError: (_e, c) => void stages.push(c.stage) });
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+    expect(res.status).toBe(200);
+    expect(runTickFn).toHaveBeenCalledTimes(1);
+    expect(stages).toContain("reconcile.sandbox_worker");
+  });
+
+  it("no worker dependency given at all (a test double) behaves as unconfigured", async () => {
+    expect(await drive({ sandboxReapMode: "on" })).toEqual(SANDBOX_JOBS.map((n) => [n, "not_configured"]));
+  });
+
+  it("an unauthenticated call never builds the worker", async () => {
+    const getWorkerSpy = vi.fn(async () => worker().w);
+    const res = await reconcileHandler(requestWithAuth("Bearer wrong"), fakeDeps({ getWorker: getWorkerSpy }), vi.fn());
+    expect(res.status).toBe(401);
+    expect(getWorkerSpy).not.toHaveBeenCalled();
   });
 });

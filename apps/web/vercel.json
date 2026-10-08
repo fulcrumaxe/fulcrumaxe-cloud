@@ -23,7 +23,7 @@
     },
     {
       "path": "/api/cron/reconcile",
-      "schedule": "7 */6 * * *"
+      "schedule": "7,22,37,52 * * * *"
     }
   ]
 }

@@ -12,15 +12,22 @@ import {
   buildReconcileJobs,
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
+  parseSandboxReapMode,
+  RECONCILE_ROUTE,
   runTick,
+  sandboxInventoryJob,
+  sandboxReapJobs,
   type ReconcileJob,
   type ReportError,
+  type SandboxReapWorker,
   type TickDeps,
   type TickSummary,
 } from "@fx/reconcile";
+import { getWorker } from "../../../../lib/worker";
 
 /**
- * The reconciler cron (every 6 hours, at minute 7). Same shape as the other cron handlers: route.ts stays thin, this
+ * The reconciler cron (every 15 minutes, at minutes 7, 22, 37 and 52; each job has its own seeded interval, so the slower jobs
+ * still run on theirs). Same shape as the other cron handlers: route.ts stays thin, this
  * file holds the logic, and handler.test.ts is a fast route-layer test with no real Postgres. The lease, budget, cursor
  * and lap-time behaviour is @fx/reconcile's own real-Postgres suite.
  *
@@ -35,6 +42,15 @@ export interface ReconcileHandlerDeps {
   enabled: boolean;
   platformOpsPool: TickDeps["pool"];
   reportError: ReportError;
+  /** The raw FX_SANDBOX_REAP_MODE: unset is dry_run, off | dry_run | on are themselves, anything else is off (and reported). */
+  sandboxReapMode?: string | undefined;
+  /**
+   * The sandbox reaper's worker facade (the same getWorker() the compute-settle handler uses; this file never reads the runner
+   * login). Called only for a tick that runs, after the secret check. Null while the worker is not configured: the sandbox jobs then
+   * report sandbox_reap_unconfigured and the others still run. Absent (a test double that does not exercise the sandbox jobs) is the same as null;
+   * defaultReconcileDeps always supplies it.
+   */
+  getWorker?(): Promise<SandboxReapWorker | null>;
 }
 
 /**
@@ -101,6 +117,8 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     enabled: process.env.FX_RECONCILE_ENABLED !== "0",
     platformOpsPool: cachedPlatformOpsPool,
     reportError,
+    sandboxReapMode: process.env.FX_SANDBOX_REAP_MODE,
+    getWorker,
   };
 }
 
@@ -129,6 +147,15 @@ export async function reconcileHandler(
   }
   const run = async (): Promise<TickSummary> => {
     const deps = injected ?? defaultReconcileDeps();
+    // The sandbox jobs reach the reaper only through the worker. Under either kill switch (FX_RECONCILE_ENABLED=0, or the mode off or
+    // unusable) the worker is never asked for, so nothing is built or opened. A worker that fails to build costs the sandbox jobs
+    // their run (they report sandbox_reap_unconfigured) and nothing else.
+    const sandbox = parseSandboxReapMode(deps.sandboxReapMode);
+    const worker = !deps.enabled || sandbox.mode === "off" ? null : await (deps.getWorker?.() ?? Promise.resolve(null)).catch((err: unknown) => {
+      deps.reportError(err, { stage: "reconcile.sandbox_worker", route: RECONCILE_ROUTE });
+      return null;
+    });
+    const sandboxDeps = { mode: sandbox, reportError: deps.reportError };
     return runTickFn({
       pool: deps.platformOpsPool,
       jobs: buildReconcileJobs({
@@ -136,6 +163,7 @@ export async function reconcileHandler(
         githubRepos: githubReposJobFromEnv(deps.platformOpsPool, deps.reportError),
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
+        sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,
       reportError: deps.reportError,

@@ -52,9 +52,10 @@ export interface JobResult {
    * A result the job itself decided. `not_configured`: the job's outside credential is absent, so it did nothing.
    * `error`: the job already reported a failure and stopped, and its cursor (the progress made before it) is kept,
    * which a thrown error would not do. `breaker_tripped`: a job refused to apply a mass change (the installation job's detach
-   * breaker); the job restarts its pass next time. Each one means the pass did not complete, so `wrapped` is ignored.
+   * breaker); the job restarts its pass next time. `disabled`: the job's own switch is off (the sandbox reaper's mode), so it did nothing
+   * and kept its cursor. Each one means the pass did not complete, so `wrapped` is ignored.
    */
-  code?: 'not_configured' | 'error' | 'breaker_tripped';
+  code?: 'not_configured' | 'error' | 'breaker_tripped' | 'disabled';
 }
 
 export interface ReconcileJob {
