@@ -1147,6 +1147,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/test-guard':
+        specifier: workspace:*
+        version: link:../test-guard
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
