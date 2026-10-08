@@ -16,6 +16,7 @@ export async function walkFiles(
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
     } catch {
+      // fx-swallow-ok: an unreadable directory is skipped; the walk lists what it can read
       return;
     }
     for (const entry of entries) {

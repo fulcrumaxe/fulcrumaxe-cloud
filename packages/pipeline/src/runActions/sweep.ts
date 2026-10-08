@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { RunActionsWorker } from "./dispatcher.js";
 
 /**
@@ -46,8 +47,9 @@ export async function sweepRunActions(deps: SweepDeps): Promise<SweepResult> {
     try {
       await deps.startWorkflow(id);
       started += 1;
-    } catch {
+    } catch (err) {
       // One id that would not start must not hold back the rest; the next sweep lists it again.
+      reportError(err, { stage: "run_actions.sweep" });
     }
   }
   const purged = await worker.purgeRunActions(PURGE_AFTER_SECONDS, PURGE_LIMIT);

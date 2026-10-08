@@ -200,6 +200,7 @@ export async function verifySession(
     }
     return claims;
   } catch {
+    // fx-swallow-ok: a cookie that does not verify or parse is an unauthenticated request, not a server failure
     return null;
   }
 }

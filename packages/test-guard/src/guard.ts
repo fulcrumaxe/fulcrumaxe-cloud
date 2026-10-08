@@ -35,6 +35,7 @@ function hostFromFetchInput(input: unknown): string | null {
       return new URL((input as { url: string }).url).host;
     }
   } catch {
+    // fx-swallow-ok: an input that is not a URL has no host to match; the guard treats null as "not a match"
     return null;
   }
   return null;

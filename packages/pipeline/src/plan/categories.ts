@@ -56,6 +56,7 @@ export function parseClassifierOutput(raw: unknown): ParsedCategory {
       }
       candidate = Object.hasOwn(parsed, "category") ? (parsed as Record<string, unknown>).category : undefined;
     } catch {
+      // fx-swallow-ok: malformed classifier output is returned as an { ok: false } result
       return { ok: false, reason: "classifier output is malformed JSON" };
     }
   }

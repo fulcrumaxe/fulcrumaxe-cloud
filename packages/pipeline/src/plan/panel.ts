@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { BACK_TO_DISCUSSION_REF_PREFIX } from "@fx/core/src/work-items/operatorActions.js";
@@ -358,9 +359,10 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
           ),
           deadline,
         ]);
-      } catch {
+      } catch (err) {
         // A runner that rejects the moment the deadline aborts its signal settles
         // before the deadline promise does: that is the timeout, not a failure.
+        if (!controller.signal.aborted) reportError(err, { stage: "plan.panel_seat" });
         return missing(controller.signal.aborted ? "timed_out" : "runner_failed");
       } finally {
         budget.cancel();

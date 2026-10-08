@@ -51,6 +51,7 @@ export async function run(renderedDir: string, options: FreshnessOptions = {}): 
     try {
       raw = await fs.readFile(path.join(renderedDir, sc.path), "utf-8");
     } catch {
+      // fx-swallow-ok: an unreadable sidecar becomes a sidecar_missing finding
       findings.push({ path: url, kind: "sidecar_missing", message: `${sc.path} is missing`, severity: "error" });
       continue;
     }
@@ -60,6 +61,7 @@ export async function run(renderedDir: string, options: FreshnessOptions = {}): 
       try {
         when = parseStamp(dig(JSON.parse(raw), sc.timestampKey));
       } catch {
+        // fx-swallow-ok: an unparseable stamp leaves `when` null, which becomes a sidecar_age_undeclared finding
         when = null;
       }
     }
@@ -101,7 +103,7 @@ export async function run(renderedDir: string, options: FreshnessOptions = {}): 
       }
     }
   } catch {
-    // No security.txt: no finding, as the original.
+    // fx-swallow-ok: no security.txt means no finding, as the original
   }
 
   const ok = !findings.some((f) => f.severity === "error");

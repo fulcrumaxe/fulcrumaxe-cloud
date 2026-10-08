@@ -57,6 +57,7 @@ export function verifyCreateRepoState(state: string, secret: string, now: Date =
       c.exp > Math.floor(now.getTime() / 1000);
     return ok ? (c as unknown as CreateRepoClaims) : null;
   } catch {
+    // fx-swallow-ok: a state token that does not decode or verify is rejected as null; the caller treats it as invalid input
     return null;
   }
 }

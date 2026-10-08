@@ -107,6 +107,7 @@ export async function checkRetryAuthor(input: CheckRetryAuthorInput): Promise<Re
         pending.catch(() => {});
         found = await Promise.race([pending, deadline]);
       } catch {
+        // fx-swallow-ok: a failed lookup fails closed as 'unavailable'; the caller records that outcome
         return 'unavailable';
       }
       if (found === 'deadline') return 'unavailable';

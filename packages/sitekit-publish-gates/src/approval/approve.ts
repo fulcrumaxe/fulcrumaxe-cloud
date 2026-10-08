@@ -67,6 +67,7 @@ export async function approve(
     // Once the K06 gates pass, and always on this render: a stored report is never read.
     if (gates.ok) checks = await runApprovalChecks(out, { siteDomains, now: new Date(), driver: options.browserDriver, evidenceCommits: evidenceCommitsOf(l.content, l.repoSha, l.claims) });
   } catch (e) {
+    // fx-swallow-ok: the failure is returned as a render_failed refusal carrying its detail
     return refuse({ code: "render_failed", detail: e instanceof Error ? e.message : String(e) });
   } finally {
     await rm(work, { recursive: true, force: true });

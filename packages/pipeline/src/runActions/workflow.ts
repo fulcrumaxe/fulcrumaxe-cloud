@@ -64,6 +64,7 @@ export async function performBody(worker: RunActionsWorker | null, claimed: Clai
   try {
     return await performer(worker, claimed.id);
   } catch (err) {
+    // fx-swallow-ok: the failure goes back as an "error" outcome with its code, and the settle call records it
     return { result: "error", errorCode: errorCodeFor(err) };
   }
 }

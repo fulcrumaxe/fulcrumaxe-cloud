@@ -345,7 +345,7 @@ export async function triageIntake(deps: TriageDeps, intake: TriageIntake): Prom
       ...(moved.replayed || replayedCreate ? { replayed: true as const } : {}),
     };
   } catch (err) {
-    // The discussion is committed; do not lose its ids to the exception.
+    // fx-swallow-ok: the message goes back in `reason`; the discussion is committed, so do not lose its ids to the exception.
     return {
       status: "created_not_staged",
       category,

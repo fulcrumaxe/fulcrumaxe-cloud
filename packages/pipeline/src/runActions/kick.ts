@@ -1,3 +1,4 @@
+import { reportError } from "@fx/telemetry";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 /**
@@ -63,6 +64,7 @@ export function actionIdFromBody(body: string): string | null {
     const id = typeof parsed === "object" && parsed !== null ? (parsed as { actionId?: unknown }).actionId : undefined;
     return typeof id === "string" && UUID_RE.test(id) ? id : null;
   } catch {
+    // fx-swallow-ok: a body that is not JSON carries no action id; the caller treats null as "nothing to start"
     return null;
   }
 }
@@ -74,8 +76,9 @@ export async function handleKick(header: string | null, body: string, deps: Kick
   if (actionId && deps.configured()) {
     try {
       await deps.startWorkflow(actionId);
-    } catch {
+    } catch (err) {
       // The row is the durable signal; the sweep starts it if this kick could not.
+      reportError(err, { stage: "run_actions.kick" });
     }
   }
   return 202;

@@ -69,15 +69,14 @@ export default tseslint.config(
     rules: { "fx-dom/no-null-dom-insert": "error" },
   },
   // A server-side catch must rethrow, report, log at error/warn, or say why it swallows
-  // (`// fx-swallow-ok: <reason>`). A site beyond the file's baseline count is an error; the baselined ones are
-  // warnings (the burn-down list). See lint/no-silent-catch.mjs. Client code in apps/workspace is out of scope.
+  // (`// fx-swallow-ok: <reason>`). It is an error; the baseline file is empty. See lint/no-silent-catch.mjs.
+  // Client code in apps/workspace is out of scope.
   {
     files: ["packages/*/src/**/*.{ts,tsx,js,mjs}", "apps/web/app/**/*.{ts,tsx}", "apps/web/lib/**/*.{ts,tsx}"],
     ignores: ["**/*.test.{ts,tsx,js,mjs}", "**/test/**", "**/fixtures/**"],
     plugins: { "fx-catch": fxCatch },
     rules: {
       "fx-catch/no-silent-catch": ["error", { baseline: SILENT_CATCH_BASELINE }],
-      "fx-catch/no-silent-catch-baselined": ["warn", { baseline: SILENT_CATCH_BASELINE }],
     },
   },
   {

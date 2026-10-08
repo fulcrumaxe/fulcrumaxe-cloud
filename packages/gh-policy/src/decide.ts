@@ -447,6 +447,7 @@ export function decide(req: ProxyRequest): Decision {
       try {
         labelName = decodeURIComponent(singleLabelMatch[1]!);
       } catch {
+        // fx-swallow-ok: a malformed label encoding is a deny verdict, returned to the caller
         return deny("malformed_label_encoding");
       }
       if (!ownLabels.has(labelName)) {
@@ -518,6 +519,7 @@ export function decide(req: ProxyRequest): Decision {
     try {
       labelName = decodeURIComponent(singleLabelMatch![1]!);
     } catch {
+      // fx-swallow-ok: a malformed label encoding is a deny verdict, returned to the caller
       return deny("malformed_label_encoding");
     }
     if (ALLOWLISTED_VERDICT_LABELS.has(labelName)) {

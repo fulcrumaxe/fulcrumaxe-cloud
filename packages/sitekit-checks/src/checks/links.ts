@@ -68,7 +68,7 @@ async function resolves(target: string, renderedDir: string, opts: LinksOptions)
       if (idxSt?.isFile()) return true;
     }
   } catch {
-    // does not exist
+    // fx-swallow-ok: a path that cannot be stat-ed is a link target that does not exist; the function returns false
   }
   return false;
 }

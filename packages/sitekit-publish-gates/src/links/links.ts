@@ -72,6 +72,7 @@ export function classifyLink(raw: string): Classified {
     u.hash = "";
     return { type: "url", url: u };
   } catch {
+    // fx-swallow-ok: an unparseable link is returned as an unparseable_link result
     return { type: "bad", kind: "unparseable_link", detail: `${scheme ?? "https"} link that does not parse (${s.length} chars)` };
   }
 }

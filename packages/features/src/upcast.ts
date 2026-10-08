@@ -117,6 +117,7 @@ export function findRoundTripViolations(shape: ShapeDef, fixtures: readonly Fixt
           out.push(`${shape.key} fixture "${fx.name}" (v${fx.version}) is not identical after v${fx.version}->v${r}->v${fx.version}`);
         }
       } catch (e) {
+        // fx-swallow-ok: the failure is recorded as a finding in `out`, which the caller returns
         out.push(`${shape.key} fixture "${fx.name}" (v${fx.version}) is unreadable at v${r}: ${(e as Error).message}`);
       }
     }
