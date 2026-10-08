@@ -132,6 +132,8 @@ describe('migration 0619 (fix round 1, was 0614): platform_ops read on agent_run
         'gateway_report_tag', 'om_payer_account_id', 'om_connection_id', 'om_key_ref', 'om_state', 'om_reason', 'om_reads', 'om_finalized_at',
         'om_next_due_at', 'om_last_cost', 'om_last_count', 'om_read_share_usd', 'om_flags', 'om_gateway_usd', 'om_true_up_usd', 'om_overhead_usd',
         'metered_model_calls',
+        // 0752: the outside-meter clock reads when the run became terminal (its status is already listed).
+        'ended_at',
       ].sort(),
     );
 

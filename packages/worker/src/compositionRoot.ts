@@ -283,7 +283,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       // D#221 OM-2b: the outside meter rides the same tick. It never fails the settle above.
       let outside: OutsideMeterResult = { listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 };
       try {
-        outside = await sweepOutsideMeter({ pool: pools.runnerPool, modelConnection: targetDeps.modelConnection, decryptTenantKey: targetDeps.decryptTenantKey, flagOn: () => outsideMeterOn(env.FX_OUTSIDE_METER), onError: (runId) => console.warn(JSON.stringify({ event: "run.outside_meter_failed", run_id: runId })) });
+        outside = await sweepOutsideMeter({ pool: pools.runnerPool, modelConnection: targetDeps.modelConnection, decryptTenantKey: targetDeps.decryptTenantKey, flagOn: () => outsideMeterOn(env.FX_OUTSIDE_METER), onError: (runId) => console.warn(JSON.stringify({ event: "run.outside_meter_failed", run_id: runId })), onEscalate: (e) => console.warn(JSON.stringify({ event: "run.outside_meter_needs_owner", run_id: e.runId, kind: e.kind, gateway_usd: e.gatewayUsd, metered_usd: e.meteredUsd })) });
       } catch {
         // fx-swallow-ok: the list itself failed (a fixed-code line is logged); the next tick tries again
         console.warn(JSON.stringify({ event: "run.outside_meter_list_failed" }));

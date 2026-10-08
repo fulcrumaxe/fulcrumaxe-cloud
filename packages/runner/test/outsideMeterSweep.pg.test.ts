@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { mintGatewayTag } from "@fx/spend";
 import { startGatewayReportFake, type FakeReport, type FakeRow } from "../../spend/test/fakes/gatewayReport.js";
-import { ensureReportTag, keyRefOf, sweepOutsideMeter } from "../src/outsideMeterSweep.js";
+import { FLAG, ensureReportTag, keyRefOf, sweepOutsideMeter } from "../src/outsideMeterSweep.js";
 import { insertAgentRun, writeRunStatus } from "../src/runStatusWriter.js";
 import { seedAccount } from "./helpers/seed.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -29,7 +31,7 @@ describe("outside meter [pg]", () => {
     sweepOutsideMeter({ pool: db.runWriterPool, modelConnection: connection(connId, extra.ciphertext), decryptTenantKey: async () => KEY, flagOn: () => extra.flagOn ?? true, reportBase: fake.url, now: extra.now ? () => extra.now! : undefined });
 
   /** A finished run with a tag: usd metered, N model calls counted, finalize called. */
-  async function finishedRun(opts: { usd: number; calls: number | null; rows: FakeRow[] }) {
+  async function finishedRun(opts: { usd: number; calls: number | null; rows: FakeRow[]; settledLine?: boolean }) {
     const accountId = randomUUID();
     await seedAccount(db.admin, accountId);
     const connId = randomUUID();
@@ -39,7 +41,7 @@ describe("outside meter [pg]", () => {
     const tag = await ensureReportTag(withAcct, { accountId, runId, connectionId: connId, keyRef });
     await writeRunStatus(db.runWriterPool, { accountId, runId, from: "running", to: "succeeded", result: { usd: opts.usd }, metering: { meteredUsd: opts.usd, reportedUsd: null, flags: [], ...(opts.calls === null ? {} : { modelCalls: opts.calls }) } });
     // the run's settled model line, as finalize's settle writes it
-    await wa(accountId, (c) => c.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [accountId, opts.usd, runId]));
+    if (opts.settledLine !== false) await wa(accountId, (c) => c.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [accountId, opts.usd, runId]));
     await wa(accountId, (c) => c.query(`SELECT agent_run_outside_meter_finalize($1::uuid, $2::uuid)`, [accountId, runId]));
     fake.validKeys.add(KEY);
     fake.script.set(tag, opts.rows);
@@ -110,7 +112,7 @@ describe("outside meter [pg]", () => {
     expect((await state(r.runId)).flags).toContain("outside_meter_escalate");
     const res = await db.admin.query(`SELECT * FROM outside_meter_flag_counts(7)`);
     expect(res.rows).toHaveLength(1);
-    expect(res.fields.map((f) => f.name).sort()).toEqual(["contract", "disagree", "escalated", "no_count", "runs_checked"]);
+    expect(res.fields.map((f) => f.name).sort()).toEqual(["bad_request", "contract", "disagree", "escalated", "floor_unmet", "late_finalize", "no_count", "runs_checked", "trueup_held", "unavailable"]);
     expect(Number(res.rows[0].escalated)).toBeGreaterThanOrEqual(1);
     await expect(db.runWriterPool.query(`SELECT * FROM outside_meter_flag_counts(7)`)).rejects.toMatchObject({ code: "42501" });
   });
@@ -143,17 +145,131 @@ describe("outside meter [pg]", () => {
     expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "not_stable", reads: 8 });
   });
 
-  it("a floor the report never reaches (the VM inflated the count, or a kill left it low) ends unavailable after 8 reads, flagged, and leaves the run's charge as it was", async () => {
+  it("an unmet floor at the last read (reads agree, count under the meter's) ends floor_unmet, flagged, and still trues up when the gateway is higher", async () => {
     const stable: FakeRow = { total_cost: 2, surcharge_cost: 0, request_count: 3 };
     const r = await finishedRun({ usd: 1, calls: 40, rows: [stable] });
     for (let i = 0; i < 9; i++) { await due(r.runId); await sweep(r.connId); }
-    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "not_stable", reads: 8, flags: ["outside_meter_unavailable"] });
-    // it never blocked the run: the run is succeeded, its settled line is untouched, and no outside line was invented
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "floor_unmet", reads: 8 });
+    expect((await state(r.runId)).flags).toContain("outside_meter_floor_unmet");
+    expect(Number((await state(r.runId)).true_up)).toBeCloseTo(1, 6);
     expect((await db.admin.query(`SELECT status FROM agent_runs WHERE id = $1`, [r.runId])).rows[0].status).toBe("succeeded");
-    expect((await db.admin.query(`SELECT usd::float AS usd FROM ledger WHERE run_id = $1 AND reason IS NULL`, [r.runId])).rows).toEqual([{ usd: 1 }]);
-    expect(await ledger(r.runId)).toEqual([]);
+    expect(await ledger(r.runId)).toEqual([{ reason: "outside_meter", usd: 1 }, { reason: "outside_meter_overhead", usd: expect.any(Number) }]);
+    // before the last read nothing ends it
+    const early = await finishedRun({ usd: 1, calls: 40, rows: [stable] });
+    for (let i = 0; i < 3; i++) { await due(early.runId); await sweep(early.connId); }
+    expect(await state(early.runId)).toMatchObject({ state: "pending", reads: 3 });
   });
 
+  it("an unmet floor with the gateway at or below the meter posts no line and still ends floor_unmet", async () => {
+    const stable: FakeRow = { total_cost: 0.5, surcharge_cost: 0, request_count: 3 };
+    const r = await finishedRun({ usd: 1, calls: 40, rows: [stable] });
+    for (let i = 0; i < 9; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "floor_unmet" });
+    expect((await ledger(r.runId)).map((l) => l.reason)).toEqual(["outside_meter_overhead"]);
+  });
+
+  it("a report that never agrees ends not_stable with no true-up", async () => {
+    const rows = Array.from({ length: 12 }, (_, i): FakeRow => ({ total_cost: 3 + i, surcharge_cost: 0, request_count: 5 + i }));
+    const r = await finishedRun({ usd: 1, calls: 40, rows });
+    for (let i = 0; i < 9; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "not_stable", flags: ["outside_meter_unavailable"] });
+    expect((await ledger(r.runId)).map((l) => l.reason)).toEqual(["outside_meter_overhead"]); // it paid for reads
+  });
+
+  it("the true-up has a ceiling of the floor or 2 x per-run cap x (1 + max resumes): at it a line is posted, a cent above it is held and escalated", async () => {
+    const run = async (g: number, limits: boolean) => {
+      const row: FakeRow = { total_cost: g, surcharge_cost: 0, request_count: 2 };
+      const r = await finishedRun({ usd: 1, calls: 2, rows: [row, row] });
+      if (limits) await db.admin.query(`INSERT INTO run_limits (account_id, role, per_run_usd, max_resumes) VALUES ($1, '*', 1, 0) ON CONFLICT (account_id, role) DO NOTHING`, [r.accountId]);
+      const escalated: unknown[] = [];
+      for (let i = 0; i < 2; i++) {
+        await due(r.runId);
+        await sweepOutsideMeter({ pool: db.runWriterPool, modelConnection: connection(r.connId), decryptTenantKey: async () => KEY, flagOn: () => true, reportBase: fake.url, onEscalate: (e) => void escalated.push(e) });
+      }
+      return { r, escalated };
+    };
+    const at = await run(6, true); // the fixed floor: 6 - 1 = 5.00 exactly
+    expect(await state(at.r.runId)).toMatchObject({ state: "higher" });
+    expect((await ledger(at.r.runId)).map((l) => l.reason)).toContain("outside_meter");
+    const over = await run(6.01, true);
+    expect(await state(over.r.runId)).toMatchObject({ state: "unavailable", reason: "trueup_over_ceiling" });
+    expect((await state(over.r.runId)).flags).toContain("outside_meter_trueup_held");
+    expect((await ledger(over.r.runId)).map((l) => l.reason)).toEqual(["outside_meter_overhead"]);
+    expect(over.escalated).toEqual([{ runId: over.r.runId, kind: "trueup_held", gatewayUsd: 6.01, meteredUsd: 1 }]);
+    // the run's own limits raise it (twice a cap of ten, one spawn), so a true-up of ten posts
+    const row: FakeRow = { total_cost: 11, surcharge_cost: 0, request_count: 2 };
+    const r = await finishedRun({ usd: 1, calls: 2, rows: [row, row] });
+    await db.admin.query(`INSERT INTO run_limits (account_id, role, per_run_usd, max_resumes) VALUES ($1, '*', 10, 0)`, [r.accountId]);
+    for (let i = 0; i < 2; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "higher" });
+  });
+
+  it("a transient failure on every read gives 8 reads, then unavailable (gateway_error)", async () => {
+    const r = await finishedRun({ usd: 1, calls: 1, rows: [] });
+    const real = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return new Response("", { status: 503 }); }) as typeof fetch;
+    try {
+      for (let i = 0; i < 10; i++) { await due(r.runId); await sweep(r.connId); }
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(calls).toBe(8);
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "gateway_error", reads: 8 });
+    expect((await ledger(r.runId))).toEqual([]); // failed reads cost nothing
+  });
+
+  it("a run with no settled model line is never read as 0: no true-up, the next read is tried, and the last ends no_metered_figure", async () => {
+    const row: FakeRow = { total_cost: 2, surcharge_cost: 0, request_count: 2 };
+    const r = await finishedRun({ usd: 1, calls: 2, rows: [row], settledLine: false });
+    for (let i = 0; i < 3; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "pending", reads: 3 });
+    expect((await ledger(r.runId)).map((l) => l.reason)).not.toContain("outside_meter");
+    for (let i = 0; i < 6; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "no_metered_figure", reads: 8 });
+    expect((await state(r.runId)).flags).toContain("outside_meter_unavailable");
+    expect((await ledger(r.runId)).map((l) => l.reason)).toEqual(["outside_meter_overhead"]);
+  });
+
+  it("overhead is posted once for a run that paid for a read and ended unavailable, and not at all for a run that never read", async () => {
+    const stable: FakeRow = { total_cost: 1, surcharge_cost: 0, request_count: 1 };
+    const none = await finishedRun({ usd: 1, calls: 1, rows: [] });
+    fake.notEntitled.add(KEY);
+    await due(none.runId);
+    await sweep(none.connId);
+    fake.notEntitled.delete(KEY);
+    expect(await state(none.runId)).toMatchObject({ state: "unavailable", reason: "plan_not_entitled" });
+    expect(await ledger(none.runId)).toEqual([]);
+    const paid = await finishedRun({ usd: 1, calls: 1, rows: [stable], settledLine: false });
+    for (let i = 0; i < 9; i++) { await due(paid.runId); await sweep(paid.connId); }
+    expect(await ledger(paid.runId)).toHaveLength(1);
+    expect(Number((await state(paid.runId)).overhead)).toBeGreaterThan(0);
+  });
+
+  it("every flag the sweep can raise is counted by outside_meter_flag_counts, and the count has no flag the code never raises", async () => {
+    const src = readFileSync(fileURLToPath(new URL("../src/outsideMeterSweep.ts", import.meta.url)), "utf8");
+    const raised = new Set(Object.values(FLAG));
+    // every flag literal in the sweep or the spend rules is in FLAG
+    const spend = readFileSync(fileURLToPath(new URL("../../spend/src/gatewayMeter.ts", import.meta.url)), "utf8");
+    const literals = new Set([...(src + spend).matchAll(/"(outside_meter_[a-z_]+)"/g)].map((m) => m[1]!));
+    for (const l of ["outside_meter_overhead"]) literals.delete(l);
+    for (const l of literals) expect(raised.has(l as never), l).toBe(true);
+    // each raised flag, set alone on a fresh finalized run, moves the counts
+    const base = (await db.admin.query(`SELECT * FROM outside_meter_flag_counts(7)`)).rows[0];
+    const cols = Object.keys(base).filter((k) => k !== "runs_checked");
+    const hit = new Set<string>();
+    for (const flag of raised) {
+      const r = await finishedRun({ usd: 1, calls: 1, rows: [] });
+      await db.admin.query(`UPDATE agent_runs SET om_flags = ARRAY[$2]::text[] WHERE id = $1`, [r.runId, flag]);
+      const after = (await db.admin.query(`SELECT * FROM outside_meter_flag_counts(7)`)).rows[0];
+      const moved = cols.filter((k) => Number(after[k]) > Number(base[k]));
+      expect(moved.length, flag).toBeGreaterThan(0);
+      moved.forEach((k) => hit.add(k));
+      await db.admin.query(`UPDATE agent_runs SET om_flags = '{}' WHERE id = $1`, [r.runId]);
+    }
+    // no counted column is dead: each is moved by some flag
+    expect([...hit].sort()).toEqual(cols.sort());
+  });
   it("403 ends the run as plan_not_entitled; a replaced key or connection is never read with; the flag off closes it after 24 h with no read", async () => {
     const a = await finishedRun({ usd: 1, calls: 1, rows: [] });
     fake.notEntitled.add(KEY);
