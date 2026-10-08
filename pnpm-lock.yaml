@@ -1263,6 +1263,9 @@ importers:
 
   packages/worker:
     dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
       '@fx/core':
         specifier: workspace:*
         version: link:../core
@@ -1300,9 +1303,6 @@ importers:
         specifier: ^8.13.1
         version: 8.23.0
     devDependencies:
-      '@fulcrumaxe/runner-protocol':
-        specifier: workspace:*
-        version: link:../runner-protocol
       '@fx/pipeline':
         specifier: workspace:*
         version: link:../pipeline

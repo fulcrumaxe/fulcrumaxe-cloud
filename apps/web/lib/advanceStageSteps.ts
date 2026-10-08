@@ -77,13 +77,19 @@ export interface BuildRunOutcome {
   hasSummary: boolean;
   /** The run is `pending` on a runner (a queued runner run): the workflow credits that wait to the pending ceiling, not to the work budget. */
   queuedOnRunner: boolean;
+  /**
+   * The run this outcome is about: the end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7). A
+   * runner run that was lost or hit a usage limit is followed by a child, and the status above is the child's. This is the id to
+   * cancel when the wait runs out, and the one a failure is recorded against. The id asked about when the run is gone.
+   */
+  tailRunId: string;
 }
 
 export async function buildOutcomeBody(worker: AdvanceWorker | null, accountId: string, runId: string): Promise<BuildRunOutcome> {
-  if (!worker) return { status: "missing", done: true, hasSummary: false, queuedOnRunner: false };
+  if (!worker) return { status: "missing", done: true, hasSummary: false, queuedOnRunner: false, tailRunId: runId };
   const out: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
   const summary = out.envelope?.summary;
-  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out) };
+  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId };
 }
 
 /** The item's stage now, or null (gone, or no worker). */
@@ -96,11 +102,28 @@ export async function stageBody(worker: AdvanceWorker | null, accountId: string,
 const FAILED_RUN_STATUSES = ["failed", "timed_out", "cancelled", "killed_spend", "refused_spend", "missing"];
 
 /**
+ * The code a failed RUNNER run is recorded under (C22 section 8): the two ways a chain of follow-up runs runs out get codes of their
+ * own, and any other failed run is `run_failed`.
+ */
+export function runnerFailureCode(failureReason: string | null | undefined): string {
+  if (failureReason === "runner_lost") return "runner_lost";
+  if (failureReason === "usage_limit") return "runner_usage_limit";
+  return "run_failed";
+}
+
+/**
  * Records a build that ended without a pull request as needs_human. `reason` is the run's status (it becomes `run_<status>`)
- * or one of the fixed words `no_pull_request` and `wait_timeout`; the pipeline accepts only its own list of codes.
+ * or one of the fixed words `no_pull_request` and `wait_timeout`; the pipeline accepts only its own list of codes. A `failed`
+ * RUNNER run (`runId` is the end of its follow-up chain, so it has no child) is recorded as `runner_lost` or `runner_usage_limit`
+ * when that is why it failed, and as `run_failed` otherwise. The worker's write is idempotent: whichever of the driver and the
+ * sweeper records the item first wins, and the other finds it no longer in progress.
  */
 export async function buildFailedBody(worker: AdvanceWorker | null, accountId: string, workItemId: string, runId: string | null, reason: string, attempt?: string): Promise<StepOutcome> {
   if (!worker) return refused("worker_unavailable");
-  const code = FAILED_RUN_STATUSES.includes(reason) ? `run_${reason}` : reason;
+  let code = FAILED_RUN_STATUSES.includes(reason) ? `run_${reason}` : reason;
+  if (reason === "failed" && runId !== null) {
+    const run: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
+    if (run.runtime === "runner") code = runnerFailureCode(run.failureReason);
+  }
   return outcomeOf(await worker.advanceBuildFailed(accountId, workItemId, runId, code, ...(attempt === undefined ? [] : [attempt])));
 }

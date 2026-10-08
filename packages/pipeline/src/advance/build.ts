@@ -173,8 +173,12 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
   });
 }
 
-/** Fixed codes for why a build ended without a pull request. Never error text. */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout"] as const;
+/**
+ * Fixed codes for why a build ended without a pull request. Never error text. `runner_lost` and `runner_usage_limit` (D#6 R2b-3,
+ * C22 section 8) are the two ways a runner's chain of follow-up runs can run out; they are different actions for the customer than
+ * `run_failed` (a runner that stopped answering twice, and a plan limit that held for a week).
+ */
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };

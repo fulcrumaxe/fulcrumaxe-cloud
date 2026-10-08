@@ -200,6 +200,15 @@ describe("RunnerTarget [pg]", () => {
       expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1" } }]);
     });
 
+    it("resume passes the branch a follow-up of a fix round must stay on (C22 section 2), and only when the run names one", async () => {
+      const w = await world();
+      const parentRunId = randomUUID();
+      const run = { ...(await insertRun(w, { role: "executor" })), parentRunId, continuesBranch: "fx/issue-12" };
+      const t = target(db.runWriterPool);
+      await t.target.resume(run, "session-1");
+      expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1", branch: "fx/issue-12" } }]);
+    });
+
     describe("tells the runner sweeper when the queue time ends (D#6 R2b, the cron's no-database marker)", () => {
       const marks = new Map<string, number>();
       /** The marker write is fire and forget, with a read before it: give it a moment. */

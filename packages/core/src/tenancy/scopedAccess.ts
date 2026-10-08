@@ -15,7 +15,7 @@ export const AGENT_RUN_COLUMNS = `
     image_digest, sandbox_requested_at, sandbox_session_ids, sandbox_stopped_at, sandbox_self_measured, compute_settle_due_at, compute_settle_failures, compute_settle_retry_at,
     runner_id, lease_generation, lease_expires_at, initiated_by, approved_by, job_signed, backend, metered_model_calls,
     om_payer_account_id, om_connection_id, om_state, om_reason, om_reads, om_finalized_at, om_next_due_at, om_last_cost,
-    om_last_count, om_read_share_usd, om_flags, om_gateway_usd, om_true_up_usd, om_overhead_usd`;
+    om_last_count, om_read_share_usd, om_flags, om_gateway_usd, om_true_up_usd, om_overhead_usd, claimable_after`;
 
 /**
  * CWE-639 (H06 pass/fail item 3): the account-scoped tables a route

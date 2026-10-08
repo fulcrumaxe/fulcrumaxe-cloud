@@ -312,7 +312,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     await admin.query(`UPDATE agent_runs SET envelope = '{"comment":"c","stance":"agree","challenge":false}'::jsonb WHERE id = $1`, [finished]);
     const t = build();
     await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
-    expect(await t.calls[0]!.ports.outcome(finished)).toEqual({ status: "succeeded", done: true, envelope: { comment: "c", stance: "agree", challenge: false }, runtime: "production" });
+    expect(await t.calls[0]!.ports.outcome(finished)).toEqual({ status: "succeeded", done: true, envelope: { comment: "c", stance: "agree", challenge: false }, runtime: "production", tailRunId: finished, failureReason: null });
     const b = await seedAccount(admin, randomUUID());
     const wb = await item(b);
     const tb = build();

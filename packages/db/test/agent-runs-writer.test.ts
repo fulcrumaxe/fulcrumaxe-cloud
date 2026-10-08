@@ -130,7 +130,8 @@ describe('agent_runs writer (0642)', () => {
         expect(r.prosecdef).toBe(true);
         expect(r.owner).toBe('platform_ops');
         expect(r.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
-        expect(r.executors).toEqual(['agent_run_writer', 'platform_ops']);
+        // 0754: runner_lease_definer holds EXECUTE on agent_run_create only, so the follow-up run it makes goes through the one create path.
+        expect(r.executors).toEqual(r.proname === 'agent_run_create' ? ['agent_run_writer', 'platform_ops', 'runner_lease_definer'] : ['agent_run_writer', 'platform_ops']);
       }
     });
 

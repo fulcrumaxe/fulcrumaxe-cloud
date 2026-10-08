@@ -405,7 +405,7 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
     outcome = await advanceBuildOutcomeStep(accountId, started.runId);
   }
   if (!outcome.done) {
-    await advanceCancelStep(accountId, userId, rootId, started.runId);
+    await advanceCancelStep(accountId, userId, rootId, outcome.tailRunId);
     await advanceLogStep("advance.stopped", { work_item_id: rootId, at: "light_spec", reason: "wait_timeout" });
     return { status: "light_spec_failed", detail: "wait_timeout" };
   }
@@ -476,16 +476,18 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   }
   if (!outcome.done) {
     // The wait ran out. The run must not keep going (and spending) behind a card that says Needs human.
-    await advanceCancelStep(accountId, userId, workItemId, runId);
-    const recorded = await advanceBuildFailedStep(accountId, workItemId, runId, "wait_timeout");
-    await buildStopped(args, runId, "build_wait_timeout");
+    // A run that was lost or hit a usage limit has a follow-up: the run still going is the end of that chain, not the one started here.
+    await advanceCancelStep(accountId, userId, workItemId, outcome.tailRunId);
+    const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "wait_timeout");
+    await buildStopped(args, outcome.tailRunId, "build_wait_timeout");
     await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build_wait", reason: "wait_timeout", recorded: recorded.status });
     return { status: "failed", detail: "build_wait_timeout" };
   }
   await advanceLogStep("advance.build_ended", { work_item_id: workItemId, run_id: runId, run_status: outcome.status, has_summary: outcome.hasSummary });
   if (outcome.status !== "succeeded") {
-    const recorded = await advanceBuildFailedStep(accountId, workItemId, runId, outcome.status);
-    await buildStopped(args, runId, `build_run_${outcome.status}`);
+    // The run recorded is the end of the chain: the one whose summary and failure say why (a lost or limited run's child, or the last run when no child could be made).
+    const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, outcome.status);
+    await buildStopped(args, outcome.tailRunId, `build_run_${outcome.status}`);
     await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build", reason: `run_${outcome.status}`, recorded: recorded.status });
     return { status: "failed", detail: `build_${outcome.status}` };
   }
@@ -499,8 +501,8 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   if (stage === "in_progress") {
     // The run succeeded and opened no pull request (live: the Spec said the work was not buildable, and the executor
     // correctly made none). The item goes to Needs human; the executor's own summary, in the run, is the reason.
-    const recorded = await advanceBuildFailedStep(accountId, workItemId, runId, "no_pull_request");
-    await buildStopped(args, runId, "build_no_pull_request");
+    const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "no_pull_request");
+    await buildStopped(args, outcome.tailRunId, "build_no_pull_request");
     await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "build_pr", reason: "no_pull_request", recorded: recorded.status });
     return { status: "failed", detail: "build_no_pull_request" };
   }
@@ -573,7 +575,7 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
     out = await advanceReviewerOutcomeStep(accountId, runId);
   }
   if (!out.done) {
-    await advanceCancelStep(accountId, userId, workItemId, runId);
+    await advanceCancelStep(accountId, userId, workItemId, out.tailRunId);
     await advanceLogStep("advance.review_wait_timeout", { work_item_id: workItemId, run_id: runId, role });
     return { role, runId, verdict: "fail", securityNeeded: false };
   }
@@ -731,7 +733,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       fixed = await advanceBuildOutcomeStep(accountId, fix.runId);
     }
     if (!fixed.done) {
-      await advanceCancelStep(accountId, userId, workItemId, fix.runId);
+      await advanceCancelStep(accountId, userId, workItemId, fixed.tailRunId);
       await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code: "wait_timeout", headSha: pr.headSha, runId: fix.runId });
       return { status: "fix_failed", detail: "wait_timeout" };
     }

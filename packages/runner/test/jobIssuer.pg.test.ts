@@ -118,6 +118,21 @@ describe("JobIssuer [pg]", () => {
     expect(runnerBranchFor(12)).toBe(`${RUNNER_BRANCH_PREFIX}issue-12`);
   });
 
+  it("a follow-up of a fix round is issued only for the branch the lost round was on (C22 section 2)", async () => {
+    const w = await world({ issue: 12 });
+    const parent = await runnerRun(w, "executor");
+    const same = await runnerRun(w, "executor", parent.id);
+    await issuer().issuer.issue({ run: same, continues: { parentRunId: parent.id, sessionId: "sess-1", branch: "fx/issue-12" } });
+    const job = verifyJob(await stored(same.id), { "job-key-1": publicKey }, { now: NOW });
+    expect(job.task.kind).toBe("fix");
+    expect(job.continues).toEqual({ parent_run_id: parent.id, session_id: "sess-1", branch: "fx/issue-12" });
+    // The issue's number changed or the parent was on another branch: refused, nothing recorded.
+    const parent2 = await runnerRun(w, "executor");
+    const other = await runnerRun(w, "executor", parent2.id);
+    expect(await codeOf(issuer().issuer.issue({ run: other, continues: { parentRunId: parent2.id, sessionId: "sess-1", branch: "fx/issue-13" } }))).toBe("continues_branch_mismatch");
+    expect(await stored(other.id)).toBeNull();
+  });
+
   it("a continuation with no parent, a bad session id or no issue number is refused and nothing is recorded", async () => {
     const w = await world();
     const noIssue = await world({ issue: null });

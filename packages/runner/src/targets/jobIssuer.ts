@@ -45,6 +45,7 @@ export type JobIssueErrorCode =
   | "continues_without_parent"
   | "continues_session_invalid"
   | "continues_without_branch"
+  | "continues_branch_mismatch"
   | "job_invalid"
   | "job_not_recorded";
 
@@ -182,7 +183,10 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         if (!input.continues.parentRunId) throw new JobIssueError("continues_without_parent");
         if (!SESSION_ID_PATTERN.test(input.continues.sessionId)) throw new JobIssueError("continues_session_invalid");
         if (context.issueNumber === null) throw new JobIssueError("continues_without_branch");
-        continues = { parent_run_id: input.continues.parentRunId, session_id: input.continues.sessionId, branch: runnerBranchFor(context.issueNumber) };
+        const branch = runnerBranchFor(context.issueNumber);
+        // A follow-up of a fix round must push to the branch the lost round was on, so its pull request is updated and not replaced.
+        if (input.continues.branch !== undefined && input.continues.branch !== branch) throw new JobIssueError("continues_branch_mismatch");
+        continues = { parent_run_id: input.continues.parentRunId, session_id: input.continues.sessionId, branch };
       }
 
       const issuedAt = now();

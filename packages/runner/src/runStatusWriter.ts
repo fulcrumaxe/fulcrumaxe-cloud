@@ -173,6 +173,30 @@ export async function insertAgentOutputLine(
   );
 }
 
+/**
+ * D#6 R2b-3: one event a local runner sent, written on the caller's client in the caller's tenant transaction. The runner's
+ * own sequence number and the digest of what it sent under that number key the row (migration 0754), so a batch sent twice
+ * stores each event once. A second event under a number already stored is dropped; if its body differs from the stored one it
+ * is also recorded, as a `runner.event_conflict` row that names the number and nothing else. The payload goes through the same
+ * redaction chokepoint as every other row here.
+ */
+export async function insertRunnerEvent(
+  client: PoolClient,
+  p: { accountId: string; runId: string; runnerSeq: number; bodySha256: string; payload: Record<string, unknown> },
+): Promise<"stored" | "duplicate" | "conflict"> {
+  const seq = await nextRunEventSeq(client, p.runId);
+  const inserted = await client.query(
+    `INSERT INTO run_events (account_id, run_id, seq, kind, payload, runner_seq, runner_body_sha256) VALUES ($1, $2, $3, 'runner.event', $4, $5, $6)
+     ON CONFLICT (run_id, runner_seq) WHERE runner_seq IS NOT NULL DO NOTHING`,
+    [p.accountId, p.runId, seq, JSON.stringify(redactEventPayload(p.payload)), p.runnerSeq, p.bodySha256],
+  );
+  if (inserted.rowCount === 1) return "stored";
+  const { rows } = await client.query<{ runner_body_sha256: string }>("SELECT runner_body_sha256 FROM run_events WHERE run_id = $1 AND runner_seq = $2", [p.runId, p.runnerSeq]);
+  if (rows[0]?.runner_body_sha256 === p.bodySha256) return "duplicate";
+  await insertRunEvent(client, p.accountId, p.runId, "runner.event_conflict", { runner_seq: p.runnerSeq });
+  return "conflict";
+}
+
 /** D#2 H14c-5c-2a (X-4): one `limit_extended` row per in-run extension. */
 export async function recordLimitExtended(
   pool: Pool,
@@ -477,6 +501,11 @@ export type WriteRunStatusResult =
  * from `domain_events` directly rather than through webhook fan-out.
  */
 export async function writeRunStatus(pool: Pool, params: WriteRunStatusParams): Promise<WriteRunStatusResult> {
+  checkRunStatusParams(params);
+  return withTenant(pool, params.accountId, (client) => writeRunStatusOn(client, params));
+}
+
+function checkRunStatusParams(params: WriteRunStatusParams): void {
   assertLegalRunTransition(params.from, params.to);
   const checkpoint = params.checkpoint;
   const allowed =
@@ -484,66 +513,74 @@ export async function writeRunStatus(pool: Pool, params: WriteRunStatusParams): 
   if (checkpoint && !(params.from === "running" && allowed)) {
     throw new Error("writeRunStatus: a checkpoint needs running -> timed_out (a time/call/turn/silence limit or the agent's own) or running -> killed_spend (per_run_usd)");
   }
-  return withTenant(pool, params.accountId, async (client) => {
-    const result = params.result;
-    const { rows: written } = await client.query<{ updated: boolean }>(
-      `SELECT agent_run_set_status($1::uuid, $2::uuid, $3::text, $4::text, $5::jsonb,
-                                   $6::bigint, $7::bigint, $8::numeric, $9::text, $10::integer) AS updated`,
-      [
-        params.accountId,
-        params.runId,
-        params.from,
-        params.to,
-        result?.envelope !== undefined ? JSON.stringify(result.envelope) : null,
-        result?.tokensIn ?? null,
-        result?.tokensOut ?? null,
-        result?.usd ?? null,
-        result?.sessionId ?? null,
-        params.metering?.modelCalls ?? null,
-      ],
-    );
-    if (written[0]?.updated === true) {
-      await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
+}
+
+/**
+ * The same write on a client the caller already holds, inside the caller's tenant transaction (D#6 R2b-3): a runner's claim,
+ * its events and the sweeper move a run's status in the SAME transaction as the lease columns they check, so the two commit or
+ * roll back together. Everything `writeRunStatus` says holds; the caller owns the transaction and its tenant context.
+ */
+export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatusParams): Promise<WriteRunStatusResult> {
+  checkRunStatusParams(params);
+  const checkpoint = params.checkpoint;
+  const result = params.result;
+  const { rows: written } = await client.query<{ updated: boolean }>(
+    `SELECT agent_run_set_status($1::uuid, $2::uuid, $3::text, $4::text, $5::jsonb,
+                                 $6::bigint, $7::bigint, $8::numeric, $9::text, $10::integer) AS updated`,
+    [
+      params.accountId,
+      params.runId,
+      params.from,
+      params.to,
+      result?.envelope !== undefined ? JSON.stringify(result.envelope) : null,
+      result?.tokensIn ?? null,
+      result?.tokensOut ?? null,
+      result?.usd ?? null,
+      result?.sessionId ?? null,
+      params.metering?.modelCalls ?? null,
+    ],
+  );
+  if (written[0]?.updated === true) {
+    await insertRunEvent(client, params.accountId, params.runId, "run.status_changed", {
+      from: params.from,
+      to: params.to,
+      ...(params.failureReason ? { failureReason: params.failureReason } : {}),
+    });
+    if (checkpoint) {
+      await insertRunEvent(client, params.accountId, params.runId, "checkpoint", {
+        ...(checkpoint.reason === "agent_checkpoint"
+          ? { reason: "agent_checkpoint" }
+          : { reason: "limit", kind: checkpoint.kind }),
+        cc_session_id: checkpoint.ccSessionId,
+        ...(checkpoint.reason === "agent_checkpoint" ? { summary: sanitizeCheckpointSummary(checkpoint.summary) } : {}),
+        metered_usd: checkpoint.meteredUsd,
+        extensions_used: checkpoint.extensionsUsed,
+      });
+    }
+    if (params.metering) {
+      await insertRunEvent(client, params.accountId, params.runId, "run.metering", {
+        metered_usd: params.metering.meteredUsd,
+        reported_usd: params.metering.reportedUsd,
+        flags: params.metering.flags,
+      });
+    }
+    await emitDomainEvent(client, {
+      type: "run.status_changed",
+      accountId: params.accountId,
+      subjectId: params.runId,
+      payload: {
+        runId: params.runId,
         from: params.from,
         to: params.to,
-        ...(params.failureReason ? { failureReason: params.failureReason } : {}),
-      });
-      if (checkpoint) {
-        await insertRunEvent(client, params.accountId, params.runId, "checkpoint", {
-          ...(checkpoint.reason === "agent_checkpoint"
-            ? { reason: "agent_checkpoint" }
-            : { reason: "limit", kind: checkpoint.kind }),
-          cc_session_id: checkpoint.ccSessionId,
-          ...(checkpoint.reason === "agent_checkpoint" ? { summary: sanitizeCheckpointSummary(checkpoint.summary) } : {}),
-          metered_usd: checkpoint.meteredUsd,
-          extensions_used: checkpoint.extensionsUsed,
-        });
-      }
-      if (params.metering) {
-        await insertRunEvent(client, params.accountId, params.runId, "run.metering", {
-          metered_usd: params.metering.meteredUsd,
-          reported_usd: params.metering.reportedUsd,
-          flags: params.metering.flags,
-        });
-      }
-      await emitDomainEvent(client, {
-        type: "run.status_changed",
-        accountId: params.accountId,
-        subjectId: params.runId,
-        payload: {
-          runId: params.runId,
-          from: params.from,
-          to: params.to,
-        },
-      });
-      return { updated: true };
-    }
-    const { rows } = await client.query<{ status: RunStatus }>(
-      `SELECT status FROM agent_runs WHERE account_id = $1 AND id = $2`,
-      [params.accountId, params.runId],
-    );
-    return { updated: false, currentStatus: rows[0]?.status };
-  });
+      },
+    });
+    return { updated: true };
+  }
+  const { rows } = await client.query<{ status: RunStatus }>(
+    `SELECT status FROM agent_runs WHERE account_id = $1 AND id = $2`,
+    [params.accountId, params.runId],
+  );
+  return { updated: false, currentStatus: rows[0]?.status };
 }
 
 /**

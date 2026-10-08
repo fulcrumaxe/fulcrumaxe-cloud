@@ -49,6 +49,9 @@ import { loadJobSigner } from "./jobSigner.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
+import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
+import { createRunnerLeaseSweeper, type RunnerLeaseSweeper } from "./runnerLeaseSweep.js";
+import { createFollowUpPorts } from "./runnerFollowUp.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
 import { createAdvanceModule, type AdvanceFacade, type AdvanceModuleDeps } from "./advance.js";
@@ -125,7 +128,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerQueueSweeper, PreviewFacade, RetryFacade, AdvanceFacade {
+export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerQueueSweeper, RunnerLeaseSweeper, PreviewFacade, RetryFacade, AdvanceFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -268,6 +271,10 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
     const advance = createAdvanceModule(pools.runnerPool, { starter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, registry });
+    // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.
+    const followUp = createFollowUpPorts({ pool: pools.runnerPool, registry, buildFailed: (accountId, workItemId, runId, code) => advance.advanceBuildFailed(accountId, workItemId, runId, code) });
+    const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })) });
+    const runnerLeaseSweep = createRunnerLeaseSweeper(pools.runnerPool, { followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.lease_sweep_failed", run_id: runId })) });
     const runSweepComputeSettle = async (): Promise<ComputeSettleSweepResult & { lost: LostSweepResult; outside: OutsideMeterResult }> => {
       // The lost-run check goes first and spends part of the tick's time; the settle gets what is left of its budget.
       const began = performance.now();
@@ -292,7 +299,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     };
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
-    return { ...runActions, ...runnerLeases, ...runnerQueue, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerLeaseSweep, ...runnerQueue, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -312,7 +319,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, sweepRunnerQueue, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, sweepRunnerLeases, sweepRunnerQueue, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -327,6 +334,10 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         performCancelRun,
         performCancelWorkItem,
         failRunnerLeases,
+        claimRunnerRun,
+        heartbeatRunnerRun,
+        ingestRunnerEvents,
+        sweepRunnerLeases,
         sweepRunnerQueue,
         performStartPreview,
         previewReady,

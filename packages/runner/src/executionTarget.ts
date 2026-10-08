@@ -64,6 +64,10 @@ export type FailureReason =
   | "usage_limit"
   | "credential_mismatch"
   | "queue_ttl"
+  /** D#6 R2b-3 (C21 section 7): a runner run still `running` two hours after it started; the sweeper's `timed_out` write records it. */
+  | "wall_clock_limit"
+  /** D#6 R2b-3 (C21 section 7): an executor's changes could not be checked against the Spec's file scope (no scope on record, or one the matcher cannot read), so no pull request is opened. */
+  | "scope_unknown"
   /** A caller that cannot wait for a runner to claim a run was handed a queued one and cancelled it (`failClosedOnQueued`). */
   | "queued_not_supported";
 
@@ -210,6 +214,11 @@ export interface ExecutionRun {
    * `backend` column (0735) is fixed at insert, and a fix round's resume must find the same name on the run it continues.
    */
   backend?: string;
+  /**
+   * D#6 R2b-3 (C22 section 2): a runner follow-up of a fix round names the branch the lost round was on. `RunnerTarget.resume` passes it
+   * to the job issuer, which refuses the run unless the branch it derives for the work item is exactly this one. Absent for every other run.
+   */
+  continuesBranch?: string;
   workdir?: string;
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
   cloneRepo?: { owner: string; name: string };
