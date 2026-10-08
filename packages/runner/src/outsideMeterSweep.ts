@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import {
   GATEWAY_PRICES, MAX_READS, MAX_TAGS_PER_QUERY, compareToMeter, effectiveEntitlement, interpretRead, isFinal, mintGatewayTag, nextReadDueAt,
@@ -70,9 +71,39 @@ export interface OutsideMeterDeps {
   clock?: () => number;
   timeBudgetMs?: number;
   onError?: (runId: string | null, err: unknown) => void;
+  /** A run ended for the owner to look at: figures only (the run id, what the gateway saw, what the runner metered). */
+  onEscalate?: (e: { runId: string; kind: "floor_unmet" | "trueup_held"; gatewayUsd: number; meteredUsd: number }) => void;
 }
 
-export interface OutsideMeterResult { listed: number; waiting: number; read: number; final: number; unavailable: number; failed: number; skipped: number }
+export interface OutsideMeterResult { listed: number; waiting: number; read: number; final: number; unavailable: number; failed: number; skipped: number; late?: number }
+
+/** Reasons this sweep ends a run with, beyond @fx/spend's: the last read was a transient failure, or the run's settled model figure never turned up. */
+type EndReason = UnavailableReason | "gateway_error" | "no_metered_figure" | "floor_unmet" | "trueup_over_ceiling";
+
+/** Every flag this sweep (and the late-finalize backstop, and @fx/spend's contract break) raises. `outside_meter_flag_counts` counts exactly these; a test holds the two equal. */
+export const FLAG = {
+  noCount: "outside_meter_no_count", disagree: "outside_meter_disagree", escalate: "outside_meter_escalate", contract: "outside_meter_contract",
+  unavailable: "outside_meter_unavailable", badRequest: "outside_meter_bad_request", lateFinalize: "outside_meter_late_finalize",
+  floorUnmet: "outside_meter_floor_unmet", trueupHeld: "outside_meter_trueup_held",
+} as const;
+
+/**
+ * The most a true-up may post on its own: twice the run's per-run dollar cap for each spawn, never under a fixed floor. The number of spawns a
+ * run took is not stored, so it is 1 plus the most resumes its limits allow. If the limits cannot be read the cap counts as 0, so the
+ * fixed floor holds: a held true-up goes to the owner, a wrongly posted one is a charge.
+ */
+export async function trueUpCeilingUsd(pool: Pool, r: { account_id: string; run_id: string }): Promise<number> {
+  try {
+    const limits = await withTenant(pool, r.account_id, async (c) => {
+      const role = (await c.query<{ role: string }>(`SELECT role FROM agent_runs WHERE account_id = $1 AND id = $2`, [r.account_id, r.run_id])).rows[0]?.role ?? "";
+      return resolveRunLimits(c, { accountId: r.account_id, role });
+    });
+    return Math.max(5, 2 * limits.per_run_usd * (1 + limits.max_resumes));
+  } catch {
+    // fx-swallow-ok: unreadable limits (or plan data) mean the fixed floor, the safe side: the true-up is held for the owner
+    return 5;
+  }
+}
 
 const TICK_BUDGET_MS = 300_000;
 const RUN_COLS = `$1::uuid, $2::uuid, $3, $4, $5::int, $6::timestamptz, $7::numeric, $8::int, $9::text[], $10::numeric, $11::numeric, $12::numeric, $13::numeric`;
@@ -82,6 +113,18 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
   const clock = deps.clock ?? (() => performance.now());
   const began = clock();
   const out: OutsideMeterResult = { listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 };
+  // Backstop (OM-2b2): a tagged run that has been terminal for over 10 minutes with no clock started is finalized now, at its own end time, and flagged.
+  out.late = 0;
+  for (const u of (await deps.pool.query<{ account_id: string; run_id: string }>(`SELECT * FROM outside_meter_list_unfinalized($1)`, [200])).rows) {
+    try {
+      const done = await withTenant(deps.pool, u.account_id, (c) => c.query<{ ok: boolean }>(`SELECT agent_run_outside_meter_late_finalize($1::uuid, $2::uuid) AS ok`, [u.account_id, u.run_id]));
+      if (done.rows[0]?.ok) out.late++;
+    } catch (err) {
+      // fx-swallow-ok: counted as failed and handed to onError; the next tick looks again
+      out.failed++;
+      deps.onError?.(u.run_id, err);
+    }
+  }
   const { rows } = await deps.pool.query<DueRow>(`SELECT * FROM outside_meter_list_due($1)`, [200]);
   out.listed = rows.length;
   out.waiting = Number((await deps.pool.query<{ n: string }>(`SELECT outside_meter_waiting() AS n`)).rows[0]?.n ?? 0);
@@ -93,8 +136,14 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
         v.flags ?? [], v.share ?? Number(r.read_share_usd), v.g ?? null, v.trueUp ?? null, v.overhead ?? null,
       ]);
     });
-  const finish = async (r: DueRow, reason: UnavailableReason, reads: number, flags: string[] = []): Promise<void> => {
-    await record(r, { state: "unavailable", reason, reads, flags });
+  const postLine = (r: DueRow, usd: number, reason: string) =>
+    withTenant(deps.pool, r.account_id, (c) =>
+      c.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget, reason) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model', $4) ON CONFLICT (account_id, run_id, reason) WHERE reason IS NOT NULL DO NOTHING`, [r.account_id, usd, r.run_id, reason]));
+  // A run that paid for at least one read posts its overhead (those reads' shares) when it ends, final or not. `share` is the total after this read.
+  const finish = async (r: DueRow, reason: EndReason, reads: number, flags: string[] = [], share = Number(r.read_share_usd)): Promise<void> => {
+    const overhead = share > 0 ? roundUsd(share) : null;
+    if (overhead !== null && overhead > 0) await postLine(r, overhead, "outside_meter_overhead");
+    await record(r, { state: "unavailable", reason, reads, flags, share, overhead });
     out.unavailable++;
   };
   const guarded = async (r: DueRow, fn: () => Promise<void>): Promise<void> => {
@@ -174,28 +223,43 @@ export async function sweepOutsideMeter(deps: OutsideMeterDeps): Promise<Outside
           if (verdict.entitlement && outcome.kind !== "contract") {
             await withTenant(deps.pool, first.payer_account_id, (c) => c.query(`SELECT outside_meter_set_entitlement($1::uuid, $2::uuid, $3, $4)`, [first.payer_account_id, conn!.connectionId, verdict.entitlement, keyRef]));
           }
-          if (verdict.run === "keep" && outcome.kind === "transient") return; // no state change; the next tick tries again
+          // A transient failure (5xx, timeout) changes no state and costs nothing, but it is a read: the schedule moves on, and on the last one the run ends.
+          if (outcome.kind === "transient") return last ? finish(r, "gateway_error", reads, [FLAG.unavailable]) : record(r, { state: "pending", reads, next: nextReadDueAt(r.finalized_at, reads) });
           const flags = verdict.flag ? [verdict.flag] : [];
-          if (typeof verdict.run === "object") return finish(r, verdict.run.unavailable, reads, verdict.run.flag ? ["outside_meter_bad_request"] : flags);
+          if (typeof verdict.run === "object") return finish(r, verdict.run.unavailable, reads, verdict.run.flag ? [FLAG.badRequest] : flags);
           const next = nextReadDueAt(r.finalized_at, reads);
           if (verdict.run === "keep" || outcome.kind !== "ok") return record(r, { state: "pending", reads, next, flags, share: Number(r.read_share_usd) + share });
           const cur = outcome.rows.get(r.tag);
           const prev = r.last_count === null ? undefined : { tag: r.tag, totalCost: Number(r.last_cost), surchargeCost: 0, requestCount: r.last_count };
           const readShare = Number(r.read_share_usd) + share;
-          if (!cur || !isFinal(prev, cur, r.metered_calls)) {
-            if (last) return finish(r, cur ? "not_stable" : "no_rows", reads, [...flags, "outside_meter_unavailable"]);
+          // At the last read, two agreeing reads whose count is still under the runner's floor: the floor comes from the VM's stream and can be pushed up.
+          const floorUnmet = last && !!cur && !!prev && cur.requestCount >= 1 && prev.totalCost === cur.totalCost && prev.requestCount === cur.requestCount
+            && r.metered_calls !== null && cur.requestCount < r.metered_calls;
+          if (!cur || (!isFinal(prev, cur, r.metered_calls) && !floorUnmet)) {
+            if (last) return finish(r, cur ? "not_stable" : "no_rows", reads, [...flags, FLAG.unavailable], readShare);
             return record(r, { state: "pending", reads, next, row: cur, flags, share: readShare });
           }
-          const cmp = compareToMeter(Number(r.metered_usd ?? 0), cur);
+          // No settled model figure is never a figure of 0: nothing is compared or trued-up from this read; the next is tried, and the last ends the run.
+          if (r.metered_usd === null) {
+            if (last) return finish(r, "no_metered_figure", reads, [...flags, FLAG.unavailable], readShare);
+            return record(r, { state: "pending", reads, next, row: cur, flags, share: readShare });
+          }
+          const cmp = compareToMeter(Number(r.metered_usd), cur);
           const overhead = roundUsd(cur.surchargeCost + readShare);
-          const f = [...(r.metered_calls === null ? ["outside_meter_no_count"] : []), ...(cmp.disagree ? ["outside_meter_disagree"] : []), ...(cmp.escalate ? ["outside_meter_escalate"] : [])];
+          const held = cmp.trueUpUsd > (await trueUpCeilingUsd(deps.pool, r));
+          const f = [
+            ...(r.metered_calls === null ? [FLAG.noCount] : []), ...(cmp.disagree ? [FLAG.disagree] : []), ...(cmp.escalate ? [FLAG.escalate] : []),
+            ...(held ? [FLAG.trueupHeld] : floorUnmet ? [FLAG.floorUnmet] : []),
+          ];
           // The lines first (each unique per run, so a repeat is a no-op), then the result: a crash between them re-reads and finds both done.
-          await withTenant(deps.pool, r.account_id, async (c) => {
-            const line = (usd: number, reason: string) =>
-              c.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget, reason) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model', $4) ON CONFLICT (account_id, run_id, reason) WHERE reason IS NOT NULL DO NOTHING`, [r.account_id, usd, r.run_id, reason]);
-            if (cmp.trueUpUsd > 0) await line(cmp.trueUpUsd, "outside_meter");
-            if (overhead > 0) await line(overhead, "outside_meter_overhead");
-          });
+          if (cmp.trueUpUsd > 0 && !held) await postLine(r, cmp.trueUpUsd, "outside_meter");
+          if (overhead > 0) await postLine(r, overhead, "outside_meter_overhead");
+          if (held || floorUnmet) {
+            await record(r, { state: "unavailable", reason: held ? "trueup_over_ceiling" : "floor_unmet", reads, row: cur, flags: f, share: readShare, g: cmp.gatewayUsd, trueUp: held ? null : cmp.trueUpUsd, overhead });
+            out.unavailable++;
+            deps.onEscalate?.({ runId: r.run_id, kind: held ? "trueup_held" : "floor_unmet", gatewayUsd: cmp.gatewayUsd, meteredUsd: Number(r.metered_usd) });
+            return;
+          }
           await record(r, { state: cmp.trueUpUsd > 0 ? "higher" : "matches", reads, row: cur, flags: f, share: readShare, g: cmp.gatewayUsd, trueUp: cmp.trueUpUsd, overhead });
           out.final++;
         });

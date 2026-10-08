@@ -176,13 +176,14 @@ describe("buildWorker (C15 / C26 / C59 §5)", () => {
     const pool = (tag: string) => ({ tag, query: async (sql: string) => (queries.push({ pool: tag, sql }), { rows: [] }) }) as unknown as Pool;
     const pools = { ...fakePools(), runnerPool: pool("runner"), platformOpsPool: pool("ops") };
     const worker = await buildWorker(options({ createPools: async () => pools }));
-    expect(await worker.sweepComputeSettle()).toEqual({ listed: 0, settled: 0, deleted: 0, failed: 0, skipped: 0, lost: { listed: 0, young: 0, stale: 0, settled: 0, alive: 0, unknown: 0, failed: 0, skipped: 0 }, outside: { listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 } });
+    expect(await worker.sweepComputeSettle()).toEqual({ listed: 0, settled: 0, deleted: 0, failed: 0, skipped: 0, lost: { listed: 0, young: 0, stale: 0, settled: 0, alive: 0, unknown: 0, failed: 0, skipped: 0 }, outside: { late: 0, listed: 0, waiting: 0, read: 0, final: 0, unavailable: 0, failed: 0, skipped: 0 } });
     // The lost-run list first (runs whose sandbox went away), then the compute settle's: both on the runner login.
-    expect(queries.map((q) => q.pool)).toEqual(["runner", "runner", "runner", "runner"]);
+    expect(queries.map((q) => q.pool)).toEqual(["runner", "runner", "runner", "runner", "runner"]);
     expect(queries[0]?.sql).toContain("agent_run_list_running");
     expect(queries[1]?.sql).toContain("compute_settle_list_due");
     // D#221 OM-2b: the outside meter rides the same tick, on the same login.
-    expect(queries[2]?.sql).toContain("outside_meter_list_due");
+    expect(queries[2]?.sql).toContain("outside_meter_list_unfinalized"); // the backstop first
+    expect(queries[3]?.sql).toContain("outside_meter_list_due");
   });
 
   it("a pool guard refusal stops the worker before anything else is built", async () => {
