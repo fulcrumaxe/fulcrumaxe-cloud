@@ -52,7 +52,7 @@ describe('sandbox_settle_definer (0742)', () => {
     withTenant(writerPool, context, (c) =>
       c.query(MARK, [t.accountId, runId, m.requested ?? false, m.session ?? null, m.stopped ?? false, m.own ? JSON.stringify(m.own) : null, m.due ?? null, null]),
     );
-  const row = async (runId: string) => (await admin.query(`SELECT * FROM agent_runs WHERE id = $1`, [runId])).rows[0];
+  const row = async (runId: string) => (await admin.query(`SELECT * FROM agent_runs WHERE id = $1 /* agent-run-columns: allow admin connection, not app_user */`, [runId])).rows[0];
 
   describe('POR-3: a direct platform_ops login no longer reads the columns', () => {
     it('gets 42501 for each column, with and without a tenant context, against both tenants', async () => {

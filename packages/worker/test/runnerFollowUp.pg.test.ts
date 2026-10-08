@@ -135,7 +135,7 @@ describe("runner follow-up runs [pg]", () => {
     for (const reason of reasons) ids.push(await failed({ parent: ids[ids.length - 1] ?? null, reasons: [reason] }));
     return ids;
   }
-  const child = async (parent: string) => (await admin.query("SELECT * FROM agent_runs WHERE parent_run_id = $1", [parent])).rows;
+  const child = async (parent: string) => (await admin.query("SELECT * FROM agent_runs WHERE parent_run_id = $1 /* agent-run-columns: allow admin connection, not app_user */", [parent])).rows;
   const sweep = (over: { followUp?: FollowUpPorts } = {}): Promise<RunnerLeaseSweepResult> => createRunnerLeaseSweeper(writerPool, { now: () => clock, followUp: over.followUp ?? ports }).sweepRunnerLeases();
   const askFor = async (parent: string, account: SeedRefs = A) => withTenant(writerPool, account.accountId, (client) => requestFollowUp(client, parent));
 

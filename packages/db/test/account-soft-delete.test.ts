@@ -91,7 +91,8 @@ describe('account soft-delete', () => {
 
     it.each(TENANT_TABLES)('app_user sees zero rows on %s for the soft-deleted account', async (table) => {
       await withTenant(appUserPool, refsDeleted.accountId, async (client) => {
-        const { rows } = await client.query(`SELECT * FROM ${table}`);
+        // agent_runs has a column-level SELECT grant (0756), so a star select is refused there; `id` is enough to prove zero rows.
+        const { rows } = await client.query(`SELECT ${table === 'agent_runs' ? 'id' : '*'} FROM ${table}`);
         expect(rows).toEqual([]);
       });
     });

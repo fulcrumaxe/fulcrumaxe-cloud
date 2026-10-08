@@ -40,7 +40,7 @@ describe('compute settle columns, ledger basis and preview total (0689)', () => 
     withTenant(pool, tenant, (c) =>
       c.query(MARK, [a.accountId, runId, m.requested ?? false, m.session ?? null, m.stopped ?? false, m.own ? JSON.stringify(m.own) : null, m.due ?? null]),
     );
-  const row = async (runId: string) => (await admin.query(`SELECT * FROM agent_runs WHERE id = $1`, [runId])).rows[0];
+  const row = async (runId: string) => (await admin.query(`SELECT * FROM agent_runs WHERE id = $1 /* agent-run-columns: allow admin connection, not app_user */`, [runId])).rows[0];
 
   it('app_user gets 42501 on every column, including clearing the request marker', async () => {
     const id = await newRun();

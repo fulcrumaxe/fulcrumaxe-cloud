@@ -523,6 +523,7 @@ const TODAY = [
   "pnpm lint",
   "pnpm typecheck",
   "scripts/check-globalsetup-env.sh",
+  "scripts/check-agent-run-columns.sh",
   "pnpm test",
   "sitekit-checks browser tier",
   "packages/db neon-shape migrations",

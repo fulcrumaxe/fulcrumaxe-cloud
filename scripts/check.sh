@@ -95,6 +95,9 @@ fi
 echo "==> scripts/check-globalsetup-env.sh"
 run bash scripts/check-globalsetup-env.sh
 
+echo "==> scripts/check-agent-run-columns.sh"
+run bash scripts/check-agent-run-columns.sh
+
 if [ "$mode" = full ]; then
   echo "==> pnpm test"
   run env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN FX_FORBID_MODEL_CALLS=1 pnpm test
