@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
+import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
 import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
 import { createAppRepoVisibility } from "./github/repoVisibility";
@@ -31,10 +31,10 @@ export interface ComputeSettleSweepWorker {
 }
 
 /** What one runner-queue tick reports (D#6 R2b): the worker's `sweepRunnerQueue`, checked against this shape at `getWorker`'s return. */
-export type RunnerQueueSweepWorker = RunnerQueueSweeper;
+export type RunnerQueueSweepWorker = RunnerQueueSweeper & RunnerNoticeSweeper;
 
-/** What the runner sweeper tick asks of the worker: the queue time (R2b-2) and the lease and wall-clock work (R2b-3). */
-export type RunnerSweepWorker = RunnerQueueSweeper & RunnerLeaseSweeper;
+/** What the runner sweeper tick asks of the worker: the queue time (R2b-2), the lease and wall-clock work (R2b-3) and the waiting notices. */
+export type RunnerSweepWorker = RunnerQueueSweeper & RunnerLeaseSweeper & RunnerNoticeSweeper;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a) and the runner queue tick (R2b). */
 export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerSweepWorker;

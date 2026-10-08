@@ -76,7 +76,7 @@ A run for a `runner_local` repo waits in `pending` until a runner claims it. The
 runner-sweeper`, every 5 minutes behind the shared pending-work gate: a tick with no due marker and no backstop makes no database connection)
 moves a run still waiting at its job's `expires_at` (72 hours after dispatch) to `timed_out` with the reason `queue_ttl`,
 through the worker's `sweepRunnerQueue` and the compare-and-set status writer. A run that ends this way is requeued with
-the existing `retry_run`, on the same model. `RunnerTarget.dispatch` marks the sweep due at the end of the queue time.
+the existing `retry_run`, on the same model. `RunnerTarget.dispatch` marks the sweep due at the earliest thing due for the run, the 15 minute notice below; the tick that connects re-derives the rest.
 
 Auto-merge on a runner repo's local reviews is off until an owner or admin turns it on for that repo
 (`repo_local_review_optin_set`, migration 0733). Turning it on needs the repo to be on a runner, and a repo cannot leave
@@ -103,3 +103,30 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   pending run (`agent_run_approve`, 0757). Anyone else gets 403. `approved_by` is write-once. The approve definer and the
   execution-mode audit definer are owned by the NOLOGIN role `runner_approval_definer` (column grants and row policies of its
   own, EXECUTE for `app_user` alone); migration 0757 gives `platform_ops` nothing, and a test diffs its privileges.
+
+## Execution mode, auto-merge and the waiting notices (R2b)
+
+- `POST /api/runners/repos/:id/execution-mode` (owner or admin; a member gets 403) takes one of three strict bodies. A mode
+  change (`sandbox` or `runner_local`; `runner_verified` is refused until it exists) and turning auto-merge on both need the
+  repository's full name typed back, compared exactly on the server (400 `confirmation_mismatch`, nothing written). Turning
+  it on also needs the sha256 of the Local auto-merge wording this server ships (409 `copy_changed`). Turning it off needs
+  neither. A public repo, or one whose visibility cannot be read, is never put on a runner (409). Leaving `runner_local`
+  turns the opt-in off in the same transaction; the audit rows come from definers (`repo_local_review_optin_set`,
+  `repo_execution_mode_switch_audit`), since the web tier cannot write the audit log.
+- Leaving `runner_local` also cancels every pending runner run of the repo in that same transaction (correction C24 section 2):
+  queued runs, runs with no job yet and follow-ups waiting on `claimable_after`, `pending -> cancelled` with the failure reason
+  `execution_mode_changed` (`COPY.executionModeChanged` is what a person reads). Running runs are untouched, and switching back
+  restores nothing. The reply carries `cancelled_runs` (0 when none, and on every other body) and the audit row records the same
+  number. The web tier cannot write a run's status, so the definer `repo_cancel_pending_runner_runs` (0759, owned by
+  `runner_mode_switch_definer`, in the shape of the other two roles above) moves the runs through the compare-and-set writer and
+  answers their ids; the events are written here, in the same transaction, by the code every status change uses. A queue sweep
+  tick cancels, with the same reason and whatever its age, a pending runner run whose repo is no longer `runner_local` (a dispatch
+  that read the old mode and inserted just after the switch), and the notice sweep skips such a run. The screen that offers the
+  switch must show the number of queued runs that will be cancelled before the user confirms; that screen is a later change.
+- The sweeper also sends two notices per waiting run, once each, as `run_events` rows: `runner.waiting` at the first tick at
+  or after 15 minutes from dispatch when no runner is online for the run's repo (a runner counts when it is not revoked, was
+  heard from within 120 s, and has the repo in its own `allowed_repo_ids`; an empty list takes no repo, as in the claim), and
+  `runner.ttl_reminder` at the first tick at or after 48 hours. The wait reason in the read model uses the same test. The row
+  is also the marker that it was sent. The tick reads the runs that still owe a notice, soonest due first
+  (`agent_run_list_runner_runs_owing_notice`, owned by the NOLOGIN role `runner_notice_lister`), so runs that have both
+  notices cannot hide newer ones. The cron keeps the earliest due time of the notices and the queue time as its marker.

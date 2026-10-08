@@ -8,11 +8,12 @@ import type { RunnerSweepWorker } from "../../../../lib/worker";
  * handler.ts: Vercel sends `Authorization: Bearer <CRON_SECRET>`; an unset secret fails closed; nothing in the request names
  * a tenant, and a customer token is just a wrong value here.
  *
- * Today it does one thing: a run waiting for a runner past its 72 hour queue time becomes `timed_out` with the reason
- * `queue_ttl` (the worker's `sweepRunnerQueue`, packages/worker). The dispatch of a runner run marks the sweep due at the
- * end of that queue time, so almost every tick ends before it connects. A tick that does connect re-derives the marker from
- * the rows: the end of the earliest queue time still running, soon when the batch was full or a run failed, and none when no
- * run is waiting.
+ * A run waiting for a runner past its 72 hour queue time becomes `timed_out` with the reason `queue_ttl` (the worker's
+ * `sweepRunnerQueue`, packages/worker), and a waiting run raises two notices, once each: `runner.waiting` at 15 minutes with
+ * no runner online and `runner.ttl_reminder` at 48 hours (`sweepRunnerNotices`). The dispatch of a runner run marks the
+ * sweep due at the earliest of these, the 15 minute notice, so almost every tick ends before it connects. A tick that does
+ * connect re-derives the marker from the rows: the earliest of the next notice and the end of the earliest queue time
+ * still running, soon when a batch was full or a run failed, and none when no run is waiting.
  */
 
 export interface RunnerSweeperHandlerDeps {
@@ -42,12 +43,12 @@ export async function runnerSweeperHandler(req: NextRequest, deps: RunnerSweeper
     const worker = await deps.getWorker();
     if (worker === null) {
       deps.log("runner sweeper: worker not configured");
-      return { result: { configured: false, listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0 }, workFound: false, nextDueAt: null };
+      return { result: { configured: false, listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0 }, workFound: false, nextDueAt: null };
     }
-    // Both halves run inside this one gated tick: there is no second, ungated entry point (C14 section 4). Each half has a try of its
+    // The three sweeps run inside this one gated tick: there is no second, ungated entry point (C14 section 4). Each guarded half (queue, leases) has a try of its
     // own: a queue sweep that throws must not stop the lease sweep that tick (a lost lease would then wait for the next one), and
     // the other way round. When one half throws, the tick still finishes with the other's work, reports the failure by name (never
-    // the error's text) and comes back in five minutes. When both throw, the tick fails as it did before: the marker is untouched.
+    // the error's text) and comes back in five minutes. When both guarded halves throw, the tick fails as it did before: the marker is untouched.
     const failures: Array<"queue" | "leases"> = [];
     let firstError: unknown;
     let queue: Awaited<ReturnType<typeof worker.sweepRunnerQueue>> | null = null;
@@ -69,12 +70,14 @@ export async function runnerSweeperHandler(req: NextRequest, deps: RunnerSweeper
       deps.log("runner sweeper: lease sweep failed");
     }
     if (queue === null && lease === null) throw firstError;
-    const { nextDueAt: queueDue, ...counts } = queue ?? { listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 1, nextDueAt: null };
+    // The notice half is not isolated: it ran bare before the lease half existed, and a throw here fails the tick with the marker untouched, so the next tick looks again.
+    const { nextDueAt: noticeDue, ...notices } = await worker.sweepRunnerNotices();
+    const { nextDueAt: queueDue, ...counts } = queue ?? { listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 1, nextDueAt: null };
     const { nextDueAt: leaseDue, ...leases } = lease ?? { leasesListed: 0, lost: 0, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0, joblessRetried: 0, joblessFailed: 0, joblessErrors: 0, revoked: 0, wallClockTimedOut: 0, held: 0, leasesSkipped: 0, leasesFailed: 1, nextDueAt: null };
-    const due = [queueDue, leaseDue, failures.length > 0 ? Date.now() + SWEEP_FAILURE_RETRY_MS : null].filter((t): t is number => t !== null);
+    const due = [queueDue, leaseDue, noticeDue, failures.length > 0 ? Date.now() + SWEEP_FAILURE_RETRY_MS : null].filter((t): t is number => t !== null);
     return {
       result: { configured: true, ...counts, leases, ...(failures.length > 0 ? { sweepFailures: failures } : {}) },
-      workFound: counts.listed > 0 || leases.leasesListed > 0 || failures.length > 0,
+      workFound: counts.listed > 0 || leases.leasesListed > 0 || notices.listed > 0 || failures.length > 0,
       nextDueAt: due.length > 0 ? Math.min(...due) : null,
     };
   });

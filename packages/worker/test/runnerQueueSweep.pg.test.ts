@@ -55,7 +55,7 @@ describe("runner queue sweep [pg]", () => {
     const exactly = await waiting(A.accountId, { expiresAt: NOW });
     const young = await waiting(A.accountId, { expiresAt: NOW + 5 * HOUR, createdAt: NOW - 67 * HOUR });
     const result = await sweeper().sweepRunnerQueue();
-    expect(result).toEqual({ listed: 3, expired: 2, waiting: 1, skipped: 0, failed: 0, nextDueAt: NOW + 5 * HOUR });
+    expect(result).toEqual({ listed: 3, expired: 2, cancelled: 0, waiting: 1, skipped: 0, failed: 0, nextDueAt: NOW + 5 * HOUR });
     expect(await status(expired)).toBe("timed_out");
     expect(await status(exactly)).toBe("timed_out");
     expect(await status(young)).toBe("pending");
@@ -85,7 +85,7 @@ describe("runner queue sweep [pg]", () => {
     const stale = await waiting(A.accountId, { expiresAt: null, createdAt: NOW - 73 * HOUR });
     const fresh = await waiting(A.accountId, { expiresAt: null, createdAt: NOW - 70 * HOUR });
     const result = await sweeper().sweepRunnerQueue();
-    expect(result).toEqual({ listed: 2, expired: 1, waiting: 1, skipped: 0, failed: 0, nextDueAt: NOW - 70 * HOUR + RUNNER_QUEUE_TTL_MS });
+    expect(result).toEqual({ listed: 2, expired: 1, cancelled: 0, waiting: 1, skipped: 0, failed: 0, nextDueAt: NOW - 70 * HOUR + RUNNER_QUEUE_TTL_MS });
     expect(await status(stale)).toBe("timed_out");
     expect(await status(fresh)).toBe("pending");
   });
@@ -103,7 +103,7 @@ describe("runner queue sweep [pg]", () => {
     const unmoded = await waiting(A.accountId, { expiresAt: NOW - HOUR, mode: null });
     const done = await waiting(A.accountId, { expiresAt: NOW - HOUR, status: "succeeded" });
     const paused = await waiting(A.accountId, { expiresAt: NOW - HOUR, status: "paused" });
-    expect(await sweeper().sweepRunnerQueue()).toEqual({ listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null });
+    expect(await sweeper().sweepRunnerQueue()).toEqual({ listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null });
     expect([claimed, sandbox, unmoded, done, paused].length).toBe(5);
     expect([await status(claimed), await status(sandbox), await status(unmoded), await status(done), await status(paused)]).toEqual(["running", "pending", "pending", "succeeded", "paused"]);
   });
@@ -111,7 +111,7 @@ describe("runner queue sweep [pg]", () => {
   it("is idempotent: a second tick finds nothing and records no second event", async () => {
     const run = await waiting(A.accountId, { expiresAt: NOW - HOUR });
     await sweeper().sweepRunnerQueue();
-    expect(await sweeper().sweepRunnerQueue()).toEqual({ listed: 0, expired: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null });
+    expect(await sweeper().sweepRunnerQueue()).toEqual({ listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null });
     expect(await events(run)).toHaveLength(1);
   });
 
@@ -163,7 +163,7 @@ describe("runner queue sweep [pg]", () => {
     });
     const errors: string[] = [];
     const result = await sweeper({ retryDelayMs: 90_000, onError: (runId) => errors.push(runId) }, flaky).sweepRunnerQueue();
-    expect(result).toEqual({ listed: 3, expired: 2, waiting: 0, skipped: 0, failed: 1, nextDueAt: NOW + 90_000 });
+    expect(result).toEqual({ listed: 3, expired: 2, cancelled: 0, waiting: 0, skipped: 0, failed: 1, nextDueAt: NOW + 90_000 });
     expect(errors).toEqual([second]);
     expect([await status(first), await status(second), await status(third)]).toEqual(["timed_out", "pending", "timed_out"]);
   });
@@ -179,5 +179,38 @@ describe("runner queue sweep [pg]", () => {
     } finally {
       await Promise.all([appUser.end(), ops.end()]);
     }
+  });
+
+  describe("race backstop (C24 section 2): a pending runner run whose repo left runner_local", () => {
+    async function inRepo(accountId: string, repoId: string | null, createdAt: number): Promise<string> {
+      const id = randomUUID();
+      await admin.query(
+        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, created_at)
+         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', 'runner_local', $3, to_timestamp($4 / 1000.0))`,
+        [id, accountId, repoId, createdAt],
+      );
+      return id;
+    }
+    it("cancels it on the next tick whatever its age, with execution_mode_changed; runs of a repo still on a runner, and a run with no repo, are left alone", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [B.repoId]);
+      try {
+        const late = await inRepo(B.accountId, B.repoId, NOW - 60_000); // inserted a minute ago, after the switch
+        const old = await inRepo(B.accountId, B.repoId, NOW - 70 * HOUR);
+        const stays = await inRepo(A.accountId, A.repoId, NOW - 60_000);
+        const noRepo = await inRepo(A.accountId, null, NOW - 60_000);
+        const result = await sweeper().sweepRunnerQueue();
+        expect(result).toMatchObject({ listed: 4, expired: 0, cancelled: 2, waiting: 2, failed: 0 });
+        for (const r of [late, old]) {
+          expect(await status(r)).toBe("cancelled");
+          expect(await events(r)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+        }
+        expect(await status(stays)).toBe("pending");
+        expect(await status(noRepo)).toBe("pending");
+        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ cancelled: 0 });
+      } finally {
+        await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [B.repoId]);
+      }
+    });
   });
 });

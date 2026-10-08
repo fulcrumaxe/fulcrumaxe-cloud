@@ -5,6 +5,7 @@ import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { isAdmitDenyReason, type ExecutionRun } from "../src/executionTarget.js";
 import {
   RUNNER_QUEUE_TTL_MS,
+  RUNNER_WAITING_NOTICE_MS,
   RUNNER_TARGET_ROLES,
   RunnerTarget,
   unwiredRunnerLimits,
@@ -237,19 +238,19 @@ describe("RunnerTarget [pg]", () => {
       });
       afterEach(() => setPendingHooks(null));
 
-      it("dispatch and resume each mark the sweep due 72 hours from now, once the job is recorded", async () => {
+      it("dispatch and resume each mark the sweep due at the 15 minute notice (the earliest thing due), once the job is recorded", async () => {
         const w = await world();
         const t = target(db.runWriterPool);
         const before = Date.now();
         await t.target.dispatch(await insertRun(w));
         await settle();
         const first = marks.get("pending:runner-sweeper");
-        expect(first).toBeGreaterThanOrEqual(before + RUNNER_QUEUE_TTL_MS);
-        expect(first).toBeLessThanOrEqual(Date.now() + RUNNER_QUEUE_TTL_MS);
+        expect(first).toBeGreaterThanOrEqual(before + RUNNER_WAITING_NOTICE_MS);
+        expect(first).toBeLessThanOrEqual(Date.now() + RUNNER_WAITING_NOTICE_MS);
         marks.clear();
         await t.target.resume(await insertRun(w, { role: "executor" }), "session-1");
         await settle();
-        expect(marks.get("pending:runner-sweeper")).toBeGreaterThanOrEqual(before + RUNNER_QUEUE_TTL_MS);
+        expect(marks.get("pending:runner-sweeper")).toBeGreaterThanOrEqual(before + RUNNER_WAITING_NOTICE_MS);
       });
 
       it("a dispatch whose job could not be issued marks nothing", async () => {

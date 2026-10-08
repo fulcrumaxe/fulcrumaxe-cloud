@@ -18,6 +18,7 @@
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",
     "pg": "^8.13.1"
   },

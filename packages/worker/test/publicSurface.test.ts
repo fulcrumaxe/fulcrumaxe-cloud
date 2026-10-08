@@ -89,6 +89,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "settleRunAction",
       "sweepComputeSettle",
       "sweepRunnerLeases",
+      "sweepRunnerNotices",
       "sweepRunnerQueue",
       "sweepSandboxReap",
     ]);

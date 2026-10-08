@@ -39,6 +39,10 @@ import type {
  * body R3.7): no tenant, account or repo setting changes it. R2b's sweeper owns the `pending -> timed_out` move. */
 export const RUNNER_QUEUE_TTL_MS = 259_200_000;
 
+/** How long a runner run waits before the "no runner online" notice may be sent (15 minutes), and before the reminder (48 hours). Not before: the worker's notice sweep sends each once, at the first tick at or after. */
+export const RUNNER_WAITING_NOTICE_MS = 15 * 60_000;
+export const RUNNER_TTL_REMINDER_MS = 48 * 3_600_000;
+
 /** Every role `admit` accepts: runner-protocol's list, which the owner ruling (C12 section 1) widened to the four reviewers. */
 export const RUNNER_TARGET_ROLES: ReadonlySet<string> = new Set<string>(RUNNER_ELIGIBLE_ROLES);
 
@@ -171,10 +175,11 @@ export class RunnerTarget implements ExecutionTarget {
   /**
    * Tells the runner sweeper when this run's queue time ends, so its cron tick does not open the database before then
    * (D#454 H3c's marker). Best effort and never awaited: the marker is a hint and the sweeper's backstop tick finds the
-   * run anyway. An earlier marker is never pushed later.
+   * run anyway. An earlier marker is never pushed later. The marker is the earliest thing due for this run, the 15
+   * minute notice; the sweep that connects then re-derives the rest (the 48 hour reminder and the end of the queue time).
    */
   private markQueued(): void {
-    void markWorkPending("runner-sweeper", { since: Date.now() + this.queueTtlMs });
+    void markWorkPending("runner-sweeper", { since: Date.now() + RUNNER_WAITING_NOTICE_MS });
   }
 
   async cancel(run: ExecutionRun): Promise<CancelResult> {

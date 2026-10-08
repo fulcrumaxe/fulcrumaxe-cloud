@@ -21,6 +21,7 @@ describe("the runner copy (D#6 R2b)", () => {
       approval: "Waiting for {person} to approve (it runs on their Claude plan).",
       lost: "Runner lost contact at {time}. Retrying from the last pushed commit (attempt {n} of 2).",
       timedOut: "Timed out waiting for a runner.",
+      executionModeChanged: "Cancelled because this repository was moved off your runner. Retry to run it under the new setting.",
       paused: "Paused: Claude usage limit reached.",
       jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
       agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",

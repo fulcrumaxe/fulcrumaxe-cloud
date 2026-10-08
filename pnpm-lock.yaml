@@ -987,6 +987,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/runner':
+        specifier: workspace:*
+        version: link:../runner
       '@fx/telemetry':
         specifier: workspace:*
         version: link:../telemetry
