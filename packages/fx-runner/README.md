@@ -76,6 +76,41 @@ It only calls out (no listening socket).
   runs start at once on a lock a crash left behind, two may both take it; there is no `flock`, and `service install` runs one
   instance per user.
 
+- `fx-runner doctor`: one PASS, WARN or FAIL line per check, and a non-zero exit if any FAIL. It checks the registration and its
+  key, that the cloud answers, that the Claude Code CLI is found (the same lookup `run` makes), that its version is at least the
+  minimum the runner supports and that its `--help` lists every flag the runner passes, and whether a login of the right kind
+  exists (yes, no or unknown, with the method label). In subscription mode it warns when `ANTHROPIC_API_KEY` or
+  `ANTHROPIC_AUTH_TOKEN` is set in your shell, because it would outrank your Claude login; the runner removes it from jobs. It
+  makes no model request and prints no secret: the shell variables are shown by name only, and of the CLI's answers only the
+  version, the flag names and a short method label are kept.
+- `fx-runner logs <run id>`: prints the local transcript of a run on this machine from `~/.fx-runner/logs/<run id>.jsonl`, the
+  runner's own capture (never Claude Code's project logs). Agent text, the tools used (as the cloud sees them, without their
+  input), results, and stderr notes are shown; credential values are removed when the file is written and the output is
+  redacted again and stripped of control characters.
+- `fx-runner service install | uninstall`: writes (or removes) the per-user file that keeps `fx-runner run` going: a systemd
+  user unit (`~/.config/systemd/user/fx-runner.service`) on Linux, a launchd agent
+  (`~/Library/LaunchAgents/dev.fulcrumaxe.fx-runner.plist`) on macOS. It only writes the file and prints the command that starts
+  it; it starts nothing. There is one unit per user, so a second `install` rewrites the same file, and `run` itself refuses a
+  second copy on the same state directory. A file at that path that `service` did not write is never overwritten or removed.
+  The unit carries your shell's `PATH` (so it finds Claude Code) and, if you use `FX_RUNNER_HOME`, that too; a path with a
+  space or another unusual character is refused.
+
+## Supported platforms
+
+| Platform | v1 |
+|---|---|
+| macOS arm64 and x64 | supported as a **preview, not yet verified** (see below) |
+| Linux x64 and arm64 | supported |
+| Windows 10 and 11 through WSL2 (x64 and arm64) | supported, using the Linux install inside WSL2 |
+| Native Windows | not supported |
+| WSL1 | not supported |
+
+macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet.
+`fx-runner doctor` repeats this on macOS. Native Windows and WSL1 have no sandbox path, so the runner refuses to start there.
+
+There is one install path per OS: the installer script, which arrives with the release change, installs the macOS build on
+macOS and the Linux build on Linux, and WSL2 uses the Linux one. Claude Code itself must already be installed and signed in.
+
 `FX_RUNNER_HOME` moves the state directory. A key over 90 days old is refused by the cloud: revoke and register again.
 
 ## Boundaries

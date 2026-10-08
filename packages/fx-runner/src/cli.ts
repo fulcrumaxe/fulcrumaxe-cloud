@@ -8,7 +8,10 @@ import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { registerCommand } from "./commands/register.js";
 import { revokeCommand } from "./commands/revoke.js";
+import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
+import { logsCommand } from "./commands/logs.js";
 import { runCommand, type RunHost } from "./commands/run.js";
+import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
 
 export interface CliIo {
@@ -24,6 +27,10 @@ export interface CliIo {
   fetchFn?: typeof fetch;
   /** What `run` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
   host?: RunHost;
+  /** What `doctor` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
+  doctorHost?: DoctorHost;
+  /** What `service` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
+  serviceHost?: ServiceHost;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
@@ -35,22 +42,34 @@ Commands:
   run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
   revoke [--reason <text>] [--local]
                      Revoke this runner and delete its key. --local only deletes the local files.
+  doctor             Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request.
+  logs <run id>      Print the local transcript of a run on this machine.
+  service install | uninstall
+                     Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
 `;
 
 /** Which flags each command takes, and which of them are switches. */
-const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[] }>> = {
+const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[]; positionals?: number }>> = {
   register: { flags: ["code", "credential-mode", "cloud-url"], switches: [] },
   status: { flags: [], switches: [] },
   run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
+  doctor: { flags: [], switches: [] },
+  logs: { flags: [], switches: [], positionals: 1 },
+  service: { flags: [], switches: [], positionals: 1 },
 };
 
-function parseFlags(command: string, rest: readonly string[]): Flags {
+function parseFlags(command: string, rest: readonly string[]): { flags: Flags; positionals: string[] } {
   const spec = COMMANDS[command]!;
   const flags = new Map<string, string | true>();
+  const positionals: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
-    if (!arg.startsWith("--")) throw new CliError(`unexpected argument for ${command}`, 2);
+    if (!arg.startsWith("--")) {
+      if (positionals.length >= (spec.positionals ?? 0)) throw new CliError(`unexpected argument for ${command}`, 2);
+      positionals.push(arg);
+      continue;
+    }
     const eq = arg.indexOf("=");
     const name = arg.slice(2, eq === -1 ? undefined : eq);
     const isSwitch = spec.switches.includes(name);
@@ -68,7 +87,7 @@ function parseFlags(command: string, rest: readonly string[]): Flags {
       i++;
     }
   }
-  return flags;
+  return { flags, positionals };
 }
 
 export async function runCli(io: CliIo): Promise<number> {
@@ -79,7 +98,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return command === undefined ? 2 : 0;
     }
     if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command ${command.slice(0, 40)}; run fx-runner --help`, 2);
-    const flags = parseFlags(command, rest);
+    const { flags, positionals } = parseFlags(command, rest);
     const ctx: CommandContext = {
       stateDir: stateDirFor(io.home, io.stateDirOverride),
       out: (line) => io.stdout(`${line}\n`),
@@ -92,6 +111,15 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "run") {
       if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");
       return await runCommand(ctx, io.host);
+    }
+    if (command === "doctor") {
+      if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
+      return await doctorCommand(ctx, io.doctorHost);
+    }
+    if (command === "logs") return logsCommand(positionals[0], ctx);
+    if (command === "service") {
+      if (io.serviceHost === undefined) throw new CliError("service is only available from the fx-runner program");
+      return serviceCommand(positionals[0], ctx, io.serviceHost);
     }
     return await statusCommand(ctx);
   } catch (error) {

@@ -52,6 +52,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/gitPath.ts": ["path"], // the snapshots directory under the runner's state directory
   "src/daemon/snapshot.ts": ["fs", "fs/promises", "path"], // the daemon-owned copy of the workspace's git files: no-follow reads, one 0700 directory per push
   "src/daemon/staleTemp.ts": ["fs", "path"], // `fx-runner run` at start: lstat and unlink of exact-name regular files next to the ledger, nothing else
+  "src/commands/logs.ts": ["fs", "path"], // `fx-runner logs`: a size check, then the log file <state dir>/logs/<run id>.jsonl through the private-file reader
+  "src/commands/service.ts": ["crypto", "fs", "path"], // `fx-runner service`: lstat, an atomic write (random temp name) and an unlink of the one per-user unit file
   "src/commands/run.ts": ["path"], // the composition root: the runner's own directory layout; the process start and the pid check arrive through its host argument
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
   "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path

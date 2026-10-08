@@ -84,33 +84,54 @@ function missingFlags(help: string): string[] {
   return REQUIRED_FLAGS.filter((flag) => !new RegExp(`(?:^|[\\s,|])${flag}(?=[\\s,<\\[=|]|$)`, "m").test(help));
 }
 
+/** What the stored binary answered, without a verdict. */
+export interface BinaryReport {
+  /** From `--version`; undefined when the output did not parse. */
+  version: string | undefined;
+  /** Flags the engine passes that `--help` does not list. Undefined when the version is unreadable or too old (help is not read then) or `--help` failed. */
+  missingFlags: string[] | undefined;
+}
+
+/**
+ * Asks the stored binary `--version` and, when that is at least `MIN_CLAUDE_VERSION`, `--help` (read once per version; the
+ * answer is cached in `cacheDir`, so a new version is checked afresh). It never throws for what the binary says, and makes no
+ * model request. `storedBinarySource` (before each job) and `fx-runner doctor` both read this one answer.
+ */
+export async function inspectBinary(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; timeoutMs?: number }, env: Record<string, string>): Promise<BinaryReport> {
+  const timeout = opts.timeoutMs ?? 10_000;
+  const reported = await runCapture(opts.spawn, opts.storedPath, ["--version"], env, timeout);
+  const version = reported.code === 0 ? parseVersion(reported.stdout) : undefined;
+  if (version === undefined || !versionSupported(version)) return { version, missingFlags: undefined };
+  const cacheFile = path.join(opts.cacheDir, "claude-flags.json");
+  const cache = readCache(cacheFile);
+  let entry = Object.hasOwn(cache, version) ? cache[version] : undefined;
+  if (entry === undefined || !Array.isArray(entry.missing)) {
+    const help = await runCapture(opts.spawn, opts.storedPath, ["--help"], env, timeout, 512 * 1024);
+    if (help.code !== 0) return { version, missingFlags: undefined };
+    entry = { missing: missingFlags(help.stdout) };
+    mkdirSync(opts.cacheDir, { recursive: true, mode: 0o700 });
+    const temp = `${cacheFile}.tmp`;
+    writeFileSync(temp, `${JSON.stringify({ ...cache, [version]: entry })}\n`, { mode: 0o600 });
+    renameSync(temp, cacheFile);
+  }
+  return { version, missingFlags: entry.missing.filter((flag) => REQUIRED_FLAGS.includes(flag)) };
+}
+
 /**
  * The v1 source: the stored absolute path, checked before every job. A missing or non-executable path is
  * `claude_binary_missing`. `--version` must parse and be at least `MIN_CLAUDE_VERSION` (`claude_version_unsupported`,
- * with an upgrade hint). `--help` must list every flag the argument list uses (`claude_flags_unsupported`, naming them);
- * it is read once per version and the answer is cached in `cacheDir`, so a new version is checked afresh. No model request.
+ * with an upgrade hint). `--help` must list every flag the argument list uses (`claude_flags_unsupported`, naming them).
+ * No model request.
  */
 export function storedBinarySource(opts: { storedPath: string; cacheDir: string; spawn: SpawnFn; timeoutMs?: number }): BinarySource {
   return async (env) => {
     assertRunnable(opts.storedPath);
-    const timeout = opts.timeoutMs ?? 10_000;
-    const reported = await runCapture(opts.spawn, opts.storedPath, ["--version"], env, timeout);
-    const version = reported.code === 0 ? parseVersion(reported.stdout) : undefined;
+    const report = await inspectBinary(opts, env);
+    const { version } = report;
     if (version === undefined) throw new EngineRefusal("claude_version_unsupported", `the binary's version could not be read; upgrade Claude Code to ${MIN_CLAUDE_VERSION} or newer`);
     if (!versionSupported(version)) throw new EngineRefusal("claude_version_unsupported", `version ${version} is older than ${MIN_CLAUDE_VERSION}; upgrade Claude Code`);
-    const cacheFile = path.join(opts.cacheDir, "claude-flags.json");
-    const cache = readCache(cacheFile);
-    let entry = Object.hasOwn(cache, version) ? cache[version] : undefined;
-    if (entry === undefined || !Array.isArray(entry.missing)) {
-      const help = await runCapture(opts.spawn, opts.storedPath, ["--help"], env, timeout, 512 * 1024);
-      if (help.code !== 0) throw new EngineRefusal("claude_flags_unsupported", "the binary's --help could not be read");
-      entry = { missing: missingFlags(help.stdout) };
-      mkdirSync(opts.cacheDir, { recursive: true, mode: 0o700 });
-      const temp = `${cacheFile}.tmp`;
-      writeFileSync(temp, `${JSON.stringify({ ...cache, [version]: entry })}\n`, { mode: 0o600 });
-      renameSync(temp, cacheFile);
-    }
-    if (entry.missing.length > 0) throw new EngineRefusal("claude_flags_unsupported", `version ${version} lacks ${entry.missing.filter((flag) => REQUIRED_FLAGS.includes(flag)).join(", ")}; upgrade Claude Code`);
+    if (report.missingFlags === undefined) throw new EngineRefusal("claude_flags_unsupported", "the binary's --help could not be read");
+    if (report.missingFlags.length > 0) throw new EngineRefusal("claude_flags_unsupported", `version ${version} lacks ${report.missingFlags.join(", ")}; upgrade Claude Code`);
     return { path: opts.storedPath, version };
   };
 }
