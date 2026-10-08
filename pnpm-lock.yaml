@@ -122,6 +122,9 @@ importers:
       '@fx/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@fx/model-connection':
+        specifier: workspace:*
+        version: link:../../packages/model-connection
       '@fx/net-guard':
         specifier: workspace:*
         version: link:../../packages/net-guard
@@ -866,6 +869,9 @@ importers:
       '@fx/github':
         specifier: workspace:*
         version: link:../github
+      '@fx/model-connection':
+        specifier: workspace:*
+        version: link:../model-connection
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

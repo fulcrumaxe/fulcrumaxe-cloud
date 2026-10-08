@@ -49,3 +49,10 @@ export {
   type GithubAppResponse,
   type GithubTransport,
 } from './githubAppApi.js';
+export {
+  createModelKeyHealthJob,
+  MODEL_KEY_HEALTH_JOB,
+  MODEL_KEYS_PER_RUN,
+  type CheckConnection,
+  type ModelKeyHealthDeps,
+} from './jobs/modelKeyHealth.js';

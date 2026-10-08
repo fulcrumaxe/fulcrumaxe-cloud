@@ -20,6 +20,7 @@
     "@fx/design": "workspace:*",
     "@fx/gh-policy": "workspace:*",
     "@fx/github": "workspace:*",
+    "@fx/model-connection": "workspace:*",
     "@fx/net-guard": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/plan-data": "workspace:*",

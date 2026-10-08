@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { RECONCILE_JOBS, type JobContext, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
-import { defaultReconcileDeps, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
+import { defaultReconcileDeps, modelKeyHealthJobFromEnv, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
 
 /**
@@ -66,8 +66,13 @@ describe("GET /api/cron/reconcile: the tick", () => {
     expect(await res.json()).toEqual(summary);
     const tick = runTickFn.mock.calls[0]![0];
     expect(tick).toMatchObject({ pool: deps.platformOpsPool, enabled: true, reportError: deps.reportError });
-    // The fixed jobs first, then the GitHub and Stripe jobs, which the route builds from its environment.
-    expect(tick.jobs.map((job) => job.name)).toEqual([...RECONCILE_JOBS.map((job) => job.name), "github_installations", "stripe_subscriptions"]);
+    // The fixed jobs first, then the GitHub, Stripe and model-key jobs, which the route builds from its environment.
+    expect(tick.jobs.map((job) => job.name)).toEqual([
+      ...RECONCILE_JOBS.map((job) => job.name),
+      "github_installations",
+      "stripe_subscriptions",
+      "model_key_health",
+    ]);
   });
 
   it("passes the kill switch through: a switched-off run is still answered 200 with the disabled summary", async () => {
@@ -131,6 +136,44 @@ describe("the Stripe job's key", () => {
     await withKey("rk_test_restricted_read_only", "sk_test_unused", async () => {
       const query = vi.fn(async () => ({ rows: [] }));
       const job = stripeSubscriptionsJobFromEnv({ query } as never, () => undefined);
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: true });
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("the model-key health job's environment", () => {
+  const ctx = (query: ReturnType<typeof vi.fn>): JobContext =>
+    ({ pool: { query } as never, cursor: null, signal: new AbortController().signal, calls: { limit: 50, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
+  const withEnv = async (env: Record<string, string | undefined>, fn: () => Promise<void>) => {
+    const saved = Object.fromEntries(Object.keys(env).map((name) => [name, process.env[name]]));
+    const set = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value));
+    for (const [name, value] of Object.entries(env)) set(name, value);
+    try {
+      await fn();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) set(name, value);
+    }
+  };
+
+  it.each([
+    ["no app database URL", { DATABASE_URL_APP_USER: undefined, FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: "A".repeat(43) + "=" }],
+    ["no key-encryption key", { DATABASE_URL_APP_USER: "postgres://app_user@127.0.0.1:1/none", FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: undefined }],
+    ["a current version below 1 (envKekSource throws on it)", { DATABASE_URL_APP_USER: "postgres://app_user@127.0.0.1:1/none", FX_KEK_CURRENT_VERSION: "0", FX_KEK_V0: "A".repeat(43) + "=", FX_KEK_V1: "A".repeat(43) + "=" }],
+  ])("records not_configured and reads nothing with %s", async (_label, env) => {
+    await withEnv(env, async () => {
+      const query = vi.fn();
+      const job = modelKeyHealthJobFromEnv({ query } as never, () => undefined);
+      expect(job.name).toBe("model_key_health");
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: false, code: "not_configured" });
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
+
+  it("when configured it lists the connections (and opens no pool when there are none)", async () => {
+    await withEnv({ DATABASE_URL_APP_USER: "postgres://app_user@127.0.0.1:1/none", FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: "A".repeat(43) + "=" }, async () => {
+      const query = vi.fn(async () => ({ rows: [] }));
+      const job = modelKeyHealthJobFromEnv({ query } as never, () => undefined);
       expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: true });
       expect(query).toHaveBeenCalledTimes(1);
     });

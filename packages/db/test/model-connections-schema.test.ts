@@ -38,9 +38,10 @@ describe('model_connections schema', () => {
     expect(byName.get('status')).toBe('text');
     expect(byName.get('last_validated_at')).toBe('timestamp with time zone');
     expect(byName.get('last_error_code')).toBe('text');
+    expect(byName.get('health_strikes')).toBe('smallint');
     expect(byName.get('created_at')).toBe('timestamp with time zone');
     expect(byName.get('updated_at')).toBe('timestamp with time zone');
-    expect(rows).toHaveLength(13);
+    expect(rows).toHaveLength(14);
 
     // The only columns permitted to be free-form text are provably NOT the
     // raw key: an enum-like status/provider, a one-way fingerprint, and an
