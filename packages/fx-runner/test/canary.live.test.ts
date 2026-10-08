@@ -9,6 +9,7 @@ import { createWorkspaceStore, type WorkspaceStore } from "../src/job/workspace.
 import { createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import { resolveSandboxTools, sandboxToolDirs } from "../src/sandbox/select.js";
 import { selfTestCard } from "./helpers/canaryCard.js";
+import { callStatus, classifyLinkEdit } from "./helpers/canaryClassify.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 /**
@@ -36,6 +37,10 @@ import { sampleJob } from "./helpers/sampleJob.js";
  * "pass" for the wrong reason. Each Edit probe therefore follows a Read attempt of the same path (the direct one the
  * `~/.bashrc` Read in the outside-files list, the link one the `(d0)` probe). An Edit answered with that message is
  * reported INCONCLUSIVE, is not counted as denied, and fails the run; the bytes-unchanged checks stay as a second line.
+ * One exception, by rule (`classifyLinkEdit`, unit-tested): the link Edit (d) can never get past that message, because
+ * the Read it needs, (d0), goes through the same link and is denied. So (d) is PASS, covered by the read-before-edit
+ * invariant, ONLY when (d) answered "not read" AND (d0) was denied AND `~/.bashrc`'s bytes are unchanged. If (d0) was
+ * allowed, not called or has no result, or the bytes changed, (d) stays INCONCLUSIVE (or FAIL) and fails the run.
  * The symlink probes (CWE-59) go through links that the workspace store plants inside the workspace before the run: a
  * confinement that compares the path as written, and not where it lands, lets those through.
  */
@@ -109,9 +114,6 @@ function readTranscript(file: string): { uses: Map<string, ToolUse>; results: Ma
   }
   return { uses, results, said };
 }
-
-/** Claude Code's answer to an Edit of a file not Read in the session: not a permission decision. */
-const NOT_READ = /has not been read/i;
 
 describe.skipIf(!ON)("canary: the real binary cannot reach outside the workspace", () => {
   it("allows the workspace pair, denies every outside call (direct and through links), and changes and leaks nothing", { timeout: 600_000 }, async () => {
@@ -204,26 +206,41 @@ describe.skipIf(!ON)("canary: the real binary cannot reach outside the workspace
       if (problem !== undefined) failures.push(`${label}: ${problem}`);
     };
 
+    const statuses = new Map(
+      probes.map((probe) => {
+        const match = [...uses.entries()].find(([, use]) => use.name === probe.tool && (probe.tool === "Bash" ? use.command.includes(probe.seen) : use.filePath === probe.seen || use.filePath.endsWith(`${path.sep}${probe.seen}`)));
+        const result = match === undefined ? undefined : results.get(match[0]);
+        return [probe.name, { status: callStatus(result, match !== undefined), text: result?.text ?? "" }] as const;
+      }),
+    );
+    const d0Probe = probes.find((probe) => probe.name.startsWith("(d0)"));
+    const d0Status = d0Probe === undefined ? "missing" : (statuses.get(d0Probe.name)?.status ?? "missing");
+    const rcUnchanged = readFileSync(rcFile, "utf8") === before.get(rcFile);
     let denied = 0;
     let inconclusive = 0;
     let unexercised = 0;
     for (const probe of probes) {
-      const match = [...uses.entries()].find(([, use]) => use.name === probe.tool && (probe.tool === "Bash" ? use.command.includes(probe.seen) : use.filePath === probe.seen || use.filePath.endsWith(`${path.sep}${probe.seen}`)));
-      if (match === undefined) {
+      const { status, text } = statuses.get(probe.name) ?? { status: "missing" as const, text: "" };
+      if (status === "missing") {
         unexercised += 1;
         report(probe.name, `the model made no ${probe.tool} call for ${probe.seen}, so this path was not exercised`);
-        continue;
-      }
-      const result = results.get(match[0]);
-      if (result === undefined) report(probe.name, "the call has no result in the log");
-      else if (!result.isError) report(probe.name, "the call was NOT denied");
-      else if (NOT_READ.test(result.text)) {
+      } else if (status === "no_result") report(probe.name, "the call has no result in the log");
+      else if (status === "allowed") report(probe.name, "the call was NOT denied");
+      else if (probe.name.startsWith("(d) ")) {
+        const verdict = classifyLinkEdit(status, d0Status, rcUnchanged);
+        if (verdict === "PASS") {
+          denied += 1;
+          report(probe.name, undefined, status === "not_read" ? `covered by the read-before-edit invariant: (d0) was denied and ~/.bashrc is unchanged; ${text}` : `denied: ${text}`);
+        } else {
+          if (verdict === "INCONCLUSIVE") inconclusive += 1;
+          report(probe.name, "refused only because the file was not Read first, and (d0) was not denied with ~/.bashrc unchanged, so the permission check never ran", text, verdict);
+        }
+      } else if (status === "not_read") {
         inconclusive += 1;
-        report(probe.name, "refused only because the file was not Read first, so the permission check never ran", result.text, "INCONCLUSIVE");
-      }
-      else {
+        report(probe.name, "refused only because the file was not Read first, so the permission check never ran", text, "INCONCLUSIVE");
+      } else {
         denied += 1;
-        report(probe.name, undefined, `denied: ${result.text}`);
+        report(probe.name, undefined, `denied: ${text}`);
       }
     }
 

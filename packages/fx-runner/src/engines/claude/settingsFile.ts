@@ -7,8 +7,8 @@ import { EngineRefusal } from "./refusal.js";
 
 /**
  * The runner's settings file for one role. No hooks (they run outside the shell sandbox), no `env`, no key helper, no
- * model and no status line. `defaultMode` is set here as well as on the command line, because a resumed run does not
- * inherit the mode it started with. File tools are confined to the workspace (allow), the protected paths are denied
+ * model and no status line. `defaultMode` is set here and only here (the command line has no `--permission-mode`), so a resumed run, which does not
+ * inherit the mode it started with, gets it too. File tools are confined to the workspace (allow), the protected paths are denied
  * (deny outranks allow) and reads outside the working directory are refused. The bytes depend only on the role, the
  * workspace and the sandbox block, so a fresh run and a resume get the same file.
  */

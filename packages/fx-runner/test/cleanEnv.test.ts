@@ -268,6 +268,16 @@ describe("cleanEnv in subscription mode", () => {
     for (const bad of ["bin", "./bin", "", "/a:/b"]) expect(() => cleanEnv({ mode: "subscription" }, { extraPathDirs: [bad] }), bad).toThrow(TypeError);
   });
 
+  // CWE-426: an empty or relative PATH entry resolves against the working directory, which is the workspace.
+  it("keeps only absolute host PATH entries, in order, and the tool dirs still go last", () => {
+    vi.stubEnv("PATH", ["", ".", "bin", "/abs", "../up", "/second", ""].join(":"));
+    expect(cleanEnv({ mode: "subscription" }).PATH).toBe("/abs:/second");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/nix/store/aaa-bubblewrap/bin"] }).PATH).toBe("/abs:/second:/nix/store/aaa-bubblewrap/bin");
+    vi.stubEnv("PATH", "::.:bin:");
+    expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty("PATH");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/a/bin"] }).PATH).toBe("/a/bin");
+  });
+
   it("omits the subscription token when the shell has none", () => {
     vi.stubEnv(SUBSCRIPTION_TOKEN_VAR, "");
     expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);

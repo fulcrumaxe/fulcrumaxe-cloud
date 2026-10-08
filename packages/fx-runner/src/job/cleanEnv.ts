@@ -37,10 +37,17 @@ export interface CleanEnvOptions {
   extraPathDirs?: readonly string[];
 }
 
+/** True for a PATH entry that is an absolute directory with no NUL byte. */
+function isAbsoluteEntry(entry: string): boolean {
+  return entry.startsWith("/") && !entry.includes("\0");
+}
+
 /** `pathValue` with each of `dirs` added at the end unless it is already an entry. */
 function withDirs(pathValue: string | undefined, dirs: readonly string[]): string | undefined {
   // POSIX only: the runner supports macOS, Linux and WSL2, where PATH entries are `:`-separated and absolute paths start with `/`.
-  const entries = pathValue === undefined || pathValue === "" ? [] : pathValue.split(":");
+  // Only absolute host entries are kept. An empty or relative entry (`::`, `.`, `bin`) resolves against the working
+  // directory, which is the workspace, so a tool the agent wrote there (a `bwrap`, say) would run outside the sandbox.
+  const entries = pathValue === undefined || pathValue === "" ? [] : pathValue.split(":").filter(isAbsoluteEntry);
   for (const dir of dirs) {
     if (typeof dir !== "string" || !dir.startsWith("/") || dir.includes(":") || dir.includes("\0")) throw new TypeError("cleanEnv: extraPathDirs must be absolute directories");
     if (!entries.includes(dir)) entries.push(dir);
@@ -57,6 +64,7 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
   }
   const widened = withDirs(env.PATH, options.extraPathDirs ?? []);
   if (widened !== undefined) env.PATH = widened;
+  else delete env.PATH;
   Object.assign(env, FIXED_ENV);
   if (credentials.mode === "subscription") {
     const token = process.env[SUBSCRIPTION_TOKEN_VAR];

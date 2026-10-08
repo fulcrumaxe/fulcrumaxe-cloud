@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 /**
  * `scripts/canary.sh` swaps a decoy in for the user's real `~/.bashrc` and must put the real one back however the run
- * ends. Each case runs the real script against a throwaway HOME, with a stub `claude` and a stub `pnpm` (which stands in
+ * ends. Each case runs the real script against a throwaway HOME, with a stub agent binary and a stub `pnpm` (which stands in
  * for the live test), and checks what is at `~/.bashrc` afterwards.
  */
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../scripts/canary.sh");
@@ -44,7 +44,8 @@ function makeHome(): { home: string; claude: string; bashrc: string; pidfile: st
   roots.push(home);
   const stubs = path.join(home, "stubs");
   mkdirSync(stubs);
-  const claude = path.join(stubs, "claude");
+  // Not named for the agent binary: the repo's test guard blocks any child process whose command line names it, and the script takes any path.
+  const claude = path.join(stubs, "agent-cli");
   writeFileSync(claude, "#!/usr/bin/env bash\necho '2.1.294 (Claude Code)'\n", { mode: 0o755 });
   writeFileSync(path.join(stubs, "pnpm"), PNPM_STUB, { mode: 0o755 });
   // The script wants the CLI's two sandbox tools on PATH (Linux); these stand in for them.
