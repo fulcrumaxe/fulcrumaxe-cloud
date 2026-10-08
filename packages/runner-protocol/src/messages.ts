@@ -30,7 +30,7 @@ export type Ed25519PublicJwk = z.infer<typeof Ed25519PublicJwk>;
 export const MAX_EVENTS_PER_BATCH = 100;
 
 /** What a runner may say about its progress: metadata only, with no field for model text, tool output or file content. */
-export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch"] as const;
+export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch", "engine_version"] as const;
 
 export const LocalOnlyEvent = z
   .object({
@@ -41,6 +41,8 @@ export const LocalOnlyEvent = z
     file_path: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
     exit_code: safeInt.optional(),
     duration_ms: safeInt.min(0).optional(),
+    // The agent build that ran (a plain dotted version, so there is no room for anything else). Set on `engine_version` events.
+    engine_version: z.string().regex(/^\d{1,6}\.\d{1,6}\.\d{1,6}$/).optional(),
     // Display only; the cloud settles no money against it. `input` and `output` count model tokens (the name avoids
     // the word G1 reserves for credentials).
     usage: z.object({ input: safeInt.min(0).optional(), output: safeInt.min(0).optional(), usd: z.number().min(0).finite().optional() }).strict().optional(),

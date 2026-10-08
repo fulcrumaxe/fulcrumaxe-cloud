@@ -103,6 +103,14 @@ describe("hello", () => {
 });
 
 describe("LocalOnlyEvent", () => {
+  it("carries the agent build on an engine_version event, and only a plain dotted version fits", () => {
+    expect(LOCAL_ONLY_EVENT_TYPES).toContain("engine_version");
+    expect(LocalOnlyEvent.safeParse({ ...EVENT, type: "engine_version", engine_version: "2.1.289" }).success).toBe(true);
+    for (const bad of ["2.1", "2.1.289 (Claude Code)", "v2.1.289", "2.1.289\nsecret", "", "1".repeat(300)]) {
+      expect(LocalOnlyEvent.safeParse({ ...EVENT, type: "engine_version", engine_version: bad }).success, bad).toBe(false);
+    }
+  });
+
   it("includes usage_limit_reached and credential_mismatch in its type enum", () => {
     expect(LOCAL_ONLY_EVENT_TYPES).toContain("usage_limit_reached");
     expect(LOCAL_ONLY_EVENT_TYPES).toContain("credential_mismatch");
@@ -111,7 +119,7 @@ describe("LocalOnlyEvent", () => {
   });
 
   it("has only the Spec's fields", () => {
-    expect(Object.keys(LocalOnlyEvent.shape).sort()).toEqual(["duration_ms", "exit_code", "file_path", "seq", "tool_name", "ts", "type", "usage"]);
+    expect(Object.keys(LocalOnlyEvent.shape).sort()).toEqual(["duration_ms", "engine_version", "exit_code", "file_path", "seq", "tool_name", "ts", "type", "usage"]);
   });
 
   it("refuses model text, tool output, file content or a message under any name", () => {

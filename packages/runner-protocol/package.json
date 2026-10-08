@@ -11,7 +11,9 @@
     ".": "./src/index.ts",
     "./agentRuntime": "./src/agentRuntime.ts",
     "./redact": "./src/redact.ts",
-    "./envelope": "./src/envelope.ts"
+    "./envelope": "./src/envelope.ts",
+    "./streamJson": "./src/streamJson.ts",
+    "./toolActivity": "./src/toolActivity.ts"
   },
   "engines": {
     "node": ">=22.22.2"

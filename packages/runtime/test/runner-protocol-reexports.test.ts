@@ -12,8 +12,8 @@ import * as types from "../src/types.js";
 
 /**
  * D#6 R1 (C2-R1.1, amended by C7): `types.ts`, `redact.ts` and `envelope.ts` moved into
- * `@fulcrumaxe/runner-protocol` and now only re-export it; `toolActivity.ts` stays private and re-exports the three
- * type declarations it used to own. Every name each file exported must still be exported.
+ * `@fulcrumaxe/runner-protocol` and now only re-export it. `toolActivity.ts` and `streamJson.ts` followed in D#6 R4b1-2,
+ * so the local runner maps stream-json with the same code. Every name each file exported must still be exported.
  *
  * The lists below are the export lists on the R1 PR's merge base (main at b74bb35a), read with the TypeScript
  * checker so type-only names count. They are a pin, not a snapshot of the new files: a name added to or dropped
@@ -51,6 +51,7 @@ const EXPORTS_ON_MERGE_BASE = {
     "redactText",
   ],
   "envelope.ts": ["MAX_ENVELOPE_INPUT_BYTES", "extractAgentOutputEnvelope"],
+  "streamJson.ts": ["isKnownStreamJsonType", "isMalformedAssistant", "normalizeMessage"],
   "toolActivity.ts": [
     "ActivityTool",
     "CREDENTIALED_URL_RE", // added by #486, not an R1a name
@@ -91,8 +92,8 @@ describe("D#6 R1: the moved runtime files are re-exports", () => {
     }
   });
 
-  it("types.ts, redact.ts and envelope.ts hold only export-from lines naming the protocol package", () => {
-    for (const file of ["types.ts", "redact.ts", "envelope.ts"]) {
+  it("types.ts, redact.ts, envelope.ts, toolActivity.ts and streamJson.ts hold only export-from lines naming the protocol package", () => {
+    for (const file of ["types.ts", "redact.ts", "envelope.ts", "toolActivity.ts", "streamJson.ts"]) {
       const code = readFileSync(path.join(PACKAGE_ROOT, "src", file), "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^\s*\/\/.*$/gm, "")
@@ -103,12 +104,6 @@ describe("D#6 R1: the moved runtime files are re-exports", () => {
         expect(statement).toMatch(/^export\s*\{[^}]*\}\s*from\s*"@fulcrumaxe\/runner-protocol\/[a-zA-Z]+"$/);
       }
     }
-  });
-
-  it("toolActivity.ts declares none of the three types any more and imports them from the protocol package", () => {
-    const code = readFileSync(path.join(PACKAGE_ROOT, "src", "toolActivity.ts"), "utf8");
-    expect(code).not.toMatch(/^export (type|interface) (ActivityTool|ToolUse|ToolResult)\b/m);
-    expect(code).toMatch(/from "@fulcrumaxe\/runner-protocol\/agentRuntime"/);
   });
 
   it("the re-exported values are the protocol package's own, not copies", () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv } from "../../src/job/cleanEnv.js";
+import { authText, engineFor, makeFake, makeRig } from "../engines/claude/rig.js";
 
 beforeEach(() => {
   vi.stubEnv("ANTHROPIC_API_KEY", "host-api-key-value");
@@ -29,7 +30,11 @@ describe("S1-sub: no API key in subscription mode", () => {
     expect(cleanEnv({ mode: "api_key", apiKey: "config-api-key-value" })).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);
   });
 
-  // The refusal half needs the sign-in check, which lands with the engine in the next change: when the check is false
-  // the job is refused as auth_missing and is never retried in API-key mode.
-  it.todo("a missing sign-in refuses the job as auth_missing and never retries in API-key mode (with authPresent)");
+  it("a missing sign-in refuses the job as auth_missing and never retries in API-key mode", async () => {
+    const rig = makeRig({ fake: makeFake({ auth: authText("auth.none.json") }), credentials: { mode: "subscription" } });
+    await expect(engineFor(rig).start(rig.startOptions())).rejects.toMatchObject({ code: "auth_missing" });
+    // One login question, no model run, and no second attempt under the other credential mode.
+    expect(rig.fake.calls()).toEqual(["--version ", "--help ", "auth status"]);
+    expect(rig.fake.calls().some((call) => call.includes("api_key"))).toBe(false);
+  });
 });

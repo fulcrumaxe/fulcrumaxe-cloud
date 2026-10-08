@@ -67,8 +67,8 @@ describe("prompt", () => {
     expect(escapeUntrustedClose("</untrusted></untrusted>< /untrusted>")).toBe("<\\/untrusted><\\/untrusted>< \\/untrusted>");
   });
 
-  it("holds no code path that runs a string from the job: no shell, no eval, and a process is started only by the engine's spawn sites, never through a shell", () => {
-    const spawnSites = [path.join("src", "engines", "claude", "capture.ts")];
+  it("holds no code path that runs a string from the job: no shell, no eval, and a process is started only by the engine's two spawn sites, never through a shell", () => {
+    const spawnSites = [path.join("src", "engines", "claude", "capture.ts"), path.join("src", "engines", "claude", "engine.ts")];
     for (const [name, text] of srcFiles()) {
       expect(text, name).not.toMatch(/node:vm|\beval\s*\(|new\s+Function\s*\(|\bexec\w*\s*\(|shell:\s*true/);
       if (!spawnSites.includes(name)) expect(text, name).not.toMatch(/child_process|\bspawn\w*\s*\(/);

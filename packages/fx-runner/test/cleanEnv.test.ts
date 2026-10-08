@@ -158,6 +158,15 @@ describe("cleanEnv allowlist", () => {
     expect(envAccessViolations(SPAWN_IMPORT + call, "src/engines/claude/engine.ts"), call).not.toEqual([]);
   });
 
+  it("the guard lets processGroup.ts name process only as process.kill or process.platform", () => {
+    const file = "src/engines/claude/processGroup.ts";
+    expect(envAccessViolations("process.kill(-pid, 'SIGTERM'); const w = process.platform !== 'win32';", file)).toEqual([]);
+    for (const bad of ["const e = process.env;", "const e = process.env.HOME;", "const p = process;", "process?.kill(1);", "const { kill } = process;", "Object.keys(process.env);"]) {
+      expect(envAccessViolations(bad, file), bad).not.toEqual([]);
+    }
+    expect(envAccessViolations("process.kill(1, 0);", "src/engines/claude/stream.ts")).not.toEqual([]);
+  });
+
   it("the guard allows the injection seam in the engine file, and only there and only in that shape", () => {
     const engine = "src/engines/claude/engine.ts";
     const seam =
