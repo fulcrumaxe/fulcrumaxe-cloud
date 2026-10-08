@@ -120,6 +120,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Local runner (D#6 R4a-3 fix round 3): the copy of the workspace's git files was refused, or git is older than the minimum.
   "snapshot_refused",
   "git_version_unsupported",
+  // Local runner (D#6 R4a-2b): `fx-runner run` refused to start. No pinned job-signing keys for the cloud address, a damaged job ledger,
+  // a mirrors directory that overlaps a runner directory, and a registration for a credential mode that has no local key file yet.
+  "job_keyring_missing",
+  "ledger_closed",
+  "mirrors_root_overlap",
+  "api_key_not_configured",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

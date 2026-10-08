@@ -48,9 +48,9 @@ describe("command line", () => {
 describe("bin/fx-runner.mjs", () => {
   const text = readFileSync(path.join(PACKAGE_DIR, "bin", "fx-runner.mjs"), "utf8");
 
-  it("reads the environment only by name (HOME and FX_RUNNER_HOME), never as a whole", () => {
+  it("reads the environment only by name (HOME, FX_RUNNER_HOME, XDG_CACHE_HOME), never as a whole", () => {
     const reads = [...text.matchAll(/process\.env(\.\w+|\[[^\]]*\]|[^\w.[])/g)].map((m) => m[1]);
-    expect(reads).toEqual([".HOME", ".FX_RUNNER_HOME"]);
+    expect(reads).toEqual([".HOME", ".FX_RUNNER_HOME", ".HOME", ".XDG_CACHE_HOME"]);
     expect(text).not.toMatch(/\.\.\.\s*process|Object\.\w+\(\s*process\.env|globalThis|\bglobal\b/);
   });
 });
