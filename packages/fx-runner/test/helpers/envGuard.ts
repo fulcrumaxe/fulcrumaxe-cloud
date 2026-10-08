@@ -31,6 +31,9 @@ const ENGINE_FILES = ["src/engines/claude/capture.ts", "src/engines/claude/engin
  * reason; each entry below is read off the engine slice's imports.
  */
 export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
+  "src/cloud.ts": ["crypto"],
+  "src/config.ts": ["crypto", "fs", "path"],
+  "src/keys.ts": ["crypto"],
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/pin.ts": ["fs", "path"],
