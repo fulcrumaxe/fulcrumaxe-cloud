@@ -1253,6 +1253,74 @@ check_work_item_halt_definer_role_shape() {
   fi
 }
 
+# D#6 R2b-3 (0754, C21 section 11): the SECURITY DEFINER functions owned by runner_lease_definer. Prints their oids, comma separated,
+# when each is one of the six exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
+# pg_temp, with an ACL that holds the one login that calls it (app_user for the throttle, agent_run_writer for the other five) and
+# nobody else but the owner, with no grant option; SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic
+# owner check then rejects anything else).
+check_runner_lease_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid IN ('public.agent_run_runner_claim(uuid,uuid,uuid,timestamptz,integer)'::regprocedure, 'public.agent_run_runner_lease(uuid,uuid,uuid,integer,timestamptz,integer,bigint)'::regprocedure, 'public.runner_claim_throttle(integer)'::regprocedure, 'public.agent_run_list_running_runner_runs(integer,bigint)'::regprocedure, 'public.agent_run_list_jobless_runner_runs(integer)'::regprocedure, 'public.runner_follow_up_run(uuid)'::regprocedure)
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0)
+            = CASE WHEN p.proname = 'runner_claim_throttle' THEN ARRAY['app_user'] ELSE ARRAY['agent_run_writer'] END
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'runner_lease_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'runner-lease-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_lease_definer fail the exception shape (not one of its six exact signatures, a loose search_path, EXECUTE for anyone but the one login that calls it and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#6 R2b-3 (0754, C21 section 11): role shape of runner_lease_definer. A no-op when the role does not exist. Every problem is named:
+# NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
+# the 48 granted by 0754 (column SELECT and UPDATE on agent_runs, runners, runner_claim_stamps (and INSERT there), run_events and accounts,
+# USAGE on public; nothing table-wide), owning exactly its six functions and nothing else (the table runner_claim_stamps is the
+# migration role's).
+check_runner_lease_definer_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.parent_run_id SELECT','column agent_runs.role SELECT','column agent_runs.runtime SELECT','column agent_runs.status SELECT','column agent_runs.head_sha SELECT','column agent_runs.execution_mode SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.spec_version_id SELECT','column agent_runs.resolved_exposure SELECT','column agent_runs.exposure_digest SELECT','column agent_runs.initiated_by SELECT','column agent_runs.approved_by SELECT','column agent_runs.runner_id SELECT','column agent_runs.lease_generation SELECT','column agent_runs.lease_expires_at SELECT','column agent_runs.claimable_after SELECT','column agent_runs.started_at SELECT','column agent_runs.created_at SELECT','column agent_runs.job_signed SELECT','column agent_runs.runner_id UPDATE','column agent_runs.lease_generation UPDATE','column agent_runs.lease_expires_at UPDATE','column agent_runs.updated_at UPDATE','column agent_runs.claimable_after UPDATE','column agent_runs.approved_by UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column runners.last_seen_at UPDATE','column runner_claim_stamps.runner_id SELECT','column runner_claim_stamps.account_id SELECT','column runner_claim_stamps.last_claim_at SELECT','column runner_claim_stamps.runner_id INSERT','column runner_claim_stamps.account_id INSERT','column runner_claim_stamps.last_claim_at INSERT','column runner_claim_stamps.last_claim_at UPDATE','column run_events.account_id SELECT','column run_events.run_id SELECT','column run_events.seq SELECT','column run_events.kind SELECT','column run_events.payload SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_lease_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'runner_lease_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 48 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 48 granted by 0754' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 6
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.agent_run_runner_claim(uuid,uuid,uuid,timestamptz,integer)'::regprocedure, 'public.agent_run_runner_lease(uuid,uuid,uuid,integer,timestamptz,integer,bigint)'::regprocedure, 'public.runner_claim_throttle(integer)'::regprocedure, 'public.agent_run_list_running_runner_runs(integer,bigint)'::regprocedure, 'public.agent_run_list_jobless_runner_runs(integer)'::regprocedure, 'public.runner_follow_up_run(uuid)'::regprocedure]::oid[]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its six functions and nothing else' END,
+      CASE WHEN has_schema_privilege('runner_lease_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'runner_lease_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): runner_lease_definer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -1354,7 +1422,16 @@ if [ -n "$WORK_ITEM_HALT_RESULT" ] && ! [[ "$WORK_ITEM_HALT_RESULT" =~ ^[0-9]+(,
   echo "neon-shape: internal error -- work_item_halt_definer exempt function oid was not numeric: $WORK_ITEM_HALT_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}"
+RUNNER_LEASE_RESULT="$(check_runner_lease_definer_exception_shape fx_neon)"
+if [[ "$RUNNER_LEASE_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${RUNNER_LEASE_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$RUNNER_LEASE_RESULT" ] && ! [[ "$RUNNER_LEASE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- runner_lease_definer exempt function oids were not numeric: $RUNNER_LEASE_RESULT" >&2
+  exit 1
+fi
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1376,6 +1453,7 @@ check_plan_kind_audit_role_shape fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
 check_work_item_halt_definer_role_shape fx_neon
 check_proposal_work_item_role_shape fx_neon
+check_runner_lease_definer_role_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"

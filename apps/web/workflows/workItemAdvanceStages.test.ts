@@ -37,6 +37,8 @@ interface SetupOptions {
   build?: AdvanceStepResult;
   /** The executor run's statuses, read one per poll (the last repeats). */
   buildOutcomes?: AdvanceRunOutcome[];
+  /** What the worker answers for a run other than the first one (a follow-up run, D#6 C22 section 7). */
+  outcomeFor?: (runId: string) => AdvanceRunOutcome | undefined;
   /** The item's stage on each read after the load (the last repeats). */
   stages?: string[];
   /** What publishing the short Spec answers. */
@@ -56,6 +58,8 @@ function setup(o: SetupOptions = {}) {
     }),
     advanceStartRun: vi.fn(async (_req: AdvanceRunRequest): Promise<AdvanceRunStart> => ({ ok: true as const, runId: "run-1" })),
     advanceRunOutcome: vi.fn(async (_account: string, runId: string) => {
+      const other = o.outcomeFor?.(runId);
+      if (other) return other;
       if (runId !== "run-b") return { status: "succeeded", done: true, envelope: { category: "feature" } };
       return buildOutcomes.length > 1 ? buildOutcomes.shift()! : buildOutcomes[0]!;
     }),
@@ -234,6 +238,42 @@ describe("the build for an item at Spec ready", () => {
     // The run does not keep going behind a card that says Needs human: it is cancelled through the existing path.
     expect(w.advanceCancel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, "run-b");
     expect(w.advanceCancel.mock.invocationCallOrder[0]!).toBeLessThan(w.advanceBuildFailed.mock.invocationCallOrder[0]!);
+  });
+
+  describe("D#6 C22 section 7: a runner run that was lost or hit a usage limit is followed to its follow-up run", () => {
+    const FOLLOW_UP = "run-child";
+    const chainOutcome = (over: Partial<AdvanceRunOutcome>): AdvanceRunOutcome => ({ status: "running", done: false, envelope: null, runtime: "runner", tailRunId: FOLLOW_UP, ...over });
+
+    it("a first loss does not fail the item: the driver keeps waiting on the follow-up and goes on to the review when it succeeds", async () => {
+      const w = setup({
+        item: AT_SPEC,
+        buildOutcomes: [chainOutcome({ status: "pending" }), chainOutcome({ status: "running" }), chainOutcome({ status: "succeeded", done: true, envelope: { summary: "I changed the footer." } })],
+        stages: ["pr_opened"],
+      });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+      expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+      expect(w.advanceCancel).not.toHaveBeenCalled();
+    });
+
+    it("a wait that runs out cancels the END of the chain, and records the failure against it, not against the run that was lost", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [chainOutcome({ status: "running" })] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
+      expect(w.advanceCancel).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, FOLLOW_UP);
+      expect(w.advanceCancel).not.toHaveBeenCalledWith(expect.anything(), "run-b");
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, FOLLOW_UP, "wait_timeout");
+    });
+
+    it.each([
+      ["runner_lost", "runner_lost"],
+      ["usage_limit", "runner_usage_limit"],
+      ["internal_error", "run_failed"],
+    ])("a chain that ended failed (%s) is recorded once, against the last run, under %s", async (failureReason, code) => {
+      const end = chainOutcome({ status: "failed", done: true, failureReason });
+      const w = setup({ item: AT_SPEC, buildOutcomes: [end], outcomeFor: (id) => (id === FOLLOW_UP ? end : undefined) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_failed" });
+      expect(w.advanceBuildFailed).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, FOLLOW_UP, code);
+    });
   });
 
   describe("D#6 C12 A3: time spent pending (a queued runner run) does not count against the four-hour wait", () => {

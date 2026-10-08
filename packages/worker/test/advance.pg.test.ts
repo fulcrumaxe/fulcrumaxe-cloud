@@ -230,13 +230,13 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     const w = await world(a);
     const m = build().module;
     const running = await run(a, w, "running");
-    expect(await m.advanceRunOutcome(a.accountId, running)).toEqual({ status: "running", done: false, envelope: null, runtime: "production" });
+    expect(await m.advanceRunOutcome(a.accountId, running)).toEqual({ status: "running", done: false, envelope: null, runtime: "production", tailRunId: running, failureReason: null });
     const finished = await run(a, w, "succeeded");
     await admin.query(`UPDATE agent_runs SET envelope = '{"category":"bug"}'::jsonb WHERE id = $1`, [finished]);
-    expect(await m.advanceRunOutcome(a.accountId, finished)).toEqual({ status: "succeeded", done: true, envelope: { category: "bug" }, runtime: "production" });
+    expect(await m.advanceRunOutcome(a.accountId, finished)).toEqual({ status: "succeeded", done: true, envelope: { category: "bug" }, runtime: "production", tailRunId: finished, failureReason: null });
     const junk = await run(a, w, "failed");
     await admin.query(`UPDATE agent_runs SET envelope = '"just a string"'::jsonb WHERE id = $1`, [junk]);
-    expect(await m.advanceRunOutcome(a.accountId, junk)).toEqual({ status: "failed", done: true, envelope: null, runtime: "production" });
+    expect(await m.advanceRunOutcome(a.accountId, junk)).toEqual({ status: "failed", done: true, envelope: null, runtime: "production", tailRunId: junk, failureReason: null });
     expect(await m.advanceRunOutcome(b.accountId, finished)).toEqual({ status: "missing", done: true, envelope: null });
     expect(await m.advanceRunOutcome(a.accountId, randomUUID())).toEqual({ status: "missing", done: true, envelope: null });
     expect(await m.advanceRunOutcome("x", "y")).toEqual({ status: "missing", done: true, envelope: null });

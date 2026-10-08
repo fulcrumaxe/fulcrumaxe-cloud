@@ -446,7 +446,7 @@ describe("0714 runner runs [pg]", () => {
            FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = 'agent_run_create'`,
       );
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ prosecdef: true, owner: "platform_ops", proconfig: ["search_path=pg_catalog, public, pg_temp"], executors: ["agent_run_writer", "platform_ops"] });
+      expect(rows[0]).toMatchObject({ prosecdef: true, owner: "platform_ops", proconfig: ["search_path=pg_catalog, public, pg_temp"], executors: ["agent_run_writer", "platform_ops", "runner_lease_definer"] });
       expect(rows[0].args).toMatch(/p_initiated_by uuid DEFAULT NULL/);
     });
   });

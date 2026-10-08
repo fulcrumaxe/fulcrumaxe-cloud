@@ -37,6 +37,9 @@ import type {
 /** Runs a runner-plan account may start per UTC day. PROVISIONAL, D#6 R2b criterion 12 (source D#6 18502844). */
 export const RUNNER_RUNS_PER_DAY = 30;
 
+/** Runner runs an account may have `running` at once; claim hands out no more. PROVISIONAL like the figure above: R2b-3 part (ii) replaces both with the runner plan's data (`maxConcurrentRunnerJobs`). */
+export const RUNNER_MAX_CONCURRENT_JOBS = 1;
+
 /** How long a runner run may wait to be claimed: 72 hours. A constant of this class and nothing else (C12 section 3, from
  * body R3.7): no tenant, account or repo setting changes it. R2b's sweeper owns the `pending -> timed_out` move. */
 export const RUNNER_QUEUE_TTL_MS = 259_200_000;
@@ -59,6 +62,8 @@ export interface RepoVisibilityPort {
 export interface RunContinues {
   parentRunId: string | null;
   sessionId: string;
+  /** When set, the issuer refuses the job unless the branch it derives equals this one (a follow-up of a fix round, C22 section 2). */
+  branch?: string;
 }
 
 /**
@@ -137,7 +142,7 @@ export class RunnerTarget implements ExecutionTarget {
 
   async resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
     assertRunnerBackend(run.backend);
-    await this.deps.issuer.issue({ run, continues: { parentRunId: run.parentRunId ?? null, sessionId } });
+    await this.deps.issuer.issue({ run, continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }) } });
     this.markQueued();
     return { queued: true };
   }

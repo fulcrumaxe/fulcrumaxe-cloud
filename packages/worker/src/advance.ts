@@ -35,6 +35,15 @@ export { ADVANCEABLE_STAGES, ADVANCE_NON_BUILDABLE_KINDS } from "@fx/core/src/wo
 /** Run statuses a run cannot leave; anything else is live. Mirrors @fx/runner's RUN_STATUS_TRANSITIONS (pinned by a test). */
 export const ADVANCE_TERMINAL_STATUSES = ["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"] as const;
 const TERMINAL = new Set<string>(ADVANCE_TERMINAL_STATUSES);
+
+/**
+ * D#6 R2b-3 (C22 sections 5 and 7): the most runs `advanceRunOutcome` looks at when it follows a runner run to the run that
+ * replaced it. The same bound as the database's follow-up chain walk (migration 0754).
+ */
+export const FOLLOW_UP_CHAIN_MAX_RUNS = 16;
+
+/** The two reasons that make a failed runner run get a follow-up (a "follow-up hop", C22 section 5). */
+const FOLLOW_UP_REASONS: ReadonlySet<string> = new Set(["runner_lost", "usage_limit"]);
 /**
  * The first role each action starts: the seat the pre-flight in `performAdvanceWorkItem` resolves. `check_build` starts none
  * (a pull request is looked for first; with none open the item goes to Needs human and no model runs), so it has no seat to
@@ -239,6 +248,14 @@ export interface AdvanceRunOutcome {
   envelope: Record<string, unknown> | null;
   /** Where the run executes (`local`, `production` or `runner`); only a `runner` run's `pending` time is credited (D#6 C12 A3). Absent when the run is gone. */
   runtime?: string;
+  /**
+   * D#6 R2b-3 (C22 section 7): the run this outcome is about, which is the end of the follow-up chain that starts at the run asked
+   * about. A runner run that ended `runner_lost` or `usage_limit` has a follow-up run, and the status, envelope and runtime above are
+   * the last of those runs'. It is the id the caller must cancel, and the one a failure is recorded against. Absent when the run is gone.
+   */
+  tailRunId?: string;
+  /** The tail's failure reason when it is a failed runner run (`runner_lost`, `usage_limit` or another fixed word), else null. Absent when the run is gone. */
+  failureReason?: string | null;
 }
 
 /** What the workflow reads about the item before it starts: plain data, or null when the item is gone. */
@@ -503,14 +520,39 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { ok: true, runId: started.runId };
   }
 
+  /**
+   * How a run stands, following the run that replaced it (C22 sections 5 and 7). A runner run that ended `failed` with
+   * `runner_lost` or `usage_limit` and has a runner child (the follow-up) is not the end of the work: the outcome is that of the
+   * child, and of ITS child in turn, for at most `FOLLOW_UP_CHAIN_MAX_RUNS` runs. Only a chain whose last run has no child is
+   * final, so a pending child reads as not done and queued on a runner, and a childless failed run (a chain that ran out of
+   * allowance, or whose child could not be made) reads as failed and done. Every other run is read as it stands.
+   */
   async function advanceRunOutcome(accountId: string, runId: string): Promise<AdvanceRunOutcome> {
     if (!UUID_RE.test(accountId) || !UUID_RE.test(runId)) return { status: "missing", done: true, envelope: null };
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ status: string; envelope: unknown; runtime: string }>("SELECT status, envelope, runtime FROM agent_runs WHERE id = $1 AND account_id = $2", [runId, accountId]);
-      const row = r.rows[0];
-      if (!row) return { status: "missing", done: true, envelope: null };
-      const envelope = row.envelope !== null && typeof row.envelope === "object" && !Array.isArray(row.envelope) ? (row.envelope as Record<string, unknown>) : null;
-      return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime };
+      let currentId = runId;
+      for (let seen = 1; ; seen++) {
+        const r = await client.query<{ status: string; envelope: unknown; runtime: string }>("SELECT status, envelope, runtime FROM agent_runs WHERE id = $1 AND account_id = $2", [currentId, accountId]);
+        const row = r.rows[0];
+        if (!row) return { status: "missing", done: true, envelope: null };
+        let reason: string | null = null;
+        if (row.status === "failed" && row.runtime === "runner") {
+          const e = await client.query<{ reason: string | null }>(
+            "SELECT payload->>'failureReason' AS reason FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.status_changed' AND payload->>'to' = 'failed' ORDER BY seq DESC LIMIT 1",
+            [accountId, currentId],
+          );
+          reason = e.rows[0]?.reason ?? null;
+          if (reason !== null && FOLLOW_UP_REASONS.has(reason) && seen < FOLLOW_UP_CHAIN_MAX_RUNS) {
+            const next = await client.query<{ id: string }>("SELECT id FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2 AND runtime = 'runner' LIMIT 1", [accountId, currentId]);
+            if (next.rows[0]) {
+              currentId = next.rows[0].id;
+              continue;
+            }
+          }
+        }
+        const envelope = row.envelope !== null && typeof row.envelope === "object" && !Array.isArray(row.envelope) ? (row.envelope as Record<string, unknown>) : null;
+        return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime, tailRunId: currentId, failureReason: reason };
+      }
     });
   }
 

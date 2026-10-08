@@ -192,14 +192,16 @@ export interface ReviewerOutcome {
   securityNeeded: boolean;
   /** The run is `pending` on a runner (a queued runner run): the workflow credits that wait to the pending ceiling, not to the work budget. */
   queuedOnRunner: boolean;
+  /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
+  tailRunId: string;
 }
 
 /** How a reviewer run stands. The findings and the summary stay in the run: only the verdict word and the flag leave. */
 export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId: string, runId: string): Promise<ReviewerOutcome> {
-  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, queuedOnRunner: false };
+  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, queuedOnRunner: false, tailRunId: runId };
   const out = await worker.advanceRunOutcome(accountId, runId);
   const v = readVerdict(out.status, out.envelope);
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, queuedOnRunner: isQueuedOnRunner(out) };
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId };
 }
 
 export interface RoundOut {

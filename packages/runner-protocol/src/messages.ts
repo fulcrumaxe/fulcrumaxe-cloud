@@ -46,8 +46,12 @@ export const LocalOnlyEvent = z
     // Display only; the cloud settles no money against it. `input` and `output` count model tokens (the name avoids
     // the word G1 reserves for credentials).
     usage: z.object({ input: safeInt.min(0).optional(), output: safeInt.min(0).optional(), usd: z.number().min(0).finite().optional() }).strict().optional(),
+    // D#6 R2b-3 (comment 27 item 7; additive under C8 section 6): when the plan's usage limit resets, on a `usage_limit_reached`
+    // event only. Display data: the follow-up run becomes claimable from it, and a false value only affects the tenant that sent it.
+    reset_at: z.string().datetime().optional(),
   })
-  .strict();
+  .strict()
+  .refine((event) => event.reset_at === undefined || event.type === "usage_limit_reached", { message: "reset_at belongs to usage_limit_reached only", path: ["reset_at"] });
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */

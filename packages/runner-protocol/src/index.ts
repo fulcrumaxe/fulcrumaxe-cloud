@@ -6,6 +6,7 @@ export * from "./agentRuntime.js";
 export * from "./envelope.js";
 export * from "./redact.js";
 export * from "./messages.js";
+export * from "./replies.js";
 export * from "./job.js";
 export * from "./jobSignature.js";
 export * from "./httpSignature.js";

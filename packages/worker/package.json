@@ -16,6 +16,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
     "@fx/github": "workspace:*",
@@ -30,7 +31,6 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
-    "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/runner-cloud": "workspace:*",
     "@types/node": "^24.19.0",

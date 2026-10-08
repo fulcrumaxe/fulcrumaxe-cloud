@@ -118,8 +118,18 @@ describe("LocalOnlyEvent", () => {
     expect(LocalOnlyEvent.safeParse({ ...EVENT, type: "anything_else" }).success).toBe(false);
   });
 
-  it("has only the Spec's fields", () => {
-    expect(Object.keys(LocalOnlyEvent.shape).sort()).toEqual(["duration_ms", "engine_version", "exit_code", "file_path", "seq", "tool_name", "ts", "type", "usage"]);
+  it("has only the Spec's fields, and reset_at (D#6 R2b-3, comment 27 item 7)", () => {
+    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["duration_ms", "engine_version", "exit_code", "file_path", "reset_at", "seq", "tool_name", "ts", "type", "usage"]);
+  });
+
+  it("takes a reset time on usage_limit_reached only, as an ISO timestamp", () => {
+    const limit = { ...EVENT, type: "usage_limit_reached" };
+    expect(LocalOnlyEvent.safeParse({ ...limit, reset_at: "2026-10-04T17:00:00.000Z" }).success).toBe(true);
+    expect(LocalOnlyEvent.safeParse(limit).success).toBe(true);
+    for (const bad of ["tomorrow", "2026-10-04", "", 5]) expect(LocalOnlyEvent.safeParse({ ...limit, reset_at: bad }).success, String(bad)).toBe(false);
+    for (const type of LOCAL_ONLY_EVENT_TYPES.filter((t) => t !== "usage_limit_reached")) {
+      expect(LocalOnlyEvent.safeParse({ ...EVENT, type, reset_at: "2026-10-04T17:00:00.000Z" }).success, type).toBe(false);
+    }
   });
 
   it("refuses model text, tool output, file content or a message under any name", () => {

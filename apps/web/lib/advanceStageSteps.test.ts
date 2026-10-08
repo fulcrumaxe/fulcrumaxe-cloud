@@ -91,7 +91,7 @@ describe("buildOutcomeBody: the summary stays in the run", () => {
   it("says whether the envelope has a plain-text summary and never returns it", async () => {
     const withSummary = worker({ advanceRunOutcome: async () => ({ status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }) });
     const out = await buildOutcomeBody(withSummary, ACCOUNT, "r");
-    expect(out).toEqual({ status: "succeeded", done: true, hasSummary: true, queuedOnRunner: false });
+    expect(out).toEqual({ status: "succeeded", done: true, hasSummary: true, queuedOnRunner: false, tailRunId: "r" });
     expect(JSON.stringify(out)).not.toContain("footer");
   });
   it.each([null, {}, { summary: "" }, { summary: "   " }, { summary: 3 }, { summary: { a: 1 } }])("%j is no summary", async (envelope) => {
@@ -99,7 +99,44 @@ describe("buildOutcomeBody: the summary stays in the run", () => {
     expect((await buildOutcomeBody(w, ACCOUNT, "r")).hasSummary).toBe(false);
   });
   it("no worker is a finished 'missing' run", async () => {
-    expect(await buildOutcomeBody(null, ACCOUNT, "r")).toEqual({ status: "missing", done: true, hasSummary: false, queuedOnRunner: false });
+    expect(await buildOutcomeBody(null, ACCOUNT, "r")).toEqual({ status: "missing", done: true, hasSummary: false, queuedOnRunner: false, tailRunId: "r" });
+  });
+  it("names the end of the follow-up chain as the run to cancel, and a queued follow-up as waiting on a runner (C22 section 7)", async () => {
+    const w = worker({ advanceRunOutcome: async () => ({ status: "pending", done: false, envelope: null, runtime: "runner", tailRunId: "child-run" }) });
+    expect(await buildOutcomeBody(w, ACCOUNT, "lost-run")).toEqual({ status: "pending", done: false, hasSummary: false, queuedOnRunner: true, tailRunId: "child-run" });
+  });
+});
+
+describe("a failed runner run is recorded under the code of why it failed (C22 section 8)", () => {
+  const runner = (failureReason: string | null) => worker({ advanceRunOutcome: vi.fn(async () => ({ status: "failed", done: true, envelope: null as Record<string, unknown> | null, runtime: "runner", tailRunId: "tail", failureReason })) });
+  it.each([
+    ["runner_lost", "runner_lost"],
+    ["usage_limit", "runner_usage_limit"],
+    ["credential_mismatch", "run_failed"],
+    ["internal_error", "run_failed"],
+    [null, "run_failed"],
+  ])("a failed runner run that ended %s is recorded as %s", async (failureReason, code) => {
+    const w = runner(failureReason);
+    expect(await buildFailedBody(w, ACCOUNT, ITEM, "tail", "failed")).toMatchObject({ status: "recorded", stage: "needs_human" });
+    expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "tail", code);
+  });
+  it("only a failed run is mapped: a timeout of a runner run keeps its own code, and a sandbox run that failed stays run_failed", async () => {
+    const w = runner("runner_lost");
+    await buildFailedBody(w, ACCOUNT, ITEM, "tail", "timed_out");
+    expect(w.advanceBuildFailed).toHaveBeenLastCalledWith(ACCOUNT, ITEM, "tail", "run_timed_out");
+    const sandbox = worker({ advanceRunOutcome: async () => ({ status: "failed", done: true, envelope: null, runtime: "production", tailRunId: "t", failureReason: null }) });
+    await buildFailedBody(sandbox, ACCOUNT, ITEM, "t", "failed");
+    expect(sandbox.advanceBuildFailed).toHaveBeenLastCalledWith(ACCOUNT, ITEM, "t", "run_failed");
+  });
+  it("a failed run with no run id (Check the build) is run_failed and reads nothing", async () => {
+    const w = runner("runner_lost");
+    await buildFailedBody(w, ACCOUNT, ITEM, null, "failed");
+    expect(w.advanceRunOutcome).not.toHaveBeenCalled();
+    expect(w.advanceBuildFailed).toHaveBeenLastCalledWith(ACCOUNT, ITEM, null, "run_failed");
+  });
+  it("the two new codes are on the pipeline's closed list, so the write happens", async () => {
+    const { BUILD_FAILURE_CODES } = await import("@fx/pipeline");
+    expect(BUILD_FAILURE_CODES).toEqual(expect.arrayContaining(["runner_lost", "runner_usage_limit"]));
   });
 });
 
