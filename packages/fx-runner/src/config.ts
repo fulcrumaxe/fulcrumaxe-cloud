@@ -24,7 +24,9 @@ export interface Registration {
   /** `scheme://host[:port]` the runner registered with. */
   cloud_origin: string;
   runner_id: string;
-  /** What the user said at registration. The cloud's response does not repeat it, so it is recorded, not verified. */
+  /** The account the code belonged to, as the cloud reported it. For `status` and diagnostics only; never a security input. */
+  account_id: string;
+  /** The mode the cloud stored for the runner. `register` writes nothing unless it equals what the user asked for. */
   credential_mode: CredentialMode;
   /** RFC 7638 thumbprint of the public key: the id every signed request carries. */
   jkt: string;
@@ -119,10 +121,11 @@ function isRegistration(value: unknown): value is Registration {
   if (typeof value !== "object" || value === null) return false;
   const r = value as Record<string, unknown>;
   return (
-    Object.keys(r).length === 6 &&
+    Object.keys(r).length === 7 &&
     r.version === 1 &&
     typeof r.cloud_origin === "string" &&
     typeof r.runner_id === "string" && UUID.test(r.runner_id) &&
+    typeof r.account_id === "string" && UUID.test(r.account_id) &&
     typeof r.credential_mode === "string" && (CREDENTIAL_MODES as readonly string[]).includes(r.credential_mode) &&
     typeof r.jkt === "string" && THUMBPRINT.test(r.jkt) &&
     typeof r.registered_at === "string" && !Number.isNaN(Date.parse(r.registered_at))

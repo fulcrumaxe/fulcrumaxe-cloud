@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { RegisterMessage, RevokeMessage, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk } from "@fulcrumaxe/runner-protocol";
+import { RegisterMessage, RegisterResponse, RevokeMessage, jwkThumbprint, verifyRunnerRequest, type CredentialMode, type Ed25519Jwk } from "@fulcrumaxe/runner-protocol";
 
 /**
  * A stand-in for the cloud's `/api/runner/register` and `/api/runner/revoke` routes (packages/runner-cloud/src/register.ts
@@ -10,7 +10,7 @@ import { RegisterMessage, RevokeMessage, jwkThumbprint, verifyRunnerRequest, typ
  * `invalid_message` before any signature is looked at, as `registerRunner` does) and for both routes the signature checked
  * with the protocol package's own `verifyRunnerRequest` against `origin + path` (never the Host header), the key resolved
  * from the body for a registration and from the registered runners (active ones only) for a revoke, a code that works
- * once, 409 for a key that is already registered, and the exact reply shapes: 201 `{runner_id}`, 200 `{revoked, runs_failed}`
+ * once, 409 for a key that is already registered, and the exact reply shapes: 201 `{runner_id, account_id, credential_mode}` (the mode and account of the stored code, never the request's; built with the protocol's `RegisterResponse`), 200 `{revoked, runs_failed}`
  * and `{error:{code,message}}` refusals (with `revoked:true` beside `error` for 503 `leases_not_failed`, as `errorResponse`
  * builds it). What it cannot reproduce: the 400 `invalid_key` for a small-order public key (that check lives in runner-cloud's strictEd25519, which this package may not import, and the CLI only ever sends keys it generated), the database functions behind the codes, the per-address limit's real counter
  * (`rateLimit` forces the 429 reply instead) and the 90-day key age (`keyTooOld` forces that 401).
@@ -25,7 +25,11 @@ export interface FakeCloud {
   origin: string;
   seen: SeenRequest[];
   validCodes: Set<string>;
-  runners: Map<string, { runnerId: string; jwk: Ed25519Jwk; revoked: boolean }>;
+  /** The mode each code was minted for; a code not listed here is an `api_key` code. */
+  codeModes: Map<string, CredentialMode>;
+  /** The account every code and runner here belongs to. */
+  accountId: string;
+  runners: Map<string, { runnerId: string; jwk: Ed25519Jwk; revoked: boolean; credentialMode: CredentialMode }>;
   /** Next replies to force, consumed in order. */
   force: Array<"rate_limit" | "runner_limit" | "leases_not_failed" | "key_too_old">;
   close: () => Promise<void>;
@@ -45,7 +49,7 @@ async function readBody(req: IncomingMessage): Promise<Buffer | null> {
 }
 
 export async function startFakeCloud(): Promise<FakeCloud> {
-  const state: FakeCloud = { origin: "", seen: [], validCodes: new Set(), runners: new Map(), force: [], close: async () => undefined };
+  const state: FakeCloud = { origin: "", seen: [], validCodes: new Set(), codeModes: new Map(), accountId: randomUUID(), runners: new Map(), force: [], close: async () => undefined };
   const server: Server = createServer((req, res) => {
     const send = (status: number, body: unknown, headers: Record<string, string> = {}): void => {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
@@ -96,8 +100,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         }
         if (!state.validCodes.delete(registerMessage.data.code)) return refuse(401, "invalid_code");
         const runnerId = randomUUID();
-        state.runners.set(runnerId, { runnerId, jwk: registerMessage.data.public_key_jwk, revoked: false });
-        return send(201, { runner_id: runnerId });
+        const credentialMode = state.codeModes.get(registerMessage.data.code) ?? "api_key";
+        state.runners.set(runnerId, { runnerId, jwk: registerMessage.data.public_key_jwk, revoked: false, credentialMode });
+        return send(201, RegisterResponse.parse({ runner_id: runnerId, account_id: state.accountId, credential_mode: credentialMode }));
       }
 
       if (state.force[0] === "key_too_old") {

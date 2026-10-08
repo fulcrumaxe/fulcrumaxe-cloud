@@ -32,6 +32,9 @@ the daemon come in later changes.
   `registration.json`, which holds no secret. A machine holds one registration; a second one is refused until the first
   is revoked (`fx-runner revoke`, or `fx-runner revoke --local` when the cloud no longer accepts the key), so one Claude
   login is never shared between accounts. A lock file (`register.lock`) keeps two `register` runs from both registering.
+  The cloud's reply carries the account and the credential mode it stored for the code; `register` saves nothing unless that
+  mode equals `--credential-mode`. On a mismatch it revokes the runner it just made (signed with the key it still holds in
+  memory), writes nothing and exits non-zero.
 - `fx-runner status`: shows the saved registration and the key's age. It makes no network call.
 - `fx-runner revoke [--reason <text>] [--local]`: revokes this runner in the cloud with its own signature, then deletes
   the key and the registration. `--local` only deletes the local files, for a machine the cloud no longer accepts.

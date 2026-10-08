@@ -1,4 +1,4 @@
-import { RegisterMessage } from "@fulcrumaxe/runner-protocol";
+import { RegisterMessage, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_BODY_BYTES, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { hashRegistrationCode } from "./registrationCodes.js";
@@ -10,6 +10,7 @@ export const REGISTER_PATH = "/api/runner/register";
  * POST /api/runner/register. The runner proves it holds the key by signing with it. Account, registrant, credential mode
  * and repos all come from the code's own row, through `runner_register` (0712), which also enforces single use, the
  * expiry, the minter still being an owner or admin, and the runner-plan limit. A replay is 409 `key_registered` (README).
+ * The 201 reply is `RegisterResponse`: the runner id, the account and the credential mode, the last two read from the stored row.
  */
 export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
   if (req.body.byteLength > MAX_BODY_BYTES) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
@@ -27,11 +28,15 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
   if (!accountId) throw new RunnerHttpError(401, "invalid_code", "the registration code is not valid");
 
   try {
-    const runnerId = await withTenant(deps.appUserPool, accountId, async (client) => {
+    // The mode comes back from the stored row (the code's own mode, copied by `runner_register`), in the same transaction.
+    const body = await withTenant(deps.appUserPool, accountId, async (client) => {
       const result = await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL) AS id", [codeHash, JSON.stringify(message.public_key_jwk)]);
-      return result.rows[0]!.id;
+      const id = result.rows[0]!.id;
+      const row = await client.query<{ credential_mode: string }>("SELECT credential_mode FROM runners WHERE id = $1 AND account_id = $2", [id, accountId]);
+      // Parsed inside the transaction: a reply that does not fit the protocol rolls the registration back.
+      return RegisterResponse.parse({ runner_id: id, account_id: accountId, credential_mode: row.rows[0]?.credential_mode });
     });
-    return { status: 201, body: { runner_id: runnerId }, headers: { "cache-control": "no-store" } };
+    return { status: 201, body, headers: { "cache-control": "no-store" } };
   } catch (error) {
     switch (pgCode(error)) {
       case "P0002": // no_data_found: unusable code (used, expired, minter demoted)

@@ -114,6 +114,14 @@ export const REGISTRATION_CODE_PATTERN = /^fxrr_[A-Za-z0-9]{32,128}$/;
 
 export const RegisterMessage = z.object({ code: z.string().max(133).regex(REGISTRATION_CODE_PATTERN), public_key_jwk: Ed25519PublicJwk }).strict();
 
+/**
+ * The cloud's 201 reply to a registration (cloud to runner, so it is not one of `RUNNER_MESSAGES`). `account_id` and
+ * `credential_mode` are read from the stored runner row, never from the request: the runner compares the mode with the
+ * one it was asked to register for, and keeps the account for display only. Strict, so a reply with anything else is refused.
+ */
+export const RegisterResponse = z.object({ runner_id: uuid, account_id: uuid, credential_mode: CredentialMode }).strict();
+export type RegisterResponse = z.infer<typeof RegisterResponse>;
+
 /** The new key. The request itself is signed by the old key. */
 export const RotateMessage = z.object({ public_key_jwk: Ed25519PublicJwk }).strict();
 
