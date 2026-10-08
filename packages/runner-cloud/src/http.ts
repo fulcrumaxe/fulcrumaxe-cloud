@@ -78,6 +78,12 @@ export interface RunnerCloudDeps {
   now?: () => Date;
   /** The protocol version `hello` is judged against. Defaults to the constant. */
   currentProtocolVersion?: number;
+  /**
+   * The most active runners an account on the runner plan may hold, read from the plan data (D#6 R2b criterion 12).
+   * Throws while the plan data is unavailable: registering then answers 503 and registers nothing. Absent is the same
+   * as unavailable. An account that is not on the runner plan is never asked.
+   */
+  maxRunners?: () => number;
 }
 
 export type FailRunnerLeases = (input: { accountId: string; runnerId: string; reason: "runner_revoked" }) => Promise<{ runIds: string[]; complete: boolean }>;

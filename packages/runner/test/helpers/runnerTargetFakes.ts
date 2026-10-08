@@ -1,5 +1,5 @@
 import type { ExecutionRun } from "../../src/executionTarget.js";
-import type { JobIssuer, RepoVisibility, RepoVisibilityPort, RunContinues } from "../../src/targets/runnerTarget.js";
+import type { JobIssuer, RepoVisibility, RepoVisibilityPort, RunContinues, RunnerLimitsPort } from "../../src/targets/runnerTarget.js";
 
 /** The R3a fake issuer: records what it was asked to issue, builds nothing and signs nothing. R3b supplies the real one. */
 export interface RecordedJobIssuer extends JobIssuer {
@@ -29,4 +29,9 @@ export function createFakeVisibility(answer: RepoVisibility | "throw" = "private
       return answer;
     },
   };
+}
+
+/** A limits port that answers one fixed daily figure. The default is high enough that no test meets it by accident. */
+export function createFakeRunnerLimits(runsPerDay = 1000): RunnerLimitsPort {
+  return { runsPerDay: () => runsPerDay };
 }

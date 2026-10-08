@@ -5,16 +5,19 @@ import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { isAdmitDenyReason, type ExecutionRun } from "../src/executionTarget.js";
 import {
   RUNNER_QUEUE_TTL_MS,
-  RUNNER_RUNS_PER_DAY,
   RUNNER_TARGET_ROLES,
   RunnerTarget,
+  unwiredRunnerLimits,
   type RepoVisibility,
 } from "../src/targets/runnerTarget.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
-import { createFakeJobIssuer, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
 /** D#6 R3a: what `RunnerTarget.admit` decides, and what `dispatch`, `resume`, `cancel` and `finalize` do and do not do. */
+/** The daily figure these tests inject. Invented, small, and not a plan figure. */
+const PER_DAY = 5;
+
 describe("RunnerTarget [pg]", () => {
   const db = pgHarness();
 
@@ -54,7 +57,7 @@ describe("RunnerTarget [pg]", () => {
   function target(pool: Pool, visibility: RepoVisibility | "throw" = "private") {
     const issuer = createFakeJobIssuer();
     const port = createFakeVisibility(visibility);
-    return { target: new RunnerTarget({ pool, issuer, visibility: port }), issuer, port };
+    return { target: new RunnerTarget({ limits: createFakeRunnerLimits(PER_DAY), pool, issuer, visibility: port }), issuer, port };
   }
 
   describe("admit: the role", () => {
@@ -106,19 +109,34 @@ describe("RunnerTarget [pg]", () => {
   });
 
   describe("admit: the day's run cap", () => {
-    it("the 30th run of a UTC day is admitted and the 31st is refused as runner_daily_limit", async () => {
+    it("the last run the plan allows in a UTC day is admitted and the next is refused as runner_daily_limit", async () => {
       const w = await world();
-      for (let i = 0; i < RUNNER_RUNS_PER_DAY - 1; i++) await insertRun(w);
-      const thirtieth = await insertRun(w);
+      for (let i = 0; i < PER_DAY - 1; i++) await insertRun(w);
+      const last = await insertRun(w);
       const t = target(db.runWriterPool);
-      expect(await t.target.admit(thirtieth, db.admin)).toEqual({ admitted: true });
+      expect(await t.target.admit(last, db.admin)).toEqual({ admitted: true });
 
-      const thirtyFirst = await insertRun(w);
-      expect(await t.target.admit(thirtyFirst, db.admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
+      const over = await insertRun(w);
+      expect(await t.target.admit(over, db.admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
     });
 
-    it("the limit is 30 (provisional, D#6 R2b criterion 12)", () => {
-      expect(RUNNER_RUNS_PER_DAY).toBe(30);
+    it("the limit is whatever the injected port says, read on every admit (the plan data, not a constant here)", async () => {
+      const w = await world();
+      await insertRun(w);
+      const second = await insertRun(w);
+      const tight = new RunnerTarget({ limits: createFakeRunnerLimits(1), pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
+      expect(await tight.admit(second, db.admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
+      const loose = new RunnerTarget({ limits: createFakeRunnerLimits(2), pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
+      expect(await loose.admit(second, db.admin)).toEqual({ admitted: true });
+    });
+
+    it("plan data that cannot be read refuses (fails closed) and asks the repo nothing", async () => {
+      const w = await world();
+      const run = await insertRun(w);
+      const visibility = createFakeVisibility();
+      const dark = new RunnerTarget({ limits: unwiredRunnerLimits, pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility });
+      expect(await dark.admit(run, db.admin)).toEqual({ admitted: false, reason: "runner_daily_limit" });
+      expect(visibility.calls).toHaveLength(0);
     });
 
     it("runs another account made, runs of another runtime, runs from before today and runs admit already refused do not count", async () => {
@@ -134,7 +152,7 @@ describe("RunnerTarget [pg]", () => {
 
     it("an over-limit run is refused before the repo is asked about", async () => {
       const w = await world();
-      for (let i = 0; i < RUNNER_RUNS_PER_DAY; i++) await insertRun(w);
+      for (let i = 0; i < PER_DAY; i++) await insertRun(w);
       const run = await insertRun(w);
       const t = target(db.runWriterPool);
       expect((await t.target.admit(run, db.admin)).admitted).toBe(false);
@@ -158,7 +176,7 @@ describe("RunnerTarget [pg]", () => {
     it("a port that answers something outside its type is not read as private", async () => {
       const w = await world();
       const run = await insertRun(w);
-      const t = new RunnerTarget({
+      const t = new RunnerTarget({ limits: createFakeRunnerLimits(),
         pool: db.runWriterPool,
         issuer: createFakeJobIssuer(),
         visibility: { visibility: async () => "Private" as never },
@@ -236,7 +254,7 @@ describe("RunnerTarget [pg]", () => {
 
       it("a dispatch whose job could not be issued marks nothing", async () => {
         const w = await world();
-        const t = new RunnerTarget({ pool: db.runWriterPool, issuer: { issue: async () => Promise.reject(new Error("no key")) }, visibility: createFakeVisibility("private") });
+        const t = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: { issue: async () => Promise.reject(new Error("no key")) }, visibility: createFakeVisibility("private") });
         await expect(t.dispatch(await insertRun(w))).rejects.toThrow("no key");
         await settle();
         expect(marks.size).toBe(0);
@@ -252,7 +270,7 @@ describe("RunnerTarget [pg]", () => {
     it("an issuer that fails makes dispatch fail: nothing is reported queued without a job behind it", async () => {
       const w = await world();
       const run = await insertRun(w);
-      const t = new RunnerTarget({
+      const t = new RunnerTarget({ limits: createFakeRunnerLimits(),
         pool: db.runWriterPool,
         issuer: { issue: async () => Promise.reject(new Error("no key")) },
         visibility: createFakeVisibility("private"),
@@ -273,9 +291,9 @@ describe("RunnerTarget [pg]", () => {
     it("the queue TTL is 72 hours, a constant of the class that no dependency can change", async () => {
       expect(RUNNER_QUEUE_TTL_MS).toBe(259_200_000);
       const pool = db.runWriterPool;
-      const plain = new RunnerTarget({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
+      const plain = new RunnerTarget({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
       expect(plain.queueTtlMs).toBe(259_200_000);
-      const hostile = new RunnerTarget({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility(), queueTtlMs: 5, queueTtl: 5 } as never);
+      const hostile = new RunnerTarget({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility(), queueTtlMs: 5, queueTtl: 5 } as never);
       expect(hostile.queueTtlMs).toBe(259_200_000);
     });
   });

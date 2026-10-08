@@ -7,7 +7,7 @@ import { JobIssueError, RUNNER_BRANCH_PREFIX, createJobIssuer, createJobSigner, 
 import { RUNNER_QUEUE_TTL_MS, RunnerTarget } from "../src/targets/runnerTarget.js";
 import { insertAgentRun } from "../src/runStatusWriter.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
-import { createFakeVisibility } from "./helpers/runnerTargetFakes.js";
+import { createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
 /** D#6 R3b: the real JobIssuer, over a real database and the real definer. */
@@ -237,12 +237,12 @@ describe("JobIssuer [pg]", () => {
       const w = await world();
       const run = await runnerRun(w);
       const i = issuer();
-      const target = new RunnerTarget({ pool: db.runWriterPool, issuer: i.issuer, visibility: i.visibility });
+      const target = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: i.issuer, visibility: i.visibility });
       expect(await target.dispatch(run)).toEqual({ queued: true });
       expect((await stored(run.id)).job.run_id).toBe(run.id);
 
       const run2 = await runnerRun(w);
-      const target2 = new RunnerTarget({ pool: db.runWriterPool, issuer: issuer({ visibility: "public" }).issuer, visibility: i.visibility });
+      const target2 = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: issuer({ visibility: "public" }).issuer, visibility: i.visibility });
       await expect(target2.dispatch(run2)).rejects.toBeInstanceOf(JobIssueError);
       expect(await stored(run2.id)).toBeNull();
     });

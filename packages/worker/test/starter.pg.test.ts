@@ -7,7 +7,7 @@ import { QueuedRunNotSupportedError, RunnerTarget, SandboxTarget, startAgentRun,
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount } from "@fx/db/test/helpers/seed.js";
 import { createSandboxTargetHarness } from "../../runner/test/helpers/sandboxTargetFakes.js";
-import { createFakeJobIssuer, createFakeVisibility } from "../../runner/test/helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "../../runner/test/helpers/runnerTargetFakes.js";
 import { PREVIEW_ROLE } from "../src/preview.js";
 import { WATCHDOG_MARGIN_MS, createRunStarter, type FollowArgs } from "../src/starter.js";
 import { seedPreviewTarget } from "./support/previewTarget.js";
@@ -145,7 +145,7 @@ describe("createRunStarter [pg]", { timeout: 60_000 }, () => {
     const issuer = createFakeJobIssuer();
     const registry: ExecutionTargetRegistry = {
       sandbox: new SandboxTarget(harness.deps),
-      runner_local: new RunnerTarget({ pool: writerPool, issuer, visibility: createFakeVisibility(visibility) }),
+      runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: writerPool, issuer, visibility: createFakeVisibility(visibility) }),
     };
     const starter = createRunStarter({ pool: writerPool, registry, follow });
     const input = await newInput(`run-action:${randomUUID()}`);

@@ -1,6 +1,6 @@
 import { describeExecutionTargetContract } from "./executionTarget.contract.js";
 import { RunnerTarget } from "../src/targets/runnerTarget.js";
-import { createFakeJobIssuer, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 
 /**
  * D#6 R3a (C12 section 2.1): C10's contract suite, run against `RunnerTarget` in its queued variant. `dispatch` and
@@ -9,7 +9,7 @@ import { createFakeJobIssuer, createFakeVisibility } from "./helpers/runnerTarge
  */
 describeExecutionTargetContract(
   "RunnerTarget",
-  (pool) => new RunnerTarget({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility("private") }),
+  (pool) => new RunnerTarget({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility("private") }),
   {
     dispatch: "queued",
     runtime: "runner",

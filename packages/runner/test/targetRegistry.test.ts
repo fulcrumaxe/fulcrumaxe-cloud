@@ -9,7 +9,7 @@ import {
 } from "../src/executionTarget.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { RunnerTarget } from "../src/targets/runnerTarget.js";
-import { createFakeJobIssuer, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
+import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -23,7 +23,7 @@ describe("execution target registry", () => {
 
   it("the factories build the two targets, each from its own deps", () => {
     const pool = {} as Pool;
-    const runner = EXECUTION_TARGETS.runner_local({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
+    const runner = EXECUTION_TARGETS.runner_local({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() });
     expect(runner).toBeInstanceOf(RunnerTarget);
     expect(runner.runtime).toBe("runner");
     const sandbox = EXECUTION_TARGETS.sandbox(createSandboxTargetHarness(pool).deps);
@@ -35,7 +35,7 @@ describe("execution target registry", () => {
     const pool = {} as Pool;
     const registry: ExecutionTargetRegistry = {
       sandbox: new SandboxTarget(createSandboxTargetHarness(pool).deps),
-      runner_local: new RunnerTarget({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() }),
+      runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() }),
     };
     const before = process.env.VERCEL;
     try {
@@ -55,7 +55,7 @@ describe("execution target registry", () => {
     const pool = {} as Pool;
     const registry: ExecutionTargetRegistry = {
       sandbox: new SandboxTarget(createSandboxTargetHarness(pool).deps),
-      runner_local: new RunnerTarget({ pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() }),
+      runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool, issuer: createFakeJobIssuer(), visibility: createFakeVisibility() }),
     };
     expect(() => resolveExecutionTarget("runner_verified", registry)).toThrow(UnknownExecutionModeError);
     expect(() => resolveExecutionTarget("runner", registry)).toThrow(UnknownExecutionModeError);

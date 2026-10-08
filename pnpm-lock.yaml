@@ -1306,6 +1306,9 @@ importers:
       '@fx/pipeline':
         specifier: workspace:*
         version: link:../pipeline
+      '@fx/plan-data':
+        specifier: workspace:*
+        version: link:../plan-data
       '@fx/runner-cloud':
         specifier: workspace:*
         version: link:../runner-cloud

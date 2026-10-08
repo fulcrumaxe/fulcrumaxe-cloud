@@ -49,9 +49,10 @@ describe('runner tables: row level security and tenant isolation (0711)', () => 
       const { rows } = await admin.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = $1::regclass`, [table]);
       expect(rows[0], table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
       const policies = await admin.query<{ roles: string[] }>(`SELECT roles::text[] AS roles FROM pg_policies WHERE schemaname = 'public' AND tablename = $1`, [table]);
-      // guard_definer (0720) and runner_lease_definer (0754) have their own narrow policies on runners; the first is checked in
-      // guard-trigger-functions-platform-ops.pg.test.ts, the second in runner-lease-definer.pg.test.ts.
-      const roles = policies.rows.flatMap((r) => r.roles).filter((r) => r !== 'guard_definer' && r !== 'runner_lease_definer').sort();
+      // guard_definer (0720), runner_lease_definer (0754) and runner_approval_definer (0757) have their own narrow policies on runners; the
+      // first is checked in guard-trigger-functions-platform-ops.pg.test.ts, the others in runner-lease-definer.pg.test.ts and
+      // runner-approval-definer.pg.test.ts.
+      const roles = policies.rows.flatMap((r) => r.roles).filter((r) => r !== 'guard_definer' && r !== 'runner_lease_definer' && r !== 'runner_approval_definer').sort();
       expect(roles, table).toEqual(['app_user', 'platform_ops']);
     }
   });

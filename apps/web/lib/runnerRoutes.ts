@@ -6,6 +6,7 @@ import type { FailRunnerLeases, RunnerCloudDeps, RunnerHttpRequest, RunnerHttpRe
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
+import { runnerLimitsFor } from "@fx/worker";
 import { getWorker } from "./worker";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
@@ -23,7 +24,7 @@ const failRunnerLeases: FailRunnerLeases = async (input) => {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, maxRunners: () => runnerLimitsFor().maxRunners };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

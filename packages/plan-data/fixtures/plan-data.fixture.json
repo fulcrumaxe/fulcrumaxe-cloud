@@ -46,6 +46,13 @@
       "monthlyWorkload": { "features": 5, "smalls": 6 }
     }
   },
+  "runnerPlan": {
+    "foreground": { "kind": "flat", "usdPerMonth": 6 },
+    "background": { "kind": "flat", "usdPerMonth": 0 },
+    "limits": { "maxRunners": 3, "maxConcurrentRunnerJobs": 2, "runsPerDay": 7, "maxRunWallClockMs": 5400000, "fullClonesPerRepoPerDay": 4, "previews": false },
+    "provisional": true,
+    "source": "fixture"
+  },
   "pricing": {
     "fetchedAt": "2000-01-01",
     "claude": {
