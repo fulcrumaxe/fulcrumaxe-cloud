@@ -21,6 +21,23 @@ the daemon come in later changes.
   where the binary says its credential came from before it processes any output, keeps the raw stream only in
   `~/.fx-runner/logs/<run>.jsonl` (0600, credential values removed) and reports metadata-only events.
 
+## Command line
+
+`bin/fx-runner.mjs` is the entry point; it looks up `HOME` and `FX_RUNNER_HOME` by name and hands everything else to
+`runCli` in `src/cli.ts`. It runs from a build of `src/` (the installer comes later), not from the TypeScript directly.
+
+- `fx-runner register --code <code> --credential-mode subscription|api_key --cloud-url <url>`: makes an Ed25519 key on
+  this machine and registers it. The code comes from the workspace, works once and expires after 10 minutes. The request
+  carries the code and the public key only. The private key is saved at mode 0600 in `~/.fx-runner` (mode 0700), next to
+  `registration.json`, which holds no secret. A machine holds one registration; a second one is refused until the first
+  is revoked (`fx-runner revoke`, or `fx-runner revoke --local` when the cloud no longer accepts the key), so one Claude
+  login is never shared between accounts. A lock file (`register.lock`) keeps two `register` runs from both registering.
+- `fx-runner status`: shows the saved registration and the key's age. It makes no network call.
+- `fx-runner revoke [--reason <text>] [--local]`: revokes this runner in the cloud with its own signature, then deletes
+  the key and the registration. `--local` only deletes the local files, for a machine the cloud no longer accepts.
+
+`FX_RUNNER_HOME` moves the state directory. A key over 90 days old is refused by the cloud: revoke and register again.
+
 ## Boundaries
 
 No `@anthropic-ai/*` package is a dependency or an import. `test/` checks that, that no host-side tool is defined, that
