@@ -90,6 +90,11 @@ function isSeamDefault(node: ts.Node, file: string): node is ts.BinaryExpression
   );
 }
 
+/** `SpawnFn` or `typeof spawn`: a value of this type must be named spawn..., or the name checks below cannot see its calls. */
+function isSpawnType(type: ts.TypeNode): boolean {
+  return (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName) && type.typeName.text === "SpawnFn") || (ts.isTypeQueryNode(type) && ts.isIdentifier(type.exprName) && type.exprName.text === "spawn");
+}
+
 /** True when a spawn-like name is used in a way the narrow allowances do not cover (alias, value, .call, Reflect.apply, ...). */
 function spawnValueProblem(node: ts.Identifier, file: string): boolean {
   const parent = node.parent;
@@ -180,6 +185,9 @@ export function envAccessViolations(text: string, file: string = ENV_READER_FILE
         const isMember = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node;
         if (mayUseChildProcess || !isMember) found.add("exec, fork or synchronous spawn");
       }
+    }
+    if ((ts.isParameter(node) || ts.isPropertySignature(node) || ts.isPropertyDeclaration(node) || ts.isVariableDeclaration(node)) && node.type && isSpawnType(node.type)) {
+      if (!SPAWN_NAME.test(node.name.getText(source))) found.add("a spawn-typed name that does not start with spawn");
     }
     if (isTextToken(node)) {
       if (/^(?:node:)?process$/.test(node.text)) found.add("import of the process module");

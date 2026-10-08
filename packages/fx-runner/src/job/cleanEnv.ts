@@ -13,12 +13,12 @@ export const HOST_ENV_ALLOWLIST: readonly string[] = Object.freeze(["PATH", "HOM
 export const SUBSCRIPTION_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /**
- * Set on every run. Both names are read by the pinned build (checked in 2.1.273):
- *  - `DISABLE_UPDATES` refuses all update paths;
+ * Set on every run. The runner uses the user's own installed agent binary, so it does not set `DISABLE_UPDATES`: the
+ * user's install keeps managing its updates, and the per-job version and flag checks catch a build that no longer fits.
  *  - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` removes the API key, auth token and OAuth token from the environment of every
  *    tool subprocess, so a shell command the agent runs does not inherit the credential the CLI itself needs.
  */
-export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ DISABLE_UPDATES: "1", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
+export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
 
 /**
  * How the run authenticates. Subscription mode has no field for an API key, so none can be passed. API-key mode takes
