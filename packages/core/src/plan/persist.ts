@@ -62,10 +62,15 @@ export type ImportErrorCode =
   | 'token_not_read_only'
   | 'github_unavailable'
   | 'rate_limited_by_github'
+  | 'request_budget_exhausted'
   | 'plan_file_missing'
   | 'plan_file_shape'
   | 'interrupted'
   | 'internal_error';
+
+/** The Plan view's sentence for `request_budget_exhausted` (the thirteenth error sentence). S3-L2b renders it. */
+export const REQUEST_BUDGET_EXHAUSTED_SENTENCE =
+  'Reading your repo took more requests than one import is allowed, so nothing was changed. Your previous plan is still shown.';
 
 export interface ImportEvidence {
   requests: Array<{ method: string; path: string; status: number }>;

@@ -6,7 +6,8 @@ import { cleanText, type ParsedPlan, type PlanMilestone, type PlanTaskRow } from
  * Pure: it is given what was read and answers with the same `ParsedPlan` that level 1 produces, so the counting rule, the
  * done rule (a pull request must DECLARE a task complete) and the writer are shared.
  *
- * Which Discussions: the body has a `## Spec` heading, or a `STATUS:` line of SPEC_READY, IMPLEMENTING, REVIEWING or DONE.
+ * Which Discussions: the body has a `## Spec` heading, or a `STATUS:` line of SPEC_READY, IMPLEMENTING, REVIEWING or DONE, AND
+ * the author has admin or maintain permission (`trustedSpecDiscussions`; the caller applies it before `parseSpecTables`).
  * Tables: every markdown table whose header has an id column (`Task`, `ID`, `PR` or `#`). Planned PRs come from a column named
  * `planned` or `PRs` (default 1); the description is the first other column that is not an estimate or dependency column.
  * Corrections: a comment whose first line is `## Correction C<n>` or `### Correction C<n>`, from a TRUSTED author, applied in
@@ -169,30 +170,64 @@ export interface CorrectionAuthorSource {
 }
 
 /**
+ * One permission lookup per distinct login for the whole import (logins are case-insensitive on GitHub, so the key is the
+ * lower-cased login). The Spec-author check and the Correction-author check share it, so an author is asked about once.
+ * A lookup that throws is not cached as an answer: the error reaches the caller and ends the import.
+ */
+export function memoizePermissions(source: CorrectionAuthorSource): CorrectionAuthorSource {
+  const seen = new Map<string, Promise<RepoPermission>>();
+  return {
+    authorPermission(login: string): Promise<RepoPermission> {
+      const key = login.toLowerCase();
+      let hit = seen.get(key);
+      if (hit === undefined) {
+        hit = source.authorPermission(login);
+        seen.set(key, hit);
+      }
+      return hit;
+    },
+  };
+}
+
+/** True when the real repository permission of `login` is one author-trust.ts calls trusted (admin or maintain). */
+async function isTrustedLogin(login: string, source: CorrectionAuthorSource): Promise<boolean> {
+  const repoPermission = await source.authorPermission(login);
+  return classifyAuthor({ login, repoPermission, allowlist: [] }) === "trusted";
+}
+
+/**
+ * The Discussions that count as Specs: spec-shaped (heading or status line) AND written by an author with admin or maintain
+ * permission, from the real permission API. The author is checked before anything else of the Discussion is read, so an
+ * untrusted one costs at most one lookup (none when its author was already looked up) and no comment read. A Discussion with
+ * no author (a deleted account) is untrusted. A lookup that cannot be made throws; it never reads as trusted.
+ */
+export async function trustedSpecDiscussions<T extends { body: string; authorLogin: string | null }>(
+  discussions: readonly T[],
+  source: CorrectionAuthorSource,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (const d of discussions) {
+    if (!isSpecDiscussion(d.body) || d.authorLogin === null) continue;
+    if (await isTrustedLogin(d.authorLogin, source)) out.push(d);
+  }
+  return out;
+}
+
+/**
  * The lower-cased logins, among the authors of Correction comments, that author-trust.ts calls trusted (admin or maintain on
- * the repository, from the real permission API; the body is never consulted). One lookup per distinct login. Everyone else,
- * and anyone whose lookup cannot be made because the request budget is spent, is untrusted.
+ * the repository, from the real permission API; the body is never consulted). One lookup per distinct login. Everyone else is
+ * untrusted. A lookup that cannot be made (the request budget is spent, GitHub is down) throws and ends the import: a
+ * Correction is never silently left out.
  */
 export async function trustedCorrectionAuthors(
   comments: ReadonlyMap<number, readonly SpecComment[]>,
   source: CorrectionAuthorSource,
-  onBudget: () => void,
 ): Promise<Set<string>> {
-  const logins = new Set<string>();
-  for (const list of comments.values()) for (const c of list) if (c.authorLogin && isCorrectionComment(c.body)) logins.add(c.authorLogin);
+  const logins = new Map<string, string>();
+  for (const list of comments.values()) for (const c of list) if (c.authorLogin && isCorrectionComment(c.body) && !logins.has(c.authorLogin.toLowerCase())) logins.set(c.authorLogin.toLowerCase(), c.authorLogin);
   const trusted = new Set<string>();
-  for (const login of [...logins].sort()) {
-    let repoPermission: RepoPermission;
-    try {
-      repoPermission = await source.authorPermission(login);
-    } catch (err) {
-      if ((err as { code?: unknown } | null)?.code === "request_budget_exceeded") {
-        onBudget();
-        break;
-      }
-      throw err;
-    }
-    if (classifyAuthor({ login, repoPermission, allowlist: [] }) === "trusted") trusted.add(login.toLowerCase());
+  for (const key of [...logins.keys()].sort()) {
+    if (await isTrustedLogin(logins.get(key)!, source)) trusted.add(key);
   }
   return trusted;
 }

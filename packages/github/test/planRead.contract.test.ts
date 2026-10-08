@@ -395,11 +395,13 @@ describe("the readers", () => {
     const bound = await listIssuesAndPulls(a.client, REPO, { maxPulls: 120 });
     expect(bound.truncated).toBe(true);
     expect(bound.pulls.length).toBe(120);
+    expect(bound.budgetExhausted).toBe(false);
     await gh?.close();
     gh = undefined;
     const b = await setup({ items }, { maxRequests: 2 });
     const budget = await listIssuesAndPulls(b.client, REPO);
     expect(budget.truncated).toBe(true);
+    expect(budget.budgetExhausted).toBe(true);
     expect(budget.pagesRead).toBe(2);
     expect(b.client.requestCount).toBe(2);
     expect(b.gh.server.seen.filter((s) => s.path.endsWith("/issues")).length).toBe(2);
@@ -490,6 +492,55 @@ describe("the plan source (levels 2 and 3 read through the same read-only client
     expect(log.length).toBe(4); // one issues page, Discussions, comments, one permission
     for (const e of log) expect((e.method === "GET" && e.path.startsWith("/repos/acme/widgets/")) || (e.method === "POST" && e.path.startsWith("/graphql ")), `${e.method} ${e.path}`).toBe(true);
     expect(gh.mints).toHaveLength(1);
+  });
+});
+
+describe("the plan source and the request budget (a spent budget is an error where it decides the plan)", () => {
+  const items = Array.from({ length: 250 }, (_, i) => merged(i + 1, `pr ${i + 1}`));
+  const sourceOf = (g: PlanGithub, maxRequests: number) =>
+    createPlanSourceFactory({ resolveInstallation: async () => ({ installationId: 777, appKind: "team_readonly" }), appCredentials: creds, requester: g.requester, fetchImpl: g.fetch, maxRequests })(TARGET);
+
+  it("pulls() throws request_budget_exceeded when the budget ends the list, however many pages were read; it is not a short list", async () => {
+    gh = await startPlanGithub(newFakeState({ items }));
+    const source = sourceOf(gh, 2);
+    expect(await code(source.pulls())).toBe("request_budget_exceeded");
+    expect(gh.server.seen.filter((s) => s.path.endsWith("/issues"))).toHaveLength(2);
+  });
+
+  it("pulls() with the budget spent before the first page throws too; with enough budget it returns the whole list", async () => {
+    gh = await startPlanGithub(newFakeState({ items }));
+    const none = sourceOf(gh, 0);
+    expect(await code(none.pulls())).toBe("request_budget_exceeded");
+    const enough = sourceOf(gh, 10);
+    expect((await enough.pulls()).pulls).toHaveLength(250);
+  });
+
+  it("the pull request bound still answers truncated, not an error (a bound is not the budget)", async () => {
+    gh = await startPlanGithub(newFakeState({ items: Array.from({ length: 6100 }, (_, i) => merged(i + 1, "p")) }));
+    const r = await sourceOf(gh, 400).pulls();
+    expect(r.truncated).toBe(true);
+    expect(r.pulls).toHaveLength(6000);
+  });
+
+  it("issues() (level 3 feeds no trust or merged-pull-request input) still ends truncated when the budget runs out", async () => {
+    gh = await startPlanGithub(newFakeState({ items }));
+    const r = await sourceOf(gh, 2).issues();
+    expect(r.truncated).toBe(true);
+  });
+
+  it("discussions() carries each Discussion's author, and the permission route is asked once per call", async () => {
+    gh = await startPlanGithub(newFakeState({ collaborators: { maint: "maintain" }, discussions: [{ number: 7, title: "Plan", body: "## Spec", closed: false, login: "maint", comments: [] }, { number: 8, title: "Other", body: "## Spec", closed: false, comments: [] }] }));
+    const source = sourceOf(gh, 400);
+    expect((await source.discussions()).discussions.map((d) => [d.number, d.authorLogin])).toEqual([[7, "maint"], [8, "someone"]]);
+    expect(await source.authorPermission("maint")).toBe("maintain");
+    expect(await source.authorPermission("someone")).toBe("none");
+    expect(gh.server.seen.filter((s) => s.path.includes("/collaborators/"))).toHaveLength(2);
+  });
+
+  it("authorPermission() throws request_budget_exceeded when the budget is spent, never a decision", async () => {
+    gh = await startPlanGithub(newFakeState({ collaborators: { boss: "admin" } }));
+    expect(await code(sourceOf(gh, 0).authorPermission("boss"))).toBe("request_budget_exceeded");
+    expect(gh.server.seen.filter((s) => s.path.includes("/collaborators/"))).toHaveLength(0);
   });
 });
 

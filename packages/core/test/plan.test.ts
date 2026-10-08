@@ -5,7 +5,8 @@ import { buildIssuesLevel } from '../src/plan/issuesLevel.js';
 import { decideOwnerProcess } from '../src/plan/ownerProcess.js';
 import { declaresCompletion, isDeclarationLine, referenceLineNames } from '../src/plan/referenceLine.js';
 import { PlanFileInconsistentError, PlanFileShapeError, parseRoadmapFile } from '../src/plan/roadmapFile.js';
-import { isCorrectionComment, isSpecDiscussion, parseSpecTables, trustedCorrectionAuthors, type SpecComment } from '../src/plan/specTables.js';
+import { REQUEST_BUDGET_EXHAUSTED_SENTENCE } from '../src/plan/persist.js';
+import { isCorrectionComment, isSpecDiscussion, memoizePermissions, parseSpecTables, trustedCorrectionAuthors, trustedSpecDiscussions, type SpecComment } from '../src/plan/specTables.js';
 
 /** D#483 S3-c: the level-1 importer's pure parts: the reference-line rule, the file's shape and counting rule, the statuses, the owner decision. */
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/plan/${name}`, import.meta.url), 'utf8');
@@ -383,26 +384,45 @@ describe('level 2: Spec task tables', () => {
       [1, ['Boss', 'maint', 'dev', 'tri', 'out', 'Boss'].map((l) => cmt(corr, l))],
       [2, [cmt('hello', 'chatty'), cmt(corr, 'maint')]],
     ]);
-    const trusted = await trustedCorrectionAuthors(comments, { authorPermission: async (l) => (asked.push(l), perms[l] ?? 'none') }, () => undefined);
+    const trusted = await trustedCorrectionAuthors(comments, memoizePermissions({ authorPermission: async (l) => (asked.push(l), perms[l] ?? 'none') }));
     expect([...trusted].sort()).toEqual(['boss', 'maint']);
     expect(asked.sort()).toEqual(['Boss', 'dev', 'maint', 'out', 'tri']);
   });
 
-  it('a lookup that runs into the request budget stops trusting anyone further and reports it; any other failure fails the import', async () => {
+  it('a lookup that cannot be made (the request budget, GitHub down) ends the import with that error; nobody is silently left untrusted', async () => {
     const corr = '## Correction C1\n| Task | D |\n|---|---|\n| T | x |';
     const comments = new Map([[1, [cmt(corr, 'a'), cmt(corr, 'b')]]]);
-    let budget = 0;
-    const lookup = async (l: string) => {
-      if (l === 'b') throw Object.assign(new Error('x'), { code: 'request_budget_exceeded' });
-      return 'admin' as const;
-    };
-    const trusted = await trustedCorrectionAuthors(comments, { authorPermission: lookup }, () => (budget += 1));
-    expect([...trusted]).toEqual(['a']);
-    expect(budget).toBe(1);
-    const down = async (): Promise<'admin'> => {
-      throw Object.assign(new Error('x'), { code: 'github_unavailable' });
-    };
-    await expect(trustedCorrectionAuthors(comments, { authorPermission: down }, () => undefined)).rejects.toMatchObject({ code: 'github_unavailable' });
+    for (const code of ['request_budget_exceeded', 'github_unavailable']) {
+      const lookup = async (l: string) => {
+        if (l === 'b') throw Object.assign(new Error('x'), { code });
+        return 'admin' as const;
+      };
+      await expect(trustedCorrectionAuthors(comments, { authorPermission: lookup })).rejects.toMatchObject({ code });
+    }
+  });
+
+  it('F2: a Discussion counts as a Spec only when it is spec-shaped AND its author is admin or maintain; the author is checked case-insensitively and once', async () => {
+    const asked: string[] = [];
+    const perms: Record<string, 'admin' | 'maintain' | 'write' | 'read' | 'none'> = { boss: 'admin', maint: 'maintain', dev: 'write', rd: 'read' };
+    const source = memoizePermissions({ authorPermission: async (l) => (asked.push(l), perms[l.toLowerCase()] ?? 'none') });
+    const spec = '## Spec\nx';
+    const d = (number: number, authorLogin: string | null, body = spec) => ({ number, body, authorLogin });
+    const kept = await trustedSpecDiscussions([d(1, 'Boss'), d(2, 'boss'), d(3, 'MAINT'), d(4, 'dev'), d(5, 'rd'), d(6, 'nobody'), d(7, null), d(8, 'maint', 'not a spec'), d(9, 'dev', 'STATUS: DONE')], source);
+    expect(kept.map((x) => x.number)).toEqual([1, 2, 3]);
+    // one lookup per distinct login; none for a Discussion that is not spec-shaped (8 is 'maint' again, 9 is 'dev' again)
+    expect(asked.map((l) => l.toLowerCase()).sort()).toEqual(['boss', 'dev', 'maint', 'nobody', 'rd']);
+  });
+
+  it('F2: a failed permission lookup is not cached as an answer and never reads as trusted', async () => {
+    let calls = 0;
+    const source = memoizePermissions({
+      authorPermission: async () => {
+        calls += 1;
+        throw Object.assign(new Error('x'), { code: 'request_budget_exceeded' });
+      },
+    });
+    await expect(trustedSpecDiscussions([{ number: 1, body: '## Spec', authorLogin: 'a' }], source)).rejects.toMatchObject({ code: 'request_budget_exceeded' });
+    expect(calls).toBe(1);
   });
 
   it('look-alike control text in a title or a description is neutralised', () => {
@@ -416,6 +436,12 @@ describe('level 2: Spec task tables', () => {
     const c = computePlan(p, [pr(1, 'Follow-up to D#7:T1', []), pr(2, 'Closes D#7:T2', []), pr(3, 'Unrelated', ['Blocked by D#7:T1'])]);
     expect(c.tasks.map((t) => [t.key, t.status])).toEqual([['D#7:T1', 'not_started'], ['D#7:T2', 'done']]);
     expect(c.tasks[1]!.evidence).toEqual([{ pr: 2, via: 'reference_line' }]);
+  });
+});
+
+describe('the thirteenth error sentence', () => {
+  it('request_budget_exhausted has its Plan view sentence, for the view to render', () => {
+    expect(REQUEST_BUDGET_EXHAUSTED_SENTENCE).toBe('Reading your repo took more requests than one import is allowed, so nothing was changed. Your previous plan is still shown.');
   });
 });
 
