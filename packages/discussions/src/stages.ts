@@ -12,7 +12,7 @@ import {
   type WorkItemTransitionReviewer,
 } from "@fx/core/src/work-items/stages.js";
 import type { DiscussionsContext } from "./principals.js";
-import { accountIdOf } from "./principals.js";
+import { accountIdOf, actorForWrite } from "./principals.js";
 import { effectiveProvenance } from "./provenance.js";
 import { assertAllowed, assertUuidOrNotFound, rejectAccountIdInInput, DiscussionsError } from "./operations.js";
 
@@ -105,6 +105,7 @@ export async function setStage(ctx: DiscussionsContext, input: SetStageInput): P
         source: "control_plane",
         sourceRef: input.sourceRef ?? `setStage:${randomUUID()}`,
         reviewer: input.reviewer ?? null,
+        actor: actorForWrite(ctx.principal).kind === "user" ? "person" : "automatic",
       });
     } catch (err) {
       if (err instanceof IllegalStageTransitionError) {

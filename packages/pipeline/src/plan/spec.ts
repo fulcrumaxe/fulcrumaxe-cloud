@@ -2,6 +2,7 @@ import { reportError } from "@fx/telemetry";
 import { randomBytes } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { DiscussionsError, MAX_BODY_BYTES, isBuildableKind, publishSpec, utf8ByteLength, type DiscussionsContext } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
 import { sanitize } from "@fx/trust";
@@ -100,7 +101,7 @@ export interface SpecStepDeps extends PanelDeps {
   pmAttempt?: string;
 }
 
-export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "pm_timed_out" | "pm_failed";
+export type SpecRefusal = PanelRefusal | "invalid_spec_output" | "pm_timed_out" | "pm_failed" | "item_halted";
 
 export type SpecStepOutcome =
   | { status: "refused"; reason: SpecRefusal }
@@ -641,7 +642,7 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
   // Check-and-publish under one lock per work item. `publishSpec` accepts a
   // publish from `spec_ready`, so without this two racing runs (both waiting
   // on the same keyed PM run) would each add a version.
-  const result = await withPublishLock(deps.pool, wi, async (): Promise<"replay" | "not_discussing" | "external" | { id: string; version: number }> => {
+  const result = await withPublishLock(deps.pool, wi, async (): Promise<"replay" | "not_discussing" | "external" | "halted" | { id: string; version: number }> => {
     const now = await readItem(deps, wi);
     if (now === null) return "not_discussing";
     if (now.stage === "spec_ready") return "replay";
@@ -651,11 +652,14 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
       return { id: published.id, version: published.version };
     } catch (err) {
       if (err instanceof DiscussionsError && err.code === "external_requires_human") return "external";
+      // A halted item gets no Spec from the pipeline; nothing was written.
+      if (err instanceof WorkItemHaltedError) return "halted";
       throw err;
     }
   });
   if (result === "replay") return replayOutcome(deps, wi);
   if (result === "external") return { status: "external_requires_human", workItemId: wi };
+  if (result === "halted") return { status: "refused", reason: "item_halted" };
   if (result === "not_discussing") return { status: "refused", reason: "not_discussing" };
 
   const { triggered } = await triggerBuildIfSpecReady(deps, wi);

@@ -113,11 +113,12 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
 }
 
 /** The classify run on the PM card. The key names the approval (the action), so a replayed step finds its run and a fresh approval after a failure starts a new one. */
-export async function startClassifyBody(worker: AdvanceWorker | null, accountId: string, workItemId: string, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
+export async function startClassifyBody(worker: AdvanceWorker | null, accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
   if (!worker) return { ok: false, reason: "worker_unavailable" };
   return worker.advanceStartRun({
     accountId,
     workItemId,
+    haltEpoch,
     step: `classify:${actionId}`,
     role: "project-manager",
     prompt: buildClassifyRunPrompt({ owner: loaded.owner, name: loaded.name, number: loaded.number, title: loaded.title, body: loaded.body, labels: loaded.hints }),

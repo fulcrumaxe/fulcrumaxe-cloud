@@ -58,7 +58,8 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
   const maxReadFailures = options.maxReadFailures ?? DEFAULT_MAX_READ_FAILURES;
 
   async function stop(runId: string): Promise<never> {
-    // A failed cancel must not hide the abort: the sweep that settles lost runs is the backstop for a run that survives.
+    // A failed cancel must not hide the abort. A run whose cancel failed stays live until its own limits end it (the sandbox
+    // timeout): the lost-run sweep settles only a run whose sandbox is already gone, so it is not a backstop for a live one.
     await ports.cancel(runId).catch(() => undefined);
     throw new PanelSeatAbortedError();
   }

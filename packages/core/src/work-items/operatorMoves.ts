@@ -55,7 +55,7 @@ const refOf = (key: string | null | undefined): string => (key ? createHash('sha
 
 async function move(client: PoolClient, workItemId: string, toStage: 'discussing' | 'closed' | 'triaged', sourceRef: string): Promise<void> {
   try {
-    await recordStage(client, { workItemId, toStage, at: new Date(), source: 'control_plane', sourceRef });
+    await recordStage(client, { workItemId, toStage, at: new Date(), source: 'control_plane', sourceRef, actor: 'person' });
   } catch (err) {
     if (err instanceof IllegalStageTransitionError) throw new OperatorMovedOnError();
     throw err;

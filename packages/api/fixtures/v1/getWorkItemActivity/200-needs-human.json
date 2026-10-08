@@ -1,5 +1,6 @@
 {
   "stage": "needs_human",
+  "halted": false,
   "repo": {
     "owner": "acme",
     "name": "docs"

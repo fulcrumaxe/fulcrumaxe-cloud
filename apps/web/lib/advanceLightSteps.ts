@@ -20,6 +20,7 @@ export async function startLightSpecBody(worker: LightStartWorker | null, who: S
   return worker.advanceStartRun({
     accountId: who.accountId,
     workItemId: who.workItemId,
+    haltEpoch: who.haltEpoch,
     step: `light-spec:${actionId}`,
     role: "project-manager",
     prompt: buildLightSpecPrompt({ category: input.category, title: input.title, body: input.body }),

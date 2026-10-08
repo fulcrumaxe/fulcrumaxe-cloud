@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { createDiscussion, setStage, type Discussion, type DiscussionsContext } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
 import { TRIAGE_CATEGORIES, discussionKindFor, isExplicitKind, runsPanel, type TriageCategory } from "./categories.js";
@@ -58,7 +59,8 @@ export type TriageRefusal =
   | "invalid_source_event"
   | "not_found"
   | "no_discussion"
-  | "not_triaged";
+  | "not_triaged"
+  | "item_halted";
 
 export type TriageOutcome =
   | {
@@ -276,7 +278,13 @@ export async function triageIntake(deps: TriageDeps, intake: TriageIntake): Prom
 
     let moved: { replayed: boolean } | null = null;
     if (runsPanel(category)) {
-      moved = await moveToDiscussing(ctx, workItemId, category, existing.triaged_entry);
+      try {
+        moved = await moveToDiscussing(ctx, workItemId, category, existing.triaged_entry);
+      } catch (err) {
+        // A halted item is not moved on by triage: a person resumes it.
+        if (err instanceof WorkItemHaltedError) return { status: "refused", reason: "item_halted" };
+        throw err;
+      }
     }
     return {
       status: "triaged",

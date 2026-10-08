@@ -15,6 +15,8 @@ export interface StepWho {
   accountId: string;
   userId: string;
   workItemId: string;
+  /** The halt epoch the workflow started under; a step under an older one is refused (halted_since_approval). */
+  haltEpoch: number;
 }
 
 /**

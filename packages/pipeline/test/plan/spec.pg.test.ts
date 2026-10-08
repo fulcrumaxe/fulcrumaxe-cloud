@@ -129,6 +129,22 @@ describe("H15c criterion 5 (as replaced by C20): the Spec is a spec_versions row
     console.log("H15c ROWS", JSON.stringify({ transitions: after.transitions.map((t) => [t.to_stage, t.source_ref.slice(0, 20)]), spec: { version: after.specs[0]!.version, body: after.specs[0]!.body }, executors: executors.rows }));
   });
 
+  it("DP-C6: a halted discussing item gets no Spec from the pipeline: refused item_halted, nothing published, no trigger, still discussing", async () => {
+    const r = await rig();
+    // The customer's halt commits after the project manager's run ended and before its Spec is published.
+    const write = r.writer.writeSpec.bind(r.writer);
+    r.writer.writeSpec = async (req, signal) => {
+      const result = await write(req, signal);
+      await h.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [r.workItemId, randomUUID()]);
+      return result;
+    };
+    const out = await runSpecStep(r.deps, { workItemId: r.workItemId });
+    expect(out).toEqual({ status: "refused", reason: "item_halted" });
+    const after = await state(r.workItemId);
+    expect(after).toMatchObject({ stage: "discussing", specs: [] });
+    expect(r.events).toEqual([]);
+  });
+
   it("H14 is triggered from the stage row: one event per entry into spec_ready, with ids only", async () => {
     const r = await rig();
     const out = await runSpecStep(r.deps, { workItemId: r.workItemId });

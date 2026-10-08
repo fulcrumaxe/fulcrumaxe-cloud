@@ -1,5 +1,6 @@
 {
   "stage": "pr_opened",
+  "halted": false,
   "repo": {
     "owner": "acme",
     "name": "docs"

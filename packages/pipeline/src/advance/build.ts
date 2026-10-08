@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import { IllegalStageTransitionError } from "@fx/core/src/work-items/stages.js";
+import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
 import { sanitize } from "@fx/trust";
 import { agentOutputBlock } from "../plan/envelope.js";
@@ -142,7 +142,8 @@ export async function startBuildForItem(
   const number = Number(facts.gh_number);
   const prompt = buildExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human" });
   const started = await ports.startRun({ step: `build:v${facts.version}:${approvalId}`, role: "executor", prompt, clone: true, pr: number, exclusive: true });
-  if (!started.ok) return { status: "refused", reason: `start_${started.reason}` };
+  // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
+  if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
 
   if (facts.stage === "spec_ready" || facts.stage === "needs_human") {
     try {
@@ -150,6 +151,11 @@ export async function startBuildForItem(
         recordStage(client, { workItemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `build:${started.runId}`, runId: started.runId }),
       );
     } catch (err) {
+      // The item was halted after the run was created: the halt lists and cancels that run, and this stops it too.
+      if (err instanceof WorkItemHaltedError) {
+        await ports.cancel(started.runId).catch(() => undefined);
+        return { status: "refused", reason: "item_halted" };
+      }
       if (!(err instanceof IllegalStageTransitionError)) throw err;
       // The item moved on (closed, cancelled) between the read and the write: the run must not keep going.
       await ports.cancel(started.runId).catch(() => undefined);

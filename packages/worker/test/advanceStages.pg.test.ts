@@ -179,7 +179,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     await setupRepo(a);
     const w = await item(a);
     const t = build();
-    const base = { accountId: a.accountId, workItemId: w, role: "executor", prompt: "p" };
+    const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "executor", prompt: "p" };
     expect((await t.module.advanceStartRun({ ...base, step: "build:v1:x", clone: true, pr: 7 })).ok).toBe(true);
     expect(t.inputs[0]).toMatchObject({ workdir: "/vercel/sandbox/repo", cloneRepo: { owner: "acme", name: "widgets" }, pr: 7, repoId: a.repoId });
     expect((await t.module.advanceStartRun({ ...base, role: "project-manager", step: "classify:x" })).ok).toBe(true);
@@ -192,7 +192,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);
     const t = build();
-    const base = { accountId: a.accountId, workItemId: w, role: "executor", prompt: "p", step: "build:v1:x" };
+    const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "executor", prompt: "p", step: "build:v1:x" };
     expect(await t.module.advanceStartRun({ ...base, clone: true })).toEqual({ ok: false, reason: "no_repo" });
     for (const pr of [0, -1, 1.5, Number.NaN]) expect(await t.module.advanceStartRun({ ...base, pr })).toEqual({ ok: false, reason: "invalid_input" });
     expect(t.inputs).toEqual([]);
@@ -202,7 +202,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const a = await seedAccount(admin, randomUUID());
     await setupRepo(a);
     const w = await item(a);
-    const base = { accountId: a.accountId, workItemId: w, role: "executor", prompt: "p", clone: true, pr: 7, exclusive: true };
+    const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "executor", prompt: "p", clone: true, pr: 7, exclusive: true };
     const live = await run(a, w, "running");
     const t = build();
     expect(await t.module.advanceStartRun({ ...base, step: "build:v1:second" })).toEqual({ ok: false, reason: "already_running" });
@@ -226,7 +226,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const w = await item(a);
     const other = await item(a);
     const t = build();
-    const who = { accountId: a.accountId, userId: a.userId, workItemId: w };
+    const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
     expect((await t.module.advancePanel(who)).status).toBe("ok");
     const ports = t.calls[0]!.ports;
     expect(t.calls[0]!.args).toEqual([a.accountId, w]);
@@ -241,7 +241,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const w = await item(a);
     const external = await item(a, { provenance: "external" });
     const t = build();
-    const who = (workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId });
+    const who = (workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 });
     for (const call of [(x: ReturnType<typeof who>) => t.module.advancePanel(x), (x: ReturnType<typeof who>) => t.module.advanceSpec(x), (x: ReturnType<typeof who>) => t.module.advanceBuild(x, randomUUID())]) {
       expect(await call(who(external))).toEqual({ status: "refused", reason: "external_requires_human" });
       expect(await call(who(randomUUID()))).toEqual({ status: "refused", reason: "target_not_found" });
@@ -261,7 +261,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const w = await item(a);
     const t = build();
     const approval = randomUUID();
-    expect((await t.module.advanceBuild({ accountId: a.accountId, userId: a.userId, workItemId: w }, approval)).status).toBe("started");
+    expect((await t.module.advanceBuild({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 }, approval)).status).toBe("started");
     expect(t.calls[0]!.args).toEqual([a.accountId, w, approval]);
     expect(t.calls[0]!.options).toEqual({});
     const runId = randomUUID();
@@ -278,7 +278,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const w = await item(a);
     const live = await run(a, w, "running", "technical-architect");
     const t = build();
-    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w });
+    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
     await t.calls[0]!.ports.cancel(live);
     expect(t.cancelled).toEqual([live]);
     expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [live])).rows[0].status).toBe("cancelled");
@@ -291,7 +291,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const done = await run(a, w, "succeeded", "technical-architect");
     const foreign = await run(a, other, "running", "technical-architect");
     const t = build();
-    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w });
+    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
     const ports = t.calls[0]!.ports;
     await ports.cancel(done);
     await ports.cancel(foreign);
@@ -301,7 +301,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [foreign])).rows[0].status).toBe("running");
     // No registry: nothing to cancel through, and no throw.
     const bare = build({ registry: null });
-    await bare.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w });
+    await bare.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
     await expect(bare.calls[0]!.ports.cancel(foreign)).resolves.toBeUndefined();
   });
 
@@ -311,12 +311,12 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const finished = await run(a, w, "succeeded", "technical-architect");
     await admin.query(`UPDATE agent_runs SET envelope = '{"comment":"c","stance":"agree","challenge":false}'::jsonb WHERE id = $1`, [finished]);
     const t = build();
-    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w });
+    await t.module.advancePanel({ accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 });
     expect(await t.calls[0]!.ports.outcome(finished)).toEqual({ status: "succeeded", done: true, envelope: { comment: "c", stance: "agree", challenge: false }, runtime: "production" });
     const b = await seedAccount(admin, randomUUID());
     const wb = await item(b);
     const tb = build();
-    await tb.module.advancePanel({ accountId: b.accountId, userId: b.userId, workItemId: wb });
+    await tb.module.advancePanel({ accountId: b.accountId, userId: b.userId, workItemId: wb, haltEpoch: 0 });
     expect(await tb.calls[0]!.ports.outcome(finished)).toEqual({ status: "missing", done: true, envelope: null });
   });
 });

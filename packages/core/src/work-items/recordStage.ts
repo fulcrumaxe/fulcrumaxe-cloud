@@ -3,6 +3,7 @@ import { emitDomainEvent } from '../domain-events/emit.js';
 import {
   assertLegalStageTransition,
   StageInputError,
+  WorkItemHaltedError,
   WorkItemNotFoundError,
   WORK_ITEM_STAGES_REQUIRING_REVIEWER,
   WORK_ITEM_TRANSITION_REVIEWERS,
@@ -24,6 +25,12 @@ export interface RecordStageInput {
   sourceRef: string;
   runId?: string | null;
   reviewer?: WorkItemTransitionReviewer | null;
+  /**
+   * Who is moving the item. `'automatic'` (the default, so a writer added later is covered) may not take a halted item
+   * out of its halt; `'person'` is passed only by an explicit person action (Close, Reopen, Back to discussion, and a
+   * Spec published by a signed-in person).
+   */
+  actor?: 'automatic' | 'person';
 }
 
 export type RecordStageResult =
@@ -55,14 +62,15 @@ export type RecordStageResult =
  *      current stage, so a duplicate is still recognised after the item has
  *      since moved on (criterion 9b) rather than throwing
  *      IllegalStageTransitionError for what is really a duplicate.
- *   5. `assertLegalStageTransition(fromStage, toStage)`.
+ *   5. DP-C6: a halted item refuses an automatic control-plane move out of the halt (WorkItemHaltedError).
+ *   5b. `assertLegalStageTransition(fromStage, toStage)`.
  *   6. INSERT the transition row, then UPDATE `work_items.stage`.
  */
 export async function recordStage(
   client: PoolClient,
   input: RecordStageInput,
 ): Promise<RecordStageResult> {
-  const { workItemId, toStage, at, source, sourceRef, runId = null, reviewer = null } = input;
+  const { workItemId, toStage, at, source, sourceRef, runId = null, reviewer = null, actor = 'automatic' } = input;
 
   const reviewerRequired = REVIEWER_STAGES.has(toStage);
   if (reviewerRequired && reviewer == null) {
@@ -78,14 +86,14 @@ export async function recordStage(
     throw new StageInputError(`recordStage: unknown source "${source}"`);
   }
 
-  const { rows } = await client.query<{ stage: string; account_id: string; db_now: Date }>(
-    `SELECT stage, account_id, now() AS db_now FROM work_items WHERE id = $1 FOR UPDATE`,
+  const { rows } = await client.query<{ stage: string; account_id: string; db_now: Date; halted: boolean }>(
+    `SELECT stage, account_id, now() AS db_now, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1 FOR UPDATE`,
     [workItemId],
   );
   if (rows.length === 0) {
     throw new WorkItemNotFoundError(workItemId);
   }
-  const { stage: fromStage, account_id: accountId, db_now: dbNow } = rows[0]!;
+  const { stage: fromStage, account_id: accountId, db_now: dbNow, halted } = rows[0]!;
 
   if (at.getTime() > dbNow.getTime() + AT_WINDOW_MS) {
     throw new StageInputError(
@@ -100,6 +108,13 @@ export async function recordStage(
   );
   if (dup.rows.length > 0) {
     return { recorded: false, reason: 'duplicate' };
+  }
+
+  // A customer halt is left only by a person. A webhook is a fact about GitHub and is recorded; a move INTO needs_human
+  // is the park itself (the halt, an escalation, a failed build). Checked after the duplicate test (a replay is still
+  // a duplicate) and before legality.
+  if (halted && source === 'control_plane' && actor === 'automatic' && toStage !== 'needs_human') {
+    throw new WorkItemHaltedError(workItemId);
   }
 
   assertLegalStageTransition(fromStage, toStage);

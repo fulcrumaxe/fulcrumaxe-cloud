@@ -1,5 +1,6 @@
 {
   "stage": "in_progress",
+  "halted": false,
   "repo": {
     "owner": "acme",
     "name": "docs"

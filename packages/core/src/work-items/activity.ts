@@ -81,6 +81,8 @@ export interface ActivityNotice {
 }
 export interface WorkItemActivity {
   stage: string;
+  /** A customer halted this item and no person has resumed it since (the halt marker, not the stage: a halted item can sit at any stage). */
+  halted: boolean;
   repo: { owner: string; name: string } | null;
   issue_number: number | null;
   /**
@@ -225,8 +227,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       gh_owner: string | null;
       gh_name: string | null;
       auto_merge: boolean | null;
+      halted: boolean;
     }>(
-      `SELECT w.stage, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
+      `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
               -- The merge gate's own rule (@fx/trust autoMergeAllowed): the JSON boolean true, and for external work also
               -- the JSON boolean false on blockExternalAutoMerge. A string "true" is not true.
               ((r.settings->'autoMerge') = 'true'::jsonb
@@ -358,6 +361,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
 
     return {
       stage: item.stage,
+      halted: item.halted,
       repo: item.gh_owner && item.gh_name ? { owner: item.gh_owner, name: item.gh_name } : null,
       issue_number: item.gh_number === null ? null : Number(item.gh_number),
       pr_number: prNumber,

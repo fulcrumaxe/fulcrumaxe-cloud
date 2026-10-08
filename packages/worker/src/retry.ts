@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { hasBlockingRetryChild } from "@fx/core/src/runActions/retryChild.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { IdempotencyKeyTakenError, cancelRun, checkRetryAuthor, failClosedOnQueued, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { IdempotencyKeyTakenError, WorkItemHaltedError, cancelRun, checkRetryAuthor, failClosedOnQueued, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 // A relative import: @fx/model-router is not a dependency of this package and this change may not touch the lockfile.
 import { escalate, type PreviousRun } from "../../model-router/src/escalate.js";
 import { PREVIEW_SEAT_REFUSALS, type PreviewSeatConfig } from "./preview.js";
@@ -219,6 +219,8 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
       started = await failClosedOnQueued(runnerPool, accountId, await startAgentRun(runnerPool, registry, input));
     } catch (err) {
       if (err instanceof RetryBlockedError) return blockedOrOwn(accountId, userId, actionId);
+      // The item was halted: the trigger refused the insert, so nothing exists. The person resumes with Approve or Build again.
+      if (err instanceof WorkItemHaltedError) return refused("item_halted");
       const pg = err as { code?: unknown; constraint?: unknown } | null;
       if (pg?.code === "23505" && pg.constraint === ONE_LIVE_CHILD_INDEX) {
         return blockedOrOwn(accountId, userId, actionId);

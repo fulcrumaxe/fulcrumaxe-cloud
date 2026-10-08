@@ -139,6 +139,17 @@ export class WorkItemNotFoundError extends Error {
 }
 
 /**
+ * `recordStage` refused an AUTOMATIC control-plane move out of a customer halt (the item's halt marker is set). Only a
+ * person's move (`actor: 'person'`), a webhook fact or a move into `needs_human` may change the stage of a halted item.
+ */
+export class WorkItemHaltedError extends Error {
+  constructor(public readonly workItemId: string) {
+    super(`work item is halted: ${workItemId}`);
+    this.name = 'WorkItemHaltedError';
+  }
+}
+
+/**
  * `Object.hasOwn` guards the index so an unknown `from` (an unchecked
  * value read back from the database, or a prototype-chain name like
  * `__proto__`) returns `false` (refusing the transition) rather than

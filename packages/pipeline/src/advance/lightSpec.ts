@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { publishSpec, type DiscussionsContext } from "@fx/discussions";
 import { systemPrincipal } from "@fx/discussions/server";
 import { sanitize } from "@fx/trust";
@@ -71,6 +72,8 @@ export async function publishLightSpec(pool: Pool, accountId: string, workItemId
     const published = await publishSpec(ctx, { workItemId, body: assembled.body });
     return { status: "published", version: published.version };
   } catch (err) {
+    // A halted item gets no Spec from the pipeline: nothing was written.
+    if (err instanceof WorkItemHaltedError) return { status: "refused", reason: "item_halted" };
     const code = (err as { code?: unknown })?.code;
     // fx-swallow-ok: the refusal is returned as a fixed code and recorded by the caller; the error's text is not kept
     return { status: "refused", reason: typeof code === "string" && CODE.test(code) ? code : "publish_failed" };

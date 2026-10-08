@@ -247,6 +247,16 @@ describe("an existing rooted discussion", () => {
     expect(spec.rows[0].n).toBe(0);
   });
 
+  it("DP-C6: a halted item is not moved on by triage: refused item_halted, still triaged, no transition", async () => {
+    const accountId = await tenant(h.admin);
+    const { workItemId } = await seedRootedDiscussion(h.admin, accountId, "internal");
+    await h.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [workItemId, randomUUID()]);
+    const out = await triageIntake(deps(accountId, fixture("feature")), { mode: "existing", workItemId, title: "t", body: "b" });
+    expect(out).toEqual({ status: "refused", reason: "item_halted" });
+    expect((await h.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [workItemId])).rows[0].stage).toBe("triaged");
+    expect(await transitionsOf(h.admin, workItemId)).toEqual([]);
+  });
+
   it("a member's own question or project keeps its kind with NO classifier call; a question never leaves triaged, a project goes to discussing", async () => {
     const accountId = await tenant(h.admin);
     for (const [kind, stage] of [["question", "triaged"], ["project", "discussing"]] as const) {

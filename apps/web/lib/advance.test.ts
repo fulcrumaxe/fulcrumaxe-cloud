@@ -9,7 +9,7 @@ import { workItemAdvanceWorkflow } from "../workflows/workItemAdvance";
 describe("createStartAdvance", () => {
   it("starts the advance workflow with the plain-data arguments and resolves once the start is accepted", async () => {
     const start = vi.fn(async () => ({ runId: "wf-1" }));
-    const args = { accountId: "a", userId: "u", workItemId: "w", actionId: "x" };
+    const args = { accountId: "a", userId: "u", workItemId: "w", actionId: "x", haltEpoch: 0 };
     await expect(createStartAdvance({ start })(args)).resolves.toBeUndefined();
     expect(start).toHaveBeenCalledWith(workItemAdvanceWorkflow, [args]);
   });
@@ -18,6 +18,6 @@ describe("createStartAdvance", () => {
     const start = vi.fn(async () => {
       throw new Error("workflow service down");
     });
-    await expect(createStartAdvance({ start })({ accountId: "a", userId: "u", workItemId: "w", actionId: "x" })).rejects.toThrow("workflow service down");
+    await expect(createStartAdvance({ start })({ accountId: "a", userId: "u", workItemId: "w", actionId: "x", haltEpoch: 0 })).rejects.toThrow("workflow service down");
   });
 });

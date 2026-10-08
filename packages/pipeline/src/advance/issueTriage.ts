@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { runTriageStep } from "../plan/step.js";
 
 /**
@@ -66,7 +67,12 @@ export async function triageIssueItem(pool: Pool, accountId: string, input: Issu
       if (root !== input.workItemId) {
         const cur = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [input.workItemId, accountId]);
         if (cur.rows[0]?.stage === "triaged") {
-          await recordStage(client, { workItemId: input.workItemId, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${root}` });
+          try {
+            await recordStage(client, { workItemId: input.workItemId, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${root}` });
+          } catch (err) {
+            // A halted duplicate is left as it is: nothing is closed behind a customer's halt.
+            if (!(err instanceof WorkItemHaltedError)) throw err;
+          }
         }
       }
     });
