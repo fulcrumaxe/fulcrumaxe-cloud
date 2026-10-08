@@ -44,6 +44,8 @@ describe('agent_runs write guard (0642, security review of #205)', () => {
     await admin.query(`DROP ROLE IF EXISTS ${OWNER_PROBE}`);
     await admin.query(`CREATE ROLE ${OWNER_PROBE} LOGIN NOSUPERUSER BYPASSRLS`);
     await admin.query(`GRANT SELECT, INSERT, UPDATE ON agent_runs TO ${OWNER_PROBE}`);
+    // 0750: the insert trigger calls a helper only its invokers may execute; this stand-in is one.
+    await admin.query(`GRANT EXECUTE ON FUNCTION work_item_halt_lock(uuid, uuid) TO ${OWNER_PROBE}`);
     const u = new URL(process.env.DATABASE_URL!);
     u.username = OWNER_PROBE;
     u.password = '';
@@ -53,6 +55,7 @@ describe('agent_runs write guard (0642, security review of #205)', () => {
   afterAll(async () => {
     await probe.end();
     await admin.query(`REVOKE ALL ON agent_runs FROM ${OWNER_PROBE}`);
+    await admin.query(`REVOKE EXECUTE ON FUNCTION work_item_halt_lock(uuid, uuid) FROM ${OWNER_PROBE}`);
     await admin.query(`DROP ROLE ${OWNER_PROBE}`);
     admin.release();
     await adminPool.end();

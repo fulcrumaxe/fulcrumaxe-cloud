@@ -194,6 +194,8 @@ export async function guarded<T>(run: () => Promise<T>): Promise<T> {
 export const CANCELLABLE_RUN_STATUSES = ["pending", "running", "paused"] as const;
 /** The stage a cancelled work item moves to (reversible: continue moves it back). */
 const CANCELLED_ITEM_STAGE = "needs_human";
+/** The stages with an edge to needs_human (stages.ts): the others are halted by the marker alone and keep their stage. */
+const PARKABLE_STAGES: ReadonlySet<string> = new Set(["in_progress", "pr_opened", "changes_requested", "review_passed"]);
 /** Runs cancelled per `performCancelWorkItem` call. */
 const RUNS_PER_CALL = 100;
 /** Progress re-queues one request may make. Pinned to the constant in run_action_requeue_progress (0686) by a test. */
@@ -377,9 +379,38 @@ export function createRunActionFacade(runnerPool: Pool, registry: ExecutionTarge
         const id = requireUuid(actionId);
         const who = await performerFor(runnerPool, id, "cancel_work_item");
         if (!isPerformer(who)) return who;
+        // 1. The marker, in one transaction under the item's row lock. A create in flight holds a share lock on the row (the
+        // trigger on agent_runs, 0750), so this waits for it and the list below sees its run; a create that starts after this
+        // commits is refused by the trigger. Neither depends on the stage. A replay or a later page of the same action
+        // leaves the three marker columns as the first call set them.
+        const parked = await withTenant(runnerPool, who.accountId, who.userId, async (client) => {
+          const item = await client.query<{ halt_action_id: string | null; stage: string }>(
+            "SELECT halt_action_id, stage FROM work_items WHERE account_id = $1 AND id = $2 FOR UPDATE",
+            [who.accountId, who.targetId],
+          );
+          const row = item.rows[0];
+          if (!row) return null;
+          if (row.halt_action_id !== id) {
+            await client.query(
+              "UPDATE work_items SET halted_at = clock_timestamp(), halt_action_id = $3, halt_epoch = halt_epoch + 1 WHERE account_id = $1 AND id = $2",
+              [who.accountId, who.targetId, id],
+            );
+          }
+          // The park is a courtesy of the board, only where the stage graph has the edge: the marker is what stops things.
+          let stage = "unchanged";
+          if (PARKABLE_STAGES.has(row.stage) || row.stage === CANCELLED_ITEM_STAGE) {
+            try {
+              await recordStage(client, { workItemId: who.targetId, toStage: CANCELLED_ITEM_STAGE, at: new Date(), source: "control_plane", sourceRef: `run-action:${id}` });
+              stage = CANCELLED_ITEM_STAGE;
+            } catch (err) {
+              if (!isNamed(err, "IllegalStageTransitionError")) throw err;
+            }
+          }
+          return stage;
+        });
+        if (parked === null) return refused("target_not_found");
+        // 2. One list, complete because of 1. A failed cancel fails the action and the marker stays (fail closed).
         const listed = await withTenant(runnerPool, who.accountId, who.userId, async (client) => {
-          const item = await client.query("SELECT 1 FROM work_items WHERE account_id = $1 AND id = $2", [who.accountId, who.targetId]);
-          if (item.rows.length === 0) return null;
           const runs = await client.query<{ id: string }>(
             `SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND status = ANY($3::text[])
               ORDER BY created_at, id LIMIT ${RUNS_PER_CALL + 1}`,
@@ -387,7 +418,6 @@ export function createRunActionFacade(runnerPool: Pool, registry: ExecutionTarge
           );
           return runs.rows.map((r) => r.id);
         });
-        if (listed === null) return refused("target_not_found");
         let cancelled = 0;
         let settled = 0;
         let released = 0;
@@ -399,28 +429,9 @@ export function createRunActionFacade(runnerPool: Pool, registry: ExecutionTarge
           released += r.released_usd;
         }
         if (listed.length > RUNS_PER_CALL) {
-          return { result: "done", outcome: { runs_cancelled: cancelled, settled_usd: settled, released_usd: released, remaining: true } };
+          return { result: "done", outcome: { runs_cancelled: cancelled, settled_usd: settled, released_usd: released, remaining: true, halted: true } };
         }
-        // The lease must still be live (and the principal still allowed) before the one write left.
-        const again = await performerFor(runnerPool, id, "cancel_work_item");
-        if (!isPerformer(again)) return again;
-        let stage: string = CANCELLED_ITEM_STAGE;
-        try {
-          await withTenant(runnerPool, who.accountId, who.userId, (client) =>
-            recordStage(client, {
-              workItemId: who.targetId,
-              toStage: CANCELLED_ITEM_STAGE,
-              at: new Date(),
-              source: "control_plane",
-              sourceRef: `run-action:${id}`,
-            }),
-          );
-        } catch (err) {
-          if (isNamed(err, "WorkItemNotFoundError")) return refused("target_not_found");
-          if (!isNamed(err, "IllegalStageTransitionError")) throw err;
-          stage = "unchanged"; // e.g. already closed or merged: not an error
-        }
-        return { result: "done", outcome: { runs_cancelled: cancelled, settled_usd: settled, released_usd: released, stage } };
+        return { result: "done", outcome: { runs_cancelled: cancelled, settled_usd: settled, released_usd: released, stage: parked, halted: true } };
       }),
   };
 }

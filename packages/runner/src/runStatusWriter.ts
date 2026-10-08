@@ -236,6 +236,14 @@ export class DuplicateExecutorRunError extends Error {
   }
 }
 
+/** Thrown by `insertAgentRun` when the item the run belongs to is halted (0750's trigger, SQLSTATE HX409). Nothing was written. */
+export class WorkItemHaltedError extends Error {
+  constructor() {
+    super("the work item is halted");
+    this.name = "WorkItemHaltedError";
+  }
+}
+
 const ONE_LIVE_EXECUTOR_PER_PR_INDEX = "agent_runs_one_live_executor_per_pr";
 
 /** The exposure already frozen for this run's work item (its earliest run
@@ -336,6 +344,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
     });
   } catch (err) {
     const pgErr = err as { code?: string; constraint?: string } | undefined;
+    if (pgErr?.code === "HX409") throw new WorkItemHaltedError();
     if (pgErr?.code === "23505" && pgErr.constraint === ONE_LIVE_EXECUTOR_PER_PR_INDEX) {
       throw new DuplicateExecutorRunError();
     }
