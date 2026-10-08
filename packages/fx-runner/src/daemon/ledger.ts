@@ -22,6 +22,12 @@
  *    it still holds this process's pid. The caller
  *    passes its own pid and a liveness check, because this file is not one of the two the environment guard lets read the
  *    runtime's own state.
+ *
+ * Known residual (D#6 C26 section 2 item 7): the takeover of a stale lock is not atomic against a third starter. If three
+ * processes start together on a lock left by a crash, two can each judge it stale and both end up holding the ledger. An advisory
+ * `flock` would close that, but Node has no `flock` call and a native addon would break the single reproducible binary, so the
+ * window is accepted. `fx-runner service install` runs exactly one instance per user, which is what keeps it from being reached.
+ * Temporary files a crash leaves next to the ledger are removed at start by `removeStaleLedgerTemp` (staleTemp.ts).
  */
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";

@@ -23,8 +23,8 @@ the daemon come in later changes.
 
 ## The daemon's parts
 
-`src/daemon/` is what a runner does between claiming a run and reporting it done. Nothing starts on its own yet: a later
-change wires it to the command line and the pinned job-signing keys. It only calls out (no listening socket).
+`src/daemon/` is what a runner does between claiming a run and reporting it done. `fx-runner run` (below) wires it together.
+It only calls out (no listening socket).
 
 - `client.ts`: signed `claim`, `heartbeat`, `events` and `done` calls. Requests are built with the protocol's message
   schemas and replies read with its reply schemas; anything else is an error with a closed code.
@@ -48,7 +48,7 @@ change wires it to the command line and the pinned job-signing keys. It only cal
 
 ## Command line
 
-`bin/fx-runner.mjs` is the entry point; it looks up `HOME` and `FX_RUNNER_HOME` by name and hands everything else to
+`bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME` and `XDG_CACHE_HOME` by name and hands everything else to
 `runCli` in `src/cli.ts`. It runs from a build of `src/` (the installer comes later), not from the TypeScript directly.
 
 - `fx-runner register --code <code> --credential-mode subscription|api_key --cloud-url <url>`: makes an Ed25519 key on
@@ -63,6 +63,18 @@ change wires it to the command line and the pinned job-signing keys. It only cal
 - `fx-runner status`: shows the saved registration and the key's age. It makes no network call.
 - `fx-runner revoke [--reason <text>] [--local]`: revokes this runner in the cloud with its own signature, then deletes
   the key and the registration. `--local` only deletes the local files, for a machine the cloud no longer accepts.
+
+- `fx-runner run`: claims and runs jobs until you stop it (Ctrl-C or SIGTERM, which stops the job in hand within seconds and
+  reports `runner_shutdown`). It checks, before its first claim, that this machine is registered, that this build pins
+  job-signing keys for the cloud it registered with (`src/keyring.ts`; the keys are committed in the build, and no file,
+  variable or option adds or replaces one, so an address with none, such as production before its key exists, is refused as
+  `job_keyring_missing`), that the sandbox tools and the agent CLI are found (the CLI is looked up once, here), that the repo
+  mirrors directory (`~/.cache/fx-runner/mirrors`) does not overlap the state directory or the other runner directories, and
+  that the job ledger (`jobs.ledger` in the state directory) is not damaged. One `run` holds the state directory at a time.
+  At start it removes the temporary files a crash left next to the ledger, but only exact-name regular files older than ten
+  minutes. A registration for `api_key` mode is refused until a local key file is supported. Residual risk, accepted: if three
+  runs start at once on a lock a crash left behind, two may both take it; there is no `flock`, and `service install` runs one
+  instance per user.
 
 `FX_RUNNER_HOME` moves the state directory. A key over 90 days old is refused by the cloud: revoke and register again.
 

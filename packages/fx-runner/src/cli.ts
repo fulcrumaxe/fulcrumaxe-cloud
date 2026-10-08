@@ -8,6 +8,7 @@ import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { registerCommand } from "./commands/register.js";
 import { revokeCommand } from "./commands/revoke.js";
+import { runCommand, type RunHost } from "./commands/run.js";
 import { statusCommand } from "./commands/status.js";
 
 export interface CliIo {
@@ -21,6 +22,8 @@ export interface CliIo {
   stderr: (text: string) => void;
   now?: () => Date;
   fetchFn?: typeof fetch;
+  /** What `run` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
+  host?: RunHost;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
@@ -29,6 +32,7 @@ Commands:
   register --code <code> --credential-mode <subscription|api_key> --cloud-url <url>
                      Register this machine as a runner. The code comes from the workspace, works once and expires in 10 minutes.
   status             Show this machine's registration. Makes no network call.
+  run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
   revoke [--reason <text>] [--local]
                      Revoke this runner and delete its key. --local only deletes the local files.
 `;
@@ -37,6 +41,7 @@ Commands:
 const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[] }>> = {
   register: { flags: ["code", "credential-mode", "cloud-url"], switches: [] },
   status: { flags: [], switches: [] },
+  run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
 };
 
@@ -84,6 +89,10 @@ export async function runCli(io: CliIo): Promise<number> {
     };
     if (command === "register") return await registerCommand(flags, ctx);
     if (command === "revoke") return await revokeCommand(flags, ctx);
+    if (command === "run") {
+      if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");
+      return await runCommand(ctx, io.host);
+    }
     return await statusCommand(ctx);
   } catch (error) {
     if (error instanceof CliError) {
