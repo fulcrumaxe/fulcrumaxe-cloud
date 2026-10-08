@@ -7,7 +7,7 @@ import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
 const HOME = "/home/jane";
 const STATE = "/home/jane/.fx-runner";
 const BIN = "/home/jane/.local/bin";
-const base = { workspace: "/home/jane/work/run-1", tempDir: "/tmp/fx-run-1", home: HOME, stateDir: STATE, binaryDir: BIN };
+const base = { workspace: "/home/jane/work/run-1", tempDir: "/tmp/fx-run-1", home: HOME, stateDir: STATE, binaryDir: BIN, workspaceRoot: "/home/jane/work", tempRoot: "/tmp" };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const block = (over: Partial<Parameters<typeof sandboxSettings>[0]> = {}) => sandboxSettings({ ...base, ...over }) as Record<string, any>;
 
@@ -33,7 +33,7 @@ describe("sandboxSettings: the shell sandbox a job runs under", () => {
 
   it("denies reads of the home directory, and re-allows only the workspace and temp directory", () => {
     const s = block();
-    expect(s.filesystem.denyRead).toEqual([HOME]);
+    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN]);
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir]);
   });
 
@@ -51,7 +51,7 @@ describe("sandboxSettings: the shell sandbox a job runs under", () => {
   });
 
   it("carries a later per-job extra read path, write path and domain, and nothing else changes", () => {
-    const s = block({ extraReadPaths: ["/opt/cache"], extraWritePaths: ["/home/jane/stores/repo-1"], extraDomains: ["fonts.example.com"] });
+    const s = block({ extraRoots: ["/opt", "/home/jane/stores"], extraReadPaths: ["/opt/cache"], extraWritePaths: ["/home/jane/stores/repo-1"], extraDomains: ["fonts.example.com"] });
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir, "/opt/cache"]);
     expect(s.filesystem.allowWrite).toEqual([base.workspace, base.tempDir, "/home/jane/stores/repo-1"]);
     expect(s.network.allowedDomains).toEqual([MODEL_HOST, "fonts.example.com"]);
@@ -110,8 +110,8 @@ describe("one builder", () => {
   it("only sandboxSettings.ts names the keys that open the sandbox, and the engine takes the block as an input", () => {
     const owners = (pattern: RegExp): string[] => srcFiles().filter(([, text]) => pattern.test(text)).map(([name]) => name);
     expect(owners(/strictAllowlist|failIfUnavailable/)).toEqual([path.join("src", "sandbox", "sandboxSettings.ts")]);
-    // The engine reads the escape key to refuse an open one; it never sets it.
-    expect(owners(/allowUnsandboxedCommands/)).toEqual([path.join("src", "engines", "claude", "engine.ts"), path.join("src", "sandbox", "sandboxSettings.ts")]);
+    // The engine refuses an open block through assertEnabledSandbox; it names no escape key itself.
+    expect(owners(/allowUnsandboxedCommands/)).toEqual([path.join("src", "sandbox", "sandboxSettings.ts")]);
     expect(readFileSync(path.join(PACKAGE_DIR, "src", "engines", "claude", "engine.ts"), "utf8")).not.toMatch(/allowUnsandboxedCommands\s*:/);
     expect(readFileSync(path.join(PACKAGE_DIR, "src", "engines", "claude", "settingsFile.ts"), "utf8")).toContain("sandbox: Record<string, unknown>");
   });
@@ -125,8 +125,8 @@ describe("the credential floor is checked by path segment", () => {
   });
 
   it("still grants a sibling whose name only begins like a floor directory", () => {
-    expect(() => block({ workspace: `${HOME}/.sshx/ws` })).not.toThrow();
-    expect(() => block({ workspace: `${HOME}/..cache/ws` })).not.toThrow();
+    expect(() => block({ workspace: `${HOME}/.sshx/ws`, workspaceRoot: HOME })).not.toThrow();
+    expect(() => block({ workspace: `${HOME}/..cache/ws`, workspaceRoot: HOME })).not.toThrow();
   });
 });
 

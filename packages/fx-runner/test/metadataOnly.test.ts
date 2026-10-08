@@ -21,11 +21,12 @@ describe("metadata only through hostSandbox", () => {
     const host = createHostSandbox({
       credentials: { mode: "subscription" },
       // The engine is handed the block the tier computed; the rig's own placeholder block is replaced.
-      makeRuntime: (sandbox) => createClaudeEngine({ ...rig.config, sandboxSettings: sandbox }),
+      makeRuntime: (sandbox, protectedList) => createClaudeEngine({ ...rig.config, sandboxSettings: sandbox, protectedPaths: protectedList }),
       home: "/home/jane",
       stateDir: "/home/jane/.fx-runner",
       binaryDir: path.dirname(rig.fake.binary),
       tempRoot: path.join(rig.root, "tmp"),
+      workspaceRoot: path.dirname(rig.workdir),
     });
     const handle = await host.createSandbox({ sandboxName: "rn-meta", retention: { persistent: false }, timeoutMs: 60_000 });
     const events: NormalizedEvent[] = [];

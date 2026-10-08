@@ -251,6 +251,33 @@ describe("cleanEnv in subscription mode", () => {
     expect(cleanEnv({ mode: "subscription" }).PATH).toBe("/usr/bin");
   });
 
+  it("extraPathDirs go at the end of PATH, once each, and nothing else changes", () => {
+    const dirs = ["/nix/store/aaa-bubblewrap/bin", "/nix/store/bbb-socat/bin"];
+    const env = cleanEnv({ mode: "subscription" }, { extraPathDirs: dirs });
+    expect(env.PATH).toBe("/usr/bin:/nix/store/aaa-bubblewrap/bin:/nix/store/bbb-socat/bin");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/usr/bin", ...dirs, dirs[0]!] }).PATH).toBe(env.PATH);
+    const withoutPath = (value: Record<string, string>): Record<string, string> => Object.fromEntries(Object.entries(value).filter(([name]) => name !== "PATH"));
+    expect(withoutPath(env)).toEqual(withoutPath(cleanEnv({ mode: "subscription" })));
+    expect(cleanEnv({ mode: "subscription" }, {}).PATH).toBe("/usr/bin");
+  });
+
+  it("extraPathDirs become the whole PATH when the host has none, and a relative or odd entry is refused", () => {
+    vi.stubEnv("PATH", "");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/a/bin"] }).PATH).toBe("/a/bin");
+    expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty("PATH");
+    for (const bad of ["bin", "./bin", "", "/a:/b"]) expect(() => cleanEnv({ mode: "subscription" }, { extraPathDirs: [bad] }), bad).toThrow(TypeError);
+  });
+
+  // CWE-426: an empty or relative PATH entry resolves against the working directory, which is the workspace.
+  it("keeps only absolute host PATH entries, in order, and the tool dirs still go last", () => {
+    vi.stubEnv("PATH", ["", ".", "bin", "/abs", "../up", "/second", ""].join(":"));
+    expect(cleanEnv({ mode: "subscription" }).PATH).toBe("/abs:/second");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/nix/store/aaa-bubblewrap/bin"] }).PATH).toBe("/abs:/second:/nix/store/aaa-bubblewrap/bin");
+    vi.stubEnv("PATH", "::.:bin:");
+    expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty("PATH");
+    expect(cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/a/bin"] }).PATH).toBe("/a/bin");
+  });
+
   it("omits the subscription token when the shell has none", () => {
     vi.stubEnv(SUBSCRIPTION_TOKEN_VAR, "");
     expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty(SUBSCRIPTION_TOKEN_VAR);

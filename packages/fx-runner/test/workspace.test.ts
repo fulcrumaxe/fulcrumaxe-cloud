@@ -33,6 +33,24 @@ describe("workspace store", () => {
     expect(existsSync(outside)).toBe(true);
   });
 
+  it("a root written with a trailing slash still owns, and can discard, its directories", async () => {
+    const r = root();
+    for (const written of [`${r}/`, `${r}//`]) {
+      const store = createWorkspaceStore(written);
+      const dir = await store.create(`run-${written.length}`);
+      expect(store.owns(dir)).toBe(true);
+      await store.discard(dir);
+      expect(existsSync(dir)).toBe(false);
+    }
+  });
+
+  it("owns only one plain segment directly under the root", () => {
+    const r = root();
+    const store = createWorkspaceStore(r);
+    expect(store.owns(path.join(r, "run-1"))).toBe(true);
+    for (const other of [r, path.join(r, "run-1", "sub"), path.join(r, ".hidden"), path.join(path.dirname(r), "run-1"), path.join(r, "..", "x"), "relative"]) expect(store.owns(other), other).toBe(false);
+  });
+
   it("needs an absolute root", () => {
     expect(() => createWorkspaceStore("relative/root")).toThrow(TypeError);
   });

@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
-import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
+import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import {
   SandboxNotFoundError,
@@ -12,19 +12,25 @@ import {
   type StartDetachedOptions,
   type StartDetachedResult,
 } from "./port.js";
-import { assertEnabledSandbox, sandboxSettings } from "./sandboxSettings.js";
+import { assertEnabledSandbox, protectedPaths, sandboxSettings, type ProtectedPaths } from "./sandboxSettings.js";
 
 export interface HostSandboxConfig {
   credentials: CredentialMode;
+  /** The same extra PATH directories the job runner and the engine are given; the environment check compares against them. */
+  envOptions?: CleanEnvOptions;
   /**
    * Builds the agent runtime for one job from the `sandbox` block this tier computed for it. The runtime writes the
    * block into the settings file it starts the agent with; nothing else decides what the shell sandbox allows.
    */
-  makeRuntime(sandbox: Record<string, unknown>): AgentRuntime;
+  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths): AgentRuntime;
   /** The user's home directory (absolute). Its reads are denied to the job. */
   home: string;
   /** Per-job temp directories are made under here (0700) and removed with the sandbox. */
   tempRoot: string;
+  /** The directory every job workspace is made under (the workspace store's root). A workspace elsewhere is refused. */
+  workspaceRoot: string;
+  /** Named roots (R7) under which per-job extra paths may sit. None in v1. */
+  extraRoots?: readonly string[];
   /** The runner's own state directory (`~/.fx-runner`) and the stored agent binary's directory: the job may not write to either. */
   stateDir: string;
   binaryDir: string;
@@ -34,7 +40,7 @@ export interface HostSandboxConfig {
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -120,7 +126,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     for (const rule of opts.networkPolicy) {
       if (rule.authHeader !== undefined || rule.authValue !== undefined || rule.purpose === "github_proxy") throw new HostSandboxRefused("network_rule_forbidden");
     }
-    if (!sameEnv(opts.env, cleanEnv(config.credentials))) throw new HostSandboxRefused("env_not_clean");
+    if (!sameEnv(opts.env, cleanEnv(config.credentials, config.envOptions))) throw new HostSandboxRefused("env_not_clean");
     const workdir = opts.workdir;
     if (workdir === undefined || !path.isAbsolute(workdir)) throw new HostSandboxRefused("bad_workdir");
     if (entry.running) throw new HostSandboxRefused("sandbox_busy");
@@ -131,11 +137,14 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       home: config.home,
       stateDir: config.stateDir,
       binaryDir: config.binaryDir,
+      workspaceRoot: config.workspaceRoot,
+      tempRoot: config.tempRoot,
+      ...(config.extraRoots === undefined ? {} : { extraRoots: config.extraRoots }),
       ...(config.registries === undefined ? {} : { registries: config.registries }),
       extraDomains: opts.networkPolicy.map((rule) => rule.host),
     });
     assertEnabledSandbox(sandbox);
-    const runtime = config.makeRuntime(sandbox);
+    const runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }));
     let last: NormalizedEvent | undefined;
     const agentUp = (async () => {
       await opts.onSession?.(handle.sessionId ?? handle.sandboxName);
@@ -198,6 +207,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
         if (error instanceof NotAPlainSegment) throw new HostSandboxRefused("bad_sandbox_name");
         throw error;
       }
+      // A live sandbox of that name keeps its entry: a second create would orphan its timer and agent, and share its temp directory.
+      if (sandboxes.has(opts.sandboxName)) throw new HostSandboxRefused("sandbox_exists");
       mkdirSync(tempDir, { recursive: true, mode: 0o700 });
       sandboxes.set(opts.sandboxName, { tempDir, timeoutMs: opts.timeoutMs, expired: false, running: false });
       return { runId: "", sandboxName: opts.sandboxName, sessionId: `host-${opts.sandboxName}` };

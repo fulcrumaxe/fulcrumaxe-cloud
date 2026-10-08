@@ -30,14 +30,14 @@ describe("versions", () => {
     expect(compareVersions("2.1.258", "2.1.259")).toBeLessThan(0);
   });
 
-  it("the minimum is 2.1.259: 2.1.258 is below it, 2.1.259 and 2.1.289 are not", () => {
-    expect(MIN_CLAUDE_VERSION).toBe("2.1.259");
-    expect([versionSupported("2.1.258"), versionSupported("2.1.259"), versionSupported("2.1.289")]).toEqual([false, true, true]);
+  it("the minimum is 2.1.294, the canary-verified build: 2.1.293 is below it, 2.1.294 and 2.1.295 are not", () => {
+    expect(MIN_CLAUDE_VERSION).toBe("2.1.294");
+    expect([versionSupported("2.1.293"), versionSupported("2.1.294"), versionSupported("2.1.295")]).toEqual([false, true, true]);
   });
 });
 
 describe("minimum version, before each job", () => {
-  it.each([["2.1.258", false], ["2.1.259", true], ["2.1.289", true]] as const)("--version %s: accepted is %s", async (version, accepted) => {
+  it.each([["2.1.293", false], ["2.1.294", true], ["2.1.295", true]] as const)("--version %s: accepted is %s", async (version, accepted) => {
     const fake = makeFake({ version: `${version} (Claude Code)` });
     const { load } = source(fake);
     if (accepted) await expect(load()).resolves.toEqual({ path: fake.binary, version });
