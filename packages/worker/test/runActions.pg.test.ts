@@ -461,7 +461,7 @@ describe("run-action facade [pg]", () => {
         const { registry, cancels } = fakeRegistry();
         const id = await claimed(a, "cancel_work_item", wi, await token(a));
         const out = await createRunActionFacade(writerPool, registry).performCancelWorkItem(id);
-        expect(out).toEqual({ result: "done", outcome: { runs_cancelled: 2, settled_usd: 0.5, released_usd: 1.5, stage: "needs_human" } });
+        expect(out).toEqual({ result: "done", outcome: { runs_cancelled: 2, settled_usd: 0.5, released_usd: 1.5, stage: "needs_human", halted: true } });
         expect(cancels.sort()).toEqual([pending, running].sort());
         expect(await statusOf(done)).toBe("succeeded");
         expect(await transitions(wi)).toEqual([{ to_stage: "needs_human", source: "control_plane", source_ref: `run-action:${id}` }]);
@@ -505,7 +505,7 @@ describe("run-action facade [pg]", () => {
         expect(await statusOf(b.runId)).toBe("running");
       });
 
-      it("P7: 101 live runs give 100 cancelled and remaining, with no stage row; the next call finishes", async () => {
+      it("P7: 101 live runs give 100 cancelled and remaining, the item is parked and marked on the first page, once; the next call finishes", async () => {
         const a = await fresh();
         const wi = await item(a);
         await admin.query(
@@ -518,7 +518,7 @@ describe("run-action facade [pg]", () => {
         const id = await claimed(a, "cancel_work_item", wi);
         expect(await perform.performCancelWorkItem(id)).toMatchObject({ outcome: { runs_cancelled: 100, remaining: true } });
         expect(cancels).toHaveLength(100);
-        expect(await transitions(wi)).toEqual([]);
+        expect(await transitions(wi)).toHaveLength(1); // marked and parked on the first page, so nothing new starts while the rest are cancelled
         expect(await perform.performCancelWorkItem(id)).toMatchObject({ outcome: { runs_cancelled: 1, stage: "needs_human" } });
         expect(await transitions(wi)).toHaveLength(1);
       }, 120_000);
@@ -605,7 +605,7 @@ describe("run-action facade [pg]", () => {
           expect(MAX_PROGRESS_PAGES).toBe(100);
         });
 
-        it("P3: the page after the cap settles failed (too_many_runs, one failed event, no stage row); 101 runs at 100 pages is the boundary", async () => {
+        it("P3: the page after the cap settles failed (too_many_runs, one failed event, the marker and the one stage row stay); 101 runs at 100 pages is the boundary", async () => {
           const a = await fresh();
           const wi = await item(a);
           await manyRuns(a, wi, 101);
@@ -618,7 +618,7 @@ describe("run-action facade [pg]", () => {
           expect(await rowOf(id)).toMatchObject({ state: "failed", error_code: "too_many_runs", outcome: { reason: "too_many_runs" }, progress_pages: MAX_PROGRESS_PAGES });
           expect(await events(a, id)).toEqual(["run_action.settled", "run_action.failed"]);
           expect(await settledAudits(a, id)).toBe(1);
-          expect(await transitions(wi)).toEqual([]);
+          expect(await transitions(wi)).toHaveLength(1);
         }, 120_000);
 
         it("the 100th progress page still re-queues (99 -> 100)", async () => {

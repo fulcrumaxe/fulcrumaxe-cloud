@@ -1123,6 +1123,76 @@ check_sandbox_settle_definer_role_shape() {
   fi
 }
 
+# D#7 DP8 halt marker (0750): the one SECURITY DEFINER owned by work_item_halt_definer (work_item_halt_lock(uuid, uuid)), matched
+# by exact signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp whose ACL holds platform_ops
+# and the migration role and nobody else but the owner, with no PUBLIC entry and no grant option; SHAPE_FAIL:<count> when a definer owned
+# by the role is not that; nothing when the role owns none (the generic owner check then rejects anything else).
+check_work_item_halt_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.work_item_halt_lock(uuid,uuid)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0 OR a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee) ORDER BY pg_get_userbyid(a.grantee))
+               FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner) = ARRAY['fx_migrator', 'platform_ops']::name[]) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'work_item_halt_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'work-item-halt-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by work_item_halt_definer fail the exception shape (not work_item_halt_lock(uuid, uuid), a loose search_path, EXECUTE for anyone but platform_ops, the owner and the migration role, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#7 DP8 halt marker (0750): role shape of work_item_halt_definer. A no-op when the role does not exist. Every problem is named:
+# NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
+# the 5 granted by 0750 (work_items.id, account_id and halted_at SELECT, halted_at UPDATE, USAGE on public), owning exactly its one
+# function and nothing else, no CREATE on public. Its two policies on work_items are pinned too: a read policy and an update policy
+# whose WITH CHECK is false, for this role only; and platform_ops has no halt-marker grant or policy on that table.
+check_work_item_halt_definer_role_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'work_item_halt_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'work_item_halt_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 5 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY['column work_items.id SELECT','column work_items.account_id SELECT','column work_items.halted_at SELECT','column work_items.halted_at UPDATE','schema public USAGE']))
+           THEN 'privileges are not exactly the 5 granted by 0750' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 1 OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.work_item_halt_lock(uuid,uuid)'::regprocedure)
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+      CASE WHEN has_schema_privilege('work_item_halt_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END,
+      CASE WHEN (SELECT count(*) FROM pg_policies WHERE tablename = 'work_items' AND roles = ARRAY['work_item_halt_definer']::name[]) <> 2
+              OR NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'work_items' AND roles = ARRAY['work_item_halt_definer']::name[] AND cmd = 'UPDATE' AND with_check = 'false')
+           THEN 'its two work_items policies are not a read policy and a WITH CHECK (false) update policy' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'work_items' AND policyname LIKE 'platform_ops_halt_lock%')
+              OR has_column_privilege('platform_ops', 'public.work_items', 'halted_at', 'SELECT')
+              OR has_column_privilege('platform_ops', 'public.work_items', 'halted_at', 'UPDATE') THEN 'platform_ops holds a halt-marker grant or policy' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_halt_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): work_item_halt_definer role shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -1206,7 +1276,16 @@ if [ -n "$SANDBOX_SETTLE_RESULT" ] && ! [[ "$SANDBOX_SETTLE_RESULT" =~ ^[0-9]+(,
   echo "neon-shape: internal error -- sandbox_settle_definer exempt function oids were not numeric: $SANDBOX_SETTLE_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}"
+WORK_ITEM_HALT_RESULT="$(check_work_item_halt_definer_exception_shape fx_neon)"
+if [[ "$WORK_ITEM_HALT_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${WORK_ITEM_HALT_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$WORK_ITEM_HALT_RESULT" ] && ! [[ "$WORK_ITEM_HALT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- work_item_halt_definer exempt function oid was not numeric: $WORK_ITEM_HALT_RESULT" >&2
+  exit 1
+fi
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1226,6 +1305,7 @@ check_guard_definer_owner_cascade fx_neon
 check_sandbox_reaper_role_shape fx_neon
 check_plan_kind_audit_role_shape fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
+check_work_item_halt_definer_role_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
