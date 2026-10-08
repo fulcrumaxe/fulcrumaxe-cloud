@@ -34,7 +34,13 @@ export type InstallerRecordDeps = Pick<CompleteInstallDeps, "platformOpsPool" | 
 const ACTIONS = new Set(["created", "deleted", "suspend", "unsuspend"]);
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
 
-export async function recordInstallationLifecycle(deps: InstallerRecordDeps, kind: AppKind, payload: unknown): Promise<void> {
+export async function recordInstallationLifecycle(
+  deps: InstallerRecordDeps,
+  kind: AppKind,
+  payload: unknown,
+  /** The reconciler's call meter for the un-suspend re-sync (D#454 C2-H2c-1). The webhook path passes none. */
+  meter?: { take(n?: number): boolean },
+): Promise<void> {
   const p = payload as { action?: unknown; installation?: { id?: unknown }; sender?: { id?: unknown } } | null;
   const action = typeof p?.action === "string" && ACTIONS.has(p.action) ? p.action : null;
   const ghInstallationId = posInt(p?.installation?.id);
@@ -47,7 +53,7 @@ export async function recordInstallationLifecycle(deps: InstallerRecordDeps, kin
     await withPlatformOps(deps.platformOpsPool, async (client) => {
       // H17b-2: the lock a sync's write phase holds, so a state change and a sync write are ordered.
       await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [ghInstallationId]);
-      await client.query(`UPDATE installation_installers SET ${set} WHERE gh_installation_id = $1 AND app_kind = $2`, [ghInstallationId, kind]);
+      await client.query(`UPDATE installation_installers SET ${set}, repo_list_etags = NULL WHERE gh_installation_id = $1 AND app_kind = $2`, [ghInstallationId, kind]);
       const rows = await client.query<{ id: string; account_id: string }>(
         "SELECT id, account_id FROM installations WHERE gh_installation_id = $1 AND app_kind = $2",
         [ghInstallationId, kind],
@@ -69,7 +75,7 @@ export async function recordInstallationLifecycle(deps: InstallerRecordDeps, kin
         await emitDomainEvent(client, { type: "installation.changed", accountId: inst.account_id, subjectId: inst.id, payload: { kind, state } });
       }
     });
-    if (action === "unsuspend" && (kind === "team" || kind === "team_readonly")) await syncClaimedInstallation(deps, kind, ghInstallationId);
+    if (action === "unsuspend" && (kind === "team" || kind === "team_readonly")) await syncClaimedInstallation(deps, kind, ghInstallationId, meter);
     return;
   }
   if (senderId === null) return;

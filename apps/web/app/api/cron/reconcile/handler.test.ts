@@ -70,6 +70,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
     expect(tick.jobs.map((job) => job.name)).toEqual([
       ...RECONCILE_JOBS.map((job) => job.name),
       "github_installations",
+      "github_repos",
       "stripe_subscriptions",
       "model_key_health",
     ]);

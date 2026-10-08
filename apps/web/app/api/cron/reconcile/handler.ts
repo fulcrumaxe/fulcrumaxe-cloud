@@ -4,6 +4,7 @@ import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
 import { reportError } from "@fx/telemetry";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
+import { githubReposJobFromEnv } from "../../../../lib/github/repoReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
 import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
 import { envKekSource, fetchValidationHttpClient, healthCheck } from "@fx/model-connection";
@@ -132,6 +133,7 @@ export async function reconcileHandler(
       pool: deps.platformOpsPool,
       jobs: buildReconcileJobs({
         githubInstallations: githubInstallationsJobFromEnv(deps.platformOpsPool, deps.reportError),
+        githubRepos: githubReposJobFromEnv(deps.platformOpsPool, deps.reportError),
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
       }),

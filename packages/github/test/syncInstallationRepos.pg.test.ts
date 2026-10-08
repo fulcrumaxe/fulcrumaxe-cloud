@@ -386,14 +386,14 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id]]);
     });
 
-    it('a listing with an entry that has no usable id is not trusted to detach anything', async () => {
+    it('a listing with an entry that has no usable id is refused: nothing is detached or added', async () => {
       const acc = await account();
       const inst = await install(acc);
       await syncInstallationRepos(harness([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]).deps, inst.id);
       const h = harness([]);
       h.deps.fetchImpl = (async () =>
         Response.json({ repositories: [{ id: 1, name: 'a', owner: { login: 'acme' } }, { id: null, name: 'x', owner: { login: 'acme' } }] })) as unknown as typeof fetch;
-      expect(await syncInstallationRepos(h.deps, inst.id)).toMatchObject({ status: 'synced', detached: 0, skippedInvalid: 1 });
+      await expect(syncInstallationRepos(h.deps, inst.id)).rejects.toMatchObject({ name: 'RepoListIncompleteError', reason: 'unusable_id' });
       expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id]]);
     });
 
@@ -402,17 +402,17 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       ['null', 'null'],
       ['a message object', '{"message":"Bad credentials"}'],
       ['a non-array repositories value', '{"total_count":0,"repositories":"none"}'],
-    ])('a 200 listing whose body is %s detaches nothing', async (_label, raw) => {
+    ])('a 200 listing whose body is %s is refused: nothing is changed', async (_label, raw) => {
       const acc = await account();
       const inst = await install(acc);
       await syncInstallationRepos(harness([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]).deps, inst.id);
       const h = harness([]);
       h.deps.fetchImpl = (async () => new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-      expect(await syncInstallationRepos(h.deps, inst.id)).toMatchObject({ status: 'synced', detached: 0 });
+      await expect(syncInstallationRepos(h.deps, inst.id)).rejects.toMatchObject({ name: 'RepoListIncompleteError', reason: 'malformed_page' });
       expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id]]);
     });
 
-    it('a malformed later page detaches nothing even after a good first page', async () => {
+    it('a malformed later page is refused even after a good first page: nothing is changed', async () => {
       const acc = await account();
       const inst = await install(acc);
       const all = Array.from({ length: 120 }, (_, i) => ({ id: 400 + i, name: `m${i}` }));
@@ -420,18 +420,18 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       const h = harness(all.slice(0, 100));
       h.deps.fetchImpl = (async (url: string | URL | Request) =>
         Number(new URL(String(url)).searchParams.get('page')) === 1 ? page(all.slice(0, 100), 100) : Response.json({})) as unknown as typeof fetch;
-      expect(await syncInstallationRepos(h.deps, inst.id)).toMatchObject({ status: 'synced', detached: 0 });
+      await expect(syncInstallationRepos(h.deps, inst.id)).rejects.toMatchObject({ name: 'RepoListIncompleteError', reason: 'malformed_page' });
       expect((await attachedTo(acc)).every(([, i]) => i === inst.id)).toBe(true);
     });
 
-    it('a listing whose id count disagrees with its total_count detaches nothing', async () => {
+    it('a listing whose id count disagrees with its total_count is refused: nothing is changed', async () => {
       const acc = await account();
       const inst = await install(acc);
       await syncInstallationRepos(harness([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]).deps, inst.id);
       for (const total of [5, 0]) {
         const h = harness([]);
         h.deps.fetchImpl = (async () => page([{ id: 1, name: 'a' }], total)) as unknown as typeof fetch;
-        expect(await syncInstallationRepos(h.deps, inst.id)).toMatchObject({ status: 'synced', detached: 0 });
+        await expect(syncInstallationRepos(h.deps, inst.id)).rejects.toMatchObject({ name: 'RepoListIncompleteError', reason: 'count_mismatch' });
         expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id], [3, inst.id]]);
       }
     });

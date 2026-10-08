@@ -69,7 +69,7 @@ describe('github installation state reconcile job', () => {
 
   const apiFor = (kind: InstallationKind, as: InstallationKind = kind, lookup: LookupFunction = gh.lookup): GithubAppApi =>
     createGithubAppApi(() => mintAppJwt(String(gh.keys[as].appId), gh.keys[as].privateKeyPem), { port: gh.port, ca: gh.ca, lookup });
-  const apply = (change: InstallationChange) =>
+  const apply = (change: InstallationChange, _meter?: unknown) =>
     recordInstallationLifecycle(
       { platformOpsPool: platformOps, appUserPool: appUser, appCredentials: () => ({ appId: '1', privateKeyPem: '', webhookSecret: '' }) },
       change.kind,

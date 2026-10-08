@@ -52,7 +52,7 @@ export function githubInstallationsJobFromEnv(
   };
   return createGithubInstallationsJob({
     api,
-    apply: async (change) => {
+    apply: async (change, meter) => {
       const appUser = appUserPool();
       await recordInstallationLifecycle(
         {
@@ -63,6 +63,7 @@ export function githubInstallationsJobFromEnv(
         },
         change.kind,
         { action: ACTION_NAME[change.action], installation: { id: change.ghInstallationId } },
+        meter,
       );
     },
     reportError: report,
