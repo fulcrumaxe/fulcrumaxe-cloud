@@ -9,3 +9,4 @@ export * from './reserve.js';
 export * from './settle.js';
 export { createPool, withTenant } from './pg.js';
 export * from './usage.js';
+export * from './gatewayMeter.js';

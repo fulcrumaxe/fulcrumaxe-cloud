@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@fx/db": "workspace:*",
+    "@fx/test-guard": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
     "typescript": "^5.7.2",

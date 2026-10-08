@@ -2,6 +2,7 @@ import { resolveChecked, NetGuardError, type HostLookup } from "@fx/net-guard";
 import { assertGithubForwardConfig, toGithubForwardConnection, type GithubForwardConfig } from "./githubForwardConfig.js";
 import { modelAuthValue, networkPolicy, type NetworkPolicyPhase, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ConnectionKind, ModelProvider, Product, Role } from "./types.js";
+import { isGatewayTag } from "@fx/spend";
 
 /**
  * D#2 H09 pass/fail 3: "The tenant key is decrypted only inside the step
@@ -105,6 +106,8 @@ export interface FirewallPolicyInput {
   /** Non-secret; handed to the decryptor next to the ciphertext. */
   keyContext: TenantKeyContext;
   phase?: NetworkPolicyPhase;
+  /** D#221 OM-2: the run's report tag (`fxr_...`); applied to an `ai_gateway` connection's model rule only. */
+  reportTag?: string;
 }
 
 /** D#66: `deps` carries the GitHub forward config and an optional
@@ -216,7 +219,7 @@ function rulesCarryingKey(
   plaintextKey: string,
   provider: ConnectionKind,
   host: string,
-  input: { role: Role; product: Product; phase?: NetworkPolicyPhase },
+  input: { role: Role; product: Product; phase?: NetworkPolicyPhase; reportTag?: string },
 ): NetworkPolicyRule[] {
   // H14c-3-1 (CARRY-12): the key leaves this function in exactly one place,
   // the model rule's NON-ENUMERABLE `authValue`, which the sandbox port turns
@@ -231,6 +234,10 @@ function rulesCarryingKey(
   const rules = networkPolicy(input.role, input.product, connection, input.phase ?? "run");
   for (const rule of rules) {
     if (rule.purpose === "model") Object.defineProperty(rule, "authValue", { value: authValue, enumerable: false });
+    if (rule.purpose === "model" && provider === "ai_gateway" && input.reportTag !== undefined) {
+      if (!isGatewayTag(input.reportTag)) throw new Error("buildFirewallPolicy: the report tag has an unexpected shape");
+      Object.defineProperty(rule, "reportTag", { value: input.reportTag, enumerable: false });
+    }
   }
   return rules;
 }

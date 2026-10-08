@@ -77,6 +77,11 @@ export interface NetworkPolicyRule {
    * model rule.
    */
   readonly authValue?: string;
+  /**
+   * D#221 OM-2: the run's gateway report tag, sent as `ai-reporting-tags` next to the auth header. Non-enumerable like
+   * `authValue`, so a serialised or spread policy never shows it, and set on an `ai_gateway` model rule only.
+   */
+  readonly reportTag?: string;
 }
 
 /** The header value the model host expects for `key`: a bearer token for the

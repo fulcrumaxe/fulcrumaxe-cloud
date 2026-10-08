@@ -412,7 +412,8 @@ export function sdkNetworkPolicy(rules: readonly NetworkPolicyRule[]): NetworkPo
       continue;
     }
     if (!rule.authHeader || !rule.authValue) throw new Error("createVercelSandboxPort: the model rule has no key to inject");
-    allow[rule.host] = [{ transform: [{ headers: { [rule.authHeader]: rule.authValue } }] }];
+    // D#221 OM-2: the report tag rides next to the key, outside the VM; only an ai_gateway model rule carries one.
+    allow[rule.host] = [{ transform: [{ headers: { [rule.authHeader]: rule.authValue, ...(rule.reportTag && { "ai-reporting-tags": rule.reportTag }) } }] }];
   }
   return { allow };
 }
