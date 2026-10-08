@@ -74,6 +74,8 @@ export async function runnerSweeperHandler(req: NextRequest, deps: RunnerSweeper
     const { nextDueAt: noticeDue, ...notices } = await worker.sweepRunnerNotices();
     const { nextDueAt: queueDue, ...counts } = queue ?? { listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 1, nextDueAt: null };
     const { nextDueAt: leaseDue, ...leases } = lease ?? { leasesListed: 0, lost: 0, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0, joblessRetried: 0, joblessFailed: 0, joblessErrors: 0, revoked: 0, wallClockTimedOut: 0, held: 0, leasesSkipped: 0, leasesFailed: 1, nextDueAt: null };
+    // The fixed counts of the notice half, on one line: numbers under fixed names, nothing else.
+    deps.log(JSON.stringify({ event: "runner.notice_sweep", listed: notices.listed, sent_waiting: notices.waitingEmitted, sent_reminder: notices.reminderEmitted, skipped_mode: notices.skippedMode, failed: notices.failed }));
     const due = [queueDue, leaseDue, noticeDue, failures.length > 0 ? Date.now() + SWEEP_FAILURE_RETRY_MS : null].filter((t): t is number => t !== null);
     return {
       result: { configured: true, ...counts, leases, ...(failures.length > 0 ? { sweepFailures: failures } : {}) },

@@ -25,6 +25,7 @@ const CYCLES = [
   ["packages/discussions", "packages/runner"],
   ["packages/pipeline", "packages/github"],
   ["packages/pipeline", "packages/worker"],
+  ["packages/worker", "apps/web"],
   ["packages/runner", "packages/github"],
   ["packages/spend", "packages/billing"],
   ["packages/spend", "packages/runner"],

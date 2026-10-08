@@ -554,6 +554,8 @@ async function emitRunStatusDomainEvent(client: PoolClient, params: Pick<WriteRu
  * event, from the same code `writeRunStatusOn` uses, in the caller's transaction. It writes nothing to `agent_runs`.
  */
 export async function recordRunStatusMove(client: PoolClient, params: Pick<WriteRunStatusParams, "accountId" | "runId" | "from" | "to" | "failureReason">): Promise<void> {
+  // The database function checks only that the row was `from`; whether `from -> to` is a legal move is this call's to say, before anything is written.
+  assertLegalRunTransition(params.from, params.to);
   await recordRunStatusChanged(client, params);
   await emitRunStatusDomainEvent(client, params);
 }
