@@ -1,3 +1,4 @@
+export { ensureEnvironment, type EnsuredEnvironment } from "./ensureEnvironment.js";
 export { ReplayError, createRunSandbox, replay, type ReplayErrorCode, type ReplayPorts, type RunEnvironmentRecord } from "./replay.js";
 export { mergeEnvNetwork } from "./networkMerge.js";
 export {

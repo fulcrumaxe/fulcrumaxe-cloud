@@ -46,8 +46,10 @@ export interface EnvStore {
   ): Promise<void>;
 }
 
-/** The C12 dollar reservation, taken before the build sandbox is created. */
-export type Reservation = { readonly ok: true; readonly id: string } | { readonly ok: false; readonly reason: string };
+/** The C12 dollar reservation, taken before the build sandbox is created. `reservedUsd` is the amount held. */
+export type Reservation =
+  | { readonly ok: true; readonly id: string; readonly reservedUsd: number }
+  | { readonly ok: false; readonly reason: string };
 
 /** What the builder reports. `step` names where it stopped; `costUsd` is what the build used. */
 export type BuildOutcome =
