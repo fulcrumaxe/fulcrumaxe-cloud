@@ -17,6 +17,7 @@ export {
   localOnlyViolation,
   type GithubClient,
   type GithubGraphqlOperation,
+  type LocalOnlyGithub,
   type GithubRequest,
   type GithubResponse,
   type LocalOnlyAllowlistEntry,
@@ -24,3 +25,22 @@ export {
 export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
 export { RUNNER_OFFLINE_AFTER_SECONDS, RUNNER_STATES, RUN_WAIT_REASONS, classifyRunner, getRunWaitReason, getRunnerStates, listRunners, type RunWaitReason, type RunnerFacts, type RunnerRow, type RunnerState } from "./readModel.js";
 export { approveRun } from "./approvals.js";
+export {
+  CHANGE_TYPES,
+  MAX_FILE_PAGES,
+  READY_FALLBACK_LINE,
+  RunPullRequestError,
+  TITLE_MAX,
+  createRunPullRequestPort,
+  loadRunPullRequestText,
+  pullRequestBody,
+  pullRequestTitle,
+  type BranchState,
+  type ChangedFiles,
+  type PullRequestRef,
+  type PullRequestRepo,
+  type RunPullRequestFailure,
+  type RunPullRequestPort,
+  type RunPullRequestText,
+} from "./runPullRequest.js";
+export { MAX_ENTRY_PATTERNS, MAX_SCOPE_ENTRIES, MAX_SCOPE_PATTERNS, loadAcceptanceScope, parseAcceptanceScope, pathInScope, pathsOutsideScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
