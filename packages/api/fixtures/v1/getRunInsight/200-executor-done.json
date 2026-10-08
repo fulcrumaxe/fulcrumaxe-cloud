@@ -55,5 +55,11 @@
       "status": "running",
       "created_at": "2026-10-03T10:13:00.000Z"
     }
-  ]
+  ],
+  "outside_meter": {
+    "state": "higher",
+    "reason": null,
+    "added_usd": 0.12,
+    "text": "Gateway figure higher: $0.12 added"
+  }
 }

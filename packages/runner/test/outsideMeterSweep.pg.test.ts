@@ -312,4 +312,80 @@ describe("outside meter [pg]", () => {
       globalThis.fetch = real;
     }
   });
+
+  // OM-2c carry-ins from the review of the finalize PR.
+  it("a transient failure on a read that is not the last keeps the previous snapshot instead of nulling it", async () => {
+    const r = await finishedRun({ usd: 1, calls: 5, rows: [{ total_cost: 1, surcharge_cost: 0, request_count: 2 }] });
+    await due(r.runId);
+    await sweep(r.connId);
+    expect(await state(r.runId)).toMatchObject({ state: "pending", reads: 1 });
+    const snap = async () => (await db.admin.query(`SELECT om_last_cost::float AS cost, om_last_count AS n FROM agent_runs WHERE id = $1`, [r.runId])).rows[0];
+    expect(await snap()).toEqual({ cost: 1, n: 2 });
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("", { status: 503 })) as typeof fetch;
+    try {
+      await due(r.runId);
+      await sweep(r.connId);
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(await state(r.runId)).toMatchObject({ state: "pending", reads: 2 });
+    expect(await snap()).toEqual({ cost: 1, n: 2 });
+  });
+
+  it("a failing backstop query is counted and handed to onError, and the due reads still run", async () => {
+    const r = await finishedRun({ usd: 1, calls: 1, rows: [{ total_cost: 1, surcharge_cost: 0, request_count: 1 }] });
+    await due(r.runId);
+    const real = db.runWriterPool.query.bind(db.runWriterPool) as (...a: unknown[]) => Promise<unknown>;
+    const seen: unknown[] = [];
+    const pool = new Proxy(db.runWriterPool, {
+      get: (t, k) => (k === "query"
+        ? (sql: unknown, ...rest: unknown[]) => (typeof sql === "string" && sql.includes("outside_meter_list_unfinalized") ? Promise.reject(new Error("boom")) : real(sql, ...rest))
+        : Reflect.get(t, k, t)),
+    });
+    const res = await sweepOutsideMeter({ pool, modelConnection: connection(r.connId), decryptTenantKey: async () => KEY, flagOn: () => true, reportBase: fake.url, onError: (id) => void seen.push(id) });
+    expect(res.failed).toBe(1);
+    expect(seen).toEqual([null]);
+    expect(await state(r.runId)).toMatchObject({ reads: 1 });
+  });
+
+  it("a limits query that rejects leaves the run pending, counts it failed and posts no line; the next tick, with the database back, settles it", async () => {
+    const row: FakeRow = { total_cost: 3, surcharge_cost: 0, request_count: 2 };
+    const r = await finishedRun({ usd: 1, calls: 2, rows: [row, row] });
+    const failing = new Proxy(db.runWriterPool, {
+      get: (t, k) => (k === "connect"
+        ? async () => {
+            const c = await t.connect();
+            return new Proxy(c, {
+              get: (ct, ck) => (ck === "query"
+                ? (sql: unknown, ...rest: unknown[]) => (typeof sql === "string" && sql.includes("SELECT role FROM agent_runs") ? Promise.reject(new Error("limits down")) : (ct.query as (...a: unknown[]) => unknown).call(ct, sql, ...rest))
+                : Reflect.get(ct, ck, ct)),
+            });
+          }
+        : k === "query" ? t.query.bind(t) : Reflect.get(t, k, t)), // pool.query takes its own callback-style connect, so it is left on the real pool
+    });
+    const seen: unknown[] = [];
+    let last = { failed: 0 };
+    for (let i = 0; i < 2; i++) {
+      await due(r.runId);
+      last = await sweepOutsideMeter({ pool: failing, modelConnection: connection(r.connId), decryptTenantKey: async () => KEY, flagOn: () => true, reportBase: fake.url, onError: (id) => void seen.push(id) });
+    }
+    expect(last.failed).toBe(1);
+    expect(seen).toEqual([r.runId]);
+    expect(await state(r.runId)).toMatchObject({ state: "pending" });
+    expect(await ledger(r.runId)).toEqual([]);
+    await due(r.runId);
+    await sweep(r.connId);
+    expect(await state(r.runId)).toMatchObject({ state: "higher" });
+    expect((await ledger(r.runId)).map((l) => l.reason)).toContain("outside_meter");
+  });
+
+  it("an unmet floor and a held true-up together raise both flags; the run ends held", async () => {
+    const stable: FakeRow = { total_cost: 8, surcharge_cost: 0, request_count: 3 };
+    const r = await finishedRun({ usd: 1, calls: 40, rows: [stable] });
+    await db.admin.query(`INSERT INTO run_limits (account_id, role, per_run_usd, max_resumes) VALUES ($1, '*', 1, 0)`, [r.accountId]);
+    for (let i = 0; i < 9; i++) { await due(r.runId); await sweep(r.connId); }
+    expect(await state(r.runId)).toMatchObject({ state: "unavailable", reason: "trueup_over_ceiling" });
+    expect((await state(r.runId)).flags).toEqual(expect.arrayContaining(["outside_meter_floor_unmet", "outside_meter_trueup_held"]));
+  });
 });

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
+import { outsideMeterLabel, type EndReason } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
 
 const linkedRun = z.object({ id: z.string().uuid(), role: z.string(), status: z.string(), created_at: z.string() });
@@ -53,6 +54,13 @@ export const runInsightResponseSchema = z.object({
   parent: linkedRun.nullable(),
   escalated_from: linkedRun.nullable(),
   children: z.array(linkedRun),
+  // D#221 OM-2c: one of five states, each with its sentence; never null. `reason` is a fixed code, `text` is what to show.
+  outside_meter: z.object({
+    state: z.enum(["pending", "matches", "higher", "unavailable", "off"]),
+    reason: z.string().nullable(),
+    added_usd: z.number().nullable(),
+    text: z.string(),
+  }),
 });
 
 export const runInsightRoutes: RouteEntry[] = [
@@ -70,7 +78,14 @@ export const runInsightRoutes: RouteEntry[] = [
     paramsSchema: z.object({ id: z.string() }),
     responseSchema: runInsightResponseSchema,
     async handler(ctx, input) {
-      return getRunInsight({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const insight = await getRunInsight({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const om = insight.outside_meter;
+      const text = outsideMeterLabel(
+        om.state === "higher" ? { state: "higher", addedUsd: om.added_usd ?? 0 }
+          : om.state === "unavailable" ? { state: "unavailable", reason: (om.reason ?? "unknown") as EndReason, addedUsd: om.added_usd ?? undefined }
+          : { state: om.state },
+      );
+      return { ...insight, outside_meter: { ...om, text } };
     },
   },
 ];

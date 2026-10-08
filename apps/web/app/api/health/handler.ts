@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { sessionSecretProblems } from "@fx/core/src/auth/session";
 import { planDataStatus } from "@fx/plan-data";
+import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
 
@@ -20,6 +21,9 @@ import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../.
  * which required settings are missing or invalid, by name and a fixed reason
  * code, and which optional features are off. Never a value. With CRON_SECRET
  * unset nobody gets the detail (fail closed).
+ *
+ * Every caller also gets `outside_meter`: "on" only when FX_OUTSIDE_METER is exactly "on" (any other value, or unset, is "off";
+ * the same test the sweep and the tag minting use). It names no key and no connection.
  *
  * Every caller also gets `deploy_env` (FX_DEPLOY_ENV, or null when unset). Only when that is "staging" does the
  * body also carry `project_id` (VERCEL_PROJECT_ID) and `commit` (VERCEL_GIT_COMMIT_SHA, or null): the live-test
@@ -75,7 +79,7 @@ function withSessionSecretProblems(report: EnvReport, env: EnvLike, nowMs: numbe
 
 export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: number = Date.now()): NextResponse {
   const report = withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs);
-  const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), ...identity(env) };
+  const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), outside_meter: outsideMeterOn(env.FX_OUTSIDE_METER) ? "on" : "off", ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
   if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report) }, init);
   return NextResponse.json(body, init);

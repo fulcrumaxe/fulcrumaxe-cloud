@@ -34,5 +34,11 @@
   },
   "parent": null,
   "escalated_from": null,
-  "children": []
+  "children": [],
+  "outside_meter": {
+    "state": "pending",
+    "reason": null,
+    "added_usd": null,
+    "text": "Checking with the AI Gateway"
+  }
 }

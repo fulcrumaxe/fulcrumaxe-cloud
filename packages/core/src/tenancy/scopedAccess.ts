@@ -3,6 +3,21 @@ import { withTenant } from './withTenant.js';
 import { NotFoundError } from './errors.js';
 
 /**
+ * Every agent_runs column except the two that must never leave the server: `gateway_report_tag` (the outside meter's
+ * unguessable per-run tag, D#221) and `om_key_ref` (a hash of the connection's sealed key). An explicit list, never `*`, so a
+ * column added later is not returned until someone adds it here; a pg test holds the list equal to the table less those two.
+ */
+export const AGENT_RUN_COLUMNS = `
+    id, account_id, work_item_id, role, runtime, sandbox_name, cc_session_id, parent_run_id,
+    status, envelope, tokens_in, tokens_out, usd, created_at, updated_at, model,
+    route_reason, route_table_version, escalated_from_run_id, expected_usd, all_opus_expected_usd, head_sha, execution_mode, dispatch_repo_id,
+    dispatch_pr_number, started_at, ended_at, resolved_exposure, exposure_digest, spec_version_id, env_digest, env_version_id,
+    image_digest, sandbox_requested_at, sandbox_session_ids, sandbox_stopped_at, sandbox_self_measured, compute_settle_due_at, compute_settle_failures, compute_settle_retry_at,
+    runner_id, lease_generation, lease_expires_at, initiated_by, approved_by, job_signed, backend, metered_model_calls,
+    om_payer_account_id, om_connection_id, om_state, om_reason, om_reads, om_finalized_at, om_next_due_at, om_last_cost,
+    om_last_count, om_read_share_usd, om_flags, om_gateway_usd, om_true_up_usd, om_overhead_usd`;
+
+/**
  * CWE-639 (H06 pass/fail item 3): the account-scoped tables a route
  * handler is most likely to fetch a single row from by id, given the
  * schema H02 already shipped. work_items/agent_runs/run_events belong to
@@ -19,7 +34,7 @@ import { NotFoundError } from './errors.js';
  */
 const SCOPED_TABLES = {
   work_items: 'SELECT * FROM work_items WHERE id = $1',
-  agent_runs: 'SELECT * FROM agent_runs WHERE id = $1',
+  agent_runs: `SELECT ${AGENT_RUN_COLUMNS} FROM agent_runs WHERE id = $1`,
   run_events: 'SELECT * FROM run_events WHERE id = $1',
   role_settings: 'SELECT * FROM role_settings WHERE id = $1',
 } as const;

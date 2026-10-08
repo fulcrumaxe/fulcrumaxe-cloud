@@ -24,7 +24,7 @@ export { connect } from './connect.js';
 
 export { remove } from './remove.js';
 
-export { getStatus } from './summary.js';
+export { getStatus, getOutsideMeterEntitlement } from './summary.js';
 
 export type { HealthCheckCtx, HealthCheckResult } from './validate.js';
 export { test, healthCheck } from './validate.js';

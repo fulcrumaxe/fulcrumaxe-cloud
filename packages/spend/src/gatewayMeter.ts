@@ -187,6 +187,9 @@ export function effectiveEntitlement(e: { value: Entitlement; setAt: Date | null
 export type UnavailableReason =
   | "not_stable" | "no_rows" | "plan_not_entitled" | "auth_failed" | "bad_request" | "flag_off" | "connection_changed" | "contract_mismatch";
 
+/** Every reason a run's outside check can end `unavailable`: the read-side ones above plus what the sweep itself ends a run with. */
+export type EndReason = UnavailableReason | "gateway_error" | "no_metered_figure" | "floor_unmet" | "trueup_over_ceiling";
+
 /** What one read's outcome does, before the comparison: the entitlement it sets and what happens to the run. */
 export function interpretRead(
   out: ReadOutcome,
@@ -205,8 +208,18 @@ export type OutsideMeterState =
   | { state: "pending" }
   | { state: "matches" }
   | { state: "higher"; addedUsd: number }
-  | { state: "unavailable"; reason: UnavailableReason }
+  | { state: "unavailable"; reason: EndReason; addedUsd?: number }
   | { state: "off" };
+
+/** Where a reason does not read well as its own name with the underscores turned into spaces. */
+const REASON_TEXT: Partial<Record<EndReason, string>> = {
+  floor_unmet: "gateway saw fewer calls than the meter",
+  trueup_over_ceiling: "gateway figure held for review",
+};
+
+/** The one line on an `ai_gateway` model connection (never the key, never a tag). */
+export const OUTSIDE_METER_NOTE =
+  "Outside checks use this key's Custom Reporting at about $0.03 a run, and need a Vercel Pro or Enterprise team.";
 
 /** The five run-detail lines; never null or undefined. */
 export function outsideMeterLabel(s: OutsideMeterState): string {
@@ -218,7 +231,7 @@ export function outsideMeterLabel(s: OutsideMeterState): string {
     case "higher":
       return `Gateway figure higher: $${s.addedUsd.toFixed(2)} added`;
     case "unavailable":
-      return `Outside check unavailable: ${s.reason.replaceAll("_", " ")}`;
+      return `Outside check unavailable: ${REASON_TEXT[s.reason] ?? s.reason.replaceAll("_", " ")}${s.addedUsd !== undefined && s.addedUsd > 0 ? `. $${s.addedUsd.toFixed(2)} added` : ""}`;
     case "off":
       return "Outside check off";
   }

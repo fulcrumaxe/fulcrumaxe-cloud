@@ -4424,6 +4424,43 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "outside_meter": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "matches",
+                            "higher",
+                            "unavailable",
+                            "off"
+                          ]
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "added_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "reason",
+                        "added_usd",
+                        "text"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -4439,7 +4476,8 @@
                     "limits",
                     "parent",
                     "escalated_from",
-                    "children"
+                    "children",
+                    "outside_meter"
                   ],
                   "additionalProperties": false
                 }
@@ -6289,6 +6327,48 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "outside_meter": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "note": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string",
+                              "enum": [
+                                "ga",
+                                "beta"
+                              ]
+                            },
+                            "reason": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "flag_off",
+                                    "plan_not_entitled"
+                                  ]
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "note",
+                            "label",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -6296,7 +6376,8 @@
                     "fingerprint",
                     "status",
                     "last_validated_at",
-                    "last_error_code"
+                    "last_error_code",
+                    "outside_meter"
                   ],
                   "additionalProperties": false
                 }
@@ -6448,6 +6529,48 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "outside_meter": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "note": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string",
+                              "enum": [
+                                "ga",
+                                "beta"
+                              ]
+                            },
+                            "reason": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "flag_off",
+                                    "plan_not_entitled"
+                                  ]
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "note",
+                            "label",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -6455,7 +6578,8 @@
                     "fingerprint",
                     "status",
                     "last_validated_at",
-                    "last_error_code"
+                    "last_error_code",
+                    "outside_meter"
                   ],
                   "additionalProperties": false
                 }
@@ -6672,6 +6796,48 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "outside_meter": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "note": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string",
+                              "enum": [
+                                "ga",
+                                "beta"
+                              ]
+                            },
+                            "reason": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "flag_off",
+                                    "plan_not_entitled"
+                                  ]
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "note",
+                            "label",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -6679,7 +6845,8 @@
                     "fingerprint",
                     "status",
                     "last_validated_at",
-                    "last_error_code"
+                    "last_error_code",
+                    "outside_meter"
                   ],
                   "additionalProperties": false
                 }
