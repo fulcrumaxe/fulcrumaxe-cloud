@@ -192,7 +192,23 @@ describe('getStats / getWorkItemTimeline (D#45 S3)', () => {
     let refs: SeedRefs;
     let now: Date;
 
+    // Planner statistics are the one input the plan assertions below do not
+    // control. This database is shared with every other test file, so by the
+    // time this one runs autovacuum may already have analyzed these tables
+    // while they held a handful of rows (or may analyze them half way through
+    // the load). Stale tiny-table statistics make the planner expect one row
+    // everywhere and scan ledger by account_id alone for every work item --
+    // a real plan, but one the 'before ANALYZE' state is not meant to cover,
+    // and it made this test fail on any tree, whenever the timing fell that
+    // way. So: keep autovacuum off these tables while the data loads, then
+    // erase whatever statistics exist, so 'before ANALYZE' is really the
+    // never-analyzed state and 'after ANALYZE' is the explicit one.
+    const STATS_TABLES = ['work_items', 'work_item_transitions', 'agent_runs', 'ledger'] as const;
+
     beforeAll(async () => {
+      for (const table of STATS_TABLES) {
+        await admin.query(`ALTER TABLE ${table} SET (autovacuum_enabled = false)`);
+      }
       refs = await seedAccount(admin, randomUUID());
       now = new Date();
       const itemCount = 2000;
@@ -289,7 +305,22 @@ describe('getStats / getWorkItemTimeline (D#45 S3)', () => {
                 AS t(account_id, kind, usd, run_id, budget)`,
         [ledgerAccountIds, ledgerKind, ledgerUsd, ledgerRunId, ledgerBudget],
       );
+      for (const table of STATS_TABLES) {
+        await admin.query(`SELECT pg_clear_relation_stats('public', $1)`, [table]);
+        await admin.query(
+          `SELECT pg_clear_attribute_stats('public', $1, attname, false)
+             FROM pg_attribute
+            WHERE attrelid = ('public.' || $1)::regclass AND attnum > 0 AND NOT attisdropped`,
+          [table],
+        );
+      }
     }, 120_000);
+
+    afterAll(async () => {
+      for (const table of STATS_TABLES) {
+        await admin.query(`ALTER TABLE ${table} RESET (autovacuum_enabled)`);
+      }
+    });
 
     /** Every plan node in an EXPLAIN (FORMAT JSON) tree, flattened. */
     interface PlanNode {
