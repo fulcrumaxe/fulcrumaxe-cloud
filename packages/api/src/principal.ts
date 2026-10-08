@@ -50,6 +50,7 @@ export function sessionCookieFromHeader(req: Request): string | undefined {
       try {
         return decodeURIComponent(part.slice(eq + 1).trim());
       } catch {
+        // fx-swallow-ok: a cookie with a malformed % escape (URIError) is no session; the caller is unauthenticated
         return undefined;
       }
     }

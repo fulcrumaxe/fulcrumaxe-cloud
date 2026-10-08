@@ -46,6 +46,7 @@ export function isCrossSiteCookieOpen(req: Request): boolean {
   try {
     originHost = new URL(origin).host;
   } catch {
+    // fx-swallow-ok: an Origin that does not parse is treated as cross-site, which is the refusal
     return true; // "null" or malformed
   }
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? new URL(req.url).host;

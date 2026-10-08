@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Client, type Pool } from "pg";
 import { isStagingPaused } from "@fx/core/src/pendingWork.js";
+import { reportError } from "@fx/telemetry";
 import { realClock, type Clock } from "./clock.js";
 
 /**
@@ -72,6 +73,7 @@ export function isPooledUrl(url: string): boolean {
   try {
     return new URL(url).hostname.includes("-pooler");
   } catch {
+    // fx-swallow-ok: an unparsable URL is answered as pooled, so the listener degrades to polling instead of guessing
     return true; // unparseable: refuse rather than guess
   }
 }
@@ -176,6 +178,7 @@ export class NudgeListener implements NudgeSource {
       if (epoch !== this.epoch) return;
       await this.probe(epoch);
     } catch (err) {
+      reportError(err, { stage: "sse.nudge_connect" });
       this.degrade(epoch, errorCode(err));
       return;
     }

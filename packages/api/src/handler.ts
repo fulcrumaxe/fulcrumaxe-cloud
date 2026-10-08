@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
+import { reportError } from "@fx/telemetry";
 import { effectivePrincipals, matchRoute, RawBody, ROLE_RANK, type RouteEntry } from "./registry.js";
 import { ROUTES } from "./routes/index.js";
 import { principalIdOf, resolvePrincipal } from "./principal.js";
@@ -150,6 +151,16 @@ function streamResponse(raw: RawBody, requestId: string): Response {
     },
   });
   return new Response(body, { status: 200, headers });
+}
+
+/** The request's path, for a report; undefined when the URL does not parse (the reporter then files it under `/`). */
+export function pathOf(req: Request): string | undefined {
+  try {
+    return new URL(req.url).pathname;
+  } catch {
+    // fx-swallow-ok: an unparsable request URL only costs the route label; the report still goes ahead
+    return undefined;
+  }
 }
 
 /**
@@ -352,6 +363,9 @@ export async function handleApiRequest(
     return jsonResponse(idempotencyResult.body, idempotencyResult.status, requestId, idempotencyResult.replayed || handlerReplayed);
   } catch (err) {
     const { status, body, headers } = mapError(err, requestId);
+    // A 4xx is the caller's answer. A 5xx is ours: its class (stage, route template, allowlisted code) goes to the
+    // reporter, never the message the envelope deliberately withholds.
+    if (status >= 500) reportError(err, { stage: "api.dispatch", route: pathOf(req) });
     return jsonResponse(body, status, requestId, undefined, headers);
   }
 }
