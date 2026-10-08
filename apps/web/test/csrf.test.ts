@@ -291,3 +291,47 @@ describe("middleware: strips client-sent principal headers before any step runs"
     expect(res.headers.get("x-middleware-request-x-fx-scopes")).toBeNull();
   });
 });
+
+/**
+ * D#483 S3-H: the plan-import start route is a state-changing POST under /api/v1, reachable with a session cookie, so the
+ * middleware must put it behind the same CSRF rules as every other route. Run through the real `middleware()`, not only
+ * `evaluateCsrf`, so a route-level exemption anywhere in the pipeline would show.
+ */
+describe("csrf: the plan-imports route goes through the real middleware", () => {
+  const url = "https://example.test/api/v1/repos/7b1f4c2e-5c0a-4b8e-9d57-2f3a6e0c9d11/plan-imports";
+  const withOrigin = async <T>(fn: () => Promise<T>): Promise<T> => {
+    process.env.FX_APP_ORIGIN = WORKSPACE_ORIGIN;
+    try {
+      return await fn();
+    } finally {
+      delete process.env.FX_APP_ORIGIN;
+    }
+  };
+
+  it("a cross-origin cookie POST answers 403 csrf_rejected", async () => {
+    const res = await withOrigin(() => middleware(req({ url, method: "POST", cookie: "sess", origin: "https://evil.example", contentType: "application/json" })));
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error.code).toBe("csrf_rejected");
+  });
+
+  it("a cookie POST with neither Origin nor Sec-Fetch-Site answers 403 csrf_rejected", async () => {
+    const res = await withOrigin(() => middleware(req({ url, method: "POST", cookie: "sess", contentType: "application/json" })));
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error.code).toBe("csrf_rejected");
+  });
+
+  it("a same-origin cookie POST without Content-Type: application/json answers 403 csrf_rejected", async () => {
+    for (const contentType of [undefined, "text/plain", "application/x-www-form-urlencoded"]) {
+      const res = await withOrigin(() => middleware(req({ url, method: "POST", cookie: "sess", origin: WORKSPACE_ORIGIN, secFetchSite: "same-origin", ...(contentType ? { contentType } : {}) })));
+      expect(res.status, String(contentType)).toBe(403);
+      expect((await errorBody(res)).error.code, String(contentType)).toBe("csrf_rejected");
+    }
+  });
+
+  it("a same-origin JSON cookie POST is not refused by CSRF", async () => {
+    const same = { url, method: "POST", cookie: "sess", origin: WORKSPACE_ORIGIN, secFetchSite: "same-origin", contentType: "application/json" };
+    expect(evaluateCsrf(req(same))).toBeNull();
+    const res = await withOrigin(() => middleware(req(same)));
+    if (res.status === 403) expect((await errorBody(res)).error.code).not.toBe("csrf_rejected");
+  });
+});

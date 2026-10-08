@@ -272,6 +272,25 @@ describe('plan import and proposals (0723)', () => {
       });
     });
 
+    // S3-H (0753): the owner is fixed when the row is created. Before, a `new` row could be flipped to product and approved.
+    it('cannot change the owner of a proposal in any state, either way; its ordinary upserts still pass', async () => {
+      const repo = await newRepo(a);
+      const loop = await newProposal(a, repo, { owner_process: 'internal_loop' });
+      const prod = await newProposal(a, repo, { owner_process: 'product' });
+      const withdrawn = await newProposal(a, repo, { owner_process: 'internal_loop', state: 'withdrawn' });
+      for (const [id, to] of [[loop, 'product'], [prod, 'internal_loop'], [withdrawn, 'product']] as const) {
+        await expect(asImporter(a, (c) => c.query(`UPDATE proposals SET owner_process = '${to}' WHERE id = '${id}'`)), `${id} to ${to}`).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE, message: expect.stringMatching(/owner/) });
+      }
+      // the same value written again is not a change, and title, summary and sources move freely
+      await asImporter(a, async (c) => {
+        await c.query(`UPDATE proposals SET owner_process = 'internal_loop', title = 'Renamed', summary = 'S', sources = '{plan_task,github_issue}', updated_at = now() WHERE id = '${loop}'`);
+      });
+      expect((await admin.query('SELECT owner_process, title, summary, sources FROM proposals WHERE id = $1', [loop])).rows[0]).toEqual({ owner_process: 'internal_loop', title: 'Renamed', summary: 'S', sources: ['plan_task', 'github_issue'] });
+      expect((await admin.query('SELECT owner_process FROM proposals WHERE id = $1', [prod])).rows[0].owner_process).toBe('product');
+      // the guard is the importer's: a tenant-side owner is not touched by it (app_user cannot write the table at all)
+      await expect(as(a, a.userId, (c) => c.query(`UPDATE proposals SET owner_process = 'product' WHERE id = '${loop}'`))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+    });
+
     it('cannot change a finished import, and cannot reach another tenant', async () => {
       const repo = await newRepo(a);
       const done = await newImport(a, repo, 'succeeded');
@@ -457,6 +476,29 @@ describe('plan import and proposals (0723)', () => {
       const detached = await newRepo(a, false);
       const dp = await newProposal(a, detached);
       await expect(approve(a, a.userId, dp, wi)).rejects.toMatchObject({ code: '55000', message: 'repo_not_connected' });
+    });
+
+    // S3-H (0753): the work item is the caller's argument, so the definer checks it.
+    it('refuses a work item of another repo (work_item_wrong_repo) or one past triaged (work_item_wrong_stage), and changes nothing', async () => {
+      const repo = await newRepo(a);
+      const other = await newRepo(a);
+      const p = await newProposal(a, repo);
+      const unchanged = async () => expect((await admin.query('SELECT state, work_item_id, roadmap_position FROM proposals WHERE id = $1', [p])).rows[0]).toEqual({ state: 'new', work_item_id: null, roadmap_position: null });
+      await expect(approve(a, a.userId, p, await newWorkItem(a, other))).rejects.toMatchObject({ code: '55000', message: 'work_item_wrong_repo' });
+      // a work item that does not exist, and one of another tenant, read the same way
+      await expect(approve(a, a.userId, p, randomUUID())).rejects.toMatchObject({ code: '55000', message: 'work_item_wrong_repo' });
+      const foreign = await newWorkItem(b, await newRepo(b));
+      await expect(approve(a, a.userId, p, foreign)).rejects.toMatchObject({ code: '55000', message: 'work_item_wrong_repo' });
+      for (const stage of ['discussing', 'in_progress', 'merged', 'closed']) {
+        const wi = await newWorkItem(a, repo);
+        await admin.query('UPDATE work_items SET stage = $2 WHERE id = $1', [wi, stage]);
+        await expect(approve(a, a.userId, p, wi), stage).rejects.toMatchObject({ code: '55000', message: 'work_item_wrong_stage' });
+      }
+      await unchanged();
+      // the item of the right repo at triaged still works, and a replay of it is still the same answer
+      const good = await newWorkItem(a, repo);
+      expect(await approve(a, a.userId, p, good)).toMatchObject({ state: 'approved', work_item_id: good, replayed: false });
+      expect(await approve(a, a.userId, p, good)).toMatchObject({ state: 'approved', work_item_id: good, replayed: true });
     });
 
     it('a member session and a token without work_items:write are refused; a token with it is allowed; another tenant sees not found', async () => {

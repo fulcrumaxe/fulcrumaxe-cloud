@@ -176,6 +176,32 @@ describe("E1: only reads, refused before any token is minted", () => {
     expect(g.server.seen).toHaveLength(0);
   });
 
+  // S3-H: the raw-path check passes these (a percent sign is allowed in a path), and the URL parser then folds the encoded
+  // dots into a real `..` that leaves /repos/acme/widgets/. Only the check on the parsed URL stops them.
+  it.each([
+    ["%2e%2e", "/repos/acme/widgets/%2e%2e/other/issues"],
+    ["%2E%2E in capitals", "/repos/acme/widgets/%2E%2E/other/issues"],
+    [".%2e", "/repos/acme/widgets/.%2e/other/issues"],
+    ["%2e.", "/repos/acme/widgets/%2e./other/issues"],
+    ["%2e%2e as the last segment", "/repos/acme/widgets/issues/%2e%2e/%2e%2e"],
+    ["%2e%2e climbing out of the repos tree", "/repos/acme/widgets/%2e%2e/%2e%2e/%2e%2e/user"],
+  ])("an encoded traversal (%s) that would leave the repository is refused with no mint, no request and no budget spent", async (_label, path) => {
+    const { gh: g, client } = await setup();
+    expect(new URL(`https://api.github.com${path}`).pathname.startsWith("/repos/acme/widgets/")).toBe(false);
+    expect(await code(client.request({ method: "GET", path }))).toBe("request_refused");
+    expect(g.mints).toHaveLength(0);
+    expect(g.server.seen).toHaveLength(0);
+    expect(client.requestCount).toBe(0);
+    expect(client.requestLog).toHaveLength(0);
+  });
+
+  it("an encoded slash or dot that stays inside the repository is still sent", async () => {
+    const { gh: g, client } = await setup({ files: new Map([["a.b", "{}"]]) });
+    const res = await client.request({ method: "GET", path: "/repos/acme/widgets/contents/a%2eb" });
+    expect(res.status).toBeLessThan(500);
+    expect(g.server.seen.filter((s) => s.path.startsWith("/repos/")).length).toBe(1);
+  });
+
   it.each([
     ["a mutation", "mutation M { addComment(input: {}) { clientMutationId } }"],
     ["a subscription", "subscription S { x }"],

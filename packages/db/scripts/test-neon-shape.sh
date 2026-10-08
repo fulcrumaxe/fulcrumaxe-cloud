@@ -1055,6 +1055,66 @@ check_plan_kind_audit_role_shape() {
   fi
 }
 
+# D#483 S3-H (0753): the one SECURITY DEFINER owned by proposal_work_item_reader (proposal_work_item_lookup(uuid)), matched by exact name. Prints
+# its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp with EXECUTE for platform_ops (approve_proposal) and no one else, and no grant
+# option; SHAPE_FAIL:<count> when a definer owned by the role is not that; nothing when the role owns none.
+check_proposal_work_item_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname = 'proposal_work_item_lookup'
+        AND p.proargtypes = array_to_string('{uuid}'::regtype[]::oid[], ' ')::oidvector
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'platform_ops'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'platform_ops'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'proposal_work_item_reader') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'proposal-work-item-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by proposal_work_item_reader fail the exception shape (not proposal_work_item_lookup(uuid), a loose search_path, or EXECUTE for anyone but platform_ops)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#483 S3-H (0753): role shape of proposal_work_item_reader. A no-op when the role does not exist. NOLOGIN and unprivileged, no member but
+# the migration role and no live membership for it, a member of no role, privileges exactly SELECT of four columns of work_items, owning only
+# its one function, no CREATE on public.
+check_proposal_work_item_role_shape() {
+  local dbname="$1" out rc=0 problems
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'proposal_work_item_reader'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'proposal_work_item_reader', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 4 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY['column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.stage SELECT'])) THEN 'privileges are not exactly the 4 granted by 0753' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid AND NOT (p.pronamespace = 'public'::regnamespace AND p.proname = 'proposal_work_item_lookup'))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object beyond proposal_work_item_lookup' END,
+      CASE WHEN has_schema_privilege('proposal_work_item_reader', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'proposal_work_item_reader-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): proposal_work_item_reader role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#2 PLATFORM-OPS-READ (0742): the SECURITY DEFINER functions owned by sandbox_settle_definer. Prints their oids, comma separated,
 # when each is one of the three exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public,
 # pg_temp, with an ACL that holds agent_run_writer and nobody else but the owner (and platform_ops, for the two listers only),
@@ -1267,6 +1327,15 @@ if [ -n "$PLAN_KIND_AUDIT_RESULT" ] && ! [[ "$PLAN_KIND_AUDIT_RESULT" =~ ^[0-9]+
   echo "neon-shape: internal error -- plan_kind_audit_writer exempt function oid was not numeric: $PLAN_KIND_AUDIT_RESULT" >&2
   exit 1
 fi
+PROPOSAL_WI_RESULT="$(check_proposal_work_item_exception_shape fx_neon)"
+if [[ "$PROPOSAL_WI_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${PROPOSAL_WI_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$PROPOSAL_WI_RESULT" ] && ! [[ "$PROPOSAL_WI_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- proposal_work_item_reader exempt function oid was not numeric: $PROPOSAL_WI_RESULT" >&2
+  exit 1
+fi
 SANDBOX_SETTLE_RESULT="$(check_sandbox_settle_definer_exception_shape fx_neon)"
 if [[ "$SANDBOX_SETTLE_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${SANDBOX_SETTLE_RESULT#SHAPE_FAIL:}" >&2
@@ -1285,7 +1354,7 @@ if [ -n "$WORK_ITEM_HALT_RESULT" ] && ! [[ "$WORK_ITEM_HALT_RESULT" =~ ^[0-9]+(,
   echo "neon-shape: internal error -- work_item_halt_definer exempt function oid was not numeric: $WORK_ITEM_HALT_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1306,6 +1375,7 @@ check_sandbox_reaper_role_shape fx_neon
 check_plan_kind_audit_role_shape fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
 check_work_item_halt_definer_role_shape fx_neon
+check_proposal_work_item_role_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"

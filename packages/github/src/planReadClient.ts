@@ -230,9 +230,18 @@ export function createPlanReadClient(deps: PlanReadDeps): (target: PlanReadTarge
         // Every refusal comes before the token and before the budget.
         if (req.method !== "GET") refused();
         if (!req.path.startsWith(prefix) || !PATH_RE.test(req.path) || req.path.split("/").some((s) => s === "..")) refused();
+        // The check above ran on the raw text. The URL parser folds `%2e%2e` (and `.%2e`, `%2e.`) into a real `..` segment,
+        // so the path that would actually be sent is checked again, still before the budget and the token.
+        let url: URL;
+        try {
+          url = new URL(`https://api.github.com${req.path}`);
+        } catch {
+          // fx-swallow-ok: an unparseable path is refused with the one fixed code
+          return refused();
+        }
+        if (url.origin !== "https://api.github.com" || !url.pathname.startsWith(prefix) || url.pathname.split("/").some((s) => s === "..")) refused();
         spend();
         const bearer = await token();
-        const url = new URL(`https://api.github.com${req.path}`);
         for (const [k, v] of Object.entries(req.query ?? {})) url.searchParams.set(k, String(v));
         const { res, headers, text } = await send(
           url,

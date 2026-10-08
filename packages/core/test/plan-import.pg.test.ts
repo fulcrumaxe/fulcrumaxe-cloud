@@ -176,6 +176,20 @@ describe('plan import (live build L1)', () => {
       expect((await admin.query('SELECT owner_process FROM plan_tasks WHERE repo_id = $1', [repoId])).rows[0].owner_process).toBe('product');
     });
 
+    // S3-H (0753): the owner of a proposal is fixed when it is created. A later import that would decide otherwise (the engine
+    // loop appeared in the repository) neither fails nor moves the owner; the plan task keeps following the repository.
+    it('a later import that would decide another owner leaves the proposal owner as it was, and still succeeds', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const files = { 'roadmap.json': rm({ 'D#1:A': {} }, { m1: ['D#1:A'] }) };
+      expect((await run(r, repoId, source({ files }))).state).toBe('succeeded');
+      expect((await proposals(repoId))['plan:D#1:A']!.owner_process).toBe('product');
+      const again = await run(r, repoId, source({ files: { ...files, ...LOOP } }));
+      expect(again.state).toBe('succeeded');
+      expect((await proposals(repoId))['plan:D#1:A']!.owner_process).toBe('product');
+      expect((await admin.query('SELECT owner_process FROM plan_tasks WHERE repo_id = $1', [repoId])).rows[0].owner_process).toBe('internal_loop');
+    });
+
     it('the whole frozen fixture through the database equals the committed file, per milestone, as sets (A1 through the API read)', async () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);
