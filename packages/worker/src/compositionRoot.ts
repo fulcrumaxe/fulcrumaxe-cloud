@@ -52,7 +52,7 @@ import { createWorkerPools, type WorkerPools } from "./pools.js";
 import { loadJobSigner } from "./jobSigner.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
-import { createRunnerNoticeSweeper, type RunnerNoticeSweeper } from "./runnerNotices.js";
+import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
 import { createRunnerLeaseSweeper, type RunnerLeaseSweeper } from "./runnerLeaseSweep.js";
@@ -62,6 +62,7 @@ import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./ret
 import { createAdvanceModule, type AdvanceFacade, type AdvanceModuleDeps } from "./advance.js";
 import { createSeatResolver, retrySeatSourceOf, type SeatRequest, type SeatResult } from "./seat.js";
 import { createRunStarter, type RunFollower } from "./starter.js";
+import { reportError } from "@fx/telemetry";
 
 /**
  * D#2 H14c-3-1: the production composition root, as a library. `createWorker`
@@ -273,7 +274,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runActions = createRunActionFacade(pools.runnerPool, registry);
     const runnerLeases = createRunnerLeaseFacade(pools.runnerPool);
     const runnerQueue = createRunnerQueueSweeper(pools.runnerPool, { onError: (runId) => console.warn(JSON.stringify({ event: "runner.queue_sweep_failed", run_id: runId })) });
-    const runnerNotices = createRunnerNoticeSweeper(pools.runnerPool, { onError: (runId) => console.warn(JSON.stringify({ event: "runner.notice_sweep_failed", run_id: runId })) });
+    const runnerNotices = createRunnerNoticeSweeper(pools.runnerPool, runnerNoticeReports({ report: reportError, warn: (line) => console.warn(line) }));
     const authorCheck = options.ports.authorCheck ?? (() => null);
     const resolveRunSeat = createSeatResolver({ pool: pools.runnerPool, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     // The three pieces a preview needs, wired together: its seat (from the resolver), the production run starter and the prompt builder.

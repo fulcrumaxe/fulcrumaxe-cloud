@@ -215,7 +215,47 @@ describe("runner notices [pg]", () => {
     for (const id of ids.slice(50)) expect(await kinds(id)).toEqual(["runner.waiting"]);
   });
 
+  // D#6 R2b-3h: the fixed counts, the failure hook and the backlog hook.
+  it("counts each case of one tick: listed, both notices sent, a run skipped for its repo's mode, and no failure", async () => {
+    const fresh = await waiting(A.accountId); // owes both
+    const sentOne = await waiting(B.accountId); // its 15 minute notice is already written
+    await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'runner.waiting', '{}'::jsonb)`, [B.accountId, sentOne]);
+    const other = await newRepo(A);
+    const off = await waiting(A.accountId, { repoId: other });
+    await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [other]);
+    clock = T0 + 49 * 60 * MIN;
+    expect(await sweep()).toEqual({ listed: 3, waitingEmitted: 1, reminderEmitted: 2, skippedMode: 1, failed: 0, nextDueAt: null });
+    expect(await kinds(fresh)).toEqual(["runner.waiting", "runner.ttl_reminder"]);
+    expect(await kinds(sentOne)).toEqual(["runner.waiting", "runner.ttl_reminder"]);
+    expect(await kinds(off)).toEqual([]);
+  });
+
+  it("a run whose write fails is counted failed and handed to onError with its id; the tick goes on", async () => {
+    const a = await waiting(A.accountId);
+    const b = await waiting(B.accountId);
+    clock = T0 + 20 * MIN;
+    // A pool whose tenant transactions cannot start: the list still reads, every run's write fails.
+    const broken = { query: writerPool.query.bind(writerPool), connect: async () => { throw new Error("connection refused: secret-host.internal"); } } as unknown as Pool;
+    const seen: string[] = [];
+    const result = await createRunnerNoticeSweeper(broken, { now: () => clock, onError: (runId) => void seen.push(runId) }).sweepRunnerNotices();
+    expect(result).toMatchObject({ listed: 2, waitingEmitted: 0, failed: 2 });
+    expect(seen.sort()).toEqual([a, b].sort());
+    expect(await kinds(a)).toEqual([]);
+  });
+
+  it("a full page (50) calls onBacklog once for the tick; a short page never does", async () => {
+    let backlog = 0;
+    const sweepWith = () => createRunnerNoticeSweeper(writerPool, { now: () => clock, onBacklog: () => void backlog++ }).sweepRunnerNotices();
+    for (let i = 0; i < 3; i++) await waiting(A.accountId, { createdAt: T0 + i * 1000 });
+    clock = T0 + 30 * MIN;
+    expect((await sweepWith()).listed).toBe(3);
+    expect(backlog).toBe(0);
+    for (let i = 0; i < 52; i++) await waiting(B.accountId, { createdAt: T0 + 10_000 + i * 1000 });
+    expect((await sweepWith()).listed).toBe(50);
+    expect(backlog).toBe(1);
+  });
+
   it("with nothing waiting it reports no due time", async () => {
-    expect(await sweep()).toEqual({ listed: 0, waitingEmitted: 0, reminderEmitted: 0, failed: 0, nextDueAt: null });
+    expect(await sweep()).toEqual({ listed: 0, waitingEmitted: 0, reminderEmitted: 0, skippedMode: 0, failed: 0, nextDueAt: null });
   });
 });

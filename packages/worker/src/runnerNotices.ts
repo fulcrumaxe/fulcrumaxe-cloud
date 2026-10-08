@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { ReportContext } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RUNNER_TTL_REMINDER_MS, RUNNER_WAITING_NOTICE_MS, RUN_EVENTS_SEQ_LOCK_SQL, recordRunnerNotice, runEventsSeqLockKey } from "@fx/runner";
 
@@ -39,6 +40,8 @@ export interface RunnerNoticeResult {
   listed: number;
   waitingEmitted: number;
   reminderEmitted: number;
+  /** Runs still pending whose repo is no longer `runner_local`: they owe no notice (the second check above). */
+  skippedMode: number;
   failed: number;
   /** Epoch ms of the next notice still to come (or soon, after a failure or a full batch); null when none is pending. */
   nextDueAt: number | null;
@@ -55,6 +58,8 @@ export interface RunnerNoticeDeps {
   onlineWithinMs?: number;
   retryDelayMs?: number;
   onError?: (runId: string, error: unknown) => void;
+  /** Called once in a tick whose list came back full (50): more runs may be waiting behind it. */
+  onBacklog?: () => void;
 }
 
 interface Waiting {
@@ -72,15 +77,33 @@ interface Facts {
   runner_online: boolean;
 }
 
+/**
+ * What the sweep reports (D#6 R2b-3h): a fixed code per case and nothing a failure could carry. A run whose notice failed is one
+ * `reportError` with the code `runner_notice_failed` on a fresh error (never the caught one, whose text could hold anything), and a
+ * log line with the run id. A full page from the lister is `runner_notice_backlog`, once per tick. The reporter and the log are
+ * handed in, so the composition root passes the real ones and a test passes recorders.
+ */
+export function runnerNoticeReports(io: { report: (err: unknown, ctx: ReportContext) => void; warn: (line: string) => void }): Required<Pick<RunnerNoticeDeps, "onError" | "onBacklog">> {
+  const stage = "runner.notice";
+  return {
+    onError: (runId) => {
+      io.warn(JSON.stringify({ event: "runner.notice_sweep_failed", run_id: runId }));
+      io.report(new Error("runner notice failed"), { stage, code: "runner_notice_failed" });
+    },
+    onBacklog: () => io.report(new Error("runner notice backlog"), { stage, code: "runner_notice_backlog" }),
+  };
+}
+
 /** Package-internal: `pool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {}): RunnerNoticeSweeper {
   const now = deps.now ?? Date.now;
   const onlineWithinMs = deps.onlineWithinMs ?? 120_000;
   return {
     async sweepRunnerNotices() {
-      const result: RunnerNoticeResult = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, failed: 0, nextDueAt: null };
+      const result: RunnerNoticeResult = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, skippedMode: 0, failed: 0, nextDueAt: null };
       const { rows } = await pool.query<Waiting>("SELECT account_id, run_id, created_at FROM agent_run_list_runner_runs_owing_notice($1, $2, $3)", [RUNNER_NOTICE_BATCH, RUNNER_WAITING_NOTICE_MS, RUNNER_TTL_REMINDER_MS]);
       result.listed = rows.length;
+      if (rows.length >= RUNNER_NOTICE_BATCH) deps.onBacklog?.();
       const consider = (at: number): void => {
         result.nextDueAt = result.nextDueAt === null ? at : Math.min(result.nextDueAt, at);
       };
@@ -101,7 +124,7 @@ export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {
               [row.run_id, row.account_id, new Date(now()), onlineWithinMs / 1000],
             );
             const facts = found[0];
-            if (!facts || facts.status !== "pending" || facts.repo_mode !== "runner_local") return { waiting: false, reminder: false, due: null as number | null };
+            if (!facts || facts.status !== "pending" || facts.repo_mode !== "runner_local") return { waiting: false, reminder: false, due: null as number | null, skipped: facts?.status === "pending" };
             let waiting = false;
             let reminder = false;
             let due: number | null = null;
@@ -125,8 +148,9 @@ export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {
                 due = due === null ? at : Math.min(due, at);
               }
             }
-            return { waiting, reminder, due };
+            return { waiting, reminder, due, skipped: false };
           });
+          if (sent.skipped) result.skippedMode++;
           if (sent.waiting) result.waitingEmitted++;
           if (sent.reminder) result.reminderEmitted++;
           if (sent.due !== null) consider(sent.due);

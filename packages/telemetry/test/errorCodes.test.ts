@@ -9,7 +9,7 @@ const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
 describe("the error-code allowlist", () => {
   it("keeps our codes, SQLSTATE, Node ERR_*, errno and known Stripe codes", () => {
-    for (const code of ["validation_failed", "not_found", "23505", "42P01", "P0001", "ERR_INVALID_IP_ADDRESS", "ERR_SOCKET_CLOSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "card_declined", "resource_missing", "other", "error_overflow"]) {
+    for (const code of ["validation_failed", "not_found", "23505", "42P01", "P0001", "ERR_INVALID_IP_ADDRESS", "ERR_SOCKET_CLOSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "card_declined", "resource_missing", "other", "error_overflow", "runner_notice_failed", "runner_notice_backlog"]) {
       expect(isAllowedErrorCode(code), code).toBe(true);
       expect(errorCodeOrOther(code)).toBe(code);
     }

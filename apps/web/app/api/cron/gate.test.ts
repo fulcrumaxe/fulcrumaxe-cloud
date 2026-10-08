@@ -339,7 +339,7 @@ describe("runner-sweeper (D#6 R2b)", () => {
   const HOUR = 60 * MIN;
   const none = { listed: 0, expired: 0, cancelled: 0, waiting: 0, skipped: 0, failed: 0, nextDueAt: null as number | null };
   const noLeases = { leasesListed: 0, lost: 0, followUpsCreated: 0, followUpsExhausted: 0, followUpsFailed: 0, joblessRetried: 0, joblessFailed: 0, joblessErrors: 0, revoked: 0, wallClockTimedOut: 0, held: 0, leasesSkipped: 0, leasesFailed: 0, nextDueAt: null as number | null };
-  const noNotices = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, failed: 0, nextDueAt: null as number | null };
+  const noNotices = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, skippedMode: 0, failed: 0, nextDueAt: null as number | null };
   const sweepRunnerQueue = vi.fn(async () => none);
   const sweepRunnerLeases = vi.fn(async () => noLeases);
   const sweepRunnerNotices = vi.fn(async () => noNotices);
@@ -502,6 +502,18 @@ describe("runner-sweeper (D#6 R2b)", () => {
     sweepRunnerNotices.mockClear();
     await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
     expect(sweepRunnerNotices).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs the notice sweep's five counts on one line, numbers under fixed names and nothing else (D#6 R2b-3h)", async () => {
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), deps());
+    advance(20 * MIN);
+    await markWorkPending("runner-sweeper");
+    advance(2 * MIN);
+    sweepRunnerNotices.mockResolvedValueOnce({ listed: 7, waitingEmitted: 3, reminderEmitted: 2, skippedMode: 1, failed: 1, nextDueAt: clock.value + 5 * MIN });
+    const d = deps();
+    await runnerSweeperHandler(cronRequest("runner-sweeper"), d);
+    const lines = d.log.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("{"));
+    expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.notice_sweep", listed: 7, sent_waiting: 3, sent_reminder: 2, skipped_mode: 1, failed: 1 }]);
   });
 
   it("a failed run keeps the next tick coming soon instead of dropping the marker", async () => {
