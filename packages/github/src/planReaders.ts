@@ -1,3 +1,6 @@
+import type { RepoPermission } from "@fx/trust";
+import { GH_OWNER_LOGIN_RE } from "./eventMapper.js";
+import { toPermission } from "./issueAuthorLookup.js";
 import { PlanReadError, type PlanReadClient } from "./planReadClient.js";
 import { DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, REPO_HEAD_QUERY } from "./planQueries.js";
 
@@ -257,4 +260,24 @@ export async function listDiscussionComments(client: PlanReadClient, repo: RepoR
     if (typeof conn.pageInfo.endCursor !== "string") return unexpected();
     after = conn.pageInfo.endCursor;
   }
+}
+
+/**
+ * A login's permission on the repository, from the platform's own permission API. A login it does not know is a 404 and reads
+ * as `none`. Any other answer that is not a clear one is `github_unavailable`: a failed lookup never reads as trusted (the
+ * import fails instead of silently applying or dropping a Correction).
+ */
+export async function readAuthorPermission(client: PlanReadClient, repo: RepoRef, login: string): Promise<RepoPermission> {
+  if (!GH_OWNER_LOGIN_RE.test(login)) return "none";
+  const res = await client.request({ method: "GET", path: `/repos/${repo.owner}/${repo.name}/collaborators/${encodeURIComponent(login)}/permission` });
+  if (res.status === 404) return "none";
+  if (res.status !== 200) return unexpected();
+  let body: unknown;
+  try {
+    body = JSON.parse(res.text);
+  } catch {
+    // fx-swallow-ok: a non-JSON permission answer is the other side misbehaving
+    return unexpected();
+  }
+  return isRecord(body) ? toPermission(body) : unexpected();
 }

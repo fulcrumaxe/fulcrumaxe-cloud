@@ -3,7 +3,8 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PLAN_READ_PERMISSIONS, getInstallationToken, InstallationTokenCache } from "../src/installationToken.js";
 import { createPlanReadClient, PLAN_READ_USER_AGENT, type PlanReadClient, type PlanReadDeps } from "../src/planReadClient.js";
 import { ALLOWED_GRAPHQL_DOCUMENTS, assertSingleQueryDocument, DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, REPO_HEAD_QUERY } from "../src/planQueries.js";
-import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readRepoFile, readRepoHead } from "../src/planReaders.js";
+import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readRepoFile, readRepoHead } from "../src/planReaders.js";
+import { createPlanSourceFactory } from "../src/planSource.js";
 import { httpsRoundTrip } from "./helpers/localTlsServer.js";
 import { newFakeState, startPlanGithub, type FakeGithubState, type FakeItem, type PlanGithub } from "./helpers/planGithubFake.js";
 
@@ -414,6 +415,55 @@ describe("the readers", () => {
       },
     })(TARGET);
     expect(await code(listIssuesAndPulls(bad, REPO))).toBe("github_unavailable");
+  });
+});
+
+describe("readAuthorPermission (the trust check for a Spec Correction)", () => {
+  it("returns the exact role, so maintain is not folded into write, and a login GitHub does not know is none", async () => {
+    const { gh: g, client } = await setup({ collaborators: { boss: "admin", maint: "maintain", dev: "write", tri: "triage", viewer: "read" } });
+    for (const [login, role] of Object.entries({ boss: "admin", maint: "maintain", dev: "write", tri: "triage", viewer: "read" })) expect(await readAuthorPermission(client, REPO, login), login).toBe(role);
+    expect(await readAuthorPermission(client, REPO, "nobody")).toBe("none");
+    const calls = g.server.seen.filter((s) => s.path.includes("/collaborators/"));
+    expect(calls).toHaveLength(6);
+    for (const s of calls) expect(s.headers["authorization"]).toMatch(/^Bearer ghs_plan\d+$/);
+  });
+
+  it("a login that could not be a user name is none without any request, and a path trick in a login is not sent", async () => {
+    const { gh: g, client } = await setup({ collaborators: { boss: "admin" } });
+    for (const login of ["", "a/b", "../x", "boss/permission?x=1", "a b", "-x", "x".repeat(40)]) expect(await readAuthorPermission(client, REPO, login), login).toBe("none");
+    expect(g.server.seen).toHaveLength(0);
+  });
+
+  it("a server error is github_unavailable, never none: a failed lookup cannot read as a decision", async () => {
+    const { gh: g } = await setup({ collaborators: { boss: "admin" } });
+    const flaky = createPlanReadClient({
+      resolveInstallation: async () => ({ installationId: 777, appKind: "team_readonly" }),
+      appCredentials: creds,
+      requester: g.requester,
+      fetchImpl: async (u, i) => (String(u).includes("/collaborators/") ? new Response("oops", { status: 502 }) : g.fetch(u, i)),
+    })(TARGET);
+    expect(await code(readAuthorPermission(flaky, REPO, "boss"))).toBe("github_unavailable");
+  });
+});
+
+describe("the plan source (levels 2 and 3 read through the same read-only client)", () => {
+  it("reads the issues list once for pulls() and issues(), and every request is a GET under the repo or an allowlisted POST /graphql", async () => {
+    const items = [merged(1, "pr one", "Closes D#7:T1"), { number: 2, title: "an issue", body: null, state: "open" as const }, { number: 3, title: "old", body: null, state: "closed" as const }];
+    gh = await startPlanGithub(newFakeState({ items, collaborators: { maint: "maintain" }, discussions: [{ number: 7, title: "Plan", body: "## Spec\n| Task | D |\n|---|---|\n| T1 | x |", closed: false, comments: [{ databaseId: 1, body: "## Correction C1", login: "maint" }] }] }));
+    const source = createPlanSourceFactory({ resolveInstallation: async () => ({ installationId: 777, appKind: "team_readonly" }), appCredentials: creds, requester: gh.requester, fetchImpl: gh.fetch })(TARGET);
+    const pulls = await source.pulls();
+    const issues = await source.issues();
+    expect(pulls.pulls.map((p) => [p.number, p.state, p.dLines])).toEqual([[1, "merged", ["Closes D#7:T1"]]]);
+    expect(issues.issues).toEqual([{ number: 2, title: "an issue", state: "open" }, { number: 3, title: "old", state: "closed" }]);
+    const d = await source.discussions();
+    expect(d.discussions).toMatchObject([{ number: 7, title: "Plan", closed: false }]);
+    expect((await source.discussionComments(7)).comments).toMatchObject([{ body: "## Correction C1", authorLogin: "maint" }]);
+    expect(await source.authorPermission("maint")).toBe("maintain");
+    expect(gh.server.seen.filter((s) => s.path.endsWith("/issues"))).toHaveLength(1);
+    const log = source.evidence().requests;
+    expect(log.length).toBe(4); // one issues page, Discussions, comments, one permission
+    for (const e of log) expect((e.method === "GET" && e.path.startsWith("/repos/acme/widgets/")) || (e.method === "POST" && e.path.startsWith("/graphql ")), `${e.method} ${e.path}`).toBe(true);
+    expect(gh.mints).toHaveLength(1);
   });
 });
 

@@ -55,6 +55,8 @@ export interface FakeGithubState {
   files: Map<string, string>;
   items: FakeItem[];
   discussions: FakeDiscussion[];
+  /** Repository roles by login. A login that is not here is not a user: the permission route answers 404. */
+  collaborators: Record<string, "admin" | "maintain" | "write" | "triage" | "read" | "none">;
   /** What the installation holds. A mint asking for more is a 422. */
   installPermissions: Record<string, "read" | "write">;
   /** How long a minted token lives (default one hour, as GitHub). */
@@ -93,6 +95,7 @@ export function newFakeState(over: Partial<FakeGithubState> = {}): FakeGithubSta
     files: new Map(),
     items: [],
     discussions: [],
+    collaborators: {},
     installPermissions: { metadata: "read", contents: "read", issues: "read", pull_requests: "read", discussions: "read" },
     faults: {},
     ...over,
@@ -294,6 +297,19 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
         return { status: 200, headers: { "content-type": "application/vnd.github.raw; charset=utf-8", "content-length": String(Buffer.byteLength(content)) }, body: content };
       }
       return jsonReply(200, { type: "file", name: path.split("/").pop(), path, sha: "b".repeat(40), size: Buffer.byteLength(content), encoding: "base64", content: Buffer.from(content).toString("base64") });
+    }
+
+    const collab = new RegExp(`^${repoBase}/collaborators/([^/]+)/permission$`).exec(req.path);
+    if (collab) {
+      // Like the real route: `permission` is the legacy four-level answer (maintain reads as write, triage as read) and
+      // `role_name` is the exact role. Needs metadata read.
+      const denied = needs(cred.permissions, "metadata");
+      if (denied) return denied;
+      const login = decodeURIComponent(collab[1]!);
+      const role = state.collaborators[login];
+      if (role === undefined) return ghError(404, "Not Found");
+      const legacy = { admin: "admin", maintain: "write", write: "write", triage: "read", read: "read", none: "none" }[role];
+      return jsonReply(200, { permission: legacy, role_name: role, user: { login } });
     }
 
     if (req.path === `${repoBase}/issues`) {

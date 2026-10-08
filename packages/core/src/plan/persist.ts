@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { withTenant } from '../tenancy/withTenant.js';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import type { ComputedPlan, ComputedTask } from './computePlan.js';
+import type { ItemProposal } from './issuesLevel.js';
 import type { OwnerProcess } from './ownerProcess.js';
 import type { ParsedPlan } from './roadmapFile.js';
 
@@ -94,11 +95,20 @@ export async function beginPlanImport(pool: Pool, principal: ImportPrincipal, re
   }
 }
 
+export type ImportLevel = 'roadmap_file' | 'spec_tables' | 'issues_discussions';
+
 export interface SucceededImport {
   importId: string;
   repoId: string;
-  sourcePath: string;
+  /** Which level the import used (the fallback order is roadmap_file, spec_tables, issues_discussions). */
+  level: ImportLevel;
+  /** The roadmap file's path at level 1; null at the other levels. */
+  sourcePath: string | null;
+  /** Why an earlier level was passed over (the roadmap file's shape problem), shown with the level. */
+  fallbackNote?: string | null;
   sourceSha: string;
+  /** Level 3 only: one proposal per open issue and Discussion. */
+  itemProposals?: ItemProposal[];
   plan: ParsedPlan;
   computed: ComputedPlan;
   owner: OwnerProcess;
@@ -146,6 +156,17 @@ const PROPOSALS_SQL = `
         state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
         last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
 
+/** An open issue or Discussion becomes a proposal; a withdrawn one comes back to new; an approved or rejected one keeps its state. The owner is fixed when the row is created and never rewritten by an import. */
+const ITEM_PROPOSALS_SQL = `
+  INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, discussion_number, title, summary, provenance, owner_process, state, last_import_id)
+  SELECT $1::uuid, $2::uuid, p.dedupe_key, ARRAY[p.source], p.gh_number, p.discussion_number, left(p.title, 256), left(p.summary, 2000),
+         'external', p.owner, 'new', $3::uuid
+    FROM jsonb_to_recordset($4::jsonb) AS p(dedupe_key text, source text, gh_number int, discussion_number int, title text, summary text, owner text)
+  ON CONFLICT (repo_id, dedupe_key) DO UPDATE
+    SET title = EXCLUDED.title, summary = EXCLUDED.summary,
+        state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
+        last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
+
 function taskPayload(t: ComputedTask): Record<string, unknown> {
   return {
     task_key: t.key,
@@ -182,16 +203,22 @@ export async function writeSucceededImport(pool: Pool, principal: ImportPrincipa
     // Proposals: remaining leaf tasks only. Done tasks never become proposals.
     const remaining = w.computed.tasks.filter((t) => t.status !== 'done').map(taskPayload);
     await client.query(PROPOSALS_SQL, [accountId, w.repoId, w.importId, JSON.stringify(remaining), w.owner]);
-    // A `new` proposal this import did not touch belongs to a task that is now done or gone: derived, so withdrawn.
+    if (w.itemProposals && w.itemProposals.length > 0) {
+      const items = w.itemProposals.map((p) => ({ dedupe_key: p.dedupeKey, source: p.source, gh_number: p.ghNumber, discussion_number: p.discussionNumber, title: p.title, summary: p.summary, owner: p.owner }));
+      await client.query(ITEM_PROPOSALS_SQL, [accountId, w.repoId, w.importId, JSON.stringify(items)]);
+    }
+    // A `new` proposal this import did not touch belongs to a task, issue or Discussion that is now done, closed or gone (or to a
+    // level the repo no longer uses): derived, so withdrawn. A proposal from another source (a preview) is not the importer's.
     await client.query(
       `UPDATE proposals SET state = 'withdrawn', last_import_id = $2::uuid, updated_at = now()
-        WHERE repo_id = $1::uuid AND state = 'new' AND dedupe_key LIKE 'plan:%' AND last_import_id IS DISTINCT FROM $2::uuid`,
+        WHERE repo_id = $1::uuid AND state = 'new' AND sources && ARRAY['plan_task', 'github_issue', 'github_discussion']::text[]
+          AND last_import_id IS DISTINCT FROM $2::uuid`,
       [w.repoId, w.importId],
     );
     await client.query(
       `UPDATE plan_imports
-          SET state = 'succeeded', level = 'roadmap_file', source_path = $2, source_sha = $3, counts = $4::jsonb, truncated = $5,
-              max_merged_pr = $6, github_requests = $7::jsonb, token_permissions = $8::jsonb, finished_at = now()
+          SET state = 'succeeded', level = $9, source_path = $2, source_sha = $3, counts = $4::jsonb, truncated = $5,
+              max_merged_pr = $6, github_requests = $7::jsonb, token_permissions = $8::jsonb, error_detail = $10, finished_at = now()
         WHERE id = $1::uuid`,
       [
         w.importId,
@@ -202,6 +229,8 @@ export async function writeSucceededImport(pool: Pool, principal: ImportPrincipa
         w.maxMergedPr,
         JSON.stringify(w.evidence.requests),
         JSON.stringify(w.evidence.tokenPermissions ?? {}),
+        w.level,
+        w.fallbackNote ? w.fallbackNote.slice(0, 500) : null,
       ],
     );
   });
