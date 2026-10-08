@@ -1,3 +1,4 @@
+import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
@@ -69,10 +70,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * a uuid; this check is the second lock, on the joined path itself.
  */
 export function jobDirFor(jobsDir: string, runId: string): string {
-  const jobDir = path.join(jobsDir, runId);
-  const rel = path.relative(jobsDir, jobDir);
-  if (rel !== runId || rel === "" || rel === "." || rel === ".." || rel.includes(path.sep) || rel.includes("/") || path.isAbsolute(rel)) throw new EngineRefusal("bad_start_options", "run id is not a single path segment");
-  return jobDir;
+  try {
+    return segmentUnder(jobsDir, runId);
+  } catch (error) {
+    if (error instanceof NotAPlainSegment) throw new EngineRefusal("bad_start_options", "run id is not a single path segment");
+    throw error;
+  }
 }
 
 /** The sandbox block must switch the sandbox on and leave no way out of it; anything else would start the agent with Bash and no OS sandbox. */
