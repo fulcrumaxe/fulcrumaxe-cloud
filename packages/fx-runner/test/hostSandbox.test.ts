@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRuntime } from "@fulcrumaxe/runner-protocol";
-import { cleanEnv } from "../src/job/cleanEnv.js";
+import { cleanEnv, type CleanEnvOptions } from "../src/job/cleanEnv.js";
 import { AgentRunFailed, HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbox.js";
 import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
 
-function setup(over: { hold?: boolean; done?: unknown } = {}) {
+function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions } = {}) {
   const blocks: Block[] = [];
   const starts: unknown[] = [];
   const stops: unknown[] = [];
@@ -32,6 +32,7 @@ function setup(over: { hold?: boolean; done?: unknown } = {}) {
   const tempRoot = mkdtempSync(path.join(tmpdir(), "r4b13_host-"));
   const host = createHostSandbox({
     credentials: { mode: "subscription" },
+    ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),
     makeRuntime: (sandbox) => {
       blocks.push(sandbox as Block);
       return runtime;
@@ -41,6 +42,7 @@ function setup(over: { hold?: boolean; done?: unknown } = {}) {
     binaryDir: `${HOME}/.local/bin`,
     registries: ["registry.npmjs.org"],
     tempRoot,
+    workspaceRoot: tmpdir(),
   });
   const workdir = mkdtempSync(path.join(tmpdir(), "r4b13_wd-"));
   const opts = (more: Partial<StartDetachedOptions> = {}): StartDetachedOptions => ({
@@ -73,6 +75,16 @@ describe("hostSandbox: refusals happen before anything is built or started", () 
     expect(() => t.host.startDetached(handle, t.opts({ env: { ...cleanEnv({ mode: "subscription" }), GH_TOKEN: "x" } }))).toThrow("env_not_clean");
     expect(() => t.host.startDetached(handle, t.opts({ workdir: "relative" }))).toThrow("bad_workdir");
     expect(t.starts).toEqual([]);
+  });
+
+  it("with extra PATH directories configured, env must carry exactly them: the plain clean env is refused, and so is a different set", async () => {
+    const tools = { extraPathDirs: ["/nix/store/aaa-bubblewrap/bin", "/nix/store/bbb-socat/bin"] };
+    const t = setup({ envOptions: tools });
+    const handle = await t.create();
+    expect(() => t.host.startDetached(handle, t.opts({ env: cleanEnv({ mode: "subscription" }) }))).toThrow("env_not_clean");
+    expect(() => t.host.startDetached(handle, t.opts({ env: cleanEnv({ mode: "subscription" }, { extraPathDirs: ["/nix/store/other/bin"] }) }))).toThrow("env_not_clean");
+    expect(t.starts).toEqual([]);
+    expect(() => t.host.startDetached(handle, t.opts({ env: cleanEnv({ mode: "subscription" }, tools) }))).not.toThrow();
   });
 
   it("a second start while the first is running is refused", async () => {
@@ -160,6 +172,16 @@ describe("hostSandbox: the sandbox name is one plain segment", () => {
     expect(existsSync(t.tempRoot)).toBe(true);
   });
 
+  it("refuses a name that is already live, keeps the first sandbox's directory, and takes the name again once it is deleted", async () => {
+    const t = setup();
+    const first = await t.create("rn-dup");
+    await expect(t.create("rn-dup")).rejects.toMatchObject({ code: "sandbox_exists" });
+    expect(await t.host.sandboxExists(first)).toBe(true);
+    expect(readdirSync(t.tempRoot)).toEqual(["rn-dup"]);
+    await t.host.deleteSandbox(first);
+    await expect(t.create("rn-dup")).resolves.toMatchObject({ sandboxName: "rn-dup" });
+  });
+
   it("still takes an ordinary name", async () => {
     const t = setup();
     await t.create("rn-0a1b2c3d-4e5f.6");
@@ -168,7 +190,7 @@ describe("hostSandbox: the sandbox name is one plain segment", () => {
 });
 
 describe("hostSandbox: the engine's outcome is carried through", () => {
-  it.each(["credential_mismatch", "no_init_line", "claude_flags_unsupported", "agent_error", "agent_exit"])("a failed outcome %s rejects hookFired with that code", async (failureReason) => {
+  it.each(["credential_mismatch", "no_init_line", "claude_flags_unsupported", "permission_mode_forced", "agent_error", "agent_exit"])("a failed outcome %s rejects hookFired with that code", async (failureReason) => {
     const t = setup({ done: Promise.resolve({ status: "failed", failureReason, engineVersion: "2.1.289" }) });
     const handle = await t.create();
     const error = await t.host.startDetached(handle, t.opts()).hookFired.then(() => undefined, (e: unknown) => e);
@@ -190,6 +212,6 @@ describe("hostSandbox: the block goes through the one builder and its guard", ()
   it("calls sandboxSettings and checks the block before the runtime is made", () => {
     const host = readFileSync(path.join(import.meta.dirname, "..", "src", "sandbox", "hostSandbox.ts"), "utf8");
     expect(host).toContain("sandboxSettings({");
-    expect(host.indexOf("assertEnabledSandbox(sandbox)")).toBeLessThan(host.indexOf("config.makeRuntime(sandbox)"));
+    expect(host.indexOf("assertEnabledSandbox(sandbox)")).toBeLessThan(host.indexOf("config.makeRuntime(sandbox,"));
   });
 });

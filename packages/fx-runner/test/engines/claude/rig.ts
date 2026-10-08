@@ -3,10 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { StartOptions } from "@fulcrumaxe/runner-protocol";
 import { createClaudeEngine, type EngineConfig } from "../../../src/engines/claude/engine.js";
+import { protectedPaths } from "../../../src/sandbox/sandboxSettings.js";
 import { storedBinarySource } from "../../../src/engines/claude/pin.js";
 import { RUN_ID, countingSpawn, fixtureText, makeFake, type Fake } from "./harness.js";
 
 export * from "./harness.js";
+
+/** The least a sandbox block must say for the engine to start: on, strict, no auto-allow. */
+export const ON_BLOCK = { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false };
 
 export interface Rig {
   fake: Fake;
@@ -18,7 +22,7 @@ export interface Rig {
 }
 
 /** An engine over a fake binary, with every directory under one temporary root and a spawn wrapper that counts calls. */
-export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; onLocalEvent?: EngineConfig["onLocalEvent"]; sandbox?: Record<string, unknown> } = {}): Rig {
+export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; envOptions?: EngineConfig["envOptions"]; onLocalEvent?: EngineConfig["onLocalEvent"]; sandbox?: Record<string, unknown> } = {}): Rig {
   const fake = over.fake ?? makeFake();
   const root = mkdtempSync(path.join(tmpdir(), "r4b12_rig-"));
   const workdir = path.join(root, "workspace");
@@ -27,12 +31,14 @@ export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credent
   const config: EngineConfig = {
     binary: storedBinarySource({ storedPath: fake.binary, cacheDir: path.join(root, "cache"), spawn: counting }),
     credentials: over.credentials ?? { mode: "subscription" },
-    sandboxSettings: over.sandbox ?? { enabled: true },
+    sandboxSettings: over.sandbox ?? ON_BLOCK,
+    protectedPaths: protectedPaths({ home: path.join(root, "home"), stateDir: path.join(root, "home", ".fx-runner"), binaryDir: path.dirname(fake.binary) }),
     jobsDir: path.join(root, "jobs"),
     logDir: path.join(root, "logs"),
     sessionsFile: path.join(root, "sessions.json"),
     spawn: counting,
     ...(over.onLocalEvent === undefined ? {} : { onLocalEvent: over.onLocalEvent }),
+    ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),
   };
   return {
     fake,

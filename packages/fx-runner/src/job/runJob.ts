@@ -1,4 +1,4 @@
-import type { CredentialMode } from "./cleanEnv.js";
+import type { CleanEnvOptions, CredentialMode } from "./cleanEnv.js";
 import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
@@ -38,6 +38,8 @@ export interface RunJobDeps {
   workspaces: WorkspaceStore;
   ledger: JobLedger;
   credentials: CredentialMode;
+  /** Must equal what the sandbox tier and the engine were given, or the tier refuses the job's environment. */
+  envOptions?: CleanEnvOptions;
   /** Decides resume or fresh from the job's `continues` and this machine's own session index. */
   planSession: (continues: RunnableJob["continues"]) => SessionPlan;
   /** The model when the job names none. */
@@ -83,7 +85,9 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
   const reasons = jobHashRefusals(job);
   if (reasons.length > 0) return { status: "refused", reasons };
 
-  const plan = deps.planSession(job.continues);
+  // The session index is a file on this machine: a recorded workspace that is not one of this store's own directories is never run in. Start fresh instead.
+  const planned = deps.planSession(job.continues);
+  const plan: SessionPlan = planned.kind === "resume" && !deps.workspaces.owns(planned.workspace) ? { kind: "fresh", branch: job.continues?.branch ?? null } : planned;
   const workspace = plan.kind === "resume" ? plan.workspace : await deps.workspaces.create(job.run_id);
   const wallClockMs = deps.wallClockMs ?? DEFAULT_WALL_CLOCK_MS;
   const start = {
@@ -95,7 +99,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     workdir: workspace,
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
-    env: cleanEnv(deps.credentials),
+    env: cleanEnv(deps.credentials, deps.envOptions),
     onEvent: deps.onEvent ?? (() => undefined),
   };
 

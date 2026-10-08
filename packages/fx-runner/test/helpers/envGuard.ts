@@ -48,6 +48,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keys.ts": ["crypto"],
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
+  "src/engines/claude/filePermissions.ts": ["path"],
   "src/engines/claude/pin.ts": ["fs", "path"],
   "src/engines/claude/session.ts": ["crypto", "fs", "path"], // crypto: random temp-file names for the index write
   "src/engines/claude/processGroup.ts": [],
@@ -58,7 +59,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/hostSandbox.ts": ["fs", "path"],
   "src/sandbox/platform.ts": ["os"],
   "src/sandbox/select.ts": ["fs", "path"],
-  "src/sandbox/sandboxSettings.ts": ["path"],
+  "src/sandbox/sandboxSettings.ts": ["fs", "path"],
   "src/job/plainSegment.ts": ["path"],
 };
 

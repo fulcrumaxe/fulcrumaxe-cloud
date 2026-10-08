@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import type { SpawnFn } from "../../../src/engines/claude/capture.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
-export const DEFAULT_VERSION = "2.1.289";
+/** The build the committed fixtures were captured from. */
+export const CAPTURED_VERSION = "2.1.289";
+/** What the fake prints for `--version`: at least `MIN_CLAUDE_VERSION`, or the engine would refuse it. */
+export const DEFAULT_VERSION = "2.1.294";
 
 /** A run id as the job schema types it: a uuid. */
 export const RUN_ID = "3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";
@@ -80,6 +83,7 @@ esac
 printf '%s\\n' "$@" > "$D/argv.txt"
 env > "$D/env.txt"
 cat > "$D/stdin.txt"
+[ -f "$D/stderr-first.txt" ] && cat "$D/stderr-first.txt" >&2
 cat "$D/stream.jsonl"
 [ -f "$D/stderr.txt" ] && cat "$D/stderr.txt" >&2
 [ -f "$D/hang" ] && exec sleep 30

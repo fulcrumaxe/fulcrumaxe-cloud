@@ -46,7 +46,7 @@ describe("the captured 2.1.289 run (init, two assistant lines, a rate-limit line
     const rig = makeRig({ onLocalEvent: (event) => void local.push(event) });
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
-    expect(await outcomeOf(handle)).toEqual({ status: "ok", engineVersion: "2.1.289", sessionId: "REDACTED-session_id" });
+    expect(await outcomeOf(handle)).toEqual({ status: "ok", engineVersion: "2.1.294", sessionId: "REDACTED-session_id" });
     expect((opts.events as Array<{ type: string }>).map((event) => event.type)).toEqual(["system", "assistant", "assistant", "system", "result"]);
     expect(local.map((event) => event.type)).toEqual(["engine_version", "usage"]);
     expect(local[1]).toMatchObject({ usage: { input: 9, output: 56 } });

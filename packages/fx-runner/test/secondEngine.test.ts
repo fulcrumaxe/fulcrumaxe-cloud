@@ -40,6 +40,7 @@ describe("a second engine runs through the same runJob and the same host tier, w
       stateDir: "/home/jane/.fx-runner",
       binaryDir: "/opt/other-engine/bin",
       tempRoot: path.join(root, "tmp"),
+      workspaceRoot: path.join(root, "workspaces"),
     });
     const events: NormalizedEvent[] = [];
     const out = await runJob(

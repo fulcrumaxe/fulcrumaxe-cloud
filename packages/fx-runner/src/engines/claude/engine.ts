@@ -2,13 +2,15 @@ import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
-import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CredentialMode } from "../../job/cleanEnv.js";
+import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
+import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
 import { claudeArgv } from "./argv.js";
+import { confineFileTools } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
 import type { SpawnFn } from "./capture.js";
 import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
-import type { BinarySource } from "./pin.js";
+import { MIN_CLAUDE_VERSION, versionSupported, type BinarySource } from "./pin.js";
 import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { recordSession } from "./session.js";
@@ -18,6 +20,13 @@ import { LineBuffer, createRunLog, projectLocalOnly } from "./stream.js";
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLI_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+/**
+ * What the CLI writes to stderr when it overrides the permission mode a caller asked for (it does that whenever
+ * `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is set and a non-default mode was passed). This engine passes none, so seeing it
+ * means a build or an argument list changed under it: the run is stopped and fails closed instead of carrying on with
+ * a mode nobody chose.
+ */
+export const PERMISSION_MODE_FORCED = /permission mode forced to default/i;
 
 export interface EngineConfig {
   /**
@@ -26,8 +35,12 @@ export interface EngineConfig {
    */
   binary: BinarySource;
   credentials: CredentialMode;
+  /** Extra directories on the agent's PATH (the sandbox tools' own). The job runner and the sandbox tier must be given the same value, or the tier refuses the job's environment. */
+  envOptions?: CleanEnvOptions;
   /** The sandbox block of the settings file. It comes from the host sandbox tier's one builder; this engine only writes it. */
   sandboxSettings: Record<string, unknown>;
+  /** The protected paths the sandbox tier computed with that block; the settings file's file-tool deny rules come from them. */
+  protectedPaths: ProtectedPaths;
   /** Per-job settings files go under here, outside every workspace. */
   jobsDir: string;
   /** `<run>.jsonl` raw transcripts (0600). */
@@ -44,7 +57,7 @@ export interface EngineConfig {
 /** How a run ended. `failureReason` is a closed code; no model text is ever in it. */
 export interface RunOutcome {
   status: "ok" | "failed";
-  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "agent_error" | "agent_exit";
+  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit";
   /** The agent build the run used. */
   engineVersion: string;
   sessionId?: string;
@@ -80,7 +93,13 @@ export function jobDirFor(jobsDir: string, runId: string): string {
 
 /** The sandbox block must switch the sandbox on and leave no way out of it; anything else would start the agent with Bash and no OS sandbox. */
 function sandboxIsOn(sandbox: Record<string, unknown>): boolean {
-  return sandbox.enabled === true && sandbox.allowUnsandboxedCommands !== true;
+  try {
+    assertEnabledSandbox(sandbox);
+    return true;
+  } catch {
+    // fx-swallow-ok: the caller refuses the start with a closed reason
+    return false;
+  }
 }
 
 /**
@@ -106,12 +125,14 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
     if (!sandboxIsOn(config.sandboxSettings)) throw new EngineRefusal("bad_start_options", "sandbox block is not enabled");
     const jobDir = jobDirFor(config.jobsDir, opts.runId);
 
-    const env = cleanEnv(config.credentials);
+    const env = cleanEnv(config.credentials, config.envOptions);
     const binary = await config.binary(env);
+    // The minimum is enforced here too, so a BinarySource other than storedBinarySource cannot get a build below it past the engine.
+    if (!versionSupported(binary.version)) throw new EngineRefusal("claude_version_unsupported", `version ${binary.version} is older than ${MIN_CLAUDE_VERSION}; upgrade Claude Code`);
     if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn })).present) throw new EngineRefusal("auth_missing");
 
-    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings);
-    const argv = claudeArgv({ cliModel: opts.model, roleTools, ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
+    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths);
+    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: confineFileTools(roleTools, path.resolve(workdir)), ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
 
@@ -128,6 +149,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
       let sawInit = false;
       let mismatch = false;
       let noInit = false;
+      let modeForced = false;
       let result: Record<string, unknown> | undefined;
       let sessionId: string | undefined;
       let agentOutput: Record<string, unknown> | undefined;
@@ -140,7 +162,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
 
       const handleLine = async (line: string): Promise<void> => {
         log.write("stdout", line);
-        if (mismatch || noInit || line.trim() === "") return;
+        if (mismatch || noInit || modeForced || line.trim() === "") return;
         let message: unknown;
         try {
           message = JSON.parse(line);
@@ -187,12 +209,17 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
       child.stderr?.on("data", (chunk: string) => {
         log.write("stderr", chunk);
         if (stderrTail.length < 4096) stderrTail += chunk;
+        // The warning can arrive split across chunks, so the accumulated tail is searched as well as the chunk.
+        if (!modeForced && (PERMISSION_MODE_FORCED.test(chunk) || PERMISSION_MODE_FORCED.test(stderrTail))) {
+          modeForced = true;
+          void terminateGroup(child, graceMs);
+        }
       });
       child.on("error", () => resolve({ status: "failed", failureReason: "agent_exit", engineVersion }));
       child.on("close", (code) => {
         lineBuffer.end().forEach(enqueue);
         void chain.then(async () => {
-          if (sessionId !== undefined && !mismatch && !noInit) {
+          if (sessionId !== undefined && !mismatch && !noInit && !modeForced) {
             try {
               await recordSession(config.sessionsFile, sessionId, workdir);
             } catch {
@@ -200,7 +227,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
             }
           }
           const base = { engineVersion, ...(sessionId === undefined ? {} : { sessionId }), ...(agentOutput === undefined ? {} : { agentOutput }) };
-          if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });
+          if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
+          else if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });
           else if (noInit) resolve({ status: "failed", failureReason: "no_init_line", engineVersion });
           // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.
           else if (!sawInit && code !== 0 && /unknown (option|argument)|unrecognized (option|argument)|invalid option/i.test(stderrTail)) resolve({ status: "failed", failureReason: "claude_flags_unsupported", engineVersion });

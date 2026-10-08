@@ -61,6 +61,7 @@ function depsFor(port: SandboxPort, over: Partial<RunJobDeps> = {}) {
         created.push(runId);
         return `/work/${runId}`;
       },
+      owns: (dir) => path.dirname(path.resolve(dir)) === "/work" && dir === path.resolve(dir),
       async discard(dir) {
         discarded.push(dir);
       },
@@ -89,6 +90,14 @@ describe("runJob: one path through the port", () => {
     expect(started[0]!.prompt).toContain("Implement the change.");
   });
 
+  it("hands the sandbox the clean environment with the configured extra PATH directories", async () => {
+    const { port, started } = recordingPort();
+    const envOptions = { extraPathDirs: ["/nix/store/aaa-bubblewrap/bin"] };
+    await runJob(jobWith(), { ...depsFor(port).deps, envOptions });
+    expect(started[0]!.env).toEqual(cleanEnv({ mode: "subscription" }, envOptions));
+    expect(started[0]!.env.PATH).toContain("/nix/store/aaa-bubblewrap/bin");
+  });
+
   it("uses the job's model hint over the default", async () => {
     const { port, started } = recordingPort();
     await runJob(jobWith({ model_hint: "opus" }), depsFor(port).deps);
@@ -103,6 +112,18 @@ describe("runJob: one path through the port", () => {
     expect(calls).toContain("resume:sess-7");
     expect(created).toEqual([]);
     expect(started[0]!.workdir).toBe("/work/old");
+  });
+
+  it("does not resume in a recorded workspace that is not directly under the workspace root: it starts fresh in a new one", async () => {
+    for (const recorded of ["/home/jane/.ssh", "/work", "/work/a/b", "/elsewhere/old", "/work/../etc"]) {
+      const { port, calls, started } = recordingPort();
+      const { deps, created } = depsFor(port, { planSession: () => ({ kind: "resume", sessionId: "sess-7", workspace: recorded }) });
+      const out = await runJob(jobWith({ continues: { parent_run_id: RUN, session_id: "sess-7", branch: "fx/x" } }), deps);
+      expect(out, recorded).toMatchObject({ status: "done", workspace: `/work/${RUN}` });
+      expect(calls.some((c) => c.startsWith("resume:")), recorded).toBe(false);
+      expect(created, recorded).toEqual([RUN]);
+      expect(started[0]!.workdir, recorded).toBe(`/work/${RUN}`);
+    }
   });
 
   it("passes the plan's choice the job's own continues value", async () => {

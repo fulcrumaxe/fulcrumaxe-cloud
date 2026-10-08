@@ -14,7 +14,7 @@ describe("stream", () => {
     const opts = rig.startOptions();
     const { handle } = await engineFor(rig).start(opts);
     const outcome = await outcomeOf(handle);
-    expect(outcome).toEqual({ status: "ok", engineVersion: "2.1.289", sessionId: "sess-0001", agentOutput: { verdict: "done" } });
+    expect(outcome).toEqual({ status: "ok", engineVersion: "2.1.294", sessionId: "sess-0001", agentOutput: { verdict: "done" } });
     expect((opts.events as Array<{ type: string; seq: number }>).map((event) => [event.type, event.seq])).toEqual([["system", 0], ["assistant", 1], ["user", 2], ["result", 3]]);
     // The local transcript keeps the model's text; the cloud-bound events have no field that could hold it.
     expect(JSON.stringify(opts.events)).toContain("PRIVATE-MODEL-TEXT");
