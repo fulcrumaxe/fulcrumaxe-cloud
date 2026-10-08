@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { insertAgentRun, writeRunStatus } from "../src/runStatusWriter.js";
 import { IllegalRunTransitionError } from "../src/statusTransitions.js";
+import { createRunGuard, resolveRunLimits } from "../src/meteringGuard.js";
+import { buildTerminalReport } from "../src/targets/sandboxTarget.js";
+import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
@@ -211,5 +214,74 @@ describe("runStatusWriter [pg]", () => {
 
     const lateWatchdog = await writeRunStatus(db.runWriterPool, { accountId, runId: id, from: "running", to: "timed_out" });
     expect(lateWatchdog).toEqual({ updated: false, currentStatus: "cancelled" });
+  });
+  // D#221 OM-1 (0744): the metered model-response count. The figure travels the same way it does in a real run:
+  // the run guard counts, the terminal report carries it, writeRunStatus stores it.
+  describe("metered_model_calls (D#221 OM-1)", () => {
+    async function terminalWithIds(accountId: string, ids: string[]): Promise<string> {
+      const id = await insertPending(accountId);
+      await writeRunStatus(db.runWriterPool, { accountId, runId: id, from: "pending", to: "running" });
+      const guard = createRunGuard(resolveRunLimits(), () => undefined);
+      for (const messageId of ids) guard.observe({ type: "assistant", messageId, usage: undefined });
+      const report = buildTerminalReport(undefined, undefined, 0, { tokens: { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }, flags: [], modelCalls: guard.modelCalls() });
+      const written = await writeRunStatus(db.runWriterPool, { accountId, runId: id, from: "running", to: report.status, metering: report.metering });
+      expect(written).toEqual({ updated: true });
+      return id;
+    }
+    const stored = async (id: string): Promise<number | null> =>
+      (await db.admin.query(`SELECT metered_model_calls AS n FROM agent_runs WHERE id = $1`, [id])).rows[0].n;
+
+    it("a run with 3 distinct assistant ids stores 3", async () => {
+      const { accountId } = await seedFreshAccount();
+      expect(await stored(await terminalWithIds(accountId, ["m1", "m2", "m3"]))).toBe(3);
+    });
+
+    it("a repeated message id is counted once", async () => {
+      const { accountId } = await seedFreshAccount();
+      expect(await stored(await terminalWithIds(accountId, ["m1", "m1", "m2", "m1", "m2"]))).toBe(2);
+    });
+
+    it("a run that ends before any model call stores 0, not NULL", async () => {
+      const { accountId } = await seedFreshAccount();
+      expect(await stored(await terminalWithIds(accountId, []))).toBe(0);
+    });
+
+    it("a run with no terminal write (a runner crash) stays NULL, and a terminal write with no count leaves NULL", async () => {
+      const { accountId } = await seedFreshAccount();
+      const running = await insertPending(accountId);
+      await writeRunStatus(db.runWriterPool, { accountId, runId: running, from: "pending", to: "running" });
+      expect(await stored(running)).toBeNull();
+      const lost = await insertPending(accountId);
+      await writeRunStatus(db.runWriterPool, { accountId, runId: lost, from: "pending", to: "running" });
+      await writeRunStatus(db.runWriterPool, { accountId, runId: lost, from: "running", to: "failed", metering: { meteredUsd: null, reportedUsd: null, flags: ["no_metering"] } });
+      expect(await stored(lost)).toBeNull();
+    });
+
+    it("an app_user update of the column is refused", async () => {
+      const { accountId } = await seedFreshAccount();
+      const id = await insertPending(accountId);
+      await expect(
+        withTenant(db.pureAppUserPool, accountId, (c) => c.query(`UPDATE agent_runs SET metered_model_calls = 5 WHERE id = $1`, [id])),
+      ).rejects.toMatchObject({ code: "42501" });
+      expect(await stored(id)).toBeNull();
+    });
+
+    it("write-once: a second terminal write cannot change it, and no later UPDATE can either", async () => {
+      const { accountId } = await seedFreshAccount();
+      const id = await terminalWithIds(accountId, ["m1", "m2"]);
+      const again = await writeRunStatus(db.runWriterPool, { accountId, runId: id, from: "running", to: "failed", metering: { meteredUsd: null, reportedUsd: null, flags: [], modelCalls: 9 } });
+      expect(again).toEqual({ updated: false, currentStatus: "failed" });
+      await expect(db.admin.query(`UPDATE agent_runs SET metered_model_calls = 9 WHERE id = $1`, [id])).rejects.toMatchObject({ code: "23514" });
+      expect(await stored(id)).toBe(2);
+    });
+
+    it("the count is only accepted together with a terminal status", async () => {
+      const { accountId } = await seedFreshAccount();
+      const id = await insertPending(accountId);
+      await expect(
+        writeRunStatus(db.runWriterPool, { accountId, runId: id, from: "pending", to: "running", metering: { meteredUsd: 0, reportedUsd: null, flags: [], modelCalls: 1 } }),
+      ).rejects.toMatchObject({ code: "23514" });
+      await expect(db.admin.query(`UPDATE agent_runs SET metered_model_calls = 1 WHERE id = $1`, [id])).rejects.toMatchObject({ code: "23514" });
+    });
   });
 });

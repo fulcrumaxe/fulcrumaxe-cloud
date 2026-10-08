@@ -1058,6 +1058,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           for (const line of assembler.finish()) await deliver(line);
         } finally {
           guard.stop();
+          try {
+            opts.onModelCalls?.(guard.modelCalls());
+          } catch {
+            // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
+          }
           clearTimeout(timeWarning);
           // Not awaited: on a stream blocked mid-read the close would wait
           // for the read that never finishes.

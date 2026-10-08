@@ -109,7 +109,7 @@ export interface TerminalReport {
   /** Why a `killed_spend` run was killed: its own cap, or the monthly budget. */
   abortReason?: "per_run_cap" | "monthly_budget";
   /** The metering summary (C46 MP-PLAUS; produced by H14c-5b-2b). */
-  metering?: { meteredUsd: number; reportedUsd: number | null; flags: string[] };
+  metering?: { meteredUsd: number; reportedUsd: number | null; flags: string[]; modelCalls?: number };
 }
 
 /** The runner's own limit set (meteringGuard.ts), as carried on a run. */
