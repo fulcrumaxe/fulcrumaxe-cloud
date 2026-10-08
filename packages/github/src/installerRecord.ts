@@ -125,3 +125,40 @@ export async function recordInstallationLifecycle(
     }
   }
 }
+
+/**
+ * D#454 H2b2: the owner's restore of an installation the reconciler found listed by GitHub while we hold it as deleted
+ * (`deleted_but_listed`). It is the one change a webhook delivery never makes (GitHub sends no such action), so it is its own
+ * function, but it takes the same advisory lock, writes the same table, emits the same `installation.changed` event and then
+ * runs the same repo re-sync as an un-suspend. The CALLER must have confirmed with a fresh lookup, using that kind's own App
+ * JWT, that GitHub answers 200 for this very installation id; nothing here talks to GitHub for that.
+ *
+ * Returns false when there was nothing to restore (no deleted record).
+ */
+export async function restoreInstallation(
+  deps: InstallerRecordDeps,
+  kind: AppKind,
+  ghInstallationId: number,
+  /** The restore request's own call allowance for the repo re-sync (C2-H2c-1); on run-out the RepoListBudgetError is thrown AFTER the restore itself committed. */
+  meter?: { take(n?: number): boolean },
+): Promise<boolean> {
+  if (posInt(ghInstallationId) === null) return false;
+  const restored = await withPlatformOps(deps.platformOpsPool, async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [ghInstallationId]);
+    const res = await client.query(
+      "UPDATE installation_installers SET deleted_at = NULL, repo_list_etags = NULL WHERE gh_installation_id = $1 AND app_kind = $2 AND deleted_at IS NOT NULL",
+      [ghInstallationId, kind],
+    );
+    if ((res.rowCount ?? 0) === 0) return false;
+    const rows = await client.query<{ id: string; account_id: string }>(
+      "SELECT id, account_id FROM installations WHERE gh_installation_id = $1 AND app_kind = $2",
+      [ghInstallationId, kind],
+    );
+    for (const inst of rows.rows) {
+      await emitDomainEvent(client, { type: "installation.changed", accountId: inst.account_id, subjectId: inst.id, payload: { kind, state: "restored" } });
+    }
+    return true;
+  });
+  if (restored && (kind === "team" || kind === "team_readonly")) await syncClaimedInstallation(deps, kind, ghInstallationId, meter);
+  return restored;
+}

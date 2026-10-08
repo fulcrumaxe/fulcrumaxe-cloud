@@ -99,6 +99,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Reconciler report codes (D#454 H2b): the installation job's breaker and orphan findings.
   "breaker_tripped",
   "orphan_installation",
+  // D#454 H2b2: a kind whose App identity did not check out, a breaker release a run used, and a listed-but-deleted installation.
+  "app_identity_mismatch",
+  "breaker_released",
+  "deleted_but_listed",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

@@ -35,7 +35,7 @@ export const GITHUB_API_HOST = 'api.github.com';
 export const GITHUB_API_VERSION = '2022-11-28';
 export const RECONCILE_USER_AGENT = 'fulcrumaxe-cloud-reconciler';
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
-const PATH_RE = /^\/app\/installations(\/[0-9]+)?(\?[A-Za-z0-9_=&.-]*)?$/;
+const PATH_RE = /^\/app(\/installations(\/[0-9]+)?(\?[A-Za-z0-9_=&.-]*)?)?$/;
 
 export class GithubTransportError extends Error {
   constructor(reason: 'request_failed' | 'timeout' | 'aborted' | 'path_refused') {
@@ -49,7 +49,7 @@ export function createGithubAppApi(mintJwt: () => Promise<string>, transport: Gi
   let jwt: string | undefined;
   return {
     async get(path, options) {
-      // Only the two installation endpoints this job reads, so a bug in the caller cannot widen what it can reach.
+      // Only the App identity and the two installation endpoints this job reads, so a bug in the caller cannot widen what it can reach.
       if (!PATH_RE.test(path)) throw new GithubTransportError('path_refused');
       if (options.signal?.aborted) throw new GithubTransportError('aborted');
       jwt ??= await mintJwt();

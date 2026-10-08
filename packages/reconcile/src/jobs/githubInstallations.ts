@@ -1,13 +1,16 @@
 import { RECONCILE_ROUTE, type CallBudget, type JobContext, type JobResult, type ReconcileJob, type ReportError } from '../runner.js';
 import type { GithubAppApi, GithubAppResponse } from '../githubAppApi.js';
+import { breakerAllowance, consumeHold, readOpenHold, recordTrip } from '../breakerHolds.js';
 
 export const GITHUB_INSTALLATIONS_JOB = 'github_installations';
 /** Outside calls per run (the spec's GitHub budget, shared with the repo re-sync job's own allowance). */
 export const GITHUB_CALLS_PER_RUN = 300;
-/** A run that would detach more than this many installations of one kind detaches none. */
+/** A kind's run detaches nothing when its detaching changes exceed min(5, max(2, floor(0.1 x live))); see breakerAllowance. */
 export const BREAKER_MAX_DETACHES = 5;
-/** ...or more than this share of that kind's live installations. */
 export const BREAKER_MAX_SHARE = 0.1;
+export const BREAKER_MIN_ALLOWANCE = 2;
+/** A finished list that shares no id with at least this many live installations is read as the wrong App, not as mass deletion. */
+export const IDENTITY_MIN_LIVE = 3;
 /** Kinds in the order a run takes them. Each has its own GitHub App, and only that App's JWT can see its installations. */
 export const INSTALLATION_KINDS = ['team', 'team_readonly', 'sitekit'] as const;
 export type InstallationKind = (typeof INSTALLATION_KINDS)[number];
@@ -29,6 +32,8 @@ export interface InstallationChange {
 export interface GithubInstallationsDeps {
   /** The client for one kind's App, or null when that kind is not configured (it is then skipped, never borrowed from another kind). */
   api(kind: InstallationKind): GithubAppApi | null;
+  /** The slug this kind's App must report on `GET /app` (GITHUB_APP_*_SLUG), or null when the setting is unset. */
+  slug(kind: InstallationKind): string | null;
   /**
    * `meter` is this run's call allowance: an un-suspend re-syncs the installation's repos, and those GitHub calls take from it.
    * Throw an error named `RepoListBudgetError` when it ran out: the change itself was applied, the repo rows were left as they
@@ -82,9 +87,14 @@ const asId = (v: unknown): number | null => (typeof v === 'number' && Number.isS
  *  - every change goes through the webhook path's own lifecycle function (`apply`), so detaching repos, the events the
  *    open windows refresh on, and the advisory lock are the same as for a delivery;
  *  - an installation GitHub shows and we do not know is reported as an orphan and never bound;
- *  - the breaker: more than 5 detaching changes (deleted or suspend) for one kind, or more than 10% of that kind's live
- *    installations, and none of them is applied; the run ends `breaker_tripped`. Un-suspending detaches nothing, so
- *    it is not held back.
+ *  - the breaker: more than min(5, max(2, floor(0.1 x live))) detaching changes (deleted or suspend) for one kind, and
+ *    none of them is applied. The trip is recorded as a hold (migration 0748) that only the owner releases; the alert goes
+ *    out on the first trip of an id set. A release covers a later run whose detaching set is a subset of the released
+ *    ids. A tripped kind does not end the run or reset the cursor, so the other kinds are still read. Un-suspending
+ *    detaches nothing, so it is not held back;
+ *  - identity: before any lookup a kind's `GET /app` must report the configured slug, and a finished list must share an
+ *    id with the kind's live installations; otherwise that kind changes nothing and says so (`app_identity_mismatch`);
+ *  - an installation the list shows that we hold as deleted is reported (`deleted_but_listed`), never changed.
  */
 export function createGithubInstallationsJob(deps: GithubInstallationsDeps): ReconcileJob {
   const stage = `reconcile.${GITHUB_INSTALLATIONS_JOB}`;
@@ -97,13 +107,15 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
       const apis = INSTALLATION_KINDS.map((k) => deps.api(k));
       if (apis.every((a) => a === null)) return { cursor: null, wrapped: false, code: 'not_configured' };
 
-      // The cursor is "<kind index>:<last installation id finished>"; a bad one starts over.
-      const at = /^([0-2]):([0-9]{1,18})$/.exec(ctx.cursor ?? '');
+      // The cursor is "<kind index>:<last installation id finished>[:flags]"; a bad one starts over. The flags carry what
+      // earlier runs of this pass found: t = a kind tripped its breaker, f = a kind failed or could not prove which App it is.
+      // A pass that ends carrying either one is never a full pass.
+      const at = /^([0-2]):([0-9]{1,18})(?::([tf]{1,2}))?$/.exec(ctx.cursor ?? '');
       const startKind = at ? Number(at[1]) : 0;
       const startAfter = at ? Number(at[2]) : null;
-
-      let failed = false;
-      let tripped = false;
+      let failed = at?.[3]?.includes('f') ?? false;
+      let tripped = at?.[3]?.includes('t') ?? false;
+      const flags = (): string => `${tripped ? 't' : ''}${failed ? 'f' : ''}`;
 
       for (let ki = startKind; ki < INSTALLATION_KINDS.length; ki++) {
         const api = apis[ki];
@@ -114,10 +126,10 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
         if (done.failed) failed = true;
         if (done.stop) {
           if (done.stop === 'limited') report(new Error('github rate limit: the run stopped and kept its place'), 'rate_limited');
-          // A budget, a rate limit or the deadline: keep the place. A tripped breaker restarts the pass instead, so the
-          // same rows are looked at again next time.
-          if (tripped) return { cursor: null, wrapped: false, code: 'breaker_tripped' };
-          const cursor = `${ki}:${done.lastDone ?? startAfterFor(ki, startKind, startAfter) ?? 0}`;
+          // A budget, a rate limit or the deadline: keep the place, and what this pass has found so far. A kind that
+          // tripped does not end the run or reset the cursor: the later kinds are still looked at, so a kind that
+          // trips every run cannot starve them.
+          const cursor = `${ki}:${done.lastDone ?? startAfterFor(ki, startKind, startAfter) ?? 0}${flags() ? `:${flags()}` : ''}`;
           return { cursor, wrapped: false, ...(done.stop === 'limited' || failed ? { code: 'error' as const } : {}) };
         }
       }
@@ -158,6 +170,22 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
       }
     };
 
+    // 0. Which App is this? Before any lookup, `GET /app` with this kind's JWT must name the slug configured for the kind.
+    // A different slug, an unset setting or any answer but 200 means a wrong or swapped key: that kind changes nothing
+    // (no detach, no suspension mirror, no hold) and says so once. The other kinds still run.
+    const expected = deps.slug(kind)?.trim().toLowerCase() || null;
+    const mismatch = (): { failed: true } => {
+      report(new Error('the app identity did not match the configured slug: this kind changed nothing'), 'app_identity_mismatch');
+      return { failed: true };
+    };
+    if (expected === null) return mismatch();
+    const who = await call('/app');
+    if (who === 'budget') return { stop: 'budget' };
+    if (who === 'failed') return { failed: true };
+    if (isRateLimited(who)) return { stop: 'limited' };
+    const slug = who.status === 200 ? (who.body as { slug?: unknown } | null)?.slug : undefined;
+    if (typeof slug !== 'string' || slug.toLowerCase() !== expected) return mismatch();
+
     // 1. The list: suspension and orphans. An unfinished list is never read as "the rest are gone".
     const listed = new Map<number, boolean>();
     let complete = true;
@@ -188,6 +216,10 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
       path = nextPath(res.headers['link']);
       if (path === null && /rel="next"/.test(res.headers['link'] ?? '')) complete = false;
     }
+
+    // A finished list that shows none of our live installations (three or more) is the wrong App's list, not a mass
+    // deletion: the same "no change" as an identity mismatch.
+    if (complete && live.length >= IDENTITY_MIN_LIVE && !live.some((r) => listed.has(r.gh))) return mismatch();
 
     // 2. Ours, one by one. Positive answers only.
     const changes: InstallationChange[] = [];
@@ -246,20 +278,66 @@ export function createGithubInstallationsJob(deps: GithubInstallationsDeps): Rec
       }
     }
 
+    // 3b. Self-repair, detect only: the list shows an installation whose record we hold as deleted. Reported, never
+    // re-bound; the owner restores it through the release script after a fresh confirming lookup.
+    if (complete && after === null && listed.size > 0) {
+      const { rows } = await ctx.pool.query<{ gh: string }>(
+        `SELECT i.gh_installation_id::text AS gh
+           FROM installations i
+           JOIN installation_installers ii ON ii.gh_installation_id = i.gh_installation_id AND ii.app_kind = i.app_kind
+          WHERE i.app_kind = $1 AND ii.deleted_at IS NOT NULL AND i.gh_installation_id = ANY($2::bigint[])
+          ORDER BY i.gh_installation_id LIMIT $3`,
+        [kind, [...listed.keys()], MAX_ORPHAN_REPORTS],
+      );
+      for (let n = 0; n < rows.length; n++) report(new Error('an installation we hold as deleted is listed by the provider'), 'deleted_but_listed');
+    }
+
     // 4. The breaker, then the changes.
     const detaching = changes.filter((c) => c.action !== 'unsuspend');
-    const tripped = detaching.length > BREAKER_MAX_DETACHES || detaching.length > BREAKER_MAX_SHARE * live.length;
-    if (tripped) report(new Error('detach breaker tripped: no installation was detached'), 'breaker_tripped');
-    for (const change of tripped ? changes.filter((c) => c.action === 'unsuspend') : changes) {
+    const detachingIds = detaching.map((c) => c.ghInstallationId);
+    let tripped = detaching.length > breakerAllowance(live.length);
+    let toApply = changes;
+    let consume: number | null = null;
+    try {
+      const hold = await readOpenHold(ctx.pool, GITHUB_INSTALLATIONS_JOB, kind);
+      // A release (made within 48 hours) covers the changes only when they are a subset of the ids the owner saw. A
+      // superset trips again, as a new hold.
+      // An empty set is a subset too, but it uses the release up only once this kind has been read to its end.
+      if (hold?.released && detachingIds.every((id) => hold.ids.includes(id)) && (detachingIds.length > 0 || !stop)) {
+        tripped = false;
+        consume = hold.id;
+        report(new Error('a released breaker hold was used: its changes were applied'), 'breaker_released');
+      } else if (tripped) {
+        const { alert } = await recordTrip(ctx.pool, GITHUB_INSTALLATIONS_JOB, kind, detachingIds);
+        if (alert) report(new Error('detach breaker tripped: no installation was detached'), 'breaker_tripped');
+      }
+    } catch (err) {
+      // Fail closed: if the hold cannot be read or written, nothing detaching is applied this run.
+      deps.reportError(err, { stage, route: RECONCILE_ROUTE });
+      tripped = true;
+      failed = true;
+    }
+    if (tripped) toApply = changes.filter((c) => c.action === 'unsuspend');
+    for (const change of toApply) {
       try {
         await deps.apply(change, ctx.calls);
       } catch (err) {
         if ((err as { name?: unknown } | null)?.name === 'RepoListBudgetError') {
           // The change is in; only its repo re-sync ran out of calls. Stop here and let the repo job pick the repos up.
           stop ??= 'budget';
+          consume = null; // later changes were not applied, so the release stays unused
           break;
         }
         // The change is found again on the next pass; the rest of this one still runs.
+        deps.reportError(err, { stage, route: RECONCILE_ROUTE });
+        failed = true;
+        consume = null; // a change that did not apply leaves the release unused, so the next pass is still covered
+      }
+    }
+    if (consume !== null) {
+      try {
+        await consumeHold(ctx.pool, consume);
+      } catch (err) {
         deps.reportError(err, { stage, route: RECONCILE_ROUTE });
         failed = true;
       }

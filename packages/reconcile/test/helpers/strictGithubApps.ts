@@ -15,6 +15,8 @@ import { startStrictGithubServer, type LocalTlsServer } from '../../../github/te
  *    wrong kind's;
  *  - the list is cut at 100 per page, with a `Link` header carrying rel="next" while more remain, and `suspended_at` is
  *    null or a timestamp;
+ *  - `GET /app` answers the calling App's own id and slug (`appSlugs[kind]`, overridable per test through
+ *    `world.slugs`), and a JWT that does not verify answers 401 as for every other path;
  *  - 403 with `retry-after` (the secondary rate limit), 429 and 5xx on demand (`world.failNext`);
  *  - the repo re-sync's two calls (D#454 H2c): `POST /app/installations/{id}/access_tokens` (App JWT; 404 for an installation
  *    of another App's) mints a token that works only for that installation, and `GET /installation/repositories` with it
@@ -28,6 +30,8 @@ import { startStrictGithubServer, type LocalTlsServer } from '../../../github/te
  */
 export type AppKind = 'team' | 'team_readonly' | 'sitekit';
 export const APP_KINDS: readonly AppKind[] = ['team', 'team_readonly', 'sitekit'];
+/** The slug each fake App reports on `GET /app` unless a test overrides it in `world.slugs`. */
+export const APP_SLUGS: Readonly<Record<AppKind, string>> = { team: 'fx-team', team_readonly: 'fx-team-readonly', sitekit: 'fx-sitekit' };
 
 export interface FakeInstallation {
   id: number;
@@ -58,6 +62,8 @@ export interface AppWorld {
   repos: Record<number, FakeRepo[]>;
   /** Answer the next matching requests with these, in order, then carry on. */
   failNext: FailRule[];
+  /** What `GET /app` reports as `slug` per kind; defaults to APP_SLUGS. A test sets one to model a swapped or wrong key. */
+  slugs: Record<AppKind, string>;
 }
 
 export interface AppKeys {
@@ -110,7 +116,7 @@ export async function startStrictGithubApps(): Promise<StrictGithubApps> {
     });
     keys[kind] = { appId: 1_000_001 + i, privateKeyPem: privateKey, publicKeyPem: publicKey };
   });
-  const world: AppWorld = { installations: [], repos: {}, failNext: [] };
+  const world: AppWorld = { installations: [], repos: {}, failNext: [], slugs: { ...APP_SLUGS } };
   const tokens = new Map<string, { id: number; kind: AppKind }>();
   const calls: SeenCall[] = [];
 
@@ -190,6 +196,8 @@ export async function startStrictGithubApps(): Promise<StrictGithubApps> {
       account: { login: `octo-org-${i.id}`, type: 'Organization' },
       suspended_at: i.suspended ? '2026-10-01T00:00:00Z' : null,
     });
+
+    if (req.path === '/app') return json(200, { id: keys[as].appId, slug: world.slugs[as], name: `Fake ${as}` });
 
     if (req.path === '/app/installations') {
       const q = new URLSearchParams(req.query ?? '');

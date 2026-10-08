@@ -36,6 +36,8 @@ export {
   GITHUB_CALLS_PER_RUN,
   BREAKER_MAX_DETACHES,
   BREAKER_MAX_SHARE,
+  BREAKER_MIN_ALLOWANCE,
+  IDENTITY_MIN_LIVE,
   INSTALLATION_KINDS,
   type GithubInstallationsDeps,
   type InstallationChange,
@@ -64,3 +66,16 @@ export {
   type CheckConnection,
   type ModelKeyHealthDeps,
 } from './jobs/modelKeyHealth.js';
+export { handleReleaseRequest, restoreIfConfirmed, RESTORE_CALL_ALLOWANCE, type ReleaseApiDeps, type RestoreOutcome } from './releaseApi.js';
+export {
+  breakerAllowance,
+  consumeHold,
+  listOpenHolds,
+  readBreakerHoldHealth,
+  readOpenHold,
+  recordTrip,
+  releaseHold,
+  RELEASE_LAPSE_HOURS,
+  type OpenHold,
+  type ReleaseResult,
+} from './breakerHolds.js';

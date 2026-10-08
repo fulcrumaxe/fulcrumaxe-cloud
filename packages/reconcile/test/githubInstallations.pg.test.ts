@@ -15,7 +15,7 @@ import {
   type ReconcileJob,
   type ReportError,
 } from '../src/index.js';
-import { APP_KINDS, startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
+import { APP_KINDS, APP_SLUGS, startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
 
 /**
  * D#454 H2b against real Postgres and a strict GitHub App API reached over real TLS: installation state for all three
@@ -58,6 +58,7 @@ describe('github installation state reconcile job', () => {
     gh.server.seen.length = 0;
     gh.world.installations.length = 0;
     gh.world.failNext.length = 0;
+    gh.world.slugs = { ...APP_SLUGS };
     await admin.query('DELETE FROM repos');
     await admin.query('DELETE FROM installations');
     await admin.query('DELETE FROM installation_installers');
@@ -76,7 +77,7 @@ describe('github installation state reconcile job', () => {
       { action: change.action, installation: { id: change.ghInstallationId } },
     );
   const job = (api: (kind: InstallationKind) => GithubAppApi | null = (k) => apiFor(k)): ReconcileJob =>
-    createGithubInstallationsJob({ api, apply, reportError: report });
+    createGithubInstallationsJob({ api, slug: (k) => APP_SLUGS[k], apply, reportError: report });
   const tick = (j: ReconcileJob = job()) => runTick({ pool: platformOps, jobs: [j], enabled: true, reportError: report });
   const jobRow = async () => (await admin.query(`SELECT cursor, last_result_code, last_full_pass_at FROM reconcile_jobs WHERE name = $1`, [JOB])).rows[0];
 
@@ -103,7 +104,7 @@ describe('github installation state reconcile job', () => {
   const repoLinks = async (s: Seeded) => (await admin.query(`SELECT installation_id FROM repos WHERE account_id = $1`, [s.accountId])).rows.map((r) => r.installation_id as string | null);
   const events = async (s: Seeded) => (await admin.query(`SELECT type FROM domain_events WHERE account_id = $1 ORDER BY id`, [s.accountId])).rows.map((r) => r.type as string);
   const lookupsFor = (id: number) => gh.calls.filter((c) => c.path === `/app/installations/${id}`);
-  const lookups = () => gh.calls.filter((c) => c.path !== '/app/installations');
+  const lookups = () => gh.calls.filter((c) => c.path.startsWith('/app/installations/'));
   /** The list calls made as one App (every kind lists once per pass, even with no installation of ours). */
   const lists = (as: InstallationKind = 'team') => gh.calls.filter((c) => c.path === '/app/installations' && c.as === as);
   /** A set of live installations that makes the 10% breaker allow one change (12 -> 8.3%). */
@@ -286,17 +287,17 @@ describe('github installation state reconcile job', () => {
       expect((await installer(all[5]!)).deleted_at).toBeNull();
     }, 60_000);
 
-    it('more than 10% of the kind: 2 of 12 trips, 1 of 12 does not, and exactly 10% (3 of 30) does not', async () => {
+    it('a small estate may detach 2: 2 of 12 applies, 3 of 12 trips (the allowance is min(5, max(2, floor(0.1 x live))))', async () => {
       const twelve = await estate('team');
       gh.world.installations = gh.world.installations.filter((i) => i.id !== twelve[0]!.gh && i.id !== twelve[1]!.gh);
-      expect((await tick()).results).toEqual([{ job: JOB, result: 'breaker_tripped' }]);
-      expect((await installer(twelve[0]!)).deleted_at).toBeNull();
-      // One of the two comes back on GitHub (a transient miss): the next pass sees 1 of 12 and repairs it.
-      gh.world.installations.push({ id: twelve[1]!.gh, kind: 'team', suspended: false });
-      await admin.query(`UPDATE reconcile_jobs SET next_due_at = now() WHERE name = $1`, [JOB]);
       expect((await tick()).results).toEqual([{ job: JOB, result: 'ok' }]);
       expect((await installer(twelve[0]!)).deleted_at).not.toBeNull();
-      expect((await installer(twelve[1]!)).deleted_at).toBeNull();
+      expect((await installer(twelve[1]!)).deleted_at).not.toBeNull();
+      const three = await estate('sitekit');
+      gh.world.installations = gh.world.installations.filter((i) => ![three[0]!.gh, three[1]!.gh, three[2]!.gh].includes(i.id));
+      await admin.query(`UPDATE reconcile_jobs SET next_due_at = now() WHERE name = $1`, [JOB]);
+      expect((await tick()).results).toEqual([{ job: JOB, result: 'breaker_tripped' }]);
+      for (const a of three) expect((await installer(a)).deleted_at).toBeNull();
     });
 
     it('exactly 10% is not "more than 10%"', async () => {
@@ -309,8 +310,8 @@ describe('github installation state reconcile job', () => {
     it('is per kind, and suspensions count as detaching while un-suspending does not', async () => {
       const team = await estate('team');
       const readonly = await estate('team_readonly');
-      // Two of the 12 read-only installations are suspended on GitHub: 16.7%, tripped. One team installation gone: allowed.
-      for (const a of readonly.slice(0, 2)) gh.world.installations.find((i) => i.id === a.gh)!.suspended = true;
+      // Three of the 12 read-only installations are suspended on GitHub: over the allowance of 2, tripped. One team installation gone: allowed.
+      for (const a of readonly.slice(0, 3)) gh.world.installations.find((i) => i.id === a.gh)!.suspended = true;
       gh.world.installations = gh.world.installations.filter((i) => i.id !== team[0]!.gh);
       // And a suspended-here installation that GitHub shows active (un-suspend) must still be applied under the trip.
       const back = readonly[5]!;
@@ -345,12 +346,12 @@ describe('github installation state reconcile job', () => {
       const all = await estate('team', 6);
       const sorted = [...all].sort((a, b) => a.gh - b.gh);
       gh.world.failNext.push({ status: 502, match: /^\/app\/installations$/ });
-      const small: ReconcileJob = { ...job(), maxCalls: 3 }; // the list + two lookups
+      const small: ReconcileJob = { ...job(), maxCalls: 4 }; // identity + the list + two lookups
       const out = await tick(small);
       expect(out.results).toEqual([{ job: JOB, result: 'budget' }]);
       expect((await jobRow()).cursor).toBe(`0:${sorted[1]!.gh}`);
       expect(reports.map((r) => r.ctx.code ?? 'none')).toEqual(['none']); // only the failed list; a budget is not an error
-      const again = await tick(small);
+      const again = await tick({ ...job(), maxCalls: 6 }); // identity + list for each of the three kinds
       expect(again.results).toEqual([{ job: JOB, result: 'ok' }]);
       expect((await jobRow()).last_full_pass_at).not.toBeNull();
     });
@@ -373,7 +374,7 @@ describe('github installation state reconcile job', () => {
       const bad = createGithubAppApi(async () => 'aaa.bbb.ccc', { port: gh.port, ca: gh.ca, lookup: gh.lookup });
       const out = await tick(job((k) => (k === 'team' ? bad : apiFor(k))));
       expect(out.results).toEqual([{ job: JOB, result: 'error' }]);
-      expect(codes()).toContain('invalid_token');
+      expect(codes()).toContain('app_identity_mismatch'); // GET /app is the first call, and a 401 is not a 200
       expect((await installer(team[0]!)).deleted_at).toBeNull(); // team was never read
       expect((await installer(kit[0]!)).deleted_at).not.toBeNull(); // sitekit ran
     });
@@ -390,13 +391,13 @@ describe('github installation state reconcile job', () => {
       expect(text).not.toContain(String(all[0]!.gh));
     });
 
-    it('every request carried the headers GitHub requires (User-Agent, Accept, API version, App JWT) and was a GET to /app/installations', async () => {
+    it('every request carried the headers GitHub requires (User-Agent, Accept, API version, App JWT) and was a GET to /app or /app/installations', async () => {
       await estate('team', 2);
       await tick();
       expect(gh.server.seen.length).toBeGreaterThan(0);
       for (const r of gh.server.seen) {
         expect(r.method).toBe('GET');
-        expect(r.path).toMatch(/^\/app\/installations(\/[0-9]+)?$/);
+        expect(r.path).toMatch(/^\/app(\/installations(\/[0-9]+)?)?$/);
         expect(r.headers['user-agent']).toBeTruthy();
         expect(r.headers['x-github-api-version']).toBe('2022-11-28');
         expect(r.headers['authorization']).toMatch(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
@@ -406,7 +407,7 @@ describe('github installation state reconcile job', () => {
 
     it('the client refuses any path other than the two installation endpoints', async () => {
       const api = apiFor('team');
-      for (const p of ['/app', '/repos/x/y', '/app/installations/../user', '/app/installations/1/access_tokens', 'https://evil.test/app/installations']) {
+      for (const p of ['/app?x=1', '/app/', '/repos/x/y', '/app/installations/../user', '/app/installations/1/access_tokens', 'https://evil.test/app/installations']) {
         await expect(api.get(p, { timeoutMs: 1000 })).rejects.toThrow('path_refused');
       }
       expect(gh.calls).toEqual([]);
