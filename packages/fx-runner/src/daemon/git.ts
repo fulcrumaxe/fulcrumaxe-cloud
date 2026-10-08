@@ -10,7 +10,7 @@
 import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 
 /** The closed set of codes this path throws. None is built from git's output, a path or any job text. */
-export type GitPathCode = "mirror_failed" | "mirror_dir_insecure" | "workspace_failed" | "push_failed" | "push_ref_refused" | "continuation_unsupported" | "snapshot_refused" | "git_version_unsupported";
+export type GitPathCode = "mirror_failed" | "mirror_dir_insecure" | "workspace_failed" | "push_failed" | "push_ref_refused" | "continuation_branch_missing" | "push_rejected" | "snapshot_refused" | "git_version_unsupported";
 
 export class GitPathError extends Error {
   readonly code: GitPathCode;

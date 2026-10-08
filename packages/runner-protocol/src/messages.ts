@@ -37,7 +37,7 @@ export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit
  * closed set, and the only thing a `run_ended` event says: no job content, no error text. Each reason has a closed `detail` set
  * where C24 gives one, and none otherwise (`DETAILS_OF_RUN_ENDED` maps a reason to its set; an empty set means "no detail").
  */
-export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown"] as const;
+export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected"] as const;
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
@@ -51,6 +51,8 @@ export const RUNNER_SETUP_DETAILS = [
   "bad_start_options",
   "no_init_line",
   "permission_mode_forced",
+  // D#6 R4a-3b (C25 section 1.4): a fix round's branch was gone at prepare or before the push.
+  "continuation_branch_missing",
   "other",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
@@ -63,6 +65,8 @@ export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetai
   wall_clock: [],
   runner_setup: RUNNER_SETUP_DETAILS,
   runner_shutdown: [],
+  // D#6 R4a-3b (C25 section 1.4): the push to a fix round's branch was rejected because the branch moved while the agent worked. No detail.
+  push_rejected: [],
 };
 
 export const LocalOnlyEvent = z

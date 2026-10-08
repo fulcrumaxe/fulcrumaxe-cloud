@@ -116,10 +116,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "workspace_failed",
   "push_failed",
   "push_ref_refused",
-  "continuation_unsupported",
   // Cloud runner notices (D#6 R2b-3h): a notice that could not be written for a run, and a tick whose list came back full.
   "runner_notice_failed",
   "runner_notice_backlog",
+  // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
+  "continuation_branch_missing",
+  "push_rejected",
   // Local runner (D#6 R4a-3 fix round 3): the copy of the workspace's git files was refused, or git is older than the minimum.
   "snapshot_refused",
   "git_version_unsupported",

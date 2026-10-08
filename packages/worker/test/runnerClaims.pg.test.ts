@@ -386,6 +386,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
         ["wall_clock", undefined, "timed_out", "wall_clock_limit"],
         ["runner_setup", "claude_binary_missing", "failed", "runner_setup_failed"],
         ["runner_setup", "other", "failed", "runner_setup_failed"],
+        ["runner_setup", "continuation_branch_missing", "failed", "runner_setup_failed"],
+        ["push_rejected", undefined, "failed", "push_rejected"],
       ];
 
       for (const [reason, detail, status, failureReason] of TABLE) {

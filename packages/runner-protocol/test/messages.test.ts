@@ -134,15 +134,15 @@ describe("LocalOnlyEvent", () => {
 
   describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
     const ended = { ...EVENT, type: "run_ended" };
-    it("is a local-only event type, with exactly the six reasons", () => {
+    it("is a local-only event type, with exactly the seven reasons", () => {
       expect(LOCAL_ONLY_EVENT_TYPES).toContain("run_ended");
-      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "job_refused", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
+      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
     });
 
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
       for (const reason of Object.keys(DETAILS_OF_RUN_ENDED)) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
       expect(DETAILS_OF_RUN_ENDED.job_refused).toEqual(["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role"]);
-      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "other"]);
+      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
       for (const [reason, details] of Object.entries(DETAILS_OF_RUN_ENDED)) {
         for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail }).success, `${reason}/${detail}`).toBe(true);
       }
@@ -157,10 +157,16 @@ describe("LocalOnlyEvent", () => {
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "job_refused", detail: "auth_missing" }).success).toBe(false);
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "duplicate_job" }).success).toBe(false);
       expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "free text from an error message" }).success).toBe(false);
-      for (const reason of ["agent_failed", "repo_not_private", "wall_clock", "runner_shutdown"]) {
+      for (const reason of ["agent_failed", "repo_not_private", "wall_clock", "runner_shutdown", "push_rejected"]) {
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "other" }).success, reason).toBe(false);
         expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "duplicate_job" }).success, reason).toBe(false);
       }
+    });
+
+    it("push_rejected and continuation_branch_missing (C25 section 1.4): the first takes no detail, the second only under runner_setup", () => {
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "push_rejected" }).success).toBe(true);
+      expect(LocalOnlyEvent.safeParse({ ...ended, reason: "runner_setup", detail: "continuation_branch_missing" }).success).toBe(true);
+      for (const reason of ["job_refused", "push_rejected", "agent_failed"]) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail: "continuation_branch_missing" }).success, reason).toBe(false);
     });
 
     it("refuses reason and detail on every other event type", () => {

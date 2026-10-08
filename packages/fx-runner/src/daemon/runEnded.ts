@@ -23,9 +23,13 @@ export interface RunEnd {
   detail?: RunEndedDetail;
 }
 
-/** A refused job is reported under its refusal code; a public repository has its own reason. */
+/**
+ * A refused job is reported under its refusal code; a public repository has its own reason. A fix round's branch that is not the shape
+ * of a run branch is `job_refused` with no detail: C25 section 1.3 names no code for it, and the protocol's closed set has none.
+ */
 export function endOfRefusal(refusal: JobRefusal | "duplicate_job"): RunEnd {
-  return refusal === "repo_not_private" ? { reason: "repo_not_private" } : { reason: "job_refused", detail: refusal };
+  if (refusal === "repo_not_private") return { reason: "repo_not_private" };
+  return refusal === "continues_branch_invalid" ? { reason: "job_refused" } : { reason: "job_refused", detail: refusal };
 }
 
 const SETUP_CODES: ReadonlySet<string> = new Set(RUNNER_SETUP_DETAILS.filter((code) => code !== "other"));
@@ -39,6 +43,7 @@ const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "a
 export function endOfFailure(code: string): RunEnd | null {
   if (code === "credential_mismatch") return null;
   if (code === "wall_clock") return { reason: "wall_clock" };
+  if (code === "push_rejected") return { reason: "push_rejected" };
   if (AGENT_CODES.has(code)) return { reason: "agent_failed" };
   if (SETUP_CODES.has(code)) return { reason: "runner_setup", detail: code as RunEndedDetail };
   return { reason: "runner_setup", detail: "other" };

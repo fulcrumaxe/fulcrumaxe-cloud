@@ -73,6 +73,7 @@ function recordingCapture(): { capture: GitCapture; calls: Call[] } {
   };
 }
 
+const RUN_BRANCH = "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1";
 const lease = { runId: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f", leaseGeneration: 1 };
 const jobFor = (over: Partial<GitJob> = {}): GitJob => ({ repo: { id: randomUUID(), owner: "acme", name: "widgets", private: true }, continues: null, branch_prefix: "fx/", role: "executor", ...over });
 
@@ -173,12 +174,13 @@ describe("the push target is built from the lease alone", () => {
     expect(calls[0]!).toContain("--no-verify");
   });
 
-  it("a job whose branch prefix is not fx/, or that continues a branch, is refused before anything is made", () => {
+  it("a job whose branch prefix is not fx/, or that continues a branch that is not a run branch, is refused before anything is made", () => {
     const { gitPath, cacheDir, calls } = makeGitPath();
     expect(() => gitPath.check(jobFor(), lease)).not.toThrow();
     expect(() => gitPath.check(jobFor({ branch_prefix: "release/" }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
     expect(() => gitPath.check(jobFor({ branch_prefix: "fx/../" }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
-    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: "fx/issue-3" } }), lease)).toThrow(expect.objectContaining({ code: "continuation_unsupported" }));
+    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: "fx/issue-3" } }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: RUN_BRANCH } }), lease)).not.toThrow();
     expect(() => gitPath.check(jobFor(), { runId: "main", leaseGeneration: 1 })).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
     expect(calls).toEqual([]);
     expect(existsSync(cacheDir)).toBe(false);
@@ -509,5 +511,221 @@ describe("local-only means no reference to our proxy", () => {
 
   it("the only remote address the path builds is GitHub's own", () => {
     expect(githubUrl({ id: randomUUID(), owner: "acme", name: "widgets" })).not.toMatch(PROXY);
+  });
+});
+
+describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 section 1)", () => {
+  const FIX_LEASE = { runId: "7c7c7c7c-7d7d-4e7e-8f7f-707070707070", leaseGeneration: 2 };
+  const fixPlan = (branch: string) => pushPlan(FIX_LEASE, { branch });
+  const continuesOn = (branch: string) => ({ parent_run_id: randomUUID(), session_id: "s1", branch });
+
+  /** The first run opens the pull request's branch: its commit is pushed to `fx/<run>-g<gen>`, and that branch is what a fix round continues. */
+  async function firstRun(gitPath: ReturnType<typeof makeGitPath>["gitPath"], job: GitJob) {
+    const workspace = newWorkspace("first");
+    const { base } = await gitPath.prepare(job, lease, workspace);
+    const commit = agentCommits(workspace);
+    await gitPath.publish(job, lease, workspace, base);
+    return { branch: pushPlan(lease).branch, commit, workspace };
+  }
+
+  /** Someone else pushes to the branch (the person fixing the pull request by hand). */
+  function personPushes(branch: string, file = "person.txt"): string {
+    const other = path.join(root, `person-${randomUUID()}`);
+    sh("clone", "--branch", branch, remote, other);
+    writeFileSync(path.join(other, file), "by hand\n");
+    sh("-C", other, "add", file);
+    sh("-C", other, "commit", "-m", "by hand");
+    sh("-C", other, "push", "origin", branch);
+    return tip(other, "HEAD");
+  }
+
+  const pushCalls = (calls: Call[]): Call[] => calls.filter((c) => c.args.includes("push"));
+
+  it("the refspec is the lease's private ref to refs/heads/<continues.branch>, with no plus, no wildcard and no delete", () => {
+    expect(fixPlan(RUN_BRANCH)).toEqual({
+      branch: RUN_BRANCH,
+      localRef: "refs/fx-push/7c7c7c7c-7d7d-4e7e-8f7f-707070707070-g2",
+      refspec: `refs/fx-push/7c7c7c7c-7d7d-4e7e-8f7f-707070707070-g2:refs/heads/${RUN_BRANCH}`,
+    });
+    expect(fixPlan(RUN_BRANCH).refspec).not.toMatch(/^\+|\*|--/);
+    // A fresh run is unchanged.
+    expect(pushPlan(lease, null)).toEqual(pushPlan(lease));
+  });
+
+  const BAD_BRANCHES = ["main", "master", "fx/issue-12", `${RUN_BRANCH.slice(0, -1)}0`, "refs/heads/x", `refs/heads/${RUN_BRANCH}`, `${RUN_BRANCH}/../../main`, `${RUN_BRANCH}..x`, `${RUN_BRANCH}x`, `${RUN_BRANCH}\n`, `+${RUN_BRANCH}`, `${RUN_BRANCH}:refs/heads/main`, "fx/", "", "fx/2A2A2A2A-2B2B-4C2C-8D2D-2E2E2E2E2E2E-g1", "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1000000000"];
+  for (const branch of BAD_BRANCHES) {
+    it(`refuses the target ${JSON.stringify(branch)} as push_ref_refused, in the plan and in check, and runs no process`, () => {
+      expect(() => fixPlan(branch)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+      const { gitPath, calls, cacheDir } = makeGitPath();
+      expect(() => gitPath.check(jobFor({ continues: continuesOn(branch) }), FIX_LEASE)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+      expect(calls).toEqual([]);
+      expect(existsSync(cacheDir)).toBe(false);
+    });
+  }
+
+  it("runPush for a fix round refuses every refspec but its own target: not main, not the lease's own fx branch, not another run branch, not a force", async () => {
+    const calls: unknown[] = [];
+    const git = createGit({ capture: async (...call) => (calls.push(call), { code: 0, stdout: "", timedOut: false }) });
+    const own = fixPlan(RUN_BRANCH);
+    const other = fixPlan("fx/9a9a9a9a-9b9b-4c9c-8d9d-9e9e9e9e9e9e-g1");
+    for (const refspec of [`${own.localRef}:refs/heads/main`, `+${own.refspec}`, other.refspec, pushPlan(FIX_LEASE).refspec, `${own.refspec} `, `${own.localRef}:refs/heads/${RUN_BRANCH}x`, `:refs/heads/${RUN_BRANCH}`, "refs/heads/*:refs/heads/*"]) {
+      await expect(runPush(git, "/m", remoteUrl, refspec, FIX_LEASE, { branch: RUN_BRANCH }), refspec).rejects.toMatchObject({ code: "push_ref_refused" });
+    }
+    expect(calls).toEqual([]);
+    // The fix round's refspec is not allowed for a fresh run's lease plan, and its own is.
+    await expect(runPush(git, "/m", remoteUrl, own.refspec, FIX_LEASE)).rejects.toMatchObject({ code: "push_ref_refused" });
+    await runPush(git, "/m", remoteUrl, own.refspec, FIX_LEASE, { branch: RUN_BRANCH });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a fast-forward continuation, from a second real clone through the snapshot path, updates the PR branch and nothing else", async () => {
+    const { gitPath, calls, cacheDir } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const mainBefore = tip(remote, "main");
+
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    expect(second).not.toBe(first.workspace);
+    const { base } = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    // The mirror shows the branch, the second clone is on it at its tip, and that tip is the base.
+    const mirror = path.join(cacheDir, "mirrors", `${job.repo.id}.git`);
+    expect(tip(mirror, `refs/heads/${first.branch}`)).toBe(first.commit);
+    expect(base).toBe(first.commit);
+    expect(sh("-C", second, "branch", "--show-current").trim()).toBe(first.branch);
+    expect(tip(second, "HEAD")).toBe(first.commit);
+
+    const fix = agentCommits(second, "fix.txt");
+    const published = await gitPath.publish(fixJob, FIX_LEASE, second, base);
+    expect(published).toEqual({ pushed: true, branch: first.branch, sha: fix });
+    expect(tip(remote, `refs/heads/${first.branch}`)).toBe(fix);
+    expect(sh("-C", remote, "rev-parse", `${fix}^`).trim()).toBe(first.commit);
+    expect(tip(remote, "main")).toBe(mainBefore);
+    // No new branch was made for the fix round.
+    expect(refsOf(remote)).toEqual([`refs/heads/${first.branch}`, "refs/heads/main"]);
+    expect(refsOf(mirror).filter((r) => r.startsWith("refs/fx-push/"))).toEqual([]);
+    // The push went out of the mirror, to the PR branch, and no push command line holds a force flag of any kind.
+    const pushes = pushCalls(calls);
+    expect(pushes).toHaveLength(2);
+    expect(pushes.at(-1)!.args.slice(0, 2)).toEqual(["-C", mirror]);
+    expect(pushes.at(-1)!.args.at(-1)).toBe(fixPlan(first.branch).refspec);
+    for (const push of pushes) expect(push.args.filter((a) => /^--(force|mirror|delete|force-with-lease)/.test(a) || /^-[a-zA-Z]*f/.test(a) || a.startsWith("+") || a.includes(":+"))).toEqual([]);
+  });
+
+  it("a remote that moved during the run gives push_rejected, pushes nothing, and leaves the remote branch as the person left it", async () => {
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    const { base } = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    agentCommits(second, "fix.txt");
+    const theirs = personPushes(first.branch);
+    const pushesBefore = pushCalls(calls).length;
+    await expect(gitPath.publish(fixJob, FIX_LEASE, second, base)).rejects.toMatchObject({ code: "push_rejected", message: "push_rejected" });
+    expect(tip(remote, `refs/heads/${first.branch}`)).toBe(theirs);
+    expect(pushCalls(calls).length).toBe(pushesBefore);
+  });
+
+  it("a branch that moves between the check and the push is rejected by the remote as non-fast-forward: push_rejected, remote unchanged, no retry", async () => {
+    const real = recordingCapture();
+    const arm: { branch?: string } = {};
+    let theirs: string | undefined;
+    const pushes: string[][] = [];
+    const capture: GitCapture = (command, args, env, timeoutMs) => {
+      if (args.includes("push")) {
+        pushes.push([...args]);
+        // The person's push lands after the daemon's own check and before the daemon's push reaches the remote.
+        if (arm.branch !== undefined) theirs = personPushes(arm.branch);
+      }
+      return real.capture(command, args, env, timeoutMs);
+    };
+    const { gitPath } = makeGitPath({ capture });
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    const { base } = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    agentCommits(second, "fix.txt");
+    arm.branch = first.branch;
+    const pushesBefore = pushes.length;
+    await expect(gitPath.publish(fixJob, FIX_LEASE, second, base)).rejects.toMatchObject({ code: "push_rejected" });
+    expect(theirs).toBeDefined();
+    expect(tip(remote, `refs/heads/${first.branch}`)).toBe(theirs);
+    expect(pushes.length - pushesBefore).toBe(1); // tried once, not retried
+  });
+
+  it("a branch that is gone at prepare stops everything: continuation_branch_missing, nothing in the workspace, no clone of a workspace", async () => {
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor();
+    const workspace = newWorkspace("second");
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(RUN_BRANCH) });
+    await expect(gitPath.prepare(fixJob, FIX_LEASE, workspace)).rejects.toMatchObject({ code: "continuation_branch_missing", message: "continuation_branch_missing" });
+    expect(readdirSync(workspace)).toEqual([]);
+    expect(calls.filter((c) => c.args.includes("clone") && !c.args.includes("--bare"))).toEqual([]);
+    expect(refsOf(remote)).toEqual(["refs/heads/main"]);
+  });
+
+  it("a branch deleted after prepare is not pushed: continuation_branch_missing, and the branch is not re-created", async () => {
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    const { base } = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    agentCommits(second, "fix.txt");
+    sh("-C", remote, "branch", "-D", first.branch);
+    const pushesBefore = pushCalls(calls).length;
+    await expect(gitPath.publish(fixJob, FIX_LEASE, second, base)).rejects.toMatchObject({ code: "continuation_branch_missing" });
+    expect(refsOf(remote)).toEqual(["refs/heads/main"]);
+    expect(pushCalls(calls).length).toBe(pushesBefore);
+  });
+
+  it("after a stop reply nothing is pushed: the check passed, the commit is ready, and the remote is untouched", async () => {
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    const { base } = await gitPath.prepare(fixJob, FIX_LEASE, second);
+    agentCommits(second, "fix.txt");
+    const pushesBefore = pushCalls(calls).length;
+    expect(await gitPath.publish(fixJob, FIX_LEASE, second, base, () => true)).toEqual({ pushed: false });
+    expect(tip(remote, `refs/heads/${first.branch}`)).toBe(first.commit);
+    expect(pushCalls(calls).length).toBe(pushesBefore);
+    // The same publish with no stop does push.
+    expect((await gitPath.publish(fixJob, FIX_LEASE, second, base, () => false)).pushed).toBe(true);
+  });
+
+  it("a kept session's workspace is resumed only when it is exactly at the branch's tip after a fresh mirror sync", async () => {
+    const { gitPath } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    // The first run's workspace is at the tip it pushed: usable.
+    expect(await gitPath.resume(fixJob, FIX_LEASE, first.workspace)).toEqual({ base: first.commit });
+    // A person pushed to the branch since: the kept workspace is stale, so the run starts fresh instead.
+    const theirs = personPushes(first.branch);
+    expect(await gitPath.resume(fixJob, FIX_LEASE, first.workspace)).toBeNull();
+    // The fresh start is on the new tip.
+    const fresh = newWorkspace("fresh");
+    expect((await gitPath.prepare(fixJob, FIX_LEASE, fresh)).base).toBe(theirs);
+    expect(tip(fresh, "HEAD")).toBe(theirs);
+    // A directory that is not a clone this path made is not resumed either (and nothing in it is trusted).
+    expect(await gitPath.resume(fixJob, FIX_LEASE, newWorkspace("empty"))).toBeNull();
+    // A branch that is gone is an error, not a fallback: there is nothing to start fresh on.
+    sh("-C", remote, "branch", "-D", first.branch);
+    await expect(gitPath.resume(fixJob, FIX_LEASE, first.workspace)).rejects.toMatchObject({ code: "continuation_branch_missing" });
+  });
+
+  it("the mirror shows the branch after the sync, and the workspace has the branch's history, not the default branch's", async () => {
+    const { gitPath, cacheDir } = makeGitPath();
+    const job = jobFor();
+    const first = await firstRun(gitPath, job);
+    const fixJob = jobFor({ repo: job.repo, continues: continuesOn(first.branch) });
+    const second = newWorkspace("second");
+    await gitPath.prepare(fixJob, FIX_LEASE, second);
+    expect(readFileSync(path.join(second, "agent.txt"), "utf8")).toBe("work\n");
+    expect(refsOf(path.join(cacheDir, "mirrors", `${job.repo.id}.git`))).toContain(`refs/heads/${first.branch}`);
   });
 });

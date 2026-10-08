@@ -26,6 +26,7 @@ describe("the runner copy (D#6 R2b)", () => {
       jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
       agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
       runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
+      pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
       pushTooLarge:
         "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
       pullRequestBody:
