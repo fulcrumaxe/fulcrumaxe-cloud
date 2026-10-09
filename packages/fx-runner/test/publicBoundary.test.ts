@@ -52,12 +52,16 @@ describe("boundary: what the source may import, and every workspace import is de
     expect(found).toEqual(["@scope/pkg"]);
   });
 
-  it("src imports only itself, node built-ins and the protocol package", () => {
+  // The one third-party library the runner may import: the TUF client its updater is built on (D#6 R6-2a, correction C38 section 2).
+  // It is declared exactly in package.json (a test below pins that), and no other third-party import is allowed.
+  const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js"]);
+
+  it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
     const violations: string[] = [];
     for (const file of sourceFiles) {
       for (const match of readFileSync(file, "utf8").matchAll(specifier)) {
         const spec = match[1]!;
-        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol";
+        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol" || THIRD_PARTY.has(spec);
         if (!ok) violations.push(`${path.relative(PACKAGE_DIR, file)}: ${spec}`);
       }
     }
@@ -76,6 +80,11 @@ describe("boundary: what the source may import, and every workspace import is de
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it("the TUF client is declared as an exact version, in dependencies", () => {
+    expect(manifest.dependencies?.["tuf-js"]).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(manifest.devDependencies?.["@tufjs/models"]).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("src never reaches into another package by path", () => {

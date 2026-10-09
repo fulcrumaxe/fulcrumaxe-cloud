@@ -22,6 +22,7 @@ import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
+import { updaterDoctorLine } from "../update/tuf.js";
 
 const OS_RELEASE = "/etc/os-release";
 const NIXOS_MARKER = "/etc/NIXOS";
@@ -200,6 +201,10 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
     if (host.shellVars.length === 0) line("PASS", "Shell variables", "no Anthropic key or token is set");
     for (const name of host.shellVars) line("WARN", "Shell variable", `${name} is set in this shell; it would outrank your Claude login. fx-runner removes it from jobs.`);
   }
+  // Self-update (D#6 R6-2a): off, and said so, until the build carries a release root.
+  const updates = updaterDoctorLine();
+  line(updates.level, "Updates", updates.detail);
+
   if (host.platform === "darwin") line("INFO", "macOS", MACOS_PREVIEW_NOTICE);
 
   ctx.out(failed === 0 ? "All checks passed." : `${failed} check${failed === 1 ? "" : "s"} failed.`);
