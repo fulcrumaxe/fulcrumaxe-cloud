@@ -41,6 +41,8 @@ describe("done route [pg]", () => {
     claimRunnerRun: never,
     heartbeatRunnerRun: never,
     ingestRunnerEvents: never,
+    gitTicketContext: never,
+    signGitTicket: never,
     beginRunnerDone: async (input) => (begun.push({ ...input }), begin),
     finishRunnerDone: async (input) => (finished.push({ ...input }), finish === "echo" ? { kind: "recorded", verdict: input.verdict } : finish),
   };

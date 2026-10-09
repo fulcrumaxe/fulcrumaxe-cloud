@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
+import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
 import type { SandboxReapWorker } from "@fx/reconcile";
 import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
@@ -39,7 +39,7 @@ export type RunnerQueueSweepWorker = RunnerQueueSweeper & RunnerNoticeSweeper;
 export type RunnerSweepWorker = RunnerQueueSweeper & RunnerLeaseSweeper & RunnerNoticeSweeper;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerSweepWorker & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerSweepWorker & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

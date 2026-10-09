@@ -98,11 +98,27 @@ export type DoneReply = z.infer<typeof DoneReply>;
 export const DoneRetryReply = z.object({ retry_after: retryAfter(3600) }).strict();
 export type DoneRetryReply = z.infer<typeof DoneRetryReply>;
 
+/**
+ * 200 from git-ticket (D#6 R5a-2b, C27 section 1.2): a compact JWS the cloud signed for this one run, valid for 5 minutes, and the
+ * origin of the GitHub proxy it is good for. The cloud issues it and it names one run, so it is not a credential channel from the
+ * runner (G1 bars those); the field is called `ticket` for that reason. The runner trusts `proxy_origin` only if its own pinned table lists it.
+ */
+export const GIT_TICKET_LIFETIME_SECONDS = 300;
+export const GitTicketReply = z
+  .object({
+    ticket: z.string().max(2048).regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+    expires_at: utcTimestamp,
+    proxy_origin: z.string().max(256).regex(/^https:\/\/[^\s/?#@]+$/),
+  })
+  .strict();
+export type GitTicketReply = z.infer<typeof GitTicketReply>;
+
 /** The complete set of runner-route replies. A test pins these keys. */
 export const RUNNER_REPLIES = {
   claim: ClaimReply,
   claim_rate_limited: ClaimRateLimitedReply,
   heartbeat: HeartbeatReply,
+  git_ticket: GitTicketReply,
   events: EventsReply,
   stop: StopReply,
   seq_not_increasing: SeqNotIncreasingReply,

@@ -128,7 +128,7 @@ describe("the lease-route replies (D#6 R2b-3)", () => {
   });
 
   it("every reply is strict at every depth and passes G1", () => {
-    expect(Object.keys(RUNNER_REPLIES).sort()).toEqual(["claim", "claim_rate_limited", "done", "done_retry", "events", "heartbeat", "seq_not_increasing", "stop"]);
+    expect(Object.keys(RUNNER_REPLIES).sort()).toEqual(["claim", "claim_rate_limited", "done", "done_retry", "events", "git_ticket", "heartbeat", "seq_not_increasing", "stop"]);
     for (const [name, schema] of Object.entries(RUNNER_REPLIES)) {
       const walkable = schema as z.ZodTypeAny;
       // A union is walked member by member.
