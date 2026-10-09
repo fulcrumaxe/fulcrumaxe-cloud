@@ -187,7 +187,21 @@ describe("runner follow-up runs [pg]", () => {
       }
       const sweepQuiet = async (errors: string[]) => createRunnerLeaseSweeper(writerPool, { now: () => clock, followUp: ports, onError: (runId) => errors.push(runId) }).sweepRunnerLeases();
 
-      it("is a wait, not a failure: nothing is reported, the parent stays running with no child, and the follow-up is made once the claim is marked deleted", async () => {
+      it("D#6 R4d-5c G5: the follow-up child of a parent pinned to Spec version N has spec_version_id = N even when a newer version N+1 exists", async () => {
+      const newer = randomUUID();
+      await admin.query(
+        `INSERT INTO spec_versions (id, account_id, work_item_id, version, body, body_sha256, frontmatter, created_by_kind)
+         VALUES ($1, $2, $3, 2, 'newer spec', $4, '{"acceptance_files":["src/z.ts"]}'::jsonb, 'system')`,
+        [newer, A.accountId, A.workItemId, sha256Text("newer spec")],
+      );
+      const parent = await run({ lease: clock - 1 });
+      expect(await sweep()).toMatchObject({ followUpsCreated: 1 });
+      const [c] = await child(parent);
+      expect(c.spec_version_id).toBe(specVersion);
+      expect(c.spec_version_id).not.toBe(newer);
+    });
+
+    it("is a wait, not a failure: nothing is reported, the parent stays running with no child, and the follow-up is made once the claim is marked deleted", async () => {
         const parent = await run({ lease: clock - 1 });
         const name = await claim(parent);
         const errors: string[] = [];

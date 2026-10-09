@@ -161,7 +161,13 @@ describe("queued runner runs [pg]", { timeout: 60_000 }, () => {
     const issue = Number((await admin.query("SELECT gh_number FROM work_items WHERE id = $1", [workItemId])).rows[0].gh_number);
     // The build's executor run: ended through `done` on its run branch, holding a session.
     const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
-    const { id: parent } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId, role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: a.repoId, dispatchPrNumber: issue });
+    // D#6 R4d-5c (C36): a build made after the pin carries its Spec version, which the fix round inherits; a runner fix round of an unpinned build is refused.
+    const specVersionId = randomUUID();
+    // The job names the Spec's discussion, so the item has one.
+    await admin.query("INSERT INTO discussions (account_id, number, repo_id, kind, title, root_work_item_id, provenance, created_by_kind) VALUES ($1, 6, $2, 'feature', 'Footer', $3, 'internal', 'system')", [a.accountId, a.repoId, workItemId]);
+    await admin.query("UPDATE work_items SET discussion_id = (SELECT id FROM discussions WHERE account_id = $1 AND root_work_item_id = $2) WHERE id = $2", [a.accountId, workItemId]);
+    await admin.query("INSERT INTO spec_versions (id, account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, $3, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')", [specVersionId, a.accountId, workItemId]);
+    const { id: parent } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId, specVersionId, role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: a.repoId, dispatchPrNumber: issue });
     await writeRunStatus(writerPool, { accountId: a.accountId, runId: parent, from: "pending", to: "running" });
     await writeRunStatus(writerPool, { accountId: a.accountId, runId: parent, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { summary: "built" } }, runnerDone: { prNumber: 41, branch: BRANCH } });
 

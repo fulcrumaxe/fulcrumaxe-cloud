@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { hasBlockingRetryChild } from "@fx/core/src/runActions/retryChild.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { IdempotencyKeyTakenError, WorkItemHaltedError, cancelRun, acceptQueuedRunnerRun, checkRetryAuthor, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { IdempotencyKeyTakenError, NoSpecVersionError, WorkItemHaltedError, cancelRun, acceptQueuedRunnerRun, checkRetryAuthor, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 // A relative import: @fx/model-router is not a dependency of this package and this change may not touch the lockfile.
 import { escalate, type PreviousRun } from "../../model-router/src/escalate.js";
 import { PREVIEW_SEAT_REFUSALS, type PreviewSeatConfig } from "./preview.js";
@@ -221,6 +221,8 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
       if (err instanceof RetryBlockedError) return blockedOrOwn(accountId, userId, actionId);
       // The item was halted: the trigger refused the insert, so nothing exists. The person resumes with Approve or Build again.
       if (err instanceof WorkItemHaltedError) return refused("item_halted");
+      // D#6 R4d-5c (C36): the run being retried has no Spec version to inherit (built before the pin). Nothing was written; the way on is Re-spec, then Build again.
+      if (err instanceof NoSpecVersionError) return refused("no_spec_version");
       const pg = err as { code?: unknown; constraint?: unknown } | null;
       if (pg?.code === "23505" && pg.constraint === ONE_LIVE_CHILD_INDEX) {
         return blockedOrOwn(accountId, userId, actionId);

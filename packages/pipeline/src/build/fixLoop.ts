@@ -4,7 +4,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { WorkItemHaltedError, type WorkItemTransitionReviewer } from "@fx/core/src/work-items/stages.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
-import { failClosedOnQueued, WorkItemHaltedError as RunWorkItemHaltedError, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { failClosedOnQueued, NoSpecVersionError, WorkItemHaltedError as RunWorkItemHaltedError, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { resumeAgentRun, type ResumeAgentRunResult } from "./resumeAgentRun.js";
 import { labelsForVerdict, isFixRequired } from "./verdictLabels.js";
 import type { LabelDiff, ReviewVerdict } from "./types.js";
@@ -78,7 +78,9 @@ export type RecordReviewVerdictResult =
   | { outcome: "fix_needed"; labels: LabelDiff }
   | { outcome: "escalated"; labels: LabelDiff; roundNumber: number }
   /** The item is halted: nothing was recorded, no label diff applies, no fix round started. */
-  | { outcome: "halted"; labels: LabelDiff };
+  | { outcome: "halted"; labels: LabelDiff }
+  /** D#6 R4d-5c (C36): the fix round was not started: the build it continues has no Spec version (built before the pin). No run row, no job. */
+  | { outcome: "refused"; labels: LabelDiff; reason: "no_spec_version" };
 
 async function countChangesRequestedRounds(client: PoolClient, accountId: string, workItemId: string): Promise<number> {
   const { rows } = await client.query<{ count: string }>(
@@ -205,6 +207,8 @@ export async function recordReviewVerdict(
   } catch (err) {
     // Halted between the stage write and the resume: the database refused the run.
     if (err instanceof RunWorkItemHaltedError) return { outcome: "halted", labels: { add: [], remove: [] } };
+    // D#6 R4d-5c (C36): the build being fixed has no Spec version to inherit. No run row and no job exist; the stage write above stands.
+    if (err instanceof NoSpecVersionError) return { outcome: "refused", labels, reason: "no_spec_version" };
     throw err;
   }
   return { outcome: "fix_dispatched", labels, roundNumber, resume };

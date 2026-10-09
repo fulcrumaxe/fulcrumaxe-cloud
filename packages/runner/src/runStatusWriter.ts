@@ -62,6 +62,14 @@ export interface InsertAgentRunParams {
    * the run is held to. Absent: the run pins nothing (every run of a role that has no Spec).
    */
   specVersionId?: string | null;
+  /**
+   * D#6 R4d-5c (C36): the run whose Spec version a follow-on run inherits, when that is not `parentRunId` (a resumed session's own run).
+   * When set (even to null, which means "inherit from nobody"), it is the run read; otherwise `parentRunId` is. The create reads that run's `spec_version_id` under the tenant and writes the same value on the
+   * new row; it is never the work item's latest version. An explicit `specVersionId` that differs is refused (`SpecVersionMismatchError`).
+   * A pushing role (executor, docs-writer) on a `runner_local` repo whose parent has none is refused (`NoSpecVersionError`). Nothing is
+   * written in either case.
+   */
+  specParentRunId?: string | null;
   /** D#5 E9: the environment the run uses, written at insert only. Both or neither (the definer refuses half a record). */
   envVersionId?: string | null;
   imageDigest?: string | null;
@@ -105,6 +113,42 @@ export interface InsertAgentRunParams {
   startPrompt?: string;
   /** Platform-only facts about how the run was started (a retry's model and escalation), kept in the `run.input` payload under `meta`. */
   startMeta?: Record<string, unknown>;
+}
+
+/** D#6 R4d-5c (C36): an explicit Spec version that is not the one the parent run was built against. Nothing was written. */
+export class SpecVersionMismatchError extends Error {
+  readonly code = "spec_version_mismatch";
+  constructor() {
+    super("a follow-on run takes its parent's Spec version; another was named");
+    this.name = "SpecVersionMismatchError";
+  }
+}
+
+/** D#6 R4d-5c (C36): a pushing runner run has no Spec version to inherit, so no file list to hold it to. Nothing was written. */
+export class NoSpecVersionError extends Error {
+  readonly code = "no_spec_version";
+  constructor() {
+    super("the parent run has no Spec version to inherit");
+    this.name = "NoSpecVersionError";
+  }
+}
+
+/** The roles whose runner runs push commits and so are held to a Spec's file list at done (the same two as `RUNNER_PUSHING_ROLES` in `@fx/gh-policy`, which this package does not depend on). */
+const SPEC_PINNED_RUNNER_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
+
+/**
+ * D#6 R4d-5c (C36): the Spec version a new run is written with. Without a parent it is the caller's (the new-build pin of R4d-5a).
+ * With one, it is the parent's, read here on the create's own client so it is under the tenant and inside the create; the caller
+ * never computes it. Throws before anything is written.
+ */
+async function resolveSpecVersionId(client: PoolClient, p: InsertAgentRunParams): Promise<string | null> {
+  const parentId = p.specParentRunId !== undefined ? p.specParentRunId : (p.parentRunId ?? null);
+  if (!parentId) return p.specVersionId ?? null;
+  const { rows } = await client.query<{ spec_version_id: string | null }>("SELECT spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2", [parentId, p.accountId]);
+  const inherited = rows[0]?.spec_version_id ?? null;
+  if (p.specVersionId != null && p.specVersionId !== inherited) throw new SpecVersionMismatchError();
+  if (inherited === null && p.executionMode === "runner_local" && SPEC_PINNED_RUNNER_ROLES.has(p.role)) throw new NoSpecVersionError();
+  return inherited;
 }
 
 /** Most prompt bytes `run.input` keeps; a longer prompt keeps only its hash, and a retry of that run is refused. */
@@ -357,6 +401,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
         ]);
         frozen = (await readFrozenExposure(client, params)) ?? resolved;
       }
+      const specVersionId = await resolveSpecVersionId(client, params);
       await client.query(
         `SELECT agent_run_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::text, $7::text,
                                 $8::text, $9::uuid, $10::bigint, $16::uuid, $11::jsonb, $12::text, $13::uuid, $14::text, $15::text)`,
@@ -376,7 +421,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
           params.initiatedBy ?? null,
           params.envVersionId ?? null,
           params.imageDigest ?? null,
-          params.specVersionId ?? null,
+          specVersionId,
         ],
       );
       if (params.inCreateTransaction) await params.inCreateTransaction(client, id);

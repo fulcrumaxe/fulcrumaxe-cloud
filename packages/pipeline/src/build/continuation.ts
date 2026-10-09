@@ -5,7 +5,7 @@ import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
 import { sanitize } from "@fx/trust";
 import {
-  DuplicateExecutorRunError, EXECUTOR_ROLE, IdempotencyKeyTakenError, QUEUE_TTL_MS, failClosedOnQueued, sanitizeCheckpointSummary, startAgentRun,
+  DuplicateExecutorRunError, EXECUTOR_ROLE, IdempotencyKeyTakenError, NoSpecVersionError, QUEUE_TTL_MS, failClosedOnQueued, sanitizeCheckpointSummary, startAgentRun,
   type ExecutionTargetRegistry, type StartAgentRunInput,
 } from "@fx/runner";
 import { escalate } from "./fixLoop.js";
@@ -89,7 +89,7 @@ export type ContinueAfterLimitResult =
   /** Another caller is deciding this work item right now and nothing was started here: retry. */
   | { outcome: "busy" }
   /** C8: the work item is merged or closed; nothing started, nothing parked. `work_item_closed` is this fix's own code (C7's list has none that fits). */
-  | { outcome: "refused"; reason: "work_item_closed" }
+  | { outcome: "refused"; reason: "work_item_closed" | "no_spec_version" }
   | { outcome: "continued"; resume: Exclude<ResumeAgentRunResult, { status: "refused_spend" }> };
 
 export interface ContinueAfterLimitInput {
@@ -244,6 +244,8 @@ async function relaunch(
   } catch (err) {
     // Taken key: this run was continued already. Live executor: the continuation is still running.
     if (err instanceof IdempotencyKeyTakenError || err instanceof DuplicateExecutorRunError || isLiveContinuationConflict(err)) return { outcome: "duplicate" };
+    // D#6 R4d-5c (C36): the run being continued has no Spec version to inherit (built before the pin). No run row and no job exist.
+    if (err instanceof NoSpecVersionError) return { outcome: "refused", reason: "no_spec_version" };
     throw err;
   }
   if (resume.status === "refused_spend") return parkRefused(pool, input.accountId, ended, input.runId, input.at, "spend");

@@ -50,7 +50,10 @@ describe("JobIssuer [pg]", () => {
     const reviews = (REVIEW_JOB_ROLES as readonly string[]).includes(role);
     const headSha = over.headSha !== undefined ? over.headSha : reviews ? freshHead() : null;
     const prompt = over.prompt ?? (reviews ? `${PROMPT}Review exactly commit ${headSha}.\n` : PROMPT);
-    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
+    // D#6 R4d-5c (C36): a run built after the pin carries the Spec version it was built against; a child of it inherits that version, and a runner_local
+    // executor child of an unpinned run is refused. The fixture's root runs are pinned the way a new build is.
+    const pin = parentRunId ? undefined : (await db.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 ORDER BY version DESC LIMIT 1", [w.workItemId])).rows[0]?.id;
+    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, ...(pin ? { specVersionId: pin } : {}), role: role as never, runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
     return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
