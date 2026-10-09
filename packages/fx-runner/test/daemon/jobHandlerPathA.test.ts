@@ -39,10 +39,12 @@ function rig(over: Partial<JobHandlerDeps> = {}) {
   const real = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
   const gitTicket = vi.fn(real.gitTicket);
   const client: RunnerClient = { ...real, gitTicket };
+  let sandboxes = 0;
   const handle: SandboxHandle = { runId: "", sandboxName: "rn" };
   const result = (runId: string): NormalizedEvent => ({ runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s", agentOutput: { verdict: "done" } });
   const port: SandboxPort = {
     async createSandbox(opts) {
+      sandboxes++;
       return { ...handle, sandboxName: opts.sandboxName };
     },
     startDetached: (_h, opts) => ({ handle, hookFired: Promise.resolve(result(opts.runId)) }),
@@ -67,7 +69,7 @@ function rig(over: Partial<JobHandlerDeps> = {}) {
     recordSession: async () => {}, heartbeatMs: 1e9, flushMs: 1e9, runJobFn: (job, d) => (runs++, runJob(job, d)), ...over,
   };
   return {
-    handle: createJobHandler(deps), gitTicket, runs: () => runs,
+    handle: createJobHandler(deps), client, gitTicket, runs: () => runs, sandboxCalls: () => sandboxes,
     async claim(mode: "local" | "verified") {
       cloud.enqueue(signedJob({ mode }));
       const claimed = await client.claim();
@@ -113,6 +115,24 @@ describe("the signed job's mode picks the git path", () => {
     expect(r.runs()).toBe(0);
     expect(ended(claimed.runId)).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "git_proxy_unpinned" });
     expect(sent().some((p) => p.endsWith("/done"))).toBe(false);
+  });
+});
+
+describe("an unknown model id on a verified job", () => {
+  it("ends model_unsupported before any path A call: no ticket, no proxy session, no sandbox, no run", async () => {
+    const a = fakeGitPath();
+    const b = fakeGitPath();
+    const r = rig({ git: b, gitA: a });
+    cloud.enqueue(signedJob({ mode: "verified", model_hint: "opus-9" }));
+    const claimed = await r.client.claim();
+    if (claimed.kind !== "claimed") throw new Error("expected a claim");
+    expect(await r.handle(claimed)).toEqual({ status: "failed", reason: "model_unsupported" });
+    expect(a.calls).toEqual([]);
+    expect(b.calls).toEqual([]);
+    expect(r.gitTicket).not.toHaveBeenCalled();
+    expect(r.runs()).toBe(0);
+    expect(r.sandboxCalls()).toBe(0);
+    expect(ended(claimed.runId)).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "model_unsupported" });
   });
 });
 

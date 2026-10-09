@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CLI_MODEL_NAMES as protocolCliModelNames, modelIdForCliName as protocolModelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import {
   CLAUDE_CLI_SHA256,
   CLAUDE_CLI_VERSION,
@@ -256,6 +257,12 @@ describe("C55 criterion 16: --model is an explicit table lookup, never the price
       expect(modelIdForCliName(cliName)).toBe(id);
     }
     expect(modelIdForCliName("haiku-4.5")).toBeUndefined();
+  });
+
+  it("the port's table is the runner-protocol table itself, the one fx-runner maps through, not a copy", () => {
+    expect(CLI_MODEL_NAMES).toBe(protocolCliModelNames);
+    expect(modelIdForCliName).toBe(protocolModelIdForCliName);
+    expect(CLI_MODEL_NAMES).toEqual({ "haiku-4.5": "claude-haiku-4-5", "sonnet-5": "claude-sonnet-5", "opus-5": "claude-opus-5" });
   });
 
   it("the recorded argv for a haiku-4.5 run carries the table's value, not the price-table id", async () => {

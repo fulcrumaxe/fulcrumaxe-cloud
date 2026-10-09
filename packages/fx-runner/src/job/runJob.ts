@@ -2,7 +2,7 @@ import type { CleanEnvOptions, CredentialMode } from "./cleanEnv.js";
 import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
-import type { Job, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { cliModelNameFor, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import type { SandboxPort } from "../sandbox/port.js";
 import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
@@ -49,7 +49,7 @@ export interface RunJobDeps {
   envOptions?: CleanEnvOptions;
   /** Decides resume or fresh from the job's `continues` and this machine's own session index. */
   planSession: (continues: RunnableJob["continues"]) => SessionPlan;
-  /** The model when the job names none. */
+  /** The CLI's `--model` value used when the job names no model. Passed through as given: the job's own `model_hint` is mapped, this is not. */
   defaultModel: string;
   /** Every event of the run, with model text: stays on this machine. */
   onEvent?: (event: NormalizedEvent) => void | Promise<void>;
@@ -77,6 +77,11 @@ function reasonOf(error: unknown): FailureReason {
   return typeof code === "string" && CODE.test(code) ? code : "agent_exit";
 }
 
+/** The CLI `--model` name a job runs under: the default when it names none, else its price-table id mapped; `undefined` for an id the table lacks. */
+export function cliModelFor(job: { model_hint: string | null }, defaultModel: string): string | undefined {
+  return job.model_hint === null ? defaultModel : cliModelNameFor(job.model_hint);
+}
+
 /**
  * Runs one verified job and reports how it ended. One path for every tier: create a sandbox, start the agent in it, wait
  * for its hook raced against the wall clock, then stop and delete the sandbox on every exit. It knows an agent runtime
@@ -92,6 +97,10 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
   const reasons = jobHashRefusals(job);
   if (reasons.length > 0) return { status: "refused", reasons };
 
+  // The job names its model by price-table id, which the CLI does not know. Map it, and refuse an id the table lacks before a workspace or process exists.
+  const cliModel = cliModelFor(job, deps.defaultModel);
+  if (cliModel === undefined) return { status: "failed", reason: "model_unsupported" };
+
   // The session index is a file on this machine: a recorded workspace that is not one of this store's own directories is never run in. Start fresh instead.
   const planned = deps.planSession(job.continues);
   const plan: SessionPlan = planned.kind === "resume" && !deps.workspaces.owns(planned.workspace) ? { kind: "fresh", branch: job.continues?.branch ?? null } : planned;
@@ -102,7 +111,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     role: job.role,
     roleCard: job.role_card.text,
     prompt: buildPrompt(job),
-    model: job.model_hint ?? deps.defaultModel,
+    model: cliModel,
     workdir: workspace,
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],

@@ -15,7 +15,7 @@
  * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
  */
 import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
-import { runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
+import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
@@ -190,23 +190,28 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       const started: { base?: string } = {};
       let result: RunJobResult;
       try {
-        git.check(job, claimed);
-        // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
-        // workspace is left unused and the run starts fresh on the tip (C25 section 1.4). The decision is made here, before the run starts.
-        let planSession = deps.run.planSession;
-        const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
-        if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
-          const resumed = await git.resume(job, claimed, wanted.workspace);
-          if (resumed !== null) started.base = resumed.base;
-          else {
-            const fresh = { kind: "fresh", branch: job.continues.branch } as const;
-            planSession = () => fresh;
+        // An id the price table lacks is refused first, so a fix round with a bad hint starts no process, mirror fetch or ticketed session.
+        // `runJob` keeps its own check for callers that do not come through here.
+        if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
+        else {
+          git.check(job, claimed);
+          // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
+          // workspace is left unused and the run starts fresh on the tip (C25 section 1.4). The decision is made here, before the run starts.
+          let planSession = deps.run.planSession;
+          const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
+          if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
+            const resumed = await git.resume(job, claimed, wanted.workspace);
+            if (resumed !== null) started.base = resumed.base;
+            else {
+              const fresh = { kind: "fresh", branch: job.continues.branch } as const;
+              planSession = () => fresh;
+            }
           }
+          const fill = async (workspace: string): Promise<void> => {
+            started.base = (await git.prepare(job, claimed, workspace)).base;
+          };
+          result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun, held), ledger: deps.ledger });
         }
-        const fill = async (workspace: string): Promise<void> => {
-          started.base = (await git.prepare(job, claimed, workspace)).base;
-        };
-        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun, held), ledger: deps.ledger });
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
         if (!(error instanceof GitPathError)) throw error;

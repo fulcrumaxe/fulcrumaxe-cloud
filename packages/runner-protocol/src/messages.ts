@@ -62,6 +62,8 @@ export const RUNNER_SETUP_DETAILS = [
   "clone_limited",
   "push_too_large",
   "push_incomplete",
+  // The job's `model_hint` is not a price-table id the runner can map to a CLI model name (see `cliModels.ts`). Refused before any process starts.
+  "model_unsupported",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];

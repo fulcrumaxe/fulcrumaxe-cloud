@@ -51,6 +51,11 @@ function recordingPort(end: () => Promise<NormalizedEvent | undefined> = async (
   return { port, calls, started };
 }
 
+/** The start options a run is given, for a test that calls the port directly. */
+function depsStart(): StartDetachedOptions {
+  return { runId: RUN, role: "executor", roleCard: "card", prompt: "p", model: "sonnet", workdir: "/work/x", capUsd: 0, networkPolicy: [], env: {}, onEvent: () => undefined };
+}
+
 function depsFor(port: SandboxPort, over: Partial<RunJobDeps> = {}) {
   const created: string[] = [];
   const discarded: string[] = [];
@@ -98,10 +103,61 @@ describe("runJob: one path through the port", () => {
     expect(started[0]!.env.PATH).toContain("/nix/store/aaa-bubblewrap/bin");
   });
 
-  it("uses the job's model hint over the default", async () => {
+  it.each([
+    ["haiku-4.5", "claude-haiku-4-5"],
+    ["sonnet-5", "claude-sonnet-5"],
+    ["opus-5", "claude-opus-5"],
+  ])("maps the job's price-table id %s to the CLI name %s, not the id itself", async (hint, cliName) => {
     const { port, started } = recordingPort();
-    await runJob(jobWith({ model_hint: "opus" }), depsFor(port).deps);
-    expect(started[0]!.model).toBe("opus");
+    await runJob(jobWith({ model_hint: hint }), depsFor(port).deps);
+    expect(started[0]!.model).toBe(cliName);
+  });
+
+  it("keeps the default as given when the job names no model (it is a CLI value, not a price-table id)", async () => {
+    const { port, started } = recordingPort();
+    await runJob(jobWith({ model_hint: null }), depsFor(port, { defaultModel: "sonnet" }).deps);
+    expect(started[0]!.model).toBe("sonnet");
+  });
+
+  describe("against a CLI that enforces its own --model names (real contract, CLI 2.1.295)", () => {
+    /** The CLI accepts its own names and aliases and ends a run on anything else, with its own wording; a price-table id is not one. */
+    const CLI_ACCEPTS = new Set(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "sonnet", "opus", "haiku"]);
+    const enforcingPort = () => {
+      const rec = recordingPort();
+      const startDetached: SandboxPort["startDetached"] = (_h, opts) => {
+        rec.started.push(opts);
+        const handle: SandboxHandle = { runId: "", sandboxName: `rn-${RUN}` };
+        const issue = `There's an issue with the selected model (${opts.model}). It may not exist or you may not have access to it.`;
+        return { handle, hookFired: Promise.resolve(CLI_ACCEPTS.has(opts.model) ? result() : result({ type: "error", agentOutput: { error: issue } })) };
+      };
+      return { ...rec, port: { ...rec.port, startDetached } satisfies SandboxPort };
+    };
+
+    it("the fake itself rejects a price-table id (so the tests below can fail)", async () => {
+      const { port } = enforcingPort();
+      const handle = await port.createSandbox({ sandboxName: "x", retention: { persistent: false }, timeoutMs: 1 });
+      const run = port.startDetached(handle, { ...depsStart(), model: "opus-5" });
+      expect(await run.hookFired).toMatchObject({ type: "error" });
+    });
+
+    it.each(["haiku-4.5", "sonnet-5", "opus-5"])("a job for %s runs to done", async (hint) => {
+      const { port } = enforcingPort();
+      expect(await runJob(jobWith({ model_hint: hint }), depsFor(port).deps)).toMatchObject({ status: "done" });
+    });
+
+    it("a job with no hint runs to done on the runner's default", async () => {
+      const { port } = enforcingPort();
+      expect(await runJob(jobWith(), depsFor(port).deps)).toMatchObject({ status: "done" });
+    });
+  });
+
+  it.each(["opus", "claude-opus-5", "opus-4", "gpt-5", "constructor", "__proto__", "toString"])("refuses the unknown model hint %s with no workspace, sandbox or process", async (hint) => {
+    const { port, calls, started } = recordingPort();
+    const { deps, created } = depsFor(port);
+    expect(await runJob(jobWith({ model_hint: hint }), deps)).toEqual({ status: "failed", reason: "model_unsupported" });
+    expect(calls).toEqual([]);
+    expect(started).toEqual([]);
+    expect(created).toEqual([]);
   });
 
   it("resumes a session this machine holds, in its own workspace, and creates no workspace", async () => {

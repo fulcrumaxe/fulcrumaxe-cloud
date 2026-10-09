@@ -4,6 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ModelId } from "@fx/spend";
+import { CLI_MODEL_NAMES, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail } from "./repoClone.js";
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { NormalizedEvent } from "./types.js";
@@ -120,23 +121,13 @@ export { FX_AGENT_CONFIG_DIR };
 export const SANDBOX_AGENT_COMMAND: readonly string[] = CLAUDE_CODE_BACKEND.baseArgv;
 
 /**
- * C55 §3 / C46 criterion 16: the CLI's `--model` name for each `@fx/spend`
- * price-table id. The price-table ids are not CLI names, so `launch` maps
- * through this table and refuses an id missing from it before any command.
- * `modelIdForCliName` is its inverse, used to price `message.model`.
- * PLACEHOLDER values: confirm against the pinned CLI in H18 (each must be
- * accepted as `--model` and reported back in `message.model`).
+ * C55 §3 / C46 criterion 16: the CLI's `--model` name for each `@fx/spend` price-table id. The price-table ids are not CLI
+ * names, so `launch` maps through this table and refuses an id missing from it before any command. `modelIdForCliName` is its
+ * inverse, used to price `message.model`. The table lives in `@fulcrumaxe/runner-protocol` (`cliModels.ts`), shared with the
+ * local runner; it is re-exported here for the callers and tests that read it from the port. Each value was confirmed against the
+ * installed CLI on 2026-10-09: accepted as `--model`, and reported back in `message.model`.
  */
-export const CLI_MODEL_NAMES: Readonly<Record<ModelId, string>> = {
-  "haiku-4.5": "claude-haiku-4-5",
-  "sonnet-5": "claude-sonnet-5",
-  "opus-5": "claude-opus-5",
-};
-
-/** The price-table id whose CLI name is `cliName`, else `undefined`. */
-export function modelIdForCliName(cliName: string): ModelId | undefined {
-  return (Object.keys(CLI_MODEL_NAMES) as ModelId[]).find((id) => CLI_MODEL_NAMES[id] === cliName);
-}
+export { CLI_MODEL_NAMES, modelIdForCliName };
 
 /**
  * How the prompt reaches claude's stdin without being in any argv
