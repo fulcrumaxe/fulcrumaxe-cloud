@@ -87,6 +87,10 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/toolchain.ts": ["fs", "path"], // the toolchain found at setup (D#6 R4d-3): stat, executable check and realpath of the tools; no process is started
 
   "src/job/plainSegment.ts": ["path"],
+  // D#6 R6-2a, the update client. The fetcher is the only code that opens a connection for an update: https (the request, with each redirect hop checked by hand and no plain-http hop ever opened), stream (the response body handed to the TUF client), and http for the response's type only.
+  "src/update/pinnedFetcher.ts": ["http", "https", "stream"],
+  // The client's own files under <state dir>/tuf: SHA-256 of a downloaded release file, a random temp-file name for the root, a 0700 directory, and the saved metadata and verified download.
+  "src/update/tuf.ts": ["crypto", "fs", "path"],
 };
 
 /**

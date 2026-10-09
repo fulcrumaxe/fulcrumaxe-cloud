@@ -18,11 +18,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fulcrumaxe/runner-protocol": "workspace:*"
+    "@fulcrumaxe/runner-protocol": "workspace:*",
+    "tuf-js": "6.0.0"
   },
   "devDependencies": {
     "@fx/runner": "workspace:*",
     "@fx/runtime": "workspace:*",
+    "@tufjs/models": "5.0.0",
     "@types/node": "^24.19.0",
     "esbuild": "0.28.2",
     "postject": "1.0.0-alpha.6",

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -294,6 +294,18 @@ describe("shell variables and secrets", () => {
     expect(code).toBe(0);
     expect(out).toContain("ANTHROPIC_API_KEY is set");
     expect(await runCli({ argv: ["doctor"], home: root, stateDirOverride: stateDir, stdout: () => undefined, stderr: () => undefined })).toBe(1);
+  });
+});
+
+describe("the updates line (D#6 R6-2a)", () => {
+  it("says updates are not configured in this build, never fails the run, and creates no update directory", async () => {
+    register();
+    const result = await doctor();
+    expect(result.code).toBe(0);
+    expect(levelOf(result.out, "Updates")).toBe("INFO");
+    expect(result.out).toContain("Updates:");
+    expect(result.out).toContain("updates are not configured in this build");
+    expect(existsSync(path.join(stateDir, "tuf"))).toBe(false);
   });
 });
 

@@ -173,6 +173,25 @@ name the file in `FX_RUNNER_PROTECTION_BYPASS_FILE`:
 - Vercel's protection answer is recognised by a 401 whose JSON body says `protection.vercel_auth_enabled` is true or whose
   `error.message` is "Protected deployment". The cloud's own refusals (for example `runner_revoked`) are never taken for it.
 
+## Updates (the TUF client)
+
+`src/update/tuf.ts` is the client that checks a release before anything installs it. It uses `tuf-js` (exact version in the
+lockfile) and writes no cryptography of its own. It verifies root rotation, the signature threshold of every role, expiry,
+that no metadata version goes back, the snapshot's hashes, and each release file's length and SHA-256. Any failure is a
+refusal that names its class, never an exception, and a failed download leaves no file. It stages nothing: a verified file is
+handed back in a private directory under `<state dir>/tuf/`.
+
+- The first root, the metadata location and the target location are build constants (`src/update/buildConfig.ts`). Nothing
+  read at run time can replace them. No root ships yet, so a build says "updates are not configured in this build",
+  `fx-runner doctor` says so on its `Updates` line, and the updater makes no network call.
+- The only network code is `src/update/pinnedFetcher.ts`: `https:` only, only under the two configured locations, and a
+  release redirect to another origin (GitHub's real behaviour) is followed by hand, up to 5 hops, refusing any hop that is not
+  `https:` before it connects.
+- Expired release metadata pauses updates ("updates paused: release metadata expired on YYYY-MM-DD"). Jobs are never
+  affected.
+- Tests use the real client against metadata built with the reference model classes and signed with throwaway keys, served
+  from a local HTTPS server (`test/fixtures/`). No real key or root is committed.
+
 ## Boundaries
 
 No `@anthropic-ai/*` package is a dependency or an import. `test/` checks that, that no host-side tool is defined, that
