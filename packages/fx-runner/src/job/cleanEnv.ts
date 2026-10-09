@@ -9,6 +9,15 @@
 /** Host variables copied through when they are set. `HOME` is how the agent's binary finds the user's own login. */
 export const HOST_ENV_ALLOWLIST: readonly string[] = Object.freeze(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ"]);
 
+/**
+ * Marker variables a login shell reads to decide whether the system has already set the user's environment (D#6 R4d-3). The agent
+ * CLI starts its Bash tool through a login shell, and on NixOS `/etc/profile` replaces PATH wholesale unless this marker is set, which would drop
+ * the toolchain directories `extraPathDirs` adds and leave only the user-profile ones under the home directory the sandbox hides. When the
+ * host's own environment already carries the marker, it is copied through, so that shell keeps the PATH the runner built. Only this value `1`
+ * is copied, by name, and only when set.
+ */
+export const LOGIN_SHELL_MARKERS: readonly string[] = Object.freeze(["__NIXOS_SET_ENVIRONMENT_DONE"]);
+
 /** The one variable copied from the host in subscription mode only: the user's own subscription token. */
 export const SUBSCRIPTION_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN";
 
@@ -62,6 +71,7 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
     const value = process.env[name];
     if (typeof value === "string" && value !== "") env[name] = value;
   }
+  for (const name of LOGIN_SHELL_MARKERS) if (process.env[name] === "1") env[name] = "1";
   const widened = withDirs(env.PATH, options.extraPathDirs ?? []);
   if (widened !== undefined) env.PATH = widened;
   else delete env.PATH;

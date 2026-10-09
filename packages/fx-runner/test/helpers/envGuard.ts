@@ -81,6 +81,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/probe.ts": ["path"], // the sandbox probe (`doctor`): paths for the probe's rules; the machine itself is reached only through its host argument
   "src/sandbox/probeHost.ts": ["fs"], // the real machine behind the probe: stat and a bounded read of a few small files; the process start is the engine kit's
   "src/sandbox/sandboxSettings.ts": ["fs", "path"],
+  "src/sandbox/toolchain.ts": ["fs", "path"], // the toolchain found at setup (D#6 R4d-3): stat, executable check and realpath of the tools; no process is started
+
   "src/job/plainSegment.ts": ["path"],
 };
 

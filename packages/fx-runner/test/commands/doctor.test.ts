@@ -83,6 +83,25 @@ describe("a healthy machine", () => {
   });
 });
 
+describe("the toolchain line (D#6 R4d-3)", () => {
+  it("lists what was found and never fails the run; with no node it warns that projects cannot run their tests", async () => {
+    register();
+    const nodeDir = path.join(root, "store", "nodejs", "bin");
+    mkdirSync(nodeDir, { recursive: true });
+    writeFileSync(path.join(nodeDir, "node"), "#!/bin/sh\n");
+    chmodSync(path.join(nodeDir, "node"), 0o755);
+    vi.stubEnv("PATH", `${toolbin}:${nodeDir}:${HOST_PATH}`);
+    const found = await doctor();
+    expect(levelOf(found.out, "Toolchain")).toBe("INFO");
+    expect(found.out).toMatch(/Toolchain:\s+found node/);
+    expect(found.code).toBe(0);
+    vi.stubEnv("PATH", toolbin);
+    const none = await doctor();
+    expect(levelOf(none.out, "Toolchain")).toBe("WARN");
+    expect(none.out).toContain("node not found: projects that need it cannot run their tests");
+  });
+});
+
 describe("each check fails on its own", () => {
   it("not registered", async () => {
     const result = await doctor();

@@ -43,6 +43,7 @@ import { SandboxRefused } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { commandOnPath, resolveSandboxTools, sandboxToolDirs, selectTier } from "../sandbox/select.js";
+import { describeToolchain, resolveToolchain, toolchainPathDirs, toolchainReadPaths } from "../sandbox/toolchain.js";
 import { socketPath } from "../watch/layout.js";
 import { MAX_SOCKET_PATH_BYTES, findTmux, tmuxEnv } from "../watch/tmux.js";
 
@@ -152,11 +153,16 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
 
   const searchPath = hooks.searchPath ?? cleanEnv(credentials).PATH ?? "";
   const { binaryPath, toolDirs } = localTools(host, searchPath);
+  // The minimum toolchain for a project's own tests (D#6 R4d-3): found once here, its directories at the end of the agent's PATH, and the
+  // install prefixes under the home directory as read-only grants. A tool that is not found is skipped; one that may not be granted is left out.
+  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
+  const toolchain = resolveToolchain(searchPath, { home, stateDir: ctx.stateDir, binaryDir: path.dirname(binaryPath), jobAreas: [mirrorsRoot, workspaceRoot, tempRoot] });
+  const toolchainDirs = toolchainPathDirs(toolchain);
+  toolDirs.push(...toolchainDirs.filter((dir) => !toolDirs.includes(dir)));
   const envOptions = { extraPathDirs: toolDirs };
 
   // The runner's own directories. The state directory is private; the workspaces, temp directories and mirrors sit beside each other in the cache directory.
   const stateDir = ctx.stateDir;
-  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
   const keepClear = mirrorKeepClear({ home, stateDir, binaryDir: path.dirname(binaryPath), workspaceRoot, tempRoot });
   if (keepClear.some((other) => pathsOverlap(mirrorsRoot, other))) throw new CliError("mirrors_root_overlap: the repo mirrors directory overlaps the runner's state, binary, workspace or temp directory");
 
@@ -189,6 +195,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       stateDir,
       binaryDir: path.dirname(binaryPath),
       mirrorsRoot,
+      toolchainReadPaths: toolchainReadPaths(toolchain),
       makeRuntime: (sandboxSettings, protectedPaths) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit }),
     });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
@@ -220,7 +227,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       now: ctx.now,
       probe: () => {
         const found = sandboxDirs(host, searchPath);
-        toolDirs.splice(0, toolDirs.length, ...found);
+        toolDirs.splice(0, toolDirs.length, ...found, ...toolchainDirs.filter((dir) => !found.includes(dir)));
         return probeMachine({ platform: host.platform, home, stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath }, host.sandbox);
       },
     });
@@ -228,6 +235,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const detach = abortOnSignals(stopped, host.signals);
     try {
       ctx.out(`fx-runner: running as runner ${registration.runner_id}; stop with Ctrl-C`);
+      const described = describeToolchain(toolchain);
+      ctx.out(`fx-runner: toolchain: ${described.line}`);
+      for (const warning of described.warnings) ctx.out(`fx-runner: ${warning}`);
       const first = await gate.check();
       if (!first.open) ctx.out(`fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
       lastReason = first.open ? undefined : first.reason;
