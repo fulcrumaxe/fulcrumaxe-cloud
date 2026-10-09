@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { TERMINAL_WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
-import { SandboxReapNotSupportedError, STRAY_RUNNING_GRACE_MS, sweepSandboxReap, type SweepSandboxReapInput } from "../src/sandboxReap.js";
+import { STRAY_RUNNING_GRACE_MS, sweepSandboxReap, type SweepSandboxReapInput } from "../src/sandboxReap.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { createVercelSandboxPort } from "../src/vercelSandboxPort.js";
 import { buildExecutionRun } from "../src/startAgentRun.js";
@@ -166,9 +166,7 @@ describe("D#2 SANDBOX-REAPER-1a: the end-of-item pass [pg]", () => {
       expect([await reapRow(a.name), await reapRow(b.name)]).toEqual([undefined, undefined]);
     });
 
-    it("the idle pass is not built yet (a typed not_supported error), and input it cannot trust is refused: nothing is read either way", async () => {
-      await expect(sweep({ pass: "idle" })).rejects.toBeInstanceOf(SandboxReapNotSupportedError);
-      await expect(sweep({ pass: "idle" })).rejects.toMatchObject({ code: "not_supported" });
+    it("input it cannot trust is refused: nothing is read either way", async () => {
       for (const bad of [{ cursor: "rn-1-x-2" }, { pass: "ephemeral" as const, cursor: "ex-a" }, { cursor: "ex-a b" }, { maxCalls: -1 }, { maxCalls: 1.5 }, { timeBudgetMs: 0 }, { now: Number.NaN }, { mode: "off" as never }, { pass: "other" as never }]) {
         await expect(sweep(bad), JSON.stringify(bad)).rejects.toThrow(TypeError);
       }

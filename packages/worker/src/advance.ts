@@ -5,7 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -536,6 +536,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // build racing a fix round, lose here: the loser is told, and nothing is left behind. This is the lock.
       if (err instanceof DuplicateExecutorRunError) return { ok: false, reason: "already_running" };
       if (err instanceof WorkItemHaltedError) return { ok: false, reason: "item_halted" };
+      // The executor's sandbox is inside a reaper claim (0761): nothing was written, and the step retries after a wait.
+      if (err instanceof SandboxReapingError) return { ok: false, reason: "sandbox_reaping" };
       throw err;
     }
     console.info(JSON.stringify({ event: "advance.run_started", work_item_id: req.workItemId, step: req.step, role: req.role, run_id: started.runId, refused: started.refused ?? null }));
@@ -685,7 +687,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), expectedVersion !== undefined ? { expectedVersion } : {});
     console.info(JSON.stringify({ event: "advance.build", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, run_id: out.runId ?? null }));
     // A build that did not start is a fact of the item (its code is a fixed word the start named).
-    if (out.status === "refused") {
+    // A start that met a reaper claim is not a refusal of the build: the workflow waits and starts again, so no fact is recorded.
+    if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
       await writeEvent(who, { kind: "build_refused", dedupeKey: `build:${approvalId}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(out.reason ?? "") ? out.reason : "refused" });
     }
     return out;
@@ -876,6 +879,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         const won = await claimedRun();
         if (won) return started(won);
       }
+      // A reaper claim on the sandbox is transient: the step throws and is retried (the run is keyed, so a replay is safe).
+      if (err instanceof SandboxReapingError) throw err;
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
       if (err instanceof WorkItemHaltedError) return refuse("item_halted");
       return refuse("resume_failed");

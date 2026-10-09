@@ -23,7 +23,7 @@ import {
  * tests prove the kill switch (the worker is never reached when it is off), the plain-data hand-off, and the lease/cursor/not_due
  * behaviour a real tick gives the three jobs. The worker side is tested where it lives (packages/runner, packages/worker).
  */
-const JOBS = ['sandbox_reap_terminal', 'sandbox_reap_ephemeral', 'sandbox_inventory'] as const;
+const JOBS = ['sandbox_reap_terminal', 'sandbox_reap_ephemeral', 'sandbox_reap_idle', 'sandbox_inventory'] as const;
 
 function emptySweep(over: Partial<SandboxReapSweepResult> = {}): SandboxReapSweepResult {
   return { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0, ...over };
@@ -112,7 +112,7 @@ describe('the sandbox reaper jobs (C82)', () => {
       const worker = fakeWorker();
       const result = await tick(jobsFor(worker, raw));
       expect(result.results).toEqual(JOBS.map((job) => ({ job, result: 'ok' })));
-      expect(worker.sweeps.map((s) => [s.pass, s.mode])).toEqual([['terminal', mode], ['ephemeral', mode]]);
+      expect(worker.sweeps.map((s) => [s.pass, s.mode])).toEqual([['terminal', mode], ['ephemeral', mode], ['idle', mode]]);
       expect(worker.inventories).toHaveLength(1);
       expect(reports).toEqual([]);
     });
@@ -214,7 +214,7 @@ describe('the sandbox reaper jobs (C82)', () => {
       }
       const again = await tick(jobsFor(worker, 'on'));
       expect(again.results).toEqual(JOBS.map((job) => ({ job, result: 'not_due' })));
-      expect(worker.sweeps).toHaveLength(2);
+      expect(worker.sweeps).toHaveLength(3);
       expect(worker.inventories).toHaveLength(1);
     });
 
@@ -240,6 +240,8 @@ describe('the sandbox reaper jobs (C82)', () => {
           ['reconcile.sandbox_reap_terminal', 'sandbox_name_mismatch'],
           ['reconcile.sandbox_reap_ephemeral', 'sandbox_orphan_found'],
           ['reconcile.sandbox_reap_ephemeral', 'sandbox_name_mismatch'],
+          ['reconcile.sandbox_reap_idle', 'sandbox_orphan_found'],
+          ['reconcile.sandbox_reap_idle', 'sandbox_name_mismatch'],
           ['reconcile.sandbox_inventory', 'sandbox_cap_exceeded'],
           ['reconcile.sandbox_inventory', 'sandbox_total_high'],
         ].sort(),
@@ -296,7 +298,7 @@ describe('the sandbox reaper jobs (C82)', () => {
     it('the inventory job declares the call allowance the runner bounds its listing by (two prefixes, a page cap each)', () => {
       expect(SANDBOX_INVENTORY_CALLS_PER_RUN).toBe(2 * INVENTORY_MAX_PAGES_PER_PREFIX);
       expect(sandboxInventoryJob(null, { mode: parseSandboxReapMode('on'), reportError: report }).maxCalls).toBe(SANDBOX_INVENTORY_CALLS_PER_RUN);
-      expect(sandboxReapJobs(null, { mode: parseSandboxReapMode('on'), reportError: report }).map((j) => [j.name, j.maxCalls])).toEqual([['sandbox_reap_terminal', 60], ['sandbox_reap_ephemeral', 60]]);
+      expect(sandboxReapJobs(null, { mode: parseSandboxReapMode('on'), reportError: report }).map((j) => [j.name, j.maxCalls])).toEqual([['sandbox_reap_terminal', 60], ['sandbox_reap_ephemeral', 60], ['sandbox_reap_idle', 60]]);
     });
   });
 });

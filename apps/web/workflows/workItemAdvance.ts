@@ -100,6 +100,13 @@ const MAX_REVIEW_ROUNDS = 6;
 /** The fixed codes "Check the build" records when its lookup could not decide (the activity route turns them into a notice sentence). */
 const CHECK_UNAVAILABLE = "check_build_unavailable";
 const CHECK_AMBIGUOUS = "check_build_ambiguous";
+/**
+ * A start that meets a reaper claim on the executor's sandbox (the worker answers `start_sandbox_reaping`, nothing written) waits and
+ * starts again: Build again must not fail because a delete was in flight. The waits add up to 705 s, past the claim's own
+ * 10-minute expiry, so the last try always sees an expired claim. Eight retries; the build step is keyed, so a replay is safe.
+ */
+const BUILD_REAPING_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 120_000, 120_000, 120_000, 120_000];
+const BUILD_REAPING_REASON = "start_sandbox_reaping";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
 const LIGHT_SPEC_WAIT_MS = 20 * 60_000;
 
@@ -453,7 +460,12 @@ async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo:
 async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
-  const started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+  let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+  for (let i = 0; started.reason === BUILD_REAPING_REASON && i < BUILD_REAPING_BACKOFF_MS.length; i++) {
+    await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: "sandbox_reaping", attempt: i + 1 });
+    await sleep(BUILD_REAPING_BACKOFF_MS[i]!);
+    started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+  }
   if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");
   if (started.status !== "started" || started.runId === null) {
     // Nothing was spent and the item did not move: it stays at Spec ready, where it can be approved again. The refusal is

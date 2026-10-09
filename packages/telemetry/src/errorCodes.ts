@@ -152,6 +152,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_name_mismatch",
   "sandbox_reap_mode_invalid",
   "sandbox_reap_unconfigured",
+  // Sandbox reaper (D#2 SANDBOX-REAPER-2): an executor run met a reaper claim on its sandbox; the start is retried after a wait.
+  "sandbox_reaping",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

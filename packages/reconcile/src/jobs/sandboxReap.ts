@@ -83,6 +83,7 @@ export const SANDBOX_INVENTORY_CALLS_PER_RUN = 200;
 
 export const SANDBOX_REAP_TERMINAL_JOB = 'sandbox_reap_terminal';
 export const SANDBOX_REAP_EPHEMERAL_JOB = 'sandbox_reap_ephemeral';
+export const SANDBOX_REAP_IDLE_JOB = 'sandbox_reap_idle';
 export const SANDBOX_INVENTORY_JOB = 'sandbox_inventory';
 
 /**
@@ -100,7 +101,7 @@ export function sandboxJobGate(job: string, ctx: JobContext, worker: SandboxReap
   return null;
 }
 
-function reapPassJob(name: string, pass: 'terminal' | 'ephemeral', worker: SandboxReapWorker | null, deps: SandboxReapJobDeps): ReconcileJob {
+function reapPassJob(name: string, pass: 'terminal' | 'ephemeral' | 'idle', worker: SandboxReapWorker | null, deps: SandboxReapJobDeps): ReconcileJob {
   const stage = `reconcile.${name}`;
   return {
     name,
@@ -128,9 +129,9 @@ function reapPassJob(name: string, pass: 'terminal' | 'ephemeral', worker: Sandb
 
 /**
  * The reaper's pass jobs: `sandbox_reap_terminal` (the end-of-item pass, every 15 minutes by its seeded interval) and
- * `sandbox_reap_ephemeral` (the 1-day safety net, daily). REAPER-2 adds `sandbox_reap_idle` here. With a null worker (the sandbox
+ * `sandbox_reap_ephemeral` (the 1-day safety net, daily) and `sandbox_reap_idle` (the 7-day executor rule and the cap, daily). With a null worker (the sandbox
  * credentials are not configured) each reports `sandbox_reap_unconfigured` and does nothing.
  */
 export function sandboxReapJobs(worker: SandboxReapWorker | null, deps: SandboxReapJobDeps): ReconcileJob[] {
-  return [reapPassJob(SANDBOX_REAP_TERMINAL_JOB, 'terminal', worker, deps), reapPassJob(SANDBOX_REAP_EPHEMERAL_JOB, 'ephemeral', worker, deps)];
+  return [reapPassJob(SANDBOX_REAP_TERMINAL_JOB, 'terminal', worker, deps), reapPassJob(SANDBOX_REAP_EPHEMERAL_JOB, 'ephemeral', worker, deps), reapPassJob(SANDBOX_REAP_IDLE_JOB, 'idle', worker, deps)];
 }

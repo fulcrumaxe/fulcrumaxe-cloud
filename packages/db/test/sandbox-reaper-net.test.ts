@@ -105,11 +105,12 @@ describe('sandbox reaper safety net and inventory (0760)', () => {
       }
     });
 
-    it('seeds the three reconcile jobs with their intervals and gives platform_ops no new privilege on the reaper tables', async () => {
+    it('seeds the reconcile jobs (plus the idle job of 0761) with their intervals and gives platform_ops no new privilege on the reaper tables', async () => {
       const { rows } = await admin.query(`SELECT name, interval_seconds FROM reconcile_jobs WHERE name LIKE 'sandbox\\_%' ORDER BY name`);
       expect(rows).toEqual([
         { name: 'sandbox_inventory', interval_seconds: 86400 },
         { name: 'sandbox_reap_ephemeral', interval_seconds: 86400 },
+        { name: 'sandbox_reap_idle', interval_seconds: 86400 },
         { name: 'sandbox_reap_terminal', interval_seconds: 900 },
       ]);
       const held = await admin.query(

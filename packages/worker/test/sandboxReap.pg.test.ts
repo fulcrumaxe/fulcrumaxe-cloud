@@ -73,7 +73,44 @@ describe("the sandbox reaper through the worker [pg]", () => {
     await candidate();
     await worker.sweepSandboxReap(input("dry_run"));
     expect(opsQueries).toEqual([]);
-    await expect(worker.sweepSandboxReap({ ...input("on"), pass: "idle" })).rejects.toMatchObject({ code: "not_supported" });
+  });
+
+  /** REAPER-2: an executor sandbox for an item at needs_human, idle for 8 days, stopped at the (fake) provider with its snapshot. */
+  async function idleCandidate(): Promise<{ name: string; accountId: string }> {
+    const a = await seedAccount(admin, randomUUID());
+    const itemId = randomUUID();
+    const name = `ex-${a.accountId}-${a.repoId}-7`;
+    await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage, updated_at) VALUES ($1, $2, $3, 'feature', 7, 'internal', 'needs_human', now() - interval '8 days')`, [itemId, a.accountId, a.repoId]);
+    const runId = randomUUID();
+    await admin.query(
+      `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, sandbox_name, dispatch_repo_id, dispatch_pr_number, created_at, updated_at)
+       VALUES ($1, $2, $3, 'executor', 'production', 'failed', $4, $5, 7, now() - interval '9 days', now() - interval '8 days')`,
+      [runId, a.accountId, itemId, name, a.repoId],
+    );
+    await admin.query(`ALTER TABLE agent_runs DISABLE TRIGGER USER`);
+    try {
+      await admin.query(`UPDATE agent_runs SET ended_at = now() - interval '8 days', updated_at = now() - interval '8 days' WHERE id = $1`, [runId]);
+    } finally {
+      await admin.query(`ALTER TABLE agent_runs ENABLE TRIGGER USER`);
+    }
+    sdk.seed(name, "stopped", { persistent: true, snapshot: true });
+    return { name, accountId: a.accountId };
+  }
+
+  it("the idle pass runs on the runner login: dry_run only lists, on deletes the sandbox and its snapshot, claims it under reason idle and writes the audit row", async () => {
+    const c = await idleCandidate();
+    opsQueries.length = 0;
+    const dry = await worker.sweepSandboxReap({ ...input("dry_run"), pass: "idle" });
+    expect(dry.candidates).toContainEqual({ accountId: c.accountId, sandboxName: c.name, reason: "idle" });
+    expect(sdk.estate.has(c.name)).toBe(true);
+    const result = await worker.sweepSandboxReap({ ...input("on"), pass: "idle" });
+    expect(result.candidates).toContainEqual({ accountId: c.accountId, sandboxName: c.name, reason: "idle" });
+    expect(sdk.estate.has(c.name)).toBe(false);
+    expect(sdk.snapshots.has(c.name)).toBe(false);
+    expect((await admin.query(`SELECT state, reason FROM sandbox_reaps WHERE sandbox_name = $1`, [c.name])).rows).toEqual([{ state: "deleted", reason: "idle" }]);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM audit_log WHERE account_id = $1 AND action = 'sandbox.reaped'`, [c.accountId])).rows[0].n).toBe(1);
+    expect(opsQueries).toEqual([]);
+    expect(sdk.waking).toEqual([]);
   });
 
   /** REAPER-1b: a settled non-executor run that ended 25 hours ago, and its stopped sandbox at the (fake) provider. */
@@ -114,6 +151,7 @@ describe("the sandbox reaper through the worker [pg]", () => {
     "SELECT sandbox_reap_claim('ex-x', 'terminal')",
     "SELECT sandbox_reap_done('ex-x', 'deleted')",
     "SELECT sandbox_reap_unknown_names(ARRAY['ex-x'])",
+    "SELECT * FROM sandbox_reap_candidates_idle(5, NULL, 20)",
     "SELECT * FROM sandbox_reap_candidates_ephemeral(5, NULL)",
     "SELECT sandbox_reap_claim_ephemeral('rn-1-x-1')",
     "SELECT * FROM sandbox_inventory_write(ARRAY[]::text[], ARRAY[]::text[], 20)",

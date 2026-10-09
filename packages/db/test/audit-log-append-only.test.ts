@@ -486,7 +486,7 @@ describe('audit_write / audit_write_system: append-only, unforgeable audit_log (
         .sort();
       // D#2 (0760): a migration that builds on one of the held-back ones (0760 reads 0731's sandbox_reaps and uses its done definer)
       // cannot run before it, so it is held back and applied with them.
-      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql'];
+      const BUILDS_ON_HELD_BACK = ['0760_sandbox_reaper_net.sql', '0761_sandbox_reap_lock.sql'];
       const AUDIT_WRITE_MIGRATIONS = allFiles.filter(
         (f) => BUILDS_ON_HELD_BACK.includes(f) || isAuditWriteMigration(readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), 'utf8')),
       );

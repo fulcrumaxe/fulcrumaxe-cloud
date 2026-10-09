@@ -1068,6 +1068,60 @@ SANDBOX_EPHEMERAL_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent
 SANDBOX_INVENTORY_WRITER_FUNCTIONS="'sandbox_inventory_write'"
 SANDBOX_INVENTORY_WRITER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.updated_at SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','table sandbox_inventory SELECT','table sandbox_inventory INSERT','table sandbox_inventory DELETE','schema public USAGE'"
 
+# The two roles of 0761 and what each may hold and own (see the migration header).
+SANDBOX_IDLE_REAPER_FUNCTIONS="'sandbox_reap_idle_state', 'sandbox_reap_candidates_idle', 'sandbox_reap_claim_idle'"
+SANDBOX_IDLE_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column agent_runs.compute_settle_due_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.stage SELECT','column work_items.updated_at SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','table sandbox_reaps SELECT','table sandbox_reaps INSERT','table sandbox_reaps UPDATE','schema public USAGE'"
+SANDBOX_CLAIM_GUARD_FUNCTIONS="'sandbox_reap_claimed'"
+SANDBOX_CLAIM_GUARD_PRIVILEGES="'column sandbox_reaps.sandbox_name SELECT','column sandbox_reaps.state SELECT','column sandbox_reaps.claimed_at SELECT','schema public USAGE'"
+
+# D#2 SANDBOX-REAPER-2 (0761): the one SECURITY DEFINER owned by sandbox_claim_guard (sandbox_reap_claimed(text)), matched by exact
+# signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp whose ACL holds platform_ops (the owner of
+# agent_run_create, its only caller) and nobody else but the owner, with no PUBLIC entry and no grant option; SHAPE_FAIL:<count> when a
+# definer owned by the role is not that; nothing when the role owns none (the generic owner check then rejects anything else).
+check_sandbox_claim_guard_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.sandbox_reap_claimed(text)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0 OR a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee) ORDER BY pg_get_userbyid(a.grantee))
+               FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner) = ARRAY['platform_ops']::name[]) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'sandbox_claim_guard') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'sandbox-claim-guard-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by sandbox_claim_guard fail the exception shape (not sandbox_reap_claimed(text), a loose search_path, EXECUTE for anyone but platform_ops and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#2 SANDBOX-REAPER-2 (0761): platform_ops holds no grant and no policy on sandbox_reaps (it can ask the one question and read no row),
+# and sandbox_claim_guard has exactly one SELECT policy there. A no-op when the table or the role does not exist.
+check_sandbox_claim_guard_platform_ops() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN has_table_privilege('platform_ops', 'public.sandbox_reaps', 'SELECT,INSERT,UPDATE,DELETE') OR has_any_column_privilege('platform_ops', 'public.sandbox_reaps', 'SELECT,INSERT,UPDATE')
+           THEN 'platform_ops holds a privilege on sandbox_reaps' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'sandbox_reaps' AND 'platform_ops' = ANY(roles)) THEN 'platform_ops has a policy on sandbox_reaps' END,
+      CASE WHEN (SELECT count(*) FROM pg_policies WHERE tablename = 'sandbox_reaps' AND roles = ARRAY['sandbox_claim_guard']::name[] AND cmd = 'SELECT') <> 1
+           THEN 'sandbox_claim_guard does not have exactly one SELECT policy on sandbox_reaps' END)
+    WHERE to_regclass('public.sandbox_reaps') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_claim_guard');" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'sandbox_claim_guard-platform_ops' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): sandbox_claim_guard shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#221 KS (0739): the one SECURITY DEFINER owned by plan_kind_audit_writer (plan_kind_switch_audit_write(text)), matched by exact name. Prints
 # its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp with EXECUTE for platform_ops (the invoking trigger) and no one else, and no grant
 # option; SHAPE_FAIL:<count> when a definer owned by the role is not that; nothing when the role owns none.
@@ -1672,6 +1726,24 @@ if [ -n "$SANDBOX_INVENTORY_RESULT" ] && ! [[ "$SANDBOX_INVENTORY_RESULT" =~ ^[0
   echo "neon-shape: internal error -- sandbox_inventory_writer exempt function oids were not numeric: $SANDBOX_INVENTORY_RESULT" >&2
   exit 1
 fi
+SANDBOX_IDLE_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_idle_reaper "$SANDBOX_IDLE_REAPER_FUNCTIONS")"
+if [[ "$SANDBOX_IDLE_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_IDLE_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_IDLE_RESULT" ] && ! [[ "$SANDBOX_IDLE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_idle_reaper exempt function oids were not numeric: $SANDBOX_IDLE_RESULT" >&2
+  exit 1
+fi
+SANDBOX_CLAIM_GUARD_RESULT="$(check_sandbox_claim_guard_exception_shape fx_neon)"
+if [[ "$SANDBOX_CLAIM_GUARD_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_CLAIM_GUARD_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_CLAIM_GUARD_RESULT" ] && ! [[ "$SANDBOX_CLAIM_GUARD_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_claim_guard exempt function oid was not numeric: $SANDBOX_CLAIM_GUARD_RESULT" >&2
+  exit 1
+fi
 PLAN_KIND_AUDIT_RESULT="$(check_plan_kind_audit_exception_shape fx_neon)"
 if [[ "$PLAN_KIND_AUDIT_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${PLAN_KIND_AUDIT_RESULT#SHAPE_FAIL:}" >&2
@@ -1744,7 +1816,7 @@ if [ -n "$RUNNER_NOTICE_RESULT" ] && ! [[ "$RUNNER_NOTICE_RESULT" =~ ^[0-9]+(,\ 
   echo "neon-shape: internal error -- runner_notice_lister exempt function oid was not numeric: $RUNNER_NOTICE_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1764,6 +1836,9 @@ check_guard_definer_owner_cascade fx_neon
 check_sandbox_reaper_role_shape fx_neon
 check_sandbox_net_role_shape fx_neon sandbox_ephemeral_reaper SANDBOX_EPHEMERAL_REAPER
 check_sandbox_net_role_shape fx_neon sandbox_inventory_writer SANDBOX_INVENTORY_WRITER
+check_sandbox_net_role_shape fx_neon sandbox_idle_reaper SANDBOX_IDLE_REAPER
+check_sandbox_net_role_shape fx_neon sandbox_claim_guard SANDBOX_CLAIM_GUARD
+check_sandbox_claim_guard_platform_ops fx_neon
 check_plan_kind_audit_role_shape fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
 check_work_item_halt_definer_role_shape fx_neon
@@ -1911,7 +1986,8 @@ fi
 # REPLACE of an already guard_definer-owned has_open_invitation in 0005 would otherwise fail for the migration role.
 # D#2 (0760): 0731 is held back by the audit_write rule above (it grants EXECUTE on audit_write_system to its role), and 0760 reads 0731's
 # sandbox_reaps table and its sandbox_reap_done definer. A migration cannot run before the one it extends, so it is held back with it.
-HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql)
+# D#2 (0761): the lock, idle rule and cap extend 0731 (sandbox_reaps, sandbox_reap_ex_state) and 0760, so it is held back with them.
+HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql 0761_sandbox_reap_lock.sql)
 
 AUDIT_WRITE_FUNCTION_PATTERN='FUNCTION[[:space:]]+("?public"?[[:space:]]*\.[[:space:]]*)?"?audit_write(_system)?"?([^A-Za-z0-9_]|$)'
 

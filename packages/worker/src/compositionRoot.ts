@@ -153,8 +153,8 @@ export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimF
   /**
    * D#2 SANDBOX-REAPER-1a (C82): one pass of the sandbox reaper, over plain data. Like `sweepComputeSettle` it works across
    * tenants and is for the cron only, never callable from a user request; the pool, the provider port and the stop path stay
-   * inside. `pass: "terminal"` deletes executor sandboxes whose work items have all ended; `ephemeral` and `idle` are
-   * refused with a typed `not_supported` error until they ship. There is no `off` mode: the caller decides that and never calls.
+   * inside. `pass: "terminal"` deletes executor sandboxes whose work items have all ended; `ephemeral` is the 1-day safety net and `idle` the 7-day rule and cap (REAPER-2);
+   * there is no `off` mode: the caller decides that and never calls.
    * The reconcile cron calls it (REAPER-1b); the kill switch (`FX_SANDBOX_REAP_MODE`) is read there.
    */
   sweepSandboxReap(input: SweepSandboxReapInput): Promise<SweepSandboxReapResult>;
