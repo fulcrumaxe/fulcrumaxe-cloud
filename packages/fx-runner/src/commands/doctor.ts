@@ -20,6 +20,7 @@ import { BYPASS_ENV_NAME, bypassHeaders, bypassSecret, bypassRefusalText } from 
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
+import { toolchainReport } from "../sandbox/toolchain.js";
 
 const OS_RELEASE = "/etc/os-release";
 const NIXOS_MARKER = "/etc/NIXOS";
@@ -161,6 +162,13 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost): Prom
   }
 
   await sandboxCheck(ctx, host, binaryPath, line);
+
+  // What a job's agent can run for a project's own tests (D#6 R4d-3). Missing node is a warning, not a failure: not every repository needs it.
+  const toolchain = toolchainReport(cleanEnv({ mode: "subscription" }).PATH ?? "", { home: host.home, stateDir: ctx.stateDir, binaryPath, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
+  if (toolchain !== undefined) {
+    line(toolchain.level, "Toolchain", toolchain.line);
+    for (const warning of toolchain.warnings) line("WARN", "Toolchain", warning);
+  }
 
   if (mode === "subscription") {
     if (host.shellVars.length === 0) line("PASS", "Shell variables", "no Anthropic key or token is set");

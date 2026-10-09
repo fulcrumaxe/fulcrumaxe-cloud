@@ -40,6 +40,18 @@ export function protectedPaths(input: { home: string; stateDir: string; binaryDi
   };
 }
 
+/**
+ * Credential-bearing files a package manager or version control keeps inside its own install prefix, relative to that prefix: the system-wide npm
+ * and yarn configs (which can hold a registry `_authToken`), the prefix-level user configs and the system git config. A granted toolchain
+ * prefix is readable, so each of these is denied on top of the grant, at every job, the same way the credential floor is.
+ */
+export const TOOLCHAIN_PREFIX_CREDENTIAL_FILES: readonly string[] = Object.freeze(["etc/npmrc", "etc/gitconfig", ".npmrc", "etc/yarnrc", ".yarnrc.yml"]);
+
+/** The files denied inside one granted toolchain prefix, as written and once symlinks are followed. */
+export function toolchainCredentialFiles(prefix: string): string[] {
+  return [...new Set([prefix, realOf(prefix)].flatMap((root) => TOOLCHAIN_PREFIX_CREDENTIAL_FILES.map((file) => path.join(root, file))))];
+}
+
 /** System-wide places that are never granted, whatever a job asks for. */
 const NEVER_GRANTED: readonly string[] = Object.freeze(["/", "/etc", "/Library/Keychains"]);
 
@@ -64,6 +76,11 @@ export interface SandboxInput {
   /** R7's per-job additions, already floor-checked by the caller and checked again here. */
   extraReadPaths?: readonly string[];
   extraWritePaths?: readonly string[];
+  /**
+   * Read-only grants for the toolchain found at setup (D#6 R4d-3): install prefixes under the home directory, each a root of its own and so
+   * checked against the protected list and the home directory like any grant, but never writable and never a root for other grants.
+   */
+  toolchainReadPaths?: readonly string[];
   extraDomains?: readonly string[];
   /**
    * The directory the repo mirrors live in (D#6 R4a-3, C25 section 2), absolute. It is a runner-owned root that no write may
@@ -137,6 +154,22 @@ function assertGrantable(label: string, value: string, home: string, guarded: re
   return trimmed;
 }
 
+/**
+ * Whether `value` could be a read-only grant: the same checks `assertGrantable` makes (a normalised absolute path, not the home directory, a
+ * system directory or a socket, overlapping nothing on the protected list), asked as a yes or no with the grant standing as its own root. A
+ * caller that finds tools at setup (the toolchain, D#6 R4d-3) uses it to leave out a tool the builder would refuse for every job.
+ */
+export function canGrantRead(value: string, input: { home: string; stateDir: string; binaryDir: string }): boolean {
+  const listed = protectedPaths(input);
+  try {
+    assertGrantable("toolchain read path", value, input.home, [...listed.noAccess, ...listed.noEdit], [value], true);
+    return true;
+  } catch (error) {
+    if (error instanceof SandboxGrantRefused) return false;
+    throw error;
+  }
+}
+
 const MIRROR_OBJECTS = /^[^/\\]+\.git[/\\]objects$/;
 
 /**
@@ -185,8 +218,11 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const mirrorsRoot = input.mirrorsRoot === undefined ? undefined : assertGrantable("mirrors root", input.mirrorsRoot, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot)], [input.mirrorsRoot], true);
   const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true)), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])];
   const extraRead = (input.extraReadPaths ?? []).map((value) => assertGrantable("extra read path", value, home, guarded, roots));
+  const toolchainRead = (input.toolchainReadPaths ?? []).map((value) => assertGrantable("toolchain read path", value, home, guarded, [value], true));
   const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded, roots));
   if (mirrorsRoot !== undefined) assertMirrorGrants(mirrorsRoot, extraRead, extraWrite);
+  if (mirrorsRoot !== undefined && toolchainRead.some((value) => pathsOverlap(mirrorsRoot, value))) throw new SandboxGrantRefused("sandboxSettings: a toolchain read path overlaps the mirrors root");
+  const toolchainDeny = [...new Set(toolchainRead.flatMap(toolchainCredentialFiles))];
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
   const unique = (values: string[]): string[] => [...new Set(values)];
   return {
@@ -201,10 +237,10 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
       disabled: false,
       allowWrite: unique([workspace, tempDir, ...extraWrite]),
       denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
-      allowRead: unique([workspace, tempDir, ...extraRead]),
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...toolchainDeny]),
+      allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead]),
     },
-    credentials: { files: floor.map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },
+    credentials: { files: [...floor, ...toolchainDeny].map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },
     network: { allowedDomains: domains, strictAllowlist: true, allowLocalBinding: false },
   };
 }

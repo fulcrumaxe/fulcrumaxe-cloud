@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FIXED_ENV, HOST_ENV_ALLOWLIST, SUBSCRIPTION_TOKEN_VAR, cleanEnv } from "../src/job/cleanEnv.js";
+import { FIXED_ENV, HOST_ENV_ALLOWLIST, LOGIN_SHELL_MARKERS, SUBSCRIPTION_TOKEN_VAR, cleanEnv } from "../src/job/cleanEnv.js";
 import { ENV_READER_FILE, envAccessViolations } from "./helpers/envGuard.js";
 import { srcFiles } from "./helpers/srcFiles.js";
 
@@ -247,7 +247,7 @@ describe("tool subprocesses do not inherit the credential", () => {
 describe("cleanEnv in subscription mode", () => {
   it("holds only allowlisted names, the fixed set and the subscription token", () => {
     const env = cleanEnv({ mode: "subscription" });
-    const allowed = new Set<string>([...HOST_ENV_ALLOWLIST, ...Object.keys(FIXED_ENV), SUBSCRIPTION_TOKEN_VAR]);
+    const allowed = new Set<string>([...HOST_ENV_ALLOWLIST, ...LOGIN_SHELL_MARKERS, ...Object.keys(FIXED_ENV), SUBSCRIPTION_TOKEN_VAR]);
     expect(Object.keys(env).filter((name) => !allowed.has(name))).toEqual([]);
     for (const name of STRAY) expect(env, name).not.toHaveProperty(name);
     expect(env).toMatchObject({ HOME: "/home/someone", PATH: "/usr/bin", CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", [SUBSCRIPTION_TOKEN_VAR]: "host-oauth-value" });

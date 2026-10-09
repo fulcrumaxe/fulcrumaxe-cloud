@@ -144,6 +144,56 @@ describe("1. the keyring is pinned in the build", () => {
   });
 });
 
+describe("1a. the toolchain is found once at start (D#6 R4d-3)", () => {
+  it("prints what it found, and what is missing, on the search path the run was given", async () => {
+    register(cloud.origin);
+    const nodeDir = path.join(root, "store", "nodejs", "bin");
+    mkdirSync(nodeDir, { recursive: true });
+    writeFileSync(path.join(nodeDir, "node"), "#!/bin/sh\n");
+    chmodSync(path.join(nodeDir, "node"), 0o755);
+    const run = start({ hooks: { searchPath: `${toolbin}:${nodeDir}` } });
+    await until(() => run.signals.listenerCount("SIGTERM") > 0);
+    const stopped = await stop(run);
+    expect(stopped.code).toBe(0);
+    const out = (await run.done).out;
+    expect(out).toContain("fx-runner: toolchain: found node");
+    expect(out.join("\n")).not.toContain("node not found");
+  });
+
+  it.skipIf(process.platform !== "linux")("a claimed job's agent starts with the toolchain directory at the end of its PATH, and the settings file keeps the home directory hidden", async () => {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    fake.set("hang", "");
+    register(cloud.origin);
+    const prefix = path.join(home, ".nvm", "versions", "node", "v22.1.0");
+    mkdirSync(path.join(prefix, "bin"), { recursive: true });
+    writeFileSync(path.join(prefix, "bin", "node"), "#!/bin/sh\n");
+    chmodSync(path.join(prefix, "bin", "node"), 0o755);
+    cloud.enqueue(signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
+    const run = start({ hooks: { searchPath: `${toolbin}:${path.join(prefix, "bin")}`, remoteUrl: () => pathToFileURL(remote).href } });
+    // env.txt exists as soon as the shell opens it, before `env` has written it; stdin.txt is opened only after `env` has finished, so the file is whole by then.
+    await until(() => existsSync(path.join(fake.dir, "stdin.txt")), 20_000);
+    const pathLine = fake.envText().split("\n").find((line) => line.startsWith("PATH="));
+    expect(pathLine?.split("=")[1]?.split(":").pop()).toBe(path.join(prefix, "bin"));
+    expect(readFileSync(path.join(fake.dir, "argv.txt"), "utf8")).toContain("--settings");
+    await stop(run);
+  }, 60_000);
+
+  it("with no node anywhere, it says projects that need it cannot run their tests", async () => {
+    register(cloud.origin);
+    const run = start();
+    await until(() => run.signals.listenerCount("SIGTERM") > 0);
+    await stop(run);
+    expect((await run.done).out).toContain("fx-runner: node not found: projects that need it cannot run their tests");
+  });
+});
+
 describe("1b. nothing at run time changes the keyring", () => {
 
   it("setting FX_RUNNER_* variables leaves the answer for every address unchanged", () => {

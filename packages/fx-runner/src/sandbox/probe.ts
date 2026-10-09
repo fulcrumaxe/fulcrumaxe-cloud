@@ -77,12 +77,23 @@ function fsBlock(settings: Record<string, unknown>): Record<string, unknown> {
   return block !== null && typeof block === "object" ? (block as Record<string, unknown>) : {};
 }
 
+/** The paths in `credentials.files` whose mode is `deny`. */
+function deniedCredentialFiles(settings: Record<string, unknown>): string[] {
+  const block = settings.credentials;
+  const files = block !== null && typeof block === "object" ? (block as Record<string, unknown>).files : undefined;
+  if (!Array.isArray(files)) return [];
+  return files.flatMap((entry: unknown) => {
+    const item = entry as { path?: unknown; mode?: unknown } | null;
+    return item !== null && typeof item === "object" && item.mode === "deny" && typeof item.path === "string" ? [item.path] : [];
+  });
+}
+
 /**
  * The bubblewrap arguments for the filesystem and network rules in `settings`: a read-only view of the machine, no network, a hidden copy of
  * every denied-read directory that exists, then the allowed reads and writes laid back over it. A path that is not there is skipped
  * (`-try`), so the probe creates nothing on the machine. Ends before the command.
  */
-export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: string) => boolean): string[] {
+export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: string) => boolean, isFile?: (target: string) => boolean): string[] {
   const fs = fsBlock(settings);
   const hidden = [...new Set(stringList(fs.denyRead))].filter((dir) => isDir(dir));
   // A directory under another hidden one is already hidden with it.
@@ -94,6 +105,13 @@ export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: str
   for (const dir of top) args.push("--tmpfs", dir);
   for (const dir of stringList(fs.allowRead)) args.push("--ro-bind-try", dir, dir);
   for (const dir of stringList(fs.allowWrite)) args.push("--bind-try", dir, dir);
+  // A denied file inside a re-allowed directory (a toolchain prefix's system-wide npm config) is covered last, so the deny wins over the allow.
+  // Only where the caller can say a file exists: a bind onto a missing file cannot be made inside a read-only directory.
+  if (isFile !== undefined) {
+    const allowed = [...stringList(fs.allowRead), ...stringList(fs.allowWrite)];
+    const denied = new Set([...stringList(fs.denyRead), ...deniedCredentialFiles(settings)]);
+    for (const file of denied) if (allowed.some((dir) => file.startsWith(`${dir}${path.sep}`)) && isFile(file)) args.push("--ro-bind", "/dev/null", file);
+  }
   return args;
 }
 

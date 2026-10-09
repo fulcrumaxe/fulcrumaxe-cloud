@@ -39,6 +39,11 @@ export interface HostSandboxConfig {
   binaryDir: string;
   /** The repository's declared registry hosts, none by default. */
   registries?: readonly string[];
+  /**
+   * Read-only grants every job gets: the install prefixes of the toolchain found at setup that sit under the home directory (D#6 R4d-3).
+   * The builder checks each one against the protected list and the home directory, and none is ever writable.
+   */
+  toolchainReadPaths?: readonly string[];
   /** Where the repo mirrors live (git path B, C25 section 2): never writable, and open to a job only for one mirror's `objects` directory, passed as the job's `extraReadPaths`. */
   mirrorsRoot?: string;
 }
@@ -138,6 +143,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     if (workdir === undefined || !path.isAbsolute(workdir)) throw new HostSandboxRefused("bad_workdir");
     if (entry.running) throw new HostSandboxRefused("sandbox_busy");
 
+    const toolchain = config.toolchainReadPaths ?? [];
     const sandbox = sandboxSettings({
       workspace: workdir,
       tempDir: entry.tempDir,
@@ -147,6 +153,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       workspaceRoot: config.workspaceRoot,
       tempRoot: config.tempRoot,
       ...(config.extraRoots === undefined ? {} : { extraRoots: config.extraRoots }),
+      ...(toolchain.length === 0 ? {} : { toolchainReadPaths: toolchain }),
       ...(config.registries === undefined ? {} : { registries: config.registries }),
       ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
       ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
