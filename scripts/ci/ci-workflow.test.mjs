@@ -725,11 +725,11 @@ test("every nix develop in the workflow enters the lean ci shell (D#507)", () =>
   for (const u of uses) assert.match(u, /^nix develop \.#ci --command /, u);
 });
 
-test("flake: the ci shell shares its packages with default and has only python3 plus pyyaml (no pythonEnv, anthropic, fastapi, sqlite or duckdb)", () => {
+test("flake: the ci shell shares its packages with default and has only python3 plus pyyaml and actionlint (no pythonEnv, anthropic, fastapi, sqlite or duckdb)", () => {
   const flake = readFileSync(path.join(repoRoot, "flake.nix"), "utf8");
   const ciShell = /\bci = pkgs\.mkShell \{([\s\S]*?)\n      \};/.exec(flake)?.[1];
   assert.ok(ciShell, "no ci shell in flake.nix");
-  assert.match(ciShell, /packages = sharedPackages \+\+ \[ \(pkgs\.python312\.withPackages \(ps: \[ ps\.pyyaml \]\)\) \];/);
+  assert.match(ciShell, /packages = sharedPackages \+\+ \[ \(pkgs\.python312\.withPackages \(ps: \[ ps\.pyyaml \]\)\) pkgs\.actionlint \];/);
   assert.doesNotMatch(ciShell.replace(/^\s*#.*$/gm, ""), /pythonEnv|python312Override|anthropic|fastapi|sqlite|duckdb/);
   const defaultShell = /\bdefault = pkgs\.mkShell \{([\s\S]*?)\n        shellHook/.exec(flake)?.[1] ?? "";
   assert.match(defaultShell, /sharedPackages \+\+/);
@@ -1282,4 +1282,140 @@ test("runner guard and hosted setup compose: installers run on hosted and Ubiclo
       }
     }
   }
+});
+
+// ---- the macOS VM spike workflow (D#587 B-0-mac) --------------------------------------------------------------
+// A hand-started measurement on free hosted macOS runners. It may only be started by hand, holds no secret and no
+// write permission, never runs on the private plane, and checks every download against a sha256 in its script.
+const spike = workflows.find((w) => w.file === "macos-vm-spike.yml");
+
+test("macos spike: workflow_dispatch is the only trigger, and any input is a choice that is never spliced into a run", () => {
+  assert.ok(spike, "macos-vm-spike.yml is missing");
+  const on = triggersOf(spike.doc);
+  assert.deepEqual(Object.keys(on), ["workflow_dispatch"]);
+  const inputs = on.workflow_dispatch?.inputs ?? {};
+  for (const [name, input] of Object.entries(inputs)) assert.equal(input.type, "choice", `input ${name} must be a choice`);
+  for (const [, job] of jobsOf(spike.doc)) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.run === "string") assert.doesNotMatch(step.run, /\$\{\{\s*(inputs|github\.event\.inputs)\./, "an input is spliced into a run block");
+    }
+  }
+});
+
+test("macos spike: read-only, no secrets, literal macOS runners, a timeout of 45 minutes or less, public repositories only", () => {
+  assert.deepEqual(spike.doc.permissions, { contents: "read" });
+  assert.doesNotMatch(noComments(spike.text), /secrets\./);
+  const jobs = jobsOf(spike.doc);
+  assert.ok(jobs.length >= 1);
+  for (const [name, job] of jobs) {
+    assert.equal(job.permissions, undefined, `${name} asks for its own permissions`);
+    assert.match(job["runs-on"], /^macos-[A-Za-z0-9._-]+$/, `${name} runs-on is not a literal macos label`);
+    assert.ok(job["timeout-minutes"] <= 45, `${name} timeout`);
+    assert.ok(job.if.startsWith("vars.CI_DISABLED != 'true'"), `${name} kill switch`);
+    const ctx = (isPrivate) => ({ "vars.CI_DISABLED": "", "github.event.repository.private": isPrivate });
+    assert.equal(Boolean(evalExpr(job.if, ctx(false))), true, `${name} must run on the public plane`);
+    assert.equal(Boolean(evalExpr(job.if, ctx(true))), false, `${name} must not run on the private plane`);
+    for (const step of job.steps ?? []) {
+      const uses = String(step.uses ?? "");
+      if (uses) assert.match(uses, /^actions\/[a-z-]+@v\d+$|@[0-9a-f]{40}( |$)/, `${name}: ${uses} is neither a GitHub action at a major tag nor a full sha`);
+    }
+  }
+});
+
+test("macos spike: the script is bash-valid, lives on a public path, and checks every download against a sha256", () => {
+  const script = path.join(repoRoot, "scripts/spike/macos-vm-spike.sh");
+  const syntax = spawnSync("bash", ["-n", script], { encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  const src = readFileSync(script, "utf8");
+  assert.ok((src.match(/\bfetch "\$/g) ?? []).length >= 3, "vfkit, kernel and initrd are all fetched");
+  assert.ok((src.match(/SHA256="[0-9a-f]{64}"/g) ?? []).length >= 3, "pinned sha256 values");
+  assert.doesNotMatch(src, /curl [^\n]*\|\s*(ba)?sh/, "piping a download into a shell");
+  // The overlay list is private and absent on the public plane; public CI runs publish-denylist.sh itself.
+  const denyFile = path.join(here, "publish-denylist.local");
+  if (existsSync(denyFile)) assert.doesNotMatch(readFileSync(denyFile, "utf8"), /^scripts\/spike\//m, "the spike script must stay on a public path");
+});
+
+test("workflows: no job-level env value reads the runner context (it is not available there; step-level env and run lines may)", () => {
+  for (const w of workflows) {
+    for (const [name, job] of jobsOf(w.doc)) {
+      for (const [key, value] of Object.entries(job.env ?? {})) {
+        assert.doesNotMatch(String(value), /\$\{\{[^}]*\brunner\./, `${w.file}: job ${name} env ${key} reads the runner context`);
+      }
+    }
+  }
+});
+
+// actionlint checks contexts, expressions and schema the way the hosted service does. Its shell and Python linters
+// are off: they judge run-block style, where ci.yml already has findings; this test is about the files being valid.
+const actionlint = spawnSync("actionlint", ["-version"], { encoding: "utf8" });
+test("workflows: actionlint accepts every workflow file", {
+  skip: actionlint.status === 0 ? false : "actionlint is not on PATH in this shell; the contexts check above still runs (the ci dev shell provides actionlint)",
+}, () => {
+  const r = spawnSync("actionlint", ["-no-color", "-shellcheck", "", "-pyflakes", "", ...workflows.map((w) => path.join(WORKFLOW_DIR, w.file))], { encoding: "utf8" });
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+});
+
+// ---- the spike's report: each step-1 verdict, from fake results.jsonl rows -------------------------------------
+const reportScript = path.join(repoRoot, "scripts/spike/macos-spike-report.py");
+const spikeRow = (id, value, command = "cmd", note = "") => ({ id, value, unit: "text", command, load: "1.0", note });
+function reportFor(rows) {
+  const dir = mkdtempSync(path.join(tmpdir(), "spike-report-"));
+  try {
+    writeFileSync(path.join(dir, "results.jsonl"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const r = spawnSync("python3", ["-I", reportScript, dir], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("macos spike report: a guest that wrote console output is YES", () => {
+  const out = reportFor([spikeRow("host.arch", "arm64"), spikeRow("result.vm_booted", "yes")]);
+  assert.match(out, /\*\*YES, a guest wrote console output\.\*\*/);
+  assert.doesNotMatch(out, /NOT TESTED/);
+});
+
+test("macos spike report: a boot that was tried and failed is NO, with its exact error", () => {
+  const out = reportFor([spikeRow("result.vm_booted", "no"), spikeRow("vm.boot.error", "Virtualization is not available", "vfkit ...")]);
+  assert.match(out, /\*\*NO, no guest console output\.\*\*/);
+  assert.match(out, /Virtualization is not available/);
+  assert.doesNotMatch(out, /NOT TESTED/);
+});
+
+test("macos spike report: a failed download or sha256 mismatch is NOT TESTED, never NO", () => {
+  for (const [id, value] of [["download.vfkit", "failed"], ["download.vmlinuz-virt", "sha256 mismatch: got abc"]]) {
+    // The script records vm_booted=not_tested; the report must say so from the download row alone as well.
+    for (const booted of ["not_tested", "no"]) {
+      const out = reportFor([spikeRow("result.vm_booted", booted), spikeRow(id, value, "curl -fsSL https://example.invalid/x", "expected def")]);
+      assert.match(out, /\*\*NOT TESTED \(download\/checksum failed\)\.\*\*/, `${id} / ${booted}`);
+      assert.doesNotMatch(out, /\*\*NO, no guest console output/);
+      assert.ok(out.includes(`- ${id}: ${value}`), `${id} is listed with its value`);
+    }
+  }
+});
+
+test("macos spike report: not_tested without any download row is still NOT TESTED, and a directory without results says so", () => {
+  assert.match(reportFor([spikeRow("result.vm_booted", "not_tested")]), /NOT TESTED \(download\/checksum failed\)/);
+  const dir = mkdtempSync(path.join(tmpdir(), "spike-report-"));
+  try {
+    const r = spawnSync("python3", ["-I", reportScript, dir], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /No results\.jsonl in this directory/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("macos spike report: the Seatbelt section names the profile's extra write allowances", () => {
+  const out = reportFor([spikeRow("result.vm_booted", "no")]);
+  assert.match(out, /\/private\/tmp and \/private\/var\/folders/);
+});
+
+test("macos spike script: a failed or unverified download sets a flag, records not_tested and ends the script non-zero", () => {
+  const src = readFileSync(path.join(repoRoot, "scripts/spike/macos-vm-spike.sh"), "utf8");
+  const fetchFn = /\nfetch\(\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? "";
+  assert.equal((fetchFn.match(/DOWNLOAD_FAILED=1/g) ?? []).length, 2, "both the curl failure and the mismatch set the flag");
+  assert.match(src, /if \[ "\$DOWNLOAD_FAILED" = 1 \]; then VM_BOOTED=not_tested; fi\nrec result\.vm_booted/);
+  assert.match(src, /\nrm -rf "\$WORK"\n[\s\S]*if \[ "\$DOWNLOAD_FAILED" = 1 \]; then[\s\S]*exit 1\nfi\nexit 0\n$/);
 });
