@@ -1,5 +1,6 @@
 import type { PanelRunner, PanelSeatRequest, PanelSeatResult } from "../plan/panel.js";
 import type { SpecWriter, SpecWriteRequest } from "../plan/spec.js";
+import { PanelYieldError } from "../plan/panel.js";
 import { PanelSeatAbortedError, PanelSeatFailedError } from "../plan/sandboxPanelRunner.js";
 import type { WaitClock } from "../plan/waitBudget.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -25,6 +26,14 @@ import type { AdvanceRunPorts } from "./runPorts.js";
  * so the panel's round deadline and the PM's deadline count only the time the run could be working. The paused time is capped
  * (`RUNNER_PENDING_CEILING_MS`, in `WaitBudget`): past it the deadline fires like any timeout.
  *
+ * D#6 C29: a step that waits on a queued runner cannot finish inside the platform's step limit (the runner plan runs one job at
+ * a time, so the seats go one after another). When `yieldAfterMs` of the step's own time have passed and the run it is waiting on
+ * is a live RUNNER run, the wait ends a third way: it rejects with `PanelYieldError`, which is not an abort. The run is NOT
+ * cancelled (`ports.cancel` is not called) and nothing is recorded; the caller starts the step again and the keys make it follow
+ * the same runs. A sandbox or production run never yields: those steps behave exactly as before.
+ * The budget a re-entry builds is not a fresh one: on the first read of a runner run that is `running`, the time it has already
+ * been running (read from the run's own record, see `AdvanceRunOutcome.runningMs`) is taken off the budget through `clock.consume`.
+ *
  * This file writes no comment and reads nothing but the run's status and envelope: who signed what is decided by
  * `postAgentComment` from the run's own row, exactly as for any other runner.
  */
@@ -34,6 +43,10 @@ export interface FollowedRunnerOptions {
   pollMs?: number;
   /** Consecutive failed reads of a run's status before the wait gives up. Default 5. A blip is retried; a dead database is not waited on forever. */
   maxReadFailures?: number;
+  /** D#6 C29: how much of the step's own time may pass before a wait on a live runner run hands control back. Unset: never yields. */
+  yieldAfterMs?: number;
+  /** The clock the yield point is measured on. Default `Date.now`. */
+  now?: () => number;
 }
 
 export const DEFAULT_RUN_POLL_MS = 5_000;
@@ -56,6 +69,9 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRunnerOptions = {}): { panel: PanelRunner; writer: SpecWriter } {
   const pollMs = options.pollMs ?? DEFAULT_RUN_POLL_MS;
   const maxReadFailures = options.maxReadFailures ?? DEFAULT_MAX_READ_FAILURES;
+  const now = options.now ?? Date.now;
+  // The yield point is fixed when the step starts, so every seat of the step yields at the same moment.
+  const yieldAt = options.yieldAfterMs === undefined ? null : now() + options.yieldAfterMs;
 
   async function stop(runId: string): Promise<never> {
     // A failed cancel must not hide the abort. A run whose cancel failed stays live until its own limits end it (the sandbox
@@ -66,7 +82,9 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
 
   async function follow(runId: string, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult> {
     let failures = 0;
+    let credited = false;
     for (;;) {
+      let yieldNow = false;
       try {
         const out = await ports.outcome(runId);
         failures = 0;
@@ -74,7 +92,16 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
           // Only a queued RUNNER run waits on a person's machine; a pending sandbox or production run is the platform's own
           // delay and counts against the budget like any other wait.
           if (out.status === "pending" && out.runtime === "runner") clock?.pause();
-          else clock?.resume();
+          else {
+            // A live runner run that is no longer pending has been working since its own recorded move out of pending: that time
+            // is already spent (once), so a re-entry does not give the run a fresh budget.
+            if (!credited && out.runtime === "runner" && typeof out.runningMs === "number") {
+              credited = true;
+              clock?.consume?.(out.runningMs);
+            }
+            clock?.resume();
+          }
+          yieldNow = yieldAt !== null && out.runtime === "runner" && now() >= yieldAt;
         }
         if (out.done) {
           if (out.status !== "succeeded") throw new PanelSeatFailedError(out.status);
@@ -85,6 +112,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
         if (++failures >= maxReadFailures) throw new PanelSeatFailedError("status_unreadable");
       }
       if (signal.aborted) return stop(runId);
+      if (yieldNow) throw new PanelYieldError();
       await pause(pollMs, signal);
       if (signal.aborted) {
         // One last look: a run that finished while we were being aborted keeps its result.

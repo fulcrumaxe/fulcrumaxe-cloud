@@ -11,7 +11,7 @@ import { toWellFormedString } from "./unicode.js";
 import { PANEL_ROLES, type PanelRole } from "./panelRoles.js";
 import { agentOutputBlock, READ_ONLY_CHECKOUT_LINE } from "./envelope.js";
 import { WaitBudget, type WaitClock } from "./waitBudget.js";
-import { DEFAULT_PANEL_TIMEOUT_MS, readPanelGeneration, runPanel, type MissingReason, type PanelDeps, type PanelRefusal, type PanelSeatResult } from "./panel.js";
+import { DEFAULT_PANEL_TIMEOUT_MS, PanelYieldError, readPanelGeneration, runPanel, type MissingReason, type PanelDeps, type PanelRefusal, type PanelSeatResult } from "./panel.js";
 
 /**
  * D#2 H15c: the Spec, the stage marker and the trigger into H14.
@@ -612,6 +612,8 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
       aborted,
     ]);
   } catch (err) {
+    // D#6 C29: the PM's run is still live and the step hands control back (see PanelYieldError). It is not a failure.
+    if (err instanceof PanelYieldError) throw err;
     reportError(err, { stage: "plan.spec_writer" });
     return { status: "refused", reason: "pm_failed" };
   } finally {

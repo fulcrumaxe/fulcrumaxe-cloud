@@ -248,6 +248,8 @@ export interface AdvanceRunOutcome {
   envelope: Record<string, unknown> | null;
   /** Where the run executes (`local`, `production` or `runner`); only a `runner` run's `pending` time is credited (D#6 C12 A3). Absent when the run is gone. */
   runtime?: string;
+  /** D#6 C29: for a `runner` run, how long ago (milliseconds, on the database's clock) the tail run left `pending`, from its own `started_at`; null while pending or when none was recorded. Absent for any other runtime and when the run is gone. */
+  runningMs?: number | null;
   /**
    * D#6 R2b-3 (C22 section 7): the run this outcome is about, which is the end of the follow-up chain that starts at the run asked
    * about. A runner run that ended `runner_lost` or `usage_limit` has a follow-up run, and the status, envelope and runtime above are
@@ -557,7 +559,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return withTenant(runnerPool, accountId, async (client) => {
       let currentId = runId;
       for (let seen = 1; ; seen++) {
-        const r = await client.query<{ status: string; envelope: unknown; runtime: string }>("SELECT status, envelope, runtime FROM agent_runs WHERE id = $1 AND account_id = $2", [currentId, accountId]);
+        const r = await client.query<{ status: string; envelope: unknown; runtime: string; running_ms: string | null }>(
+          "SELECT status, envelope, runtime, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint AS running_ms FROM agent_runs WHERE id = $1 AND account_id = $2",
+          [currentId, accountId],
+        );
         const row = r.rows[0];
         if (!row) return { status: "missing", done: true, envelope: null };
         let reason: string | null = null;
@@ -576,7 +581,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           }
         }
         const envelope = row.envelope !== null && typeof row.envelope === "object" && !Array.isArray(row.envelope) ? (row.envelope as Record<string, unknown>) : null;
-        return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime, tailRunId: currentId, failureReason: reason };
+        return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime, ...(row.runtime === "runner" ? { runningMs: row.running_ms === null ? null : Math.max(Number(row.running_ms), 0) } : {}), tailRunId: currentId, failureReason: reason };
       }
     });
   }

@@ -29,6 +29,12 @@ export interface AdvanceRunOutcome {
   envelope: Record<string, unknown> | null;
   /** Where the run executes. Only a `runner` run's `pending` time is credited to a wait (D#6 C12 A3). Absent when unknown. */
   runtime?: string;
+  /**
+   * D#6 C29: for a run that has left `pending`, how long ago (milliseconds, on the database's clock) it did, read from the run's own
+   * `started_at`. Null or absent for a run still pending or whose record has none. A step that is called again uses it so a wait
+   * budget counts the time the run has really been working, not the time since this call began.
+   */
+  runningMs?: number | null;
 }
 
 export interface AdvanceRunPorts {

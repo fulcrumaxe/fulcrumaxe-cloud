@@ -884,7 +884,7 @@ describe("runner follow-up runs [pg]", () => {
       const parent = await run({ lease: clock - 1 });
       await sweep();
       const [c] = await child(parent);
-      expect(await outcome(parent)).toEqual({ status: "pending", done: false, envelope: null, runtime: "runner", tailRunId: c.id, failureReason: null });
+      expect(await outcome(parent)).toEqual({ status: "pending", done: false, envelope: null, runtime: "runner", runningMs: null, tailRunId: c.id, failureReason: null });
       // The child is claimed and runs: still not done.
       await admin.query("SET session_replication_role = replica");
       await admin.query("UPDATE agent_runs SET status = 'running' WHERE id = $1", [c.id]);
@@ -909,7 +909,7 @@ describe("runner follow-up runs [pg]", () => {
       const real = createFollowUpPorts({ pool: writerPool, registry: {}, buildFailed: (a, w, r, c) => markBuildNeedsHuman(writerPool, a, w, r, c) });
       expect(await sweep({ followUp: real })).toMatchObject({ lost: 1, followUpsExhausted: 1, followUpsFailed: 0 });
       const end = await outcome(first);
-      expect(end).toEqual({ status: "failed", done: true, envelope: null, runtime: "runner", tailRunId: second.id, failureReason: "runner_lost" });
+      expect(end).toEqual({ status: "failed", done: true, envelope: null, runtime: "runner", runningMs: expect.any(Number), tailRunId: second.id, failureReason: "runner_lost" });
       // The driver's write, for the same run and code, finds the item already failed by the sweeper.
       expect(await markBuildNeedsHuman(writerPool, A.accountId, A.workItemId, end.tailRunId!, "runner_lost")).toEqual({ status: "unchanged", stage: "needs_human" });
       const rows = (await admin.query("SELECT source_ref FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'needs_human'", [A.workItemId])).rows;

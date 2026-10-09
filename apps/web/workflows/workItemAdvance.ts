@@ -77,6 +77,17 @@ import {
 /** Same value as `RUNNER_PENDING_CEILING_MS` in @fx/pipeline (a test pins it): the runner queue TTL of 72 hours plus a one hour margin. A workflow body imports no value from a package, so it is repeated here. */
 const RUNNER_PENDING_CEILING_MS = 73 * 3_600_000;
 
+/**
+ * D#6 C29: the word a panel or Spec step answers with when it hands control back because its seats or the PM are queued on (or
+ * running on) a runner and the step's own time is used up. Same value as `QUEUED_ON_RUNNER` in @fx/pipeline (a test pins it).
+ */
+const QUEUED_ON_RUNNER = "queued_on_runner";
+/**
+ * The step time a hand-back means was spent waiting. Same value as `STEP_YIELD_MS` in @fx/pipeline (a test pins it). Each call that
+ * answers `waiting` is credited this much on top of the sleep, so `RUNNER_PENDING_CEILING_MS` bounds the real wait and not just the sleeps.
+ */
+const STEP_YIELD_MS = 180_000;
+
 /** How often a waiting workflow reads the classify run's status. */
 const POLL_MS = 20_000;
 /** Past this, the workflow gives up waiting (the run's own timeout is shorter). */
@@ -362,7 +373,22 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
 async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result> {
   const { accountId, userId, actionId } = args;
 
-  const panel = await advancePanelStep(accountId, userId, rootId, args.haltEpoch);
+  // D#6 C29: on a runner repository a step hands control back (`waiting`) instead of overrunning its time limit. No run was
+  // stopped: sleep, then call the same step again (every run is keyed, so it follows the ones already started). The time spent
+  // counts toward the pending ceiling and never toward a work budget; the seats' and the PM's own budgets are measured from their
+  // runs' records, so a re-entry does not reset them.
+  let pendingWaited = 0;
+  const reenter = async (call: () => Promise<StepOutcome>): Promise<StepOutcome> => {
+    let out = await call();
+    while (out.status === "waiting" && out.reason === QUEUED_ON_RUNNER && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      await sleep(POLL_MS);
+      pendingWaited += POLL_MS + STEP_YIELD_MS;
+      out = await call();
+    }
+    return out;
+  };
+
+  const panel = await reenter(() => advancePanelStep(accountId, userId, rootId, args.haltEpoch));
   await advanceLogStep(panel.status === "completed" ? "advance.panelled" : "advance.failed", {
     work_item_id: rootId,
     at: "panel",
@@ -373,9 +399,14 @@ async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result
   });
   // A seat that did not post is not a failure here: the Spec records it as "DID NOT POST". Only a refusal ends the run.
   if (isHaltReason(panel.reason)) return haltedEnd(args, "panel");
-  if (panel.status !== "completed") return { status: "failed", detail: `panel_${panel.status}:${panel.reason ?? "none"}` };
+  if (panel.status !== "completed") return { status: "failed", detail: panel.status === "waiting" && panel.reason === QUEUED_ON_RUNNER ? "panel_wait_timeout" : `panel_${panel.status}:${panel.reason ?? "none"}` };
 
-  const spec = await advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId);
+  const spec = await reenter(() => advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId));
+  if (spec.status === "waiting" && spec.reason === QUEUED_ON_RUNNER) {
+    // Still queued when the ceiling was reached: the pipeline's own wait limit, like every other wait here.
+    await advanceLogStep("advance.failed", { work_item_id: rootId, at: "spec", reason: "wait_timeout" });
+    return { status: "failed", detail: "spec_wait_timeout" };
+  }
   if (spec.status === "published") {
     await advanceLogStep("advance.spec_ready", { work_item_id: rootId, at: "spec", version: spec.version, stage: spec.stage });
     return { status: "spec_ready" };
