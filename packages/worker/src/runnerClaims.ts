@@ -254,12 +254,20 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
       // the repo's dial and the run itself with the run locked, and writes approved_by, the audit row and the receipt in this transaction.
       // approved_by is written only now, so a pending run never carries an approval that a later dial or consent change could contradict.
       const own = locked.rows[0]!.initiated_by === runner.registered_by || locked.rows[0]!.approved_by === runner.registered_by;
+      let autoApproved = false;
       if (runner.credential_mode === "subscription" && !own) {
         const approved = await client.query<{ ok: boolean }>("SELECT agent_run_runner_auto_approve($1::uuid, $2::uuid, $3::timestamptz, $4::int) AS ok", [runId, runnerId, new Date(now()), RUNNER_RUN_CATALOGUE_VERSION]);
         if (approved.rows[0]?.ok !== true) return "taken" as const;
+        autoApproved = true;
       }
       const moved = await writeRunStatusOn(client, { accountId, runId, from: "pending", to: "running" });
-      if (!moved.updated) return "taken" as const;
+      if (!moved.updated) {
+        // The run is locked by this transaction, so a refused move after the claim approved it is not an ordinary race. Answering "taken" would
+        // COMMIT approved_by, the audit row and the receipt for a run that never started, and approved_by cannot be written twice. Throwing
+        // rolls all three back, so the run stays as it was and can be tried again.
+        if (autoApproved) throw new RunActionRefusedError("55000");
+        return "taken" as const;
+      }
       const { rows } = await client.query<{ generation: number | null }>("SELECT agent_run_runner_claim($1::uuid, $2::uuid, $3::uuid, $4::timestamptz, $5::int) AS generation", [
         accountId,
         runId,

@@ -8,5 +8,7 @@
   "tokens_in": null,
   "tokens_out": null,
   "created_at": "2026-09-18T12:00:00.000Z",
-  "updated_at": "2026-09-18T12:00:00.000Z"
+  "updated_at": "2026-09-18T12:00:00.000Z",
+  "approved_by": null,
+  "approval": null
 }

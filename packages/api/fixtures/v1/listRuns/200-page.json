@@ -10,7 +10,9 @@
       "tokens_in": 12000,
       "tokens_out": 3400,
       "created_at": "2026-09-18T12:00:00.000Z",
-      "updated_at": "2026-09-18T12:05:00.000Z"
+      "updated_at": "2026-09-18T12:05:00.000Z",
+      "approved_by": { "id": "33333333-3333-4333-8333-333333333333", "name": "Ada Admin" },
+      "approval": "auto"
     }
   ],
   "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0xOFQxMjowMDowMC4wMDBaIiwiaWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEifQ"

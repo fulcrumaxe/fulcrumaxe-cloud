@@ -61,6 +61,13 @@ export interface RunnerRow {
   plan_consent: { granted: boolean; changed_at: string | null };
   /** True only on the caller's own live runner: the one person who may turn its consent on or off. Always false in a read with no user. */
   can_change_plan_consent: boolean;
+  /**
+   * D#6 R2b-4a follow-up: the repos this runner may take work for, as `{ id, name }` ("owner/name"), sorted by name. This is what the consent
+   * dialog shows before the plan holder agrees. Only repos the caller can see: each id is looked up in `repos` through the caller's tenant
+   * context, so an id that names another account's repo, or one that no longer exists, is dropped and never named. A revoked runner takes no
+   * work, so it lists none.
+   */
+  repos: Array<{ id: string; name: string }>;
 }
 
 interface RawRunner {
@@ -75,18 +82,22 @@ interface RawRunner {
   sandbox_unavailable: SandboxUnavailableReason | null;
   consent_granted: boolean | null;
   consent_changed_at: Date | null;
+  allowed_repo_ids: string[];
   busy: boolean;
 }
+
+/** A repo's display name, the same text the approvals list uses: "owner/name", else a fixed fallback, never null or an id. */
+const REPO_NAME_SQL = "COALESCE(NULLIF(gh_owner || '/' || gh_name, ''), 'a repository')";
 
 async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
   const now = (deps.now ?? (() => new Date()))();
   const current = deps.currentProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
-  const read = async (client: PoolClient): Promise<RawRunner[]> =>
-    (
+  const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string> }> => {
+    const runners = (
       await client.query<RawRunner>(
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
                 r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, s.reason AS sandbox_unavailable,
-                pc.granted AS consent_granted, pc.created_at AS consent_changed_at,
+                pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy
            FROM runners r LEFT JOIN users u ON u.id = r.registered_by
@@ -98,7 +109,16 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
         [accountId, now, UNNAMED_MEMBER],
       )
     ).rows;
-  const rows =
+    // The repo names, looked up under the caller's tenant (row security) and again by account, so a repo of another account is never named.
+    const ids = [...new Set(runners.filter((r) => r.revoked_at === null).flatMap((r) => r.allowed_repo_ids))];
+    const repos = new Map<string, string>();
+    if (ids.length > 0) {
+      const found = await client.query<{ id: string; name: string }>(`SELECT id, ${REPO_NAME_SQL} AS name FROM repos WHERE account_id = $1 AND id = ANY($2::uuid[])`, [accountId, ids]);
+      for (const f of found.rows) repos.set(f.id, f.name);
+    }
+    return { runners, repos };
+  };
+  const { runners: rows, repos } =
     userId === null
       ? await withTenant(deps.appUserPool, accountId, read)
       : await withTenant(deps.appUserPool, accountId, userId, async (client) => {
@@ -119,6 +139,13 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     state: classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current),
     plan_consent: { granted: r.revoked_at === null && r.consent_granted === true, changed_at: r.consent_changed_at === null ? null : r.consent_changed_at.toISOString() },
     can_change_plan_consent: userId !== null && r.revoked_at === null && r.registered_by === userId,
+    repos:
+      r.revoked_at !== null
+        ? []
+        : [...new Set(r.allowed_repo_ids)]
+            .filter((id) => repos.has(id))
+            .map((id) => ({ id, name: repos.get(id)! }))
+            .sort((x, y) => x.name.localeCompare(y.name) || x.id.localeCompare(y.id)),
   }));
 }
 
@@ -223,8 +250,8 @@ export async function readUnapprovedRunFacts(client: PoolClient, accountId: stri
 
 /**
  * GET /api/runners (a session route, any member of the account). The runners with their derived state and consent, and the copy
- * strings the runner screens show, so the UI never retypes them. A runner's key, thumbprint, repo list and nonces are not
- * selected, so they cannot be returned.
+ * strings the runner screens show, so the UI never retypes them. A runner's key, thumbprint and nonces are not selected, so they
+ * cannot be returned. Its repo list is returned as `{ id, name }` pairs, and only for repos the caller's tenant context can read.
  */
 export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
   const runners = await readRunners(deps, principal.accountId, principal.userId);

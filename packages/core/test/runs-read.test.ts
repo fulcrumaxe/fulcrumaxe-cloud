@@ -58,6 +58,87 @@ describe('runs/read (D#31 API-3a)', () => {
     return id;
   }
 
+  /** D#6 R2b-4a follow-up: who approved a run to use their plan, and whether the claim or a click did it, from stored facts. */
+  describe('approval marker', () => {
+    /** The receipt the claim's auto-approve definer writes with approved_by (the only writer of this decision type). */
+    async function autoReceipt(refs: SeedRefs, runId: string): Promise<void> {
+      await admin.query(
+        `INSERT INTO decision_receipts (account_id, run_id, work_item_id, decision_type, class, chosen, rejected_alternative, actor)
+         VALUES ($1, $2, $3, 'runner_run_on_member_plan', 'human_over_the_loop', 'announce', 'ask', 'policy')`,
+        [refs.accountId, runId, refs.workItemId],
+      );
+    }
+
+    async function approvedRun(refs: SeedRefs, approver: string | null, opts: { auto?: boolean; createdAt?: Date } = {}): Promise<string> {
+      const id = await insertRun(refs, { status: 'pending', createdAt: opts.createdAt ?? new Date() });
+      if (approver !== null) {
+        await admin.query('UPDATE agent_runs SET approved_by = $2 WHERE id = $1', [id, approver]);
+        if (opts.auto) await autoReceipt(refs, id);
+      }
+      return id;
+    }
+
+    it('a run nobody approved has approved_by null and approval null', async () => {
+      const id = await approvedRun(refsA, null);
+      const dto = await getRun({ pool: appUserPool, principal: refsA }, id);
+      expect(dto.approved_by).toBeNull();
+      expect(dto.approval).toBeNull();
+    });
+
+    it("names the approver and reads 'auto' only when the claim's receipt exists, 'manual' for a click", async () => {
+      await admin.query("UPDATE users SET name = 'Ada Admin' WHERE id = $1", [refsA.userId]);
+      const manual = await approvedRun(refsA, refsA.userId);
+      const auto = await approvedRun(refsA, refsA.userId, { auto: true });
+      const m = await getRun({ pool: appUserPool, principal: refsA }, manual);
+      const a = await getRun({ pool: appUserPool, principal: refsA }, auto);
+      expect(m).toMatchObject({ approved_by: { id: refsA.userId, name: 'Ada Admin' }, approval: 'manual' });
+      expect(a).toMatchObject({ approved_by: { id: refsA.userId, name: 'Ada Admin' }, approval: 'auto' });
+    });
+
+    it('an auto receipt for another run, or an approved run with no receipt at all, does not make a run auto', async () => {
+      const other = await approvedRun(refsA, refsA.userId, { auto: true });
+      const legacy = await insertRun(refsA, { status: 'pending', createdAt: new Date() });
+      await admin.query('UPDATE agent_runs SET approved_by = $2 WHERE id = $1', [legacy, refsA.userId]);
+      expect((await getRun({ pool: appUserPool, principal: refsA }, legacy)).approval).toBe('manual');
+      expect((await getRun({ pool: appUserPool, principal: refsA }, other)).approval).toBe('auto');
+    });
+
+    it('a receipt of another decision type, or a stray audit row, does not make a run auto', async () => {
+      const id = await approvedRun(refsA, refsA.userId);
+      await admin.query(
+        "INSERT INTO decision_receipts (account_id, run_id, work_item_id, decision_type, class, chosen, actor) VALUES ($1, $2, $3, 'some_other_decision', 'human_over_the_loop', 'announce', 'policy')",
+        [refsA.accountId, id, refsA.workItemId],
+      );
+      await admin.query("INSERT INTO audit_log (account_id, actor, action, payload) VALUES ($1, $2, 'runner.run_auto_approved', $3::jsonb)", [refsA.accountId, refsA.userId, JSON.stringify({ run_id: id })]);
+      expect((await getRun({ pool: appUserPool, principal: refsA }, id)).approval).toBe('manual');
+    });
+
+    it('does not depend on the current dial: the marker is the same after the dial is lowered to ask', async () => {
+      const auto = await approvedRun(refsA, refsA.userId, { auto: true });
+      await admin.query(
+        "INSERT INTO decision_settings (account_id, repo_id, decision_type, disposition, version, changed_by) VALUES ($1, $2, 'runner_run_on_member_plan', 'ask', 1, $3)",
+        [refsA.accountId, refsA.repoId, refsA.userId],
+      );
+      expect((await getRun({ pool: appUserPool, principal: refsA }, auto)).approval).toBe('auto');
+    });
+
+    it('shows the fallback name, never null or an id, for an approver with no name and no GitHub login', async () => {
+      await admin.query('UPDATE users SET name = NULL, github_login = NULL WHERE id = $1', [refsA.userId]);
+      const id = await approvedRun(refsA, refsA.userId);
+      expect((await getRun({ pool: appUserPool, principal: refsA }, id)).approved_by).toEqual({ id: refsA.userId, name: 'A team member' });
+    });
+
+    it("another account's auto-approved run is invisible and its receipt cannot colour mine; the list carries the marker per run", async () => {
+      const theirs = await approvedRun(refsB, refsB.userId, { auto: true });
+      const mine = await approvedRun(refsA, refsA.userId, { createdAt: new Date('2030-01-01T00:00:00.000Z') });
+      const auto = await approvedRun(refsA, refsA.userId, { auto: true, createdAt: new Date('2030-01-02T00:00:00.000Z') });
+      await expect(getRun({ pool: appUserPool, principal: refsA }, theirs)).rejects.toThrow();
+      expect((await getRun({ pool: appUserPool, principal: refsB }, theirs)).approval).toBe('auto');
+      const list = await listRuns({ pool: appUserPool, principal: refsA }, { limit: 2 });
+      expect(list.data.map((r) => [r.id, r.approval])).toEqual([[auto, 'auto'], [mine, 'manual']]);
+    });
+  });
+
   describe('getRun', () => {
     it('returns the run DTO with exactly the Spec fields, numeric fields converted from pg strings', async () => {
       const createdAt = new Date('2026-01-01T00:00:00.000Z');
@@ -74,10 +155,13 @@ describe('runs/read (D#31 API-3a)', () => {
         tokens_out: 200,
         created_at: createdAt.toISOString(),
         updated_at: createdAt.toISOString(),
+        approved_by: null,
+        approval: null,
       });
       const expectedKeys = [
         'id', 'work_item_id', 'parent_run_id', 'role', 'status',
         'usd', 'tokens_in', 'tokens_out', 'created_at', 'updated_at',
+        'approved_by', 'approval',
       ];
       expect(Object.keys(dto).sort()).toEqual(expectedKeys.sort());
     });

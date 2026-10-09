@@ -1,12 +1,23 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "../src/runnerClaims.js";
+import { RunActionRefusedError } from "../src/runActions.js";
+
+// One switch for the rollback test below: when set, the move from pending to running reports that it changed nothing, as a lost race would.
+const moveRefused = vi.hoisted(() => ({ on: false }));
+vi.mock("@fx/runner", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@fx/runner")>();
+  return {
+    ...real,
+    writeRunStatusOn: (...args: Parameters<typeof real.writeRunStatusOn>) => (moveRefused.on && args[1].to === "running" ? Promise.resolve({ updated: false }) : real.writeRunStatusOn(...args)),
+  };
+});
 
 /**
  * [pg] D#6 R2b-4a (C31 section 2.2 and acceptance 2, 3, 5): the claim approves a run for a subscription runner's registrant by itself, and
@@ -237,5 +248,35 @@ describe("claim-time auto-approval [pg]", () => {
     expect(await row(id)).toMatchObject({ status: "pending", runner_id: null, approved_by: null });
     expect(await autoAudit(id)).toEqual([]);
     expect(await receipts(id)).toEqual([]);
+  });
+
+  // The run is locked, so a refused move to running after the claim approved it means the approval must not be kept: approved_by is write-once,
+  // and "taken" would commit it (with its audit row and receipt) for a run that never started.
+  it("rolls the approval, the audit row and the receipt back when the move to running reports no change", async () => {
+    await setConsent(true);
+    const id = await pending();
+    moveRefused.on = true;
+    try {
+      await expect(claim()).rejects.toBeInstanceOf(RunActionRefusedError);
+    } finally {
+      moveRefused.on = false;
+    }
+    expect(await row(id)).toMatchObject({ status: "pending", runner_id: null, approved_by: null });
+    expect(await autoAudit(id)).toEqual([]);
+    expect(await receipts(id)).toEqual([]);
+    // Nothing is stuck: the next claim approves and takes it.
+    expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+    expect(await row(id)).toMatchObject({ status: "running", approved_by: registrant });
+  });
+
+  it("a refused move for a run the registrant already owns is still just taken, with nothing to roll back", async () => {
+    const id = await pending({ initiatedBy: registrant });
+    moveRefused.on = true;
+    try {
+      expect((await claim()).kind).toBe("idle");
+    } finally {
+      moveRefused.on = false;
+    }
+    expect(await row(id)).toMatchObject({ status: "pending", approved_by: null });
   });
 });
