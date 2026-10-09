@@ -1,4 +1,4 @@
-// auth-negative pack, rows P6 and A4: what must NOT be reachable.
+// auth-negative pack, rows P6, A4 and A7 (signed out): what must NOT be reachable.
 import { expect, test } from "../../fixtures/bypass.js";
 import { isDeploymentWall } from "../../src/client.js";
 
@@ -24,5 +24,19 @@ test.describe("A4 test sign-in endpoint", () => {
     expect(res.status).toBe(404);
     // A boolean, so a failure never prints the cookie value.
     expect(/\bfx_session=/.test(res.headers.get("set-cookie") ?? ""), "a session cookie was set").toBe(false);
+  });
+});
+
+test.describe("A7 shell session paths, signed out", () => {
+  for (const path of ["/api/cloud/auth/me", "/api/profile", "/api/entitlements/me", "/api/preferences", "/api/plans"]) {
+    test(`${path} answers 401 without a session`, async ({ api }) => {
+      const res = await api.get(path);
+      expect(res.status).toBe(401);
+    });
+  }
+
+  test("/api/shell/session called directly is refused, not served", async ({ api }) => {
+    const res = await api.get("/api/shell/session");
+    expect(res.status).toBe(404);
   });
 });

@@ -1,0 +1,8 @@
+{
+  "source": "apps/web/.next/server/app-paths-manifest.json",
+  "routes": [
+    "/.well-known/workflow/v1/flow",
+    "/.well-known/workflow/v1/step",
+    "/.well-known/workflow/v1/webhook/fx-probe"
+  ]
+}

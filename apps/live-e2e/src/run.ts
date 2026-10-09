@@ -18,6 +18,7 @@ import type { Pack } from "./manifest.js";
 import { MASK_FILE_ENV } from "./mask.js";
 import { BYPASS_ENV, STRIPE_RESTRICTED_KEY_ENV } from "./needs.js";
 import type { Plan } from "./plan.js";
+import { STAGING_ONLY_TAG } from "./staging-only.js";
 import { buildResults, notRunFromPlan, scrubbedText, writeReport, type PackResult, type Results } from "./report.js";
 import { ScrubError, type ScrubContext } from "./scrub.js";
 import { fenceConfigFor, PRODUCTION_ORIGIN_ENV, type Target } from "./targets.js";
@@ -90,6 +91,8 @@ export function buildInvocations(
     const args = [cli, "test", "--config", join(opts.root, "playwright.config.ts"), `/packs/${pack.id}/`];
     for (const project of pack.projects) args.push("--project", project);
     args.push("--retries", String(pack.retry));
+    // A test tagged for staging only never runs against production (the plan lists it as skipped).
+    if (target.name === "production") args.push("--grep-invert", STAGING_ONLY_TAG);
     out.push({
       packId: pack.id,
       command: process.execPath,

@@ -1,6 +1,6 @@
 {
   "id": "platform",
-  "rows": ["P1", "P2", "P3"],
+  "rows": ["P1", "P2", "P3", "P4", "P5", "P7", "P8", "P9", "P10", "P13"],
   "tier": "smoke",
   "tags": ["@ui", "@api"],
   "targets": ["staging", "production"],
@@ -8,9 +8,37 @@
   "model_spend": false,
   "projects": ["desktop", "phone", "tablet"],
   "needs": ["bypass"],
-  "probes": [],
+  "probes": [
+    { "method": "POST", "path": "/api/csp-report", "expect": 415 },
+    { "method": "POST", "path": "/api/rum", "expect": [415, 429] },
+    { "method": "PATCH", "path": "/api/v1/budgets", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/api-sweep", "expect": 401 },
+    { "method": "POST", "path": "/api/cron/api-sweep", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/compute-settle-sweep", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/reconcile", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/run-action-sweep", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/runner-sweeper", "expect": 401 },
+    { "method": "POST", "path": "/api/internal/run-actions/kick", "expect": 401 },
+    { "method": "POST", "path": "/.well-known/workflow/v1/flow", "expect": [400, 401, 403, 404, 405] },
+    { "method": "POST", "path": "/.well-known/workflow/v1/step", "expect": [400, 401, 403, 404, 405] },
+    { "method": "POST", "path": "/.well-known/workflow/v1/webhook/fx-probe", "expect": [400, 401, 403, 404, 405] },
+    { "method": "GET", "path": "/api/gh-proxy/probe/probe", "expect": [401, 421] }
+  ],
   "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
   "retry": 0,
   "runs_last": false,
-  "paths": ["apps/web/app/api/health/**", "apps/web/middleware.ts", "apps/web/next.config.*"]
+  "paths": [
+    "apps/web/app/api/health/**",
+    "apps/web/app/api/csp-report/**",
+    "apps/web/app/api/rum/**",
+    "apps/web/app/api/cron/**",
+    "apps/web/app/api/internal/**",
+    "apps/web/app/api/gh-proxy/**",
+    "apps/web/app/(sitekit)/**",
+    "apps/web/lib/shell/csrf.ts",
+    "apps/web/lib/shell/headers.ts",
+    "apps/web/middleware.ts",
+    "apps/web/next.config.*",
+    "apps/web/vercel.json"
+  ]
 }
