@@ -526,6 +526,17 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       ["no_init_line", "runner_setup", "no_init_line"],
       ["permission_mode_forced", "runner_setup", "permission_mode_forced"],
       ["model_unsupported", "runner_setup", "model_unsupported"],
+      // D#6 R4d-2 (C32 section 3): the path's own codes each have a closed detail; they used to be `other`.
+      ["push_ref_refused", "runner_setup", "push_ref_refused"],
+      ["snapshot_refused", "runner_setup", "snapshot_refused"],
+      ["push_failed", "runner_setup", "push_failed"],
+      ["mirror_failed", "runner_setup", "mirror_failed"],
+      ["mirror_dir_insecure", "runner_setup", "mirror_dir_insecure"],
+      ["git_version_unsupported", "runner_setup", "git_version_unsupported"],
+      ["workspace_failed", "runner_setup", "workspace_failed"],
+      ["workspace_git_refused", "runner_setup", "workspace_git_refused"],
+      ["head_not_from_base", "runner_setup", "head_not_from_base"],
+      ["sandbox_stub_committed", "runner_setup", "sandbox_stub_committed"],
       // The set of codes runJob returns is open. Anything else is a setup failure of an unknown kind, and the code itself is never sent.
       ["sandbox_grant_refused", "runner_setup", "other"],
       ["some_new_code", "runner_setup", "other"],
@@ -726,21 +737,21 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     expect(sentToCloud().at(-1)).toBe("/api/runner/runs/:id/done");
   });
 
-  it("a push that fails sends no done: run_ended runner_setup / other, and the failure code is returned", async () => {
+  it("a push that fails sends no done: run_ended runner_setup / push_failed, and the failure code is returned", async () => {
     const rig = makeRig({ handler: { git: fakeGitPath({ publish: throwing("push_failed") }) } });
     const claimed = await rig.claim();
     expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "push_failed" });
     expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
-    expect(ended(claimed.runId)).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "other" });
+    expect(ended(claimed.runId)).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "push_failed" });
   });
 
-  it("a workspace that cannot be filled is removed, no sandbox is made, and the run ends runner_setup / other", async () => {
+  it("a workspace that cannot be filled is removed, no sandbox is made, and the run ends runner_setup / workspace_failed", async () => {
     const rig = makeRig({ handler: { git: fakeGitPath({ prepare: throwing("workspace_failed") }) } });
     const claimed = await rig.claim();
     expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "workspace_failed" });
     expect(readdirSync(rig.workspaces)).toEqual([]);
     expect(rig.port.calls).toEqual([]);
-    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "other" });
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "workspace_failed" });
   });
 
   it("the sandbox is started with the git path's read grants for this job, and with none when the path names none", async () => {
@@ -771,7 +782,7 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     expect(rig.runJobCalls()).toBe(0);
     expect(existsSync(rig.workspaces)).toBe(false);
     expect(rig.port.calls).toEqual([]);
-    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "other" });
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "push_ref_refused" });
   });
 
   it("a run that failed pushes nothing", async () => {

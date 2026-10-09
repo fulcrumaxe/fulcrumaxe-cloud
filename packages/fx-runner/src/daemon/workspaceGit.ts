@@ -5,11 +5,17 @@
  * would then bring that repository's history into the mirror and the push would publish it. So the daemon only fetches from a git
  * directory that is exactly what `git clone --reference <mirror>` makes, and nothing here follows a link.
  *
- * Every refusal is the one closed code `push_ref_refused`; no path or file content is put in an error.
+ * Every refusal is a closed code, `push_ref_refused` or (for the sandbox's own entries in `.git`, see below) `workspace_git_refused`; no
+ * path or file content is put in an error.
+ *
+ * D#6 R4d-2 (C32 section 2): the Claude Code shell sandbox makes empty mount points inside `.git` (`commondir`, `config.worktree`,
+ * `modules`, `worktrees`, `glab-cli`) before the agent's first command. The workspace check accepts exactly those shapes
+ * (`sandboxStubs.ts`) and nothing looser; the snapshot, which the fetch actually reads, never holds them and still refuses a `commondir`.
  */
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { GitPathError } from "./git.js";
+import { STUB_COMMONDIR_CONTENTS, STUB_COMMONDIR_MAX_BYTES, STUB_EMPTY_DIRS, STUB_EMPTY_FILE } from "./sandboxStubs.js";
 
 type Kind = "none" | "file" | "dir" | "link" | "other";
 
@@ -94,16 +100,46 @@ function closed<T>(step: () => T): T {
   }
 }
 
+const refuseWorkspace = (): never => {
+  throw new GitPathError("workspace_git_refused");
+};
+
+/** Accepts the sandbox's entries inside `.git` in the exact shapes it makes, and refuses every other shape of them with `workspace_git_refused`. */
+function assertSandboxStubs(gitDir: string): void {
+  try {
+    const commondir = path.join(gitDir, "commondir");
+    if (kindOf(commondir) !== "none") {
+      const stat = lstatSync(commondir);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > STUB_COMMONDIR_MAX_BYTES) refuseWorkspace();
+      if (!STUB_COMMONDIR_CONTENTS.has(readSmallRegular(commondir, STUB_COMMONDIR_MAX_BYTES))) refuseWorkspace();
+    }
+    const emptyFile = path.join(gitDir, STUB_EMPTY_FILE);
+    if (kindOf(emptyFile) !== "none") {
+      const stat = lstatSync(emptyFile);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size !== 0) refuseWorkspace();
+    }
+    for (const name of STUB_EMPTY_DIRS) {
+      const dir = path.join(gitDir, name);
+      const kind = kindOf(dir);
+      if (kind === "none") continue;
+      if (kind !== "dir" || readdirSync(dir).length !== 0) refuseWorkspace();
+    }
+  } catch {
+    // fx-swallow-ok: replaced by the closed code; a system error (or a helper's code) here is a shape the sandbox does not make
+    refuseWorkspace();
+  }
+}
+
 /**
  * Throws `push_ref_refused` unless `<workspace>/.git` is a real directory of the shape `git clone --reference` makes:
- * no `commondir`, no link at `HEAD`, `config`, `packed-refs`, `refs` or `objects` or anywhere inside the last two, and
+ * no `commondir` (other than the sandbox's empty one), no link at `HEAD`, `config`, `packed-refs`, `refs` or `objects` or anywhere inside the last two, and
  * `objects/info/alternates` absent or naming exactly `mirrorObjects` and nothing else. Returns the git directory to fetch from.
  */
 export function assertWorkspaceGit(workspace: string, mirrorObjects: string): string {
   if (!path.isAbsolute(workspace) || !path.isAbsolute(mirrorObjects)) return refuse();
   const gitDir = path.join(workspace, ".git");
   if (kindOf(gitDir) !== "dir") refuse();
-  assertGitDirShape(gitDir, mirrorObjects, false);
+  assertGitDirShape(gitDir, mirrorObjects, false, true);
   return gitDir;
 }
 
@@ -112,10 +148,11 @@ export function assertWorkspaceGit(workspace: string, mirrorObjects: string): st
  * before the fetch (`requireAlternates`: the daemon wrote that line, so it must be there). It refuses a `.git` entry inside the
  * directory, which a non-strict `upload-pack` would try before the directory itself, and an alternates line that is not absolute.
  */
-export function assertGitDirShape(gitDir: string, mirrorObjects: string, requireAlternates: boolean): void {
+export function assertGitDirShape(gitDir: string, mirrorObjects: string, requireAlternates: boolean, tolerateSandboxStubs = false): void {
   if (!path.isAbsolute(gitDir) || !path.isAbsolute(mirrorObjects)) return refuse();
   if (kindOf(path.join(gitDir, ".git")) !== "none") refuse();
-  if (kindOf(path.join(gitDir, "commondir")) !== "none") refuse();
+  if (tolerateSandboxStubs) assertSandboxStubs(gitDir);
+  else if (kindOf(path.join(gitDir, "commondir")) !== "none") refuse();
   if (kindOf(path.join(gitDir, "HEAD")) !== "file") refuse();
   if (!["file", "none"].includes(kindOf(path.join(gitDir, "config")))) refuse();
   if (!["file", "none"].includes(kindOf(path.join(gitDir, "packed-refs")))) refuse();

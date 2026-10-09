@@ -64,6 +64,18 @@ export const RUNNER_SETUP_DETAILS = [
   "push_incomplete",
   // The job's `model_hint` is not a price-table id the runner can map to a CLI model name (see `cliModels.ts`). Refused before any process starts.
   "model_unsupported",
+  // D#6 R4d-2 (C32 section 3; additive under C8 section 6): every code the daemon's git path can fail a run with used to be sent as `other`.
+  // The cloud must accept these before a runner sends them (the event is strict, with an enum), so the cloud deploys first.
+  "push_ref_refused",
+  "snapshot_refused",
+  "push_failed",
+  "mirror_failed",
+  "mirror_dir_insecure",
+  "git_version_unsupported",
+  "workspace_failed",
+  "workspace_git_refused",
+  "head_not_from_base",
+  "sandbox_stub_committed",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];

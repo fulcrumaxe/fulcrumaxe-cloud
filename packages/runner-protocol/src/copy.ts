@@ -38,6 +38,10 @@ export const COPY = {
     "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
   /** D#6 R5a-2b (C27 section 4.5): shown for a `run_ended` `clone_limited`. Exact text (C28 section 3 item 7); the one place it is written. */
   cloneLimited: "This repository has used today's download allowance through our proxy. The runner keeps a copy, so this is rare. It resets at 00:00 UTC.",
+  /** D#6 R4d-2 (C32 section 2), the three details of a run that published nothing. Exact text; the one place each is written. */
+  headNotFromBase: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
+  sandboxStubCommitted: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
+  workspaceGitRefused: "The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.",
   /** The description of the draft pull request our cloud opens when a runner run finishes. Fixed text: the agent's own output never goes into it. */
   pullRequestBody: "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
   /** The pull request title when the work item has none. */
@@ -59,12 +63,31 @@ export const COPY = {
 export type CopyKey = keyof typeof COPY;
 
 /**
+ * D#6 R4d-2 (C32 section 3): the line for each detail the runner's git path can end a run with. Each says what happened to the work and what to do;
+ * none holds a path, a code or text from the agent. The last three are the rulings' exact words (`COPY`).
+ */
+export const GIT_PATH_LINES = {
+  push_ref_refused: "The runner would not publish the agent's work, because it was not shaped like a run's branch. Nothing was published. Build again.",
+  snapshot_refused: "The runner could not safely copy the agent's work out of its folder (it may be too large), so nothing was published. Build again.",
+  push_failed: "The runner could not push the agent's work to GitHub with your git credentials, so nothing was published. Check that git can push to this repository from that machine, then Build again.",
+  mirror_failed: "The runner could not update its local copy of this repository, so the run did not start. Check the runner machine's git access to the repository, then Build again.",
+  mirror_dir_insecure: "The folder where the runner keeps its repository copies is not private enough to use. Fix its permissions, then Build again.",
+  git_version_unsupported: "The git on the runner machine is too old. Update git, then Build again.",
+  workspace_failed: "The runner could not prepare a working folder for the agent. Check the disk space and git access on that machine, then Build again.",
+  workspace_git_refused: COPY.workspaceGitRefused,
+  head_not_from_base: COPY.headNotFromBase,
+  sandbox_stub_committed: COPY.sandboxStubCommitted,
+} as const;
+
+/**
  * What the dashboard shows for a `run_ended` `runner_setup` event (C24 section 1, C27 section 4.5). The closed `detail` code is shown as the runner
- * sent it, except the two details with a string of their own: `push_too_large` (with `size_mb`) and `clone_limited`. Never null: a missing or
+ * sent it, except the details with a string of their own: `push_too_large` (with `size_mb`), `clone_limited`, and the git-path ones in `GIT_PATH_LINES`. Never null: a missing or
  * out-of-range size shows the plain code, not a hole in the sentence.
  */
 export function runnerSetupText(detail: string, sizeMb?: number): string {
   if (detail === "clone_limited") return COPY.cloneLimited;
+  const own = (GIT_PATH_LINES as Readonly<Record<string, string>>)[detail];
+  if (own !== undefined) return own;
   if (detail === "push_too_large" && sizeMb !== undefined && Number.isSafeInteger(sizeMb) && sizeMb >= 5) return COPY.pushTooLarge.replace("{size}", String(sizeMb));
   return COPY.runnerSetupFailed.replace("{detail}", detail);
 }

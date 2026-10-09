@@ -14,6 +14,7 @@
  */
 import path from "node:path";
 import { assertGitVersion, GitPathError, type Git } from "./git.js";
+import { EMPTY_BLOB_IDS, isSandboxStubName, SANDBOX_STUB_PATHSPECS } from "./sandboxStubs.js";
 import { takeSnapshot } from "./snapshot.js";
 import { assertGitDirShape, assertWorkspaceGit } from "./workspaceGit.js";
 
@@ -214,6 +215,22 @@ async function pushChunks(transport: PushTransport, mirrorDir: string, ends: rea
   return true;
 }
 
+/**
+ * D#6 R4d-2 (C32 section 2 item 2): throws `sandbox_stub_committed` when any commit in `base..sha` adds, as an empty blob, a file the sandbox
+ * makes an empty placeholder for (`sandboxStubs.ts`). Every commit counts, not only the net result: a stub added and removed again is still in
+ * the pushed history. A non-empty file of the same name, or an existing one that is changed, is not a stub. Read from the mirror, after the fetch.
+ */
+export async function assertNoCommittedStubs(git: Git, mirrorDir: string, base: string, sha: string): Promise<void> {
+  const raw = await git.run("push_failed", ["-C", mirrorDir, "log", "-m", "--full-history", "--no-renames", "--diff-filter=A", "--raw", "--no-abbrev", "-z", "--format=", `${base}..${sha}`, "--", ...SANDBOX_STUB_PATHSPECS]);
+  const tokens = raw.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    const meta = tokens[i]!.match(/^:\d{6} \d{6} [0-9a-f]+ ([0-9a-f]+) A$/);
+    if (meta === null) continue;
+    const added = tokens[i + 1] ?? "";
+    if (EMPTY_BLOB_IDS.has(meta[1]!) && isSandboxStubName(added)) throw new GitPathError("sandbox_stub_committed");
+  }
+}
+
 export type Published ={ pushed: false } | { pushed: true; branch: string; sha: string };
 
 /**
@@ -243,7 +260,9 @@ export async function publishBranch(git: Git, mirrorDir: string, url: string, wo
       const sha = (await git.run("push_failed", ["-C", mirrorDir, "rev-parse", "--verify", `${plan.localRef}^{commit}`])).trim();
       if (sha === base) return { pushed: false };
       // Backstop for the checks above: what is pushed must grow from the commit this run started at, whatever git read to find it.
-      await git.run("push_ref_refused", ["-C", mirrorDir, "merge-base", "--is-ancestor", base, sha]);
+      // The agent may have switched branches; whatever HEAD holds is published if `base` is its ancestor (C32 section 2), else this is `head_not_from_base`.
+      await git.run("head_not_from_base", ["-C", mirrorDir, "merge-base", "--is-ancestor", base, sha]);
+      await assertNoCommittedStubs(git, mirrorDir, base, sha);
       const transport = options.transport;
       if (continues !== null) {
         // A fix round updates a pull request's branch, so the branch must still be there, still at the commit this run started from.
