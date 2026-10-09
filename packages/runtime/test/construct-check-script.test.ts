@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const PACKAGE_ROOT = new URL("..", import.meta.url).pathname;
-const TSX_BIN = path.join(PACKAGE_ROOT, "node_modules", ".bin", "tsx");
+// `node --import tsx`, not the `tsx` CLI: the CLI opens a Unix-socket IPC pipe, which the runner's sandbox refuses.
+const TSX_ARGS = ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href];
 const SCRIPT = path.join(PACKAGE_ROOT, "src", "local", "construct-check.ts");
 
 function run(env: NodeJS.ProcessEnv): { status: number; stdout: string; stderr: string } {
   try {
-    const stdout = execFileSync(TSX_BIN, [SCRIPT], { env, encoding: "utf8" });
+    const stdout = execFileSync(process.execPath, [...TSX_ARGS, SCRIPT], { env, encoding: "utf8" });
     return { status: 0, stdout, stderr: "" };
   } catch (error) {
     const err = error as { status: number; stdout: string; stderr: string };

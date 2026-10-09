@@ -14,6 +14,7 @@ import { SandboxGrantRefused, sandboxSettings } from "../../src/sandbox/sandboxS
 import { MAX_LOG_LINE_BYTES, readLogFrom, removeEntry, clearTakeover, ensurePrivateDir, markTakeoverReady, readEntries, requestTakeover, sessionName, shortId, socketIsPrivate, socketPath, takeoverState, tmuxDir, writeEntry } from "../../src/watch/layout.js";
 import { attachArgs, findTmux, startWatch, statusLine, tmuxEnv, type TmuxConfig } from "../../src/watch/tmux.js";
 import { manualClock } from "../helpers/manualClock.js";
+import { itNeedsHostSockets } from "../helpers/needsHostSockets.js";
 
 const RUN = "3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38";
 let root: string;
@@ -80,7 +81,7 @@ describe("the tmux socket directory and socket", () => {
     expect(path.dirname(socketPath(stateDir))).toBe(tmuxDir(stateDir));
   });
 
-  it("only a real socket with mode 0600 in a 0700 directory counts as private", async () => {
+  itNeedsHostSockets("only a real socket with mode 0600 in a 0700 directory counts as private", async () => {
     expect(socketIsPrivate(stateDir)).toBe(false);
     ensurePrivateDir(tmuxDir(stateDir));
     await listen(socketPath(stateDir));
@@ -342,7 +343,7 @@ describe("readLogFrom", () => {
 });
 
 describe("socketIsPrivate and the user id", () => {
-  it("a socket whose owner is not the given user is not private", async () => {
+  itNeedsHostSockets("a socket whose owner is not the given user is not private", async () => {
     ensurePrivateDir(tmuxDir(stateDir));
     await listen(socketPath(stateDir));
     chmodSync(socketPath(stateDir), 0o600);

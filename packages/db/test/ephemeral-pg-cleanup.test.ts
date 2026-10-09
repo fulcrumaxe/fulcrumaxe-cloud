@@ -33,14 +33,13 @@ function postmasterAlive(dir: string): boolean {
 }
 
 /**
- * Postgres refuses a unix socket path over 107 bytes, and the cluster dir is
- * <root>/fx-leakchild-pg-XXXXXX/.s.PGSQL.<port>, so a deeply nested TMPDIR
- * (a nested nix-shell, a CI scratch dir) made the child die before READY.
- * Keep the child's root short: use tmpdir() when it leaves room, else /tmp.
+ * The root for the child's scratch dirs: this process's own temp directory.
+ * It used to fall back to /tmp when that was deeply nested, because Postgres
+ * refuses a Unix socket path over 107 bytes; the cluster has no Unix socket
+ * now (TCP on loopback only), and /tmp is read-only inside a runner job.
  */
 function shortTmpBase(): string {
-  const base = tmpdir();
-  return base.length <= 40 || !existsSync('/tmp') ? base : '/tmp';
+  return tmpdir();
 }
 
 async function startChild(

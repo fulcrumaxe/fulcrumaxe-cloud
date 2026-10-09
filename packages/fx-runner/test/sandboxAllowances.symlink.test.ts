@@ -5,6 +5,7 @@ import { allowanceFloorViolation, type AllowanceEntry } from "@fulcrumaxe/runner
 import { verifyJob } from "../src/daemon/verifyJob.js";
 import { allowanceRefusal, checkedAllowances, grantsOf, resolveEntries } from "../src/sandbox/allowances.js";
 import { KEYRING, NOW, jobFor, signRaw } from "./helpers/signedJob.js";
+import { tmpRoot } from "./helpers/tmpRoot.js";
 
 const rw = (value: string, access: "read" | "write" = "read"): AllowanceEntry => ({ kind: "path", value, access, reason: "needed by a step" });
 const timeout = 600;
@@ -16,7 +17,7 @@ describe("R7b: symlinks are resolved before the floor is checked and before bind
   });
 
   function links(): string {
-    const root = mkdtempSync(path.join("/tmp", "r7b-link-"));
+    const root = mkdtempSync(path.join(tmpRoot(), "r7b-link-"));
     made.push(root);
     mkdirSync(path.join(root, ".ssh"));
     mkdirSync(path.join(root, "fine"));
@@ -53,7 +54,7 @@ describe("R7b: symlinks are resolved before the floor is checked and before bind
   });
   describe("a dangling symlink is followed to the place it names (CWE-367 / CWE-59)", () => {
     function dangling(): string {
-      const root = mkdtempSync(path.join("/tmp", "r7b-dangle-"));
+      const root = mkdtempSync(path.join(tmpRoot(), "r7b-dangle-"));
       made.push(root);
       mkdirSync(path.join(root, ".ssh"));
       mkdirSync(path.join(root, "fine"));

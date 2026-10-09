@@ -9,6 +9,7 @@ import { HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbo
 import { NIX_DAEMON_SOCKET_DIR } from "../src/sandbox/nixView.js";
 import { SandboxGrantRefused, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { KEYRING, NOW, jobFor, signRaw, signedJob } from "./helpers/signedJob.js";
+import { tmpRoot } from "./helpers/tmpRoot.js";
 
 const entry = (kind: AllowanceEntry["kind"], value: string, access: AllowanceEntry["access"]): AllowanceEntry => ({ kind, value, access, reason: "needed by a step" });
 const rw = (value: string, access: "read" | "write" = "read"): AllowanceEntry => entry("path", value, access);
@@ -172,14 +173,14 @@ describe("R7b: the sandbox builder applies the allowances, and keeps its own ref
 describe("R7b: the host sandbox re-checks the floor and applies the set to that job only", () => {
   const dirs: string[] = [];
   // the write entries of these tests live in /tmp (the floor), under names no other test or program uses
-  const SCRATCH_A = `/tmp/r7b-scratch-a-${process.pid}`;
-  const SCRATCH_B = `/tmp/r7b-scratch-b-${process.pid}`;
+  const SCRATCH_A = path.join(tmpRoot(), `r7b-scratch-a-${process.pid}`);
+  const SCRATCH_B = path.join(tmpRoot(), `r7b-scratch-b-${process.pid}`);
   afterEach(() => {
     for (const dir of [...dirs.splice(0), SCRATCH_A, SCRATCH_B]) rmSync(dir, { recursive: true, force: true });
   });
 
   function rig(opts: { runtimeFails?: boolean } = {}) {
-    const root = mkdtempSync(path.join("/tmp", "r7b-host-"));
+    const root = mkdtempSync(path.join(tmpRoot(), "r7b-host-"));
     dirs.push(root);
     const home = path.join(root, "home");
     const tempRoot = path.join(home, ".cache", "fx-runner", "tmp");
@@ -360,7 +361,7 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
 
     it("never follows a symlink on removal: a link planted inside to a directory elsewhere is unlinked, and the target and its contents stay", async () => {
       const r = rig();
-      const outside = mkdtempSync(path.join("/tmp", "r7b-outside-"));
+      const outside = mkdtempSync(path.join(tmpRoot(), "r7b-outside-"));
       dirs.push(outside);
       writeFileSync(path.join(outside, "precious"), "keep");
       await r.launch(write(SCRATCH_A));
@@ -378,7 +379,7 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
     it("does not touch a directory that is no longer the one it made", async () => {
       const r = rig();
       await r.launch(write(SCRATCH_A));
-      const elsewhere = mkdtempSync(path.join("/tmp", "r7b-swap-"));
+      const elsewhere = mkdtempSync(path.join(tmpRoot(), "r7b-swap-"));
       dirs.push(elsewhere);
       writeFileSync(path.join(elsewhere, "theirs"), "keep");
       rmSync(SCRATCH_A, { recursive: true });
