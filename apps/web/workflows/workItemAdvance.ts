@@ -16,6 +16,7 @@ import {
   recordRoundBody,
   reviewLoadBody,
   reviewPlanBody,
+  verifiedGateBody,
   reviewerOutcomeBody,
   startFixBody,
   startReviewerBody,
@@ -24,10 +25,12 @@ import {
   type PrLookup,
   type ReviewCtx,
   type ReviewLoaded,
+  type PrFound,
   type ReviewPlanOut,
   type ReviewerOutcome,
   type RoundOut,
   type StartedReviewer,
+  type VerifiedGateOut,
 } from "../lib/advanceReviewSteps";
 
 /**
@@ -109,6 +112,8 @@ const REVIEW_WAIT_MS = 45 * 60_000;
  * review of the last fix, and a review of a head that moved under the merge gate.
  */
 const MAX_REVIEW_ROUNDS = 6;
+/** D#6 R5b-2a: how many times one review waits out a cloud-verified pull request's quiet period (each wait is at most ten minutes) before the driver gives up. */
+const MAX_QUIET_CHECKS = 36;
 /** The fixed codes "Check the build" records when its lookup could not decide (the activity route turns them into a notice sentence). */
 const CHECK_UNAVAILABLE = "check_build_unavailable";
 const CHECK_AMBIGUOUS = "check_build_ambiguous";
@@ -238,6 +243,11 @@ export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" 
 export async function advancePrFoundStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<string | null> {
   "use step";
   return prFoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, prNumber);
+}
+
+export async function advanceVerifiedGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, pr: { number: number; headSha: string }, seenHead: string | null): Promise<VerifiedGateOut> {
+  "use step";
+  return verifiedGateBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, pr, seenHead);
 }
 
 export async function advanceReviewPlanStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, ctx: Pick<ReviewCtx, "tier" | "debaterEnabled">, pr: { number: number; headSha: string; securityCodes: string[] }, flagged: boolean): Promise<ReviewPlanOut> {
@@ -759,6 +769,58 @@ async function stopped(args: AdvanceStartArgs, at: string, code: string, extra: 
 }
 
 /**
+ * D#6 R5b-2a (body R5b.4): waits out a cloud-verified pull request's quiet period. Each pass reads the head from GitHub again and asks the worker
+ * whether the reviewers may start on it; a push in between (seen by the webhook, or by the head having moved) restarts the ten minutes. Answers the
+ * head and context to review, or the end of the workflow: no key (`review_key_missing`, the gate's recorded reason; a later press of Approve
+ * or Check the build reviews the current head once a key is connected again), or a repository that left the mode (it is reviewed the way its new
+ * mode is: the context is loaded again and the normal path goes on).
+ */
+async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first: PrFound, pinned: number | null): Promise<{ ctx: ReviewCtx; found: PrFound } | { end: Result }> {
+  const { accountId, userId, workItemId } = args;
+  let found = first;
+  let seen: string | null = null;
+  for (let i = 0; i < MAX_QUIET_CHECKS; i++) {
+    const gate = await advanceVerifiedGateStep(accountId, userId, workItemId, args.haltEpoch, { number: found.number, headSha: found.headSha }, seen);
+    seen = found.headSha;
+    if (gate.state === "dispatch") return { ctx, found };
+    if (gate.state === "wait") {
+      await sleep(gate.waitMs);
+      const again = await advanceFindPrStep(ctx);
+      if (!again.ok) {
+        await stopped(args, "review_pr", again.reason);
+        return { end: { status: "no_pr", detail: again.reason } };
+      }
+      found = again;
+      continue;
+    }
+    if (gate.state === "not_verified") {
+      const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, args.haltEpoch, pinned);
+      if (!loaded.ok) {
+        if (isHaltReason(loaded.reason)) return { end: await haltedEnd(args, "review_load") };
+        await stopped(args, "review_load", loaded.reason);
+        return { end: { status: "failed", detail: `review_${loaded.reason}` } };
+      }
+      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+      const again = await advanceFindPrStep(next);
+      if (!again.ok) {
+        await stopped(args, "review_pr", again.reason);
+        return { end: { status: "no_pr", detail: again.reason } };
+      }
+      return { ctx: next, found: again };
+    }
+    if (gate.state === "key_missing") {
+      await stopped(args, "review", "review_key_missing", { head: found.headSha, pr: found.number });
+      return { end: { status: "needs_human", detail: "review_key_missing" } };
+    }
+    if (isHaltReason(gate.reason)) return { end: await haltedEnd(args, "review_quiet") };
+    await stopped(args, "review", gate.reason ?? "review_gate_refused", { head: found.headSha, pr: found.number });
+    return { end: { status: "needs_human", detail: gate.reason ?? "review_gate_refused" } };
+  }
+  await stopped(args, "review", "review_quiet_period_unsettled", { head: found.headSha, pr: found.number });
+  return { end: { status: "needs_human", detail: "review_quiet_period_unsettled" } };
+}
+
+/**
  * The review of an open pull request: reviewers on the head, all verdicts gathered, then recorded; the merge gate when
  * everyone passed; a fix round (a RESUME of the build's session) when someone asked for changes; then the review again on
  * the new head. See the file header for every way it stops.
@@ -772,13 +834,20 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
 
   for (let attempt = 0; attempt < MAX_REVIEW_ROUNDS; attempt++) {
-    const found = await advanceFindPrStep(ctx);
+    let found = await advanceFindPrStep(ctx);
     if (!found.ok) {
       await stopped(args, "review_pr", found.reason);
       return { status: "no_pr", detail: found.reason };
+    }
+    // D#6 R5b-2a: a cloud-verified pull request is reviewed only after its quiet period, and with a model key. Every other mode goes straight on.
+    if (ctx.executionMode === "runner_verified") {
+      const quiet = await awaitVerifiedQuiet(args, ctx, found, pinned);
+      if ("end" in quiet) return quiet.end;
+      ctx = quiet.ctx;
+      found = quiet.found;
     }
     const pr = { number: found.number, headSha: found.headSha, baseRef: found.baseRef, branch: found.branch };
 

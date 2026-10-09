@@ -8,7 +8,7 @@ import { getRoleEntry } from "@fx/roles";
 import { loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
-import { isRunnerMode, EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
+import { runsInOurSandbox, EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
 import { PINNED_MEMORY_MB, computeComputeUsd, isClaudeModelId, type PlanId } from "@fx/spend";
 
 /**
@@ -163,7 +163,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       if (repo === undefined) return refuse("no_repo");
       // The card follows the mode the caller built its prompt for; a preview has no work-item prompt, so it follows the repository.
       const cardMode = "expectedExecutionMode" in request && request.expectedExecutionMode !== undefined ? request.expectedExecutionMode : repo.execution_mode;
-      const roleCard = isRunnerMode(cardMode) ? loadCard(role, { runtime: "runner" }) : loadCard(role);
+      const roleCard = runsInOurSandbox(cardMode, role) ? loadCard(role) : loadCard(role, { runtime: "runner" });
       if (roleCard === undefined) return refuse("no_card");
       if (repo.app_kind === null) return refuse("no_installation");
       if (preview) {

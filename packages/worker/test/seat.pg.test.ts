@@ -96,6 +96,13 @@ describe("seat resolver [pg]", () => {
     expect(await seatCard("executor", "sandbox")).toBe(loadProductCard("executor"));
     expect(await seatCard("code-reviewer")).toBe(loadProductCard("code-reviewer"));
     expect(await seatCard("code-reviewer", "runner_local")).toBe(loadProductCard("code-reviewer"));
+    // D#6 R5b-2a: in a cloud-verified repository the executor still runs on the runner, and the reviewers run in our sandbox, so each gets the card for where it runs.
+    await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [a.repoId]);
+    expect(await seatCard("executor")).toBe(loadProductCard("executor", { runtime: "runner" }));
+    for (const reviewer of ["code-reviewer", "security-reviewer", "acceptance-tester", "debater"]) {
+      expect(await seatCard(reviewer), reviewer).toBe(loadProductCard(reviewer));
+      expect(await seatCard(reviewer, "runner_verified"), reviewer).toBe(loadProductCard(reviewer));
+    }
   });
 
   it("P6: every manifest role WITH a product card gets an ok seat (one without is refused no_card, below) whose model is priced and which SandboxTarget.admit does not refuse as unknown_model", async () => {

@@ -69,6 +69,64 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
     return withTenant(appUserPool, refs.accountId, (client) => applyMappedEvent(client, ctx, mapped));
   }
 
+  describe('D#6 R5b-2a: pull_request.synchronize records the push of a head commit (it starts the quiet period of a cloud-verified review)', () => {
+    type Sync = GithubPullRequestPayload & { after: string; repository: Record<string, unknown> };
+    const synchronize = (body: string | null): Sync => {
+      const real = loadFixture<Sync>('pull_request.synchronize.json');
+      return { ...real, pull_request: { ...real.pull_request, body } };
+    };
+    const pushes = async (workItemId: string) =>
+      (await admin.query(`SELECT head_sha, pr_number, code, created_at FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'pr_head_pushed'`, [refs.accountId, workItemId])).rows;
+
+    it('writes one fact per head commit, stamped by the database clock; a redelivery writes nothing and moves no time', async () => {
+      const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 139, stage: 'pr_opened' });
+      const payload = synchronize('Closes #139');
+      const mapped = mapEvent('pull_request', payload, { allowlist: [] });
+      const deliveryId = `d-${randomUUID()}`;
+      expect(await apply(mapped, { deliveryId })).toMatchObject({ applied: 'pr_push_recorded', workItemId, recorded: true });
+      const first = await pushes(workItemId);
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatchObject({ head_sha: payload.after, pr_number: 139, code: 'synchronize' });
+      expect(Math.abs(Date.now() - new Date(first[0].created_at).getTime())).toBeLessThan(60_000);
+
+      expect(await apply(mapped, { deliveryId })).toMatchObject({ applied: 'pr_push_recorded', workItemId, recorded: false });
+      const again = await pushes(workItemId);
+      expect(again).toHaveLength(1);
+      expect(new Date(again[0].created_at).getTime()).toBe(new Date(first[0].created_at).getTime());
+    });
+
+    it('a push back to a head seen before (A, B, A) is a new fact each time: the delivery decides, not the head', async () => {
+      const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 1392, stage: 'pr_opened' });
+      const base = synchronize('Closes #1392');
+      const at = (sha: string) => mapEvent('pull_request', { ...base, pull_request: { ...base.pull_request, head: { ...base.pull_request.head, sha } } }, { allowlist: [] });
+      const A = 'a'.repeat(40);
+      const B = 'b'.repeat(40);
+      await apply(at(A));
+      await apply(at(B));
+      expect(await apply(at(A))).toMatchObject({ applied: 'pr_push_recorded', recorded: true });
+      expect((await pushes(workItemId)).map((r) => r.head_sha)).toEqual([A, B, A]);
+    });
+
+    it('a fork from an untrusted author, a pull request naming no issue, and one naming an issue with no work item record nothing', async () => {
+      const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 1390, stage: 'pr_opened' });
+      const real = synchronize('Closes #1390');
+      const fork = { ...real, pull_request: { ...real.pull_request, author_association: 'NONE', user: { login: 'stranger' }, head: { ...real.pull_request.head, repo: { id: 1 } } } };
+      expect(await apply(mapEvent('pull_request', fork, { allowlist: [] }))).toMatchObject({ applied: 'skipped' });
+      expect(await apply(mapEvent('pull_request', synchronize(null), { allowlist: [] }))).toMatchObject({ applied: 'skipped' });
+      expect(await apply(mapEvent('pull_request', synchronize('Closes #987654'), { allowlist: [] }))).toMatchObject({ applied: 'skipped' });
+      expect(await pushes(workItemId)).toEqual([]);
+    });
+
+    it('arrives through the whole webhook path (tenant resolved from the delivery) and lands on the item the body links', async () => {
+      const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 1391, stage: 'pr_opened' });
+      const real = synchronize('Closes #1391');
+      const payload = { ...real, installation: { id: refs.ghInstallationId }, repository: { ...real.repository, id: refs.ghRepoId } };
+      const out = await handleGithubWebhookEvent({ appUserPool, platformOpsPool, allowlist: [] }, 'pull_request', payload as never, `d-${randomUUID()}`);
+      expect(out).toMatchObject({ handled: true, result: { applied: 'pr_push_recorded', workItemId, recorded: true } });
+      expect(await pushes(workItemId)).toHaveLength(1);
+    });
+  });
+
   describe('C18: pull_request.opened calls recordStage, deduped by X-GitHub-Delivery', () => {
     it('produces exactly one work_item_transitions row with to_stage=pr_opened, source=webhook, at = payload.pull_request.created_at; a redelivery adds no row', async () => {
       const workItemId = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 7, stage: 'in_progress' });

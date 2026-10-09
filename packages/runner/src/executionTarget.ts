@@ -6,6 +6,7 @@ import type { ModelFailureCode } from "./modelFailure.js";
 import type { RunLimits } from "./meteringGuard.js";
 import { SandboxTarget, type SandboxTargetDeps } from "./targets/sandboxTarget.js";
 import { RunnerTarget, type RunnerTargetDeps } from "./targets/runnerTarget.js";
+import { VerifiedTarget } from "./targets/verifiedTarget.js";
 
 /**
  * D#2 H09b, correction C10: `startAgentRun` depends on an
@@ -263,6 +264,8 @@ export type DispatchResult = { hookToken: string } | { queued: true };
 export interface ExecutionTarget {
   /** D#6 C12 A1: the `agent_runs.runtime` this target's runs are stamped with. */
   readonly runtime: TargetRuntime;
+  /** D#6 R5b-2a: a target that serves one role on another target (the cloud-verified mode runs its reviewers in our sandbox) answers it here. */
+  forRole?(role: string): ExecutionTarget;
   /**
    * `client` is the caller's OWN transaction client: `startAgentRun`
    * inserts `agent_runs` inside one `withTenant` transaction and passes
@@ -396,7 +399,8 @@ export type ExecutionTargetFactory<Deps> = (deps: Deps) => ExecutionTarget;
 export interface ExecutionTargetDeps {
   sandbox: SandboxTargetDeps;
   runner_local: RunnerTargetDeps;
-  runner_verified: RunnerTargetDeps;
+  /** D#6 R5b-2a: the runner side, and the sandbox target the four reviewer roles run on (the one registered for `sandbox`). */
+  runner_verified: { runner: RunnerTargetDeps; sandbox: ExecutionTarget };
 }
 
 /**
@@ -413,7 +417,7 @@ export const EXECUTION_TARGETS: Readonly<{ [M in ExecutionMode]: ExecutionTarget
   Object.freeze({
     sandbox: (deps: SandboxTargetDeps) => new SandboxTarget(deps),
     runner_local: (deps: RunnerTargetDeps) => new RunnerTarget(deps, "runner_local"),
-    runner_verified: (deps: RunnerTargetDeps) => new RunnerTarget(deps, "runner_verified"),
+    runner_verified: (deps: ExecutionTargetDeps["runner_verified"]) => new VerifiedTarget(new RunnerTarget(deps.runner, "runner_verified"), deps.sandbox),
   });
 
 /** An already-built registry of target INSTANCES, keyed by mode -- what
@@ -434,6 +438,11 @@ export type ExecutionTargetRegistry = Readonly<Partial<Record<ExecutionMode, Exe
  * run leaves no reservation, no `createSandbox` call and no status
  * write." -- `startAgentRun` calls this before writing anything.
  */
+/** The `agent_runs.runtime` a run of this role is stamped with: the target's, or the one it routes this role to (D#6 R5b-2a). */
+export function runtimeFor(target: ExecutionTarget, role: string): TargetRuntime {
+  return target.forRole ? target.forRole(role).runtime : target.runtime;
+}
+
 export function resolveExecutionTarget(mode: string, registry: ExecutionTargetRegistry): ExecutionTarget {
   const target = Object.hasOwn(registry, mode) ? registry[mode as ExecutionMode] : undefined;
   if (!target) {

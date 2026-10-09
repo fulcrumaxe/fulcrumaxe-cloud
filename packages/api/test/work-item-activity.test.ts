@@ -211,6 +211,21 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 
+    it('check_failed: at a pull-request stage the two review stops of a cloud-verified item (D#6 R5b-2a) give plain sentences; a Check the build stop does not', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'pr_opened' });
+      const stop = (code: string, key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, 'stopped', $3, $4)`, [accountId, itemId, code, key]);
+      await stop('check_build_unavailable', 'old');
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await stop('review_key_missing', 'k');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: 'A review is waiting for your model key to be connected.' });
+      await stop('review_quiet_period_unsettled', 'q');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: 'Reviews are waiting for pushes to settle.' });
+      await admin.query(`UPDATE work_items SET stage = 'changes_requested' WHERE id = $1`, [itemId]);
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('check_failed');
+    });
+
     it('check_failed is bound to the current attempt: it shows when nothing has happened since, and not once a new build has started', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'in_progress' });

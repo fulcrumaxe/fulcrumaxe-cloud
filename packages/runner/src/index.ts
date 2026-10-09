@@ -20,6 +20,7 @@ export { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 export * from "./agentConfig.js";
 export * from "./targets/sandboxTarget.js";
 export * from "./targets/runnerTarget.js";
+export * from "./targets/verifiedTarget.js";
 export * from "./targets/jobIssuer.js";
 export * from "./targets/githubRepoVisibility.js";
 export * from "./runStatusWriter.js";

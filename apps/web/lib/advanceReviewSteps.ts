@@ -40,6 +40,7 @@ export type ReviewWorker = Pick<
   | "advanceRecordRound"
   | "advanceStartFix"
   | "advanceMergeGate"
+  | "advanceVerifiedReviewGate"
   | "advanceRecordEvent"
   | "advanceCancel"
   | "advancePrFound"
@@ -111,6 +112,30 @@ export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "re
   }
 }
 
+export interface VerifiedGateOut {
+  /** `dispatch`: start the reviewers. `wait`: the quiet period has not ended. `key_missing`: no usable model key. `not_verified`: the repository left the mode. `refused`: a fixed `reason`. */
+  state: "dispatch" | "wait" | "key_missing" | "not_verified" | "refused";
+  waitMs: number;
+  /** The repository's mode right now (`not_verified` only). */
+  executionMode: string | null;
+  reason: string | null;
+}
+
+/**
+ * D#6 R5b-2a: may the reviewers of this cloud-verified pull request start? Read fresh on every call from the item's rows (the executor's end, the
+ * newest push, the model connection, the repository's mode), so a push, a removed key or a mode change between two checks is seen at once.
+ */
+export async function verifiedGateBody(worker: ReviewWorker | null, who: StepWho, pr: Pick<PrFound, "number" | "headSha">, seenHead: string | null): Promise<VerifiedGateOut> {
+  if (!worker) return { state: "refused", waitMs: 0, executionMode: null, reason: "worker_unavailable" };
+  const out = await worker.advanceVerifiedReviewGate(who, { prNumber: pr.number, headSha: pr.headSha, seenHead });
+  return {
+    state: out.state,
+    waitMs: out.state === "wait" ? out.waitMs : 0,
+    executionMode: out.state === "not_verified" ? out.executionMode : null,
+    reason: out.state === "refused" ? out.reason : null,
+  };
+}
+
 export interface ReviewPlanOut {
   /** Every role whose pass the merge gate will require on this head, debater last. */
   roles: string[];
@@ -178,7 +203,7 @@ export async function startReviewerBody(
       branch: pr.branch,
       version: spec.version,
       spec: spec.body,
-      runtime: promptRuntimeOf(ctx.executionMode),
+      runtime: promptRuntimeOf(ctx.executionMode, role),
       ...(role === "debater" ? { prior: priorSummaries } : {}),
     });
   } catch (err) {
