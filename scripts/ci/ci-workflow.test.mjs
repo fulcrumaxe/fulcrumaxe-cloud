@@ -18,7 +18,8 @@ const noComments = (s) => s.replace(/^\s*#.*$/gm, "");
 const rerunScript = readFileSync(path.join(here, "rerun-ci-full.sh"), "utf8");
 
 const checkJob = ci.slice(ci.indexOf("\n  check:"), ci.indexOf("\n  workspace-e2e:"));
-const e2eJob = ci.slice(ci.indexOf("\n  workspace-e2e:"));
+const e2eJob = ci.slice(ci.indexOf("\n  workspace-e2e:"), ci.indexOf("\n  e2e-runner:"));
+const runnerE2eJob = ci.slice(ci.indexOf("\n  e2e-runner:"));
 
 /** Step blocks of a job, in order: [{ name, text }] (text without comment lines). */
 function stepsOf(job) {
@@ -30,6 +31,7 @@ function stepsOf(job) {
 }
 const checkSteps = stepsOf(checkJob);
 const e2eSteps = stepsOf(e2eJob);
+const runnerE2eSteps = stepsOf(runnerE2eJob);
 const stepNamed = (steps, name) => {
   const s = steps.find((x) => x.name === name);
   assert.ok(s, `no step "${name}"`);
@@ -56,11 +58,11 @@ test("no plain scalar value contains a colon and a space (the shape GitHub rejec
   });
 });
 
-test("the workflow parses as YAML and has its three jobs", () => {
+test("the workflow parses as YAML and has its four jobs", () => {
   const py = spawnSync("python3", ["-c", "import sys, json, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))", path.join(repoRoot, ".github/workflows/ci.yml")], { encoding: "utf8" });
   assert.equal(py.status, 0, `ci.yml does not parse as YAML (or PyYAML is missing from the dev shell): ${py.stderr}`);
   const doc = JSON.parse(py.stdout);
-  assert.deepEqual(Object.keys(doc.jobs), ["pr-gates", "check", "workspace-e2e"]);
+  assert.deepEqual(Object.keys(doc.jobs), ["pr-gates", "check", "workspace-e2e", "e2e-runner"]);
   assert.deepEqual(doc.jobs["workspace-e2e"].strategy.matrix.project, ["desktop", "phone", "tablet"]);
   const pr = (doc.on ?? doc.true).pull_request; // YAML 1.1 reads the key `on` as the boolean true
   assert.deepEqual(pr.types, ["opened", "synchronize", "reopened"]);
@@ -438,6 +440,61 @@ test("e2e job: every step after the scope step is guarded on the scope answer", 
   for (const s of e2eSteps.filter((x) => !isNixCache(x))) assert.doesNotMatch(s.text, /continue-on-error/, s.name);
 });
 
+
+// ---- the runner end-to-end job (D#6 R4d-6) -------------------------------------
+test("e2e-runner job: runs on every pull request and push (only CI_DISABLED stands it down), never narrowed by the scope classifier, and waits on no other job", () => {
+  const job = ciDoc.jobs["e2e-runner"];
+  assert.equal(job.if, "vars.CI_DISABLED != 'true'");
+  assert.equal(job["runs-on"], GUARD);
+  assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" });
+  assert.equal(job.needs, undefined);
+  assert.ok(job["timeout-minutes"] > 0 && job["timeout-minutes"] <= 60);
+  const text = noComments(runnerE2eJob);
+  assert.doesNotMatch(text, /CI_SCOPE|affected\.mjs/, "the job must not depend on the scope classifier");
+  assert.doesNotMatch(text, /secrets\./);
+});
+
+test("e2e-runner job: no model call and no secret: the workflow forbids model calls, and the one run step is the package script under the ci shell", () => {
+  assert.equal(ciDoc.env.FX_FORBID_MODEL_CALLS, "1");
+  const steps = runnerE2eSteps;
+  assert.equal(steps[0].text.includes("actions/checkout@v4"), true);
+  assert.match(steps[0].text, /persist-credentials: false/);
+  const run = stepNamed(steps, "Run the end-to-end runner test");
+  assert.equal(ifOf(run), null, "the test step always runs");
+  assert.doesNotMatch(run.text, /continue-on-error/);
+  assert.match(run.text, /\n {8}run: nix develop \.#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'\n?$/);
+  assert.equal(steps[steps.length - 1].name, run.name, "nothing runs after the test, so its result is the job's");
+});
+
+test("e2e-runner job: the hosted setup is the check job's: gated on an ephemeral runner, each step with a short timeout, only the Nix store cache may fail softly", () => {
+  const hosted = installers(runnerE2eSteps);
+  assert.deepEqual(hosted.map((s) => s.name), ["Install Nix (hosted)", "Nix store cache (hosted)", "pnpm store cache (hosted)"]);
+  assert.equal(ifOf(hosted[0]), EPHEMERAL);
+  assert.equal(ifOf(hosted[2]), EPHEMERAL);
+  assert.match(ifOf(hosted[1]), /^runner\.environment == 'github-hosted' && !startsWith\(vars\.CI_RUNS_ON, 'ubicloud'\)$/);
+  for (const s of hosted) {
+    const t = Number((/^ {8}timeout-minutes: (\d+)$/m.exec(s.text) ?? [])[1]);
+    assert.ok(Number.isInteger(t) && t > 0 && t <= 10, `${s.name}: timeout-minutes ${t}`);
+    assert.equal(/continue-on-error/.test(s.text), isNixCache(s), s.name);
+  }
+  // the same steps, word for word, as the check job's (same pinned actions)
+  for (const name of ["Install Nix (hosted)", "Nix store cache (hosted)", "pnpm store cache (hosted)"]) {
+    assert.equal(stepNamed(runnerE2eSteps, name).text.trim(), stepNamed(checkSteps, name).text.trim(), name);
+  }
+});
+
+test("e2e-runner job: the ordinary vitest run leaves the end-to-end test out, and the package script, with its own config, is the only way in", () => {
+  const config = readFileSync(path.join(repoRoot, "packages/worker/vitest.config.ts"), "utf8");
+  assert.match(config, /\n {4}exclude: \[\.\.\.configDefaults\.exclude, "test\/e2e\/\*\*"\],\n/);
+  const e2eConfig = readFileSync(path.join(repoRoot, "packages/worker/vitest.e2e.config.ts"), "utf8");
+  assert.match(e2eConfig, /include: \["test\/e2e\/\*\*\/\*\.test\.ts"\]/);
+  assert.match(e2eConfig, /setupFiles: \["\.\.\/test-guard\/src\/setup\.ts"/, "the model-call guard stays wired in");
+  const workerPkg = JSON.parse(readFileSync(path.join(repoRoot, "packages/worker/package.json"), "utf8"));
+  assert.match(workerPkg.scripts["test:e2e-runner"], /FX_FORBID_MODEL_CALLS=1 vitest run --config vitest\.e2e\.config\.ts$/);
+  assert.match(workerPkg.scripts["test:e2e-runner"], /-u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN/);
+  const rootPkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  assert.equal(rootPkg.scripts["test:e2e-runner"], "pnpm --filter @fx/worker run test:e2e-runner");
+});
 
 // ---- hosted setup gating (GitHub-hosted and Ubicloud) ---------------------------
 /** Evaluate a step's `if:` for the hosted-gate subset: env.CI_SCOPE_E2E, runner.environment, vars.CI_RUNS_ON. */

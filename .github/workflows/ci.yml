@@ -431,3 +431,46 @@ jobs:
         env:
           E2E_PROJECT: ${{ matrix.project }}
         run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm --filter workspace e2e --project="$E2E_PROJECT"'
+
+  # The runner build path, end to end (D#6 R4d-6): one test that starts at the product's own Spec writer and ends at an opened pull request, with real
+  # Postgres (the throwaway cluster the pg tests start from the ci shell's binaries, as in `check`) and real local repositories. The cloud's runner routes,
+  # the real job issuer and signer, and the local runner's own job path (verify, mirror, workspace, publish) all run in one process against a local bare
+  # repository standing in for GitHub; the agent CLI is a shell script and the GitHub API is a strict local fake, so no model is called and no secret is read.
+  # It runs on every pull request and every push to main, never narrowed by the scope classifier: a gap between two packages shows up in the path that
+  # joins them, which a change to either side can open. The ordinary `pnpm test` leaves it out (packages/worker/vitest.config.ts), so it runs once per run.
+  # FX_FORBID_MODEL_CALLS=1 is the workflow-level setting above; the package script also unsets the three model credentials.
+  e2e-runner:
+    if: vars.CI_DISABLED != 'true'
+    runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install Nix (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 10
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Nix store cache (hosted)
+        if: runner.environment == 'github-hosted' && !startsWith(vars.CI_RUNS_ON, 'ubicloud')
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+
+      - name: pnpm store cache (hosted)
+        if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
+        timeout-minutes: 5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Run the end-to-end runner test
+        run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'

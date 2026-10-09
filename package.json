@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "vitest run",
     "test:guard": "vitest run packages/test-guard/test/guard-violation.fixture.test.ts",
+    "test:e2e-runner": "pnpm --filter @fx/worker run test:e2e-runner",
     "check": "bash scripts/check.sh"
   },
   "devDependencies": {
