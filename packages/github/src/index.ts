@@ -18,6 +18,7 @@ export * from './oidcVerify.js';
 export * from './installationToken.js';
 export * from './proxyDecision.js';
 export * from './runResolver.js';
+export * from './runnerGitResolver.js';
 export * from './appCredentials.js';
 export * from './writeInstallation.js';
 export * from './webhookApp.js';
