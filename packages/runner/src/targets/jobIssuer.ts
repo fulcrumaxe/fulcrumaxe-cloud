@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import type { Pool } from "pg";
 import {
+  REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
   SESSION_ID_PATTERN,
   JobSchema,
@@ -48,6 +49,8 @@ export type JobIssueErrorCode =
   | "continues_branch_mismatch"
   | "continues_base_unavailable"
   | "continues_role_not_executor"
+  | "review_without_head"
+  | "review_sha_prompt_mismatch"
   | "job_invalid"
   | "job_not_recorded";
 
@@ -178,11 +181,14 @@ export interface JobIssuerDeps {
   newId?: () => string;
 }
 
+/** The same pattern as the review prompt's own check and the job schema's `review.head_sha`. */
+const REVIEW_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 const MODEL_HINT = /^[A-Za-z0-9._:-]{1,100}$/;
 
 function taskKind(role: string, continues: boolean): Job["task"]["kind"] {
   if (role === "executor") return continues ? "fix" : "implement";
-  if (role === "code-reviewer" || role === "security-reviewer" || role === "acceptance-tester" || role === "debater") return "review";
+  if ((REVIEW_JOB_ROLES as readonly string[]).includes(role)) return "review";
   return "advise";
 }
 
@@ -203,6 +209,16 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       const seen = await deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch(() => "unknown" as const);
       if (seen === "public") throw new JobIssueError("public_repo");
       if (seen !== "private") throw new JobIssueError("repo_visibility_unknown");
+
+      // D#6 R4d-4 (C33 section 1.2): a review job names the commit to review, from the run's stored head (`agent_runs.head_sha`), never parsed out
+      // of the prompt. A review with no valid head, or whose prompt names a different commit, is refused and nothing is recorded.
+      let review: Job["review"];
+      if ((REVIEW_JOB_ROLES as readonly string[]).includes(role)) {
+        const head = run.headSha;
+        if (typeof head !== "string" || !REVIEW_SHA.test(head)) throw new JobIssueError("review_without_head");
+        if (!run.prompt.includes(head)) throw new JobIssueError("review_sha_prompt_mismatch");
+        review = { head_sha: head };
+      }
 
       // A fix round the pipeline started has no branch of its own to carry: it continues the branch recorded for the run it fixes (C25 section 1.2).
       const needsRecordedBranch = input.continues !== undefined && input.continues.branch === undefined;
@@ -244,6 +260,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         role_card: { text: run.roleCard, sha256: sha256Text(run.roleCard) },
         role_tools_sha256: roleToolsDigest(role),
         continues,
+        ...(review ? { review } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),

@@ -30,7 +30,16 @@ export const RUNNER_ELIGIBLE_ROLES = [
 ] as const;
 export const RunnerRole = z.enum(RUNNER_ELIGIBLE_ROLES);
 
-export const JOB_MODES = ["local", "verified"] as const;
+/**
+ * D#6 R4d-4 (C33): the roles whose job carries `review: { head_sha }`, the commit the runner checks out for the review. These four
+ * are the runner-eligible roles whose verdict gates a merge. The cloud's job issuer and the runner both read this list, so there
+ * is no second copy of it.
+ */
+export const REVIEW_JOB_ROLES = ["code-reviewer", "security-reviewer", "acceptance-tester", "debater"] as const;
+export type ReviewJobRole = (typeof REVIEW_JOB_ROLES)[number];
+export const isReviewJobRole = (role: string): role is ReviewJobRole => (REVIEW_JOB_ROLES as readonly string[]).includes(role);
+
+export const JOB_MODES =["local", "verified"] as const;
 
 /** What the run is for. Closed. The runner picks its tools from the role, never from this. */
 export const TASK_KINDS = ["implement", "fix", "review", "advise"] as const;
@@ -77,6 +86,9 @@ export const JobSchema = z
     // SHA-256 of the canonical JSON of the role's tool allow list. A runner refuses a job whose value differs from its own table's entry for the role.
     role_tools_sha256: sha256Hex,
     continues: z.object({ parent_run_id: uuid, session_id: z.string().regex(SESSION_ID_PATTERN), branch: branchName }).strict().nullable(),
+    // D#6 R4d-4 (C33): present exactly on a review-role job (REVIEW_JOB_ROLES), omitted (never null) on every other job so their canonical JSON
+    // and signature are unchanged. The signature covers it. 40 or 64 lowercase hex, the commit under review.
+    review: z.object({ head_sha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) }).strict().optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, RUNNER_SETUP_DETAILS, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, RUNNER_SETUP_DETAILS, jobRefusedText, runnerSetupText, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
@@ -389,6 +389,9 @@ describe("runner claim, heartbeat and events [pg]", () => {
       const TABLE: Array<[reason: string, detail: string | undefined, status: string, failureReason: string]> = [
         ["job_refused", "job_signature_invalid", "failed", "job_refused"],
         ["job_refused", "duplicate_job", "failed", "job_refused"],
+        // D#6 R4d-4a (C33 section 1.1): a review job the runner refused. (`review_sha_not_in_mirror` is a setup detail, in the slice below.)
+        ["job_refused", "review_sha_missing", "failed", "job_refused"],
+        ["job_refused", "review_wrong_role", "failed", "job_refused"],
         ["repo_not_private", undefined, "failed", "public_repo"],
         ["agent_failed", undefined, "failed", "agent_failed"],
         ["wall_clock", undefined, "timed_out", "wall_clock_limit"],
@@ -412,6 +415,23 @@ describe("runner claim, heartbeat and events [pg]", () => {
           expect((await events(id, "runner.event"))[0]!.payload).toMatchObject({ type: "run_ended", reason, ...(detail === undefined ? {} : { detail }) });
         });
       }
+
+      it("G9: the stored review details are the ones the Needs-human notice has a line for", async () => {
+        for (const [reason, detail, line] of [
+          ["runner_setup", "review_sha_not_in_mirror", runnerSetupText("review_sha_not_in_mirror")],
+          ["job_refused", "review_sha_missing", jobRefusedText("review_sha_missing")],
+          ["job_refused", "review_wrong_role", jobRefusedText("review_wrong_role")],
+        ] as const) {
+          const id = await pending();
+          const g = await claimed(id);
+          expect(await send(id, g, [ended(0, reason, detail)])).toMatchObject({ outcome: "accepted", stored: 1 });
+          const stored = (await events(id, "runner.event"))[0]!.payload as { reason: string; detail: string };
+          expect(stored).toMatchObject({ type: "run_ended", reason, detail });
+          const shown = reason === "runner_setup" ? runnerSetupText(stored.detail) : jobRefusedText(stored.detail);
+          expect(shown).toBe(line);
+          expect(shown).not.toContain(detail);
+        }
+      });
 
       it("is fenced like every other event: a stale generation or a finished run stores nothing and changes nothing", async () => {
         const id = await pending();

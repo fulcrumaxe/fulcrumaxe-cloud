@@ -121,6 +121,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "runner_notice_backlog",
   // Runner prompt variant (D#6 R4d-1): a run was started for a repository whose execution mode changed since the prompt was built.
   "execution_mode_changed",
+  // Runner review workspace (D#6 R4d-4a): the job issuer refused a review job with no valid stored head, or whose prompt names another commit.
+  "review_without_head",
+  "review_sha_prompt_mismatch",
   // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
   "continuation_branch_missing",
   "push_rejected",
