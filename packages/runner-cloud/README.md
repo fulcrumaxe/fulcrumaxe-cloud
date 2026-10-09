@@ -117,6 +117,22 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   and a decision receipt. The two roles that own these definers, `runner_consent_definer` and `runner_auto_approve_definer`, hold
   column grants only; `platform_ops` gains nothing.
 
+## Sandbox allowances (R7a)
+
+- A repo's job can carry extra sandbox allowances: read or write paths, plain hosts and the loopback bind a test database needs. They are
+  per repo, signed into the job as `sandbox_allowances` (present only when the approved set has entries, so every other job's canonical JSON
+  and signature are unchanged), and floor-checked by the runner. The floor is one constant in `runner-protocol`; the route, the job issuer and
+  the runner all use it.
+- The cloud never reads the file from the repository. An owner or admin uploads the reviewed `.fulcrumaxe/runner-sandbox.json` in repo
+  settings and `PUT /api/runners/repos/:id/sandbox-allowances` takes `{ set, confirm_repo? }`. A set with entries needs the repository's full
+  name typed back (400 `confirmation_mismatch`) and a repo on a runner (409); an empty set is the safe direction and needs neither. A set
+  that crosses the floor is 400 `sandbox_allowance_refused`, naming the closed reason and the entry. `GET` shows any member the approved
+  set, its hash, whether it is in use and whether the caller may change it.
+- `repo_runner_sandbox_allowances` is append-only (0770): one row per approval, newest wins, each with the set's sha256 and one audit row.
+  Leaving `runner_local` sets the approved set aside in the same transaction (kept on record, ignored), so a repo that comes back is approved
+  again first. Ruling: Chromium's `--no-sandbox` for test browsers is not an allowance kind in R7a or R7b; the self-build run (R7e) records it as a
+  test-runner setting, and adding a kind later is a reviewed protocol change. `runner_allowance_definer` owns the one writer; `platform_ops` gains nothing.
+
 ## Execution mode, auto-merge and the waiting notices (R2b)
 
 - `POST /api/runners/repos/:id/execution-mode` (owner or admin; a member gets 403) takes one of three strict bodies. A mode

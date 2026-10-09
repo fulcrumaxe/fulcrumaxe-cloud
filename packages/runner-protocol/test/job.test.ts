@@ -8,7 +8,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -161,5 +161,36 @@ describe("job.review (D#6 R4d-4a, C33)", () => {
   it("a job without the key still parses, and the parsed job has no review key", () => {
     const parsed = JobSchema.parse(sampleJob());
     expect("review" in parsed).toBe(false);
+  });
+});
+
+describe("job.sandbox_allowances (D#6 R7a, C35)", () => {
+  const entry = { kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "pnpm install --frozen-lockfile fetches the locked packages" };
+  const withAllowances = (over: Record<string, unknown> = {}) => sampleJob({ sandbox_allowances: { entries: [entry], command_timeout_s: 900, ...over } });
+
+  it("accepts a set with entries and a timeout, and the parsed job carries it", () => {
+    expect(JobSchema.parse(withAllowances()).sandbox_allowances).toEqual({ entries: [entry], command_timeout_s: 900 });
+  });
+
+  it("is omitted, never null or empty, on a job without allowances", () => {
+    expect("sandbox_allowances" in JobSchema.parse(sampleJob())).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ sandbox_allowances: null })).success).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ entries: [] })).success).toBe(false);
+  });
+
+  it("refuses a missing, zero, fractional or over-long timeout, an extra key, an unknown kind or access, and more than 64 entries", () => {
+    expect(JobSchema.safeParse(sampleJob({ sandbox_allowances: { entries: [entry] } })).success).toBe(false);
+    for (const bad of [0, -1, 1.5, 1801, "900", null]) expect(JobSchema.safeParse(withAllowances({ command_timeout_s: bad })).success, String(bad)).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ command_timeout_s: 1800 })).success).toBe(true);
+    expect(JobSchema.safeParse(withAllowances({ extra: 1 })).success).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, extra: 1 }] })).success).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, kind: "socket" }] })).success).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, access: "execute" }] })).success).toBe(false);
+    expect(JobSchema.safeParse(withAllowances({ entries: Array.from({ length: 65 }, (_, i) => ({ ...entry, value: `h${i}.example.com` })) })).success).toBe(false);
+  });
+
+  it("refuses a reason with a control character or a line break, and an empty or over-long value", () => {
+    for (const reason of ["two\nlines", "bell\u0007", ""]) expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, reason }] })).success, JSON.stringify(reason)).toBe(false);
+    for (const value of ["", "has space.example.com", "x".repeat(513)]) expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, value }] })).success, value.slice(0, 20)).toBe(false);
   });
 });

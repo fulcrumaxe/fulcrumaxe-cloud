@@ -15,6 +15,7 @@ import { executionModeHandler } from "../app/api/runners/repos/[id]/execution-mo
 import { listApprovalsHandler } from "../app/api/runners/approvals/handler";
 import { planConsentHandler } from "../app/api/runners/[id]/plan-consent/handler";
 import { getPlanApprovalDialHandler, putPlanApprovalDialHandler } from "../app/api/runners/repos/[id]/plan-approval-dial/handler";
+import { getSandboxAllowancesHandler, putSandboxAllowancesHandler } from "../app/api/runners/repos/[id]/sandbox-allowances/handler";
 import { makeRegisterHandler } from "../app/api/runner/register/handler";
 import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
 import type { RateLimitStore } from "@fx/api/src/ratelimit/store.js";
@@ -148,6 +149,9 @@ describe("a runner-signed request is not a session (every route outside api/runn
       () => planConsentHandler(signedNext(`${ORIGIN}/api/runners/x/plan-consent`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => getPlanApprovalDialHandler(signedNext(`${ORIGIN}/api/runners/repos/x/plan-approval-dial`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => putPlanApprovalDialHandler(signedNext(`${ORIGIN}/api/runners/repos/x/plan-approval-dial`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      // D#6 R7a: the sandbox allowances of a repo.
+      () => getSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      () => putSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
     ];
     for (const call of calls) expect((await call()).status).toBe(401);
   });

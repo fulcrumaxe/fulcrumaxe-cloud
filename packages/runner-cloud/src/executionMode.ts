@@ -4,6 +4,7 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordRunStatusMove, type FailureReason } from "@fx/runner";
+import { setAsideSandboxAllowances } from "./sandboxAllowances.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,7 +90,8 @@ const CANCEL_REASON: FailureReason = "execution_mode_changed";
  *    the repo's own full name must be typed back and matches exactly (400 `confirmation_mismatch`, nothing written).
  *    `runner_verified` is refused until it exists. A public repo, or one whose visibility cannot be read, is never put
  *    on a runner (409). Leaving `runner_local` turns the auto-merge opt-in off in the same transaction (the opt-in's
- *    foreign key requires it), so a repo that comes back starts with it off. It also cancels every pending runner run of the
+ *    foreign key requires it), so a repo that comes back starts with it off. It sets the repo's approved sandbox allowances aside too (R7a),
+ *    for the same reason. It also cancels every pending runner run of the
  *    repo in the same transaction (correction C24 section 2; `repo_cancel_pending_runner_runs`, 0759): queued runs, jobless ones
  *    and follow-ups waiting on `claimable_after`, with the failure reason `execution_mode_changed`. Running runs are left
  *    alone, and coming back to `runner_local` restores nothing. The reply's `cancelled_runs` is how many were cancelled (0 when
@@ -168,6 +170,8 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         // a run's status) and answers their ids; the events are written here, by the code every status change uses, in this transaction.
         let cancelled = 0;
         if (repo.execution_mode === "runner_local") {
+          // D#6 R7a (C15 section 4): the repo's approved sandbox allowances are set aside, so a repo that comes back is approved again first.
+          await setAsideSandboxAllowances(client, repoId);
           const { rows: moved } = await client.query<{ run_id: string }>("SELECT run_id FROM repo_cancel_pending_runner_runs($1)", [repoId]);
           for (const run of moved) {
             await recordRunStatusMove(client, { accountId: principal.accountId, runId: run.run_id, from: "pending", to: "cancelled", failureReason: CANCEL_REASON });
