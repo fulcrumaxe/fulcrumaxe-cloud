@@ -2,7 +2,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { createInstallationHttp, InstallationTokenCache, type AccessTokenRequester } from "@fx/github";
 import { generateKeyPairSync } from "node:crypto";
-import { createRunPullRequestPort, type GithubRequest, type RunPullRequestPort } from "@fx/runner-cloud";
+import { LocalOnlyGithubError, createRunPullRequestPort, localOnlyGithub, type GithubRequest, type RunPullRequestPort } from "@fx/runner-cloud";
+import type { LocalGitHubHttp } from "../../../../pipeline/src/build/githubMergePort.js";
 import { checkGithubRequest } from "../../../../github/test/helpers/strictGithub.js";
 import type { FakeGithub } from "../../../../runner-cloud/test/helpers/githubFake.js";
 
@@ -111,4 +112,31 @@ export function createHarnessPullRequestPort(input: { github: GithubServer; appL
       };
     },
   });
+}
+
+/**
+ * The review driver's GitHub client for a `runner_local` repo, as apps/web builds it (apps/web/lib/github/localOnlyHttp.ts, `fenceInstallationHttp`, which this package
+ * cannot import and which is copied here): the REAL installation client of the `read` kind (graphql allowed) behind the REAL `localOnlyGithub` fence, so a call off
+ * the allowlist is refused before any request is made. It reaches the same strict fake server as the done route's client.
+ */
+export function createHarnessReadHttp(input: { github: GithubServer; repo: { id: string; owner: string; name: string } }): () => Promise<LocalGitHubHttp> {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+  const requester: AccessTokenRequester = async () => ({ token: "ghs_harness_read_token", expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+  const open = createInstallationHttp({
+    resolveInstallation: async () => ({ installationId: 9, appKind: "team" }),
+    appCredentials: () => ({ appId: "app-1", privateKeyPem: privateKey as unknown as string, webhookSecret: "unused" }),
+    requester,
+    cache: new InstallationTokenCache(),
+    fetchImpl: rewritingFetch(input.github.origin),
+  });
+  return async () => {
+    const http = await open("read", { repoId: input.repo.id, owner: input.repo.owner, name: input.repo.name, allowGraphql: true });
+    const fenced = localOnlyGithub({
+      async request(req) {
+        if (req.method !== "GET" && req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH") throw new LocalOnlyGithubError("not_allowlisted");
+        return http.request({ method: req.method, path: req.path, query: req.query, body: req.body });
+      },
+    });
+    return { request: (req) => fenced.request(req), graphql: (op, variables) => fenced.graphql(op, variables) };
+  };
 }

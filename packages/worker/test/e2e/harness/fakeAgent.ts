@@ -27,6 +27,11 @@ export interface FakeAgent {
   pmPhase(output: unknown): void;
   /** An executor run: asserts the prompt does not tell the agent to push, writes `files` in its workspace and commits them. */
   executorPhase(files: Record<string, string>, opts?: { summary?: string }): void;
+  /**
+   * A review run (D#6 R4d-6r): asserts, in its workspace, that `git rev-parse HEAD` is `headSha`, that HEAD is detached (`git symbolic-ref -q HEAD` fails) and that no
+   * branch of the run exists, that the prompt is the runner variant (no `git fetch`, no `git push`), and that it changes nothing; then answers with `verdict`.
+   */
+  reviewPhase(headSha: string, opts?: { verdict?: "pass" | "needs-fix" | "fail"; summary?: string }): void;
   /** How many times a real run (not a version or help call) was started, and with which phase. */
   runs(): string[];
   /** The prompt of the last real run. */
@@ -108,6 +113,29 @@ export function createFakeAgent(): FakeAgent {
         "",
       ];
       set("act.sh", lines.join("\n"));
+    },
+    reviewPhase(headSha, opts = {}) {
+      set("phase", "reviewer\n");
+      const summary = opts.summary ?? `I reviewed commit ${headSha}.`;
+      set("stream.jsonl", streamWith(envelope(summary, { verdict: opts.verdict ?? "pass", summary, findings: [] })));
+      const fail = (why: string): string => `{ echo ${shellQuote(`the reviewer's workspace: ${why}`)} >&2; exit 3; }`;
+      set(
+        "act.sh",
+        [
+          `[ "$(git rev-parse HEAD)" = ${shellQuote(headSha)} ] || ${fail("HEAD is not the pull request's head")}`,
+          // Detached: HEAD names no branch.
+          `if git symbolic-ref -q HEAD >/dev/null; then ${fail("HEAD is on a branch")}; fi`,
+          // The runner makes no branch for a review: a clone leaves its default branch behind, and nothing named for the run or its lease (fx/...) may exist.
+          `if [ -n "$(git for-each-ref --format='%(refname)' 'refs/heads/fx/')" ]; then ${fail("a branch of the run exists")}; fi`,
+          `[ "$(git for-each-ref --format='%(refname)' refs/heads/ | grep -v '^refs/heads/main$' | wc -l)" = 0 ] || ${fail("a branch other than the default exists")}`,
+          // The runner variant of the prompt: the commit is already checked out and the agent has no network to fetch with.
+          `grep -q 'detached HEAD' "${dir}/stdin.txt" || ${fail("the prompt is not the runner review prompt")}`,
+          `if grep -q 'git fetch' "${dir}/stdin.txt"; then ${fail("the prompt tells the agent to fetch")}; fi`,
+          `grep -q ${shellQuote(headSha)} "${dir}/stdin.txt" || ${fail("the prompt does not name the head")}`,
+          `[ -z "$(git status --porcelain)" ] || ${fail("the workspace is not clean")}`,
+          "",
+        ].join("\n"),
+      );
     },
     runs: () => (existsSync(path.join(dir, "runs.txt")) ? readFileSync(path.join(dir, "runs.txt"), "utf8").split("\n").filter((line) => line !== "") : []),
     lastPrompt: () => readFileSync(path.join(dir, "stdin.txt"), "utf8"),

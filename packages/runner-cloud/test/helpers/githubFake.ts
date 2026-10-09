@@ -87,6 +87,11 @@ export class FakeGithub implements GithubClient {
   before: ((req: GithubRequest) => void) | null = null;
   /** Answers once instead of the real answer, for the call whose label matches (`A1 RunBranchState`, `A4`, ...). */
   inject: { label: RegExp; reply: GithubResponse | Error } | null = null;
+  /**
+   * When true, `markPullRequestReadyForReview` is refused the way GitHub refuses it to the runner's pull-request token: HTTP 200, `data` null and one FORBIDDEN error
+   * (D#6 C37). Off here (a token that may mark ready); the end-to-end harness turns it on because that is the token the product really uses on this path.
+   */
+  markReadyForbidden = false;
 
   addRepo(owner: string, name: string, over: Partial<Pick<FakeRepo, "defaultBranch" | "supportsDrafts" | "id">> = {}): FakeRepo {
     const repo: FakeRepo = { id: over.id ?? 1234567, owner, name, defaultBranch: over.defaultBranch ?? "main", supportsDrafts: over.supportsDrafts ?? true, branches: new Map(), pulls: [] };
@@ -183,7 +188,7 @@ export class FakeGithub implements GithubClient {
   }
 
   private pullJson(repo: FakeRepo, pr: FakePullRequest) {
-    return { number: pr.number, node_id: pr.nodeId, state: pr.state, draft: pr.draft, title: pr.title, user: { login: pr.author.login, type: pr.author.type, id: 4242 }, head: { ref: pr.head, repo: { full_name: `${repo.owner}/${repo.name}` } }, base: { ref: pr.base } };
+    return { number: pr.number, node_id: pr.nodeId, state: pr.state, draft: pr.draft, title: pr.title, user: { login: pr.author.login, type: pr.author.type, id: 4242 }, head: { ref: pr.head, sha: repo.branches.get(pr.head)?.oid ?? null, repo: { full_name: `${repo.owner}/${repo.name}` } }, base: { ref: pr.base } };
   }
 
   private listPulls(owner: string, name: string, query: Record<string, string | number>): GithubResponse {
@@ -273,6 +278,7 @@ export class FakeGithub implements GithubClient {
   }
 
   private gqlMarkReady(v: Record<string, unknown>): GithubResponse {
+    if (this.markReadyForbidden) return ok({ data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], locations: [{ line: 2, column: 3 }], message: "Resource not accessible by integration" }] });
     for (const repo of this.repos.values()) {
       const pr = repo.pulls.find((p) => p.nodeId === v.id);
       if (!pr) continue;
