@@ -460,17 +460,38 @@ describe("done route [pg]", () => {
       expect(labels(s.fake)).not.toContain("A4");
     });
 
-    it("a permanent refusal at another step has no reason of its own in the Spec: internal_error, and a pull request that was opened is never marked ready", async () => {
+    it("a permanent refusal at the read step has no reason of its own in the Spec: internal_error and no pull request", async () => {
       const read = await scene();
       read.fake.inject = { label: /^A2$/, reply: { status: 404, body: { message: "Not Found" } } };
       expect(parsedDone(await read.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: null });
+    });
 
-      // After the pull request exists, a permanent refusal closes it (C25 section 4 b): its paths were never checked, or it could not be made ready.
+    // GitHub's real answer when the runner's pull request token (pull_requests:write, no contents:write) calls markPullRequestReadyForReview:
+    // HTTP 200, data null, one FORBIDDEN error. The scope check has already passed, so the pull request stays open as a draft (C37).
+    const FORBIDDEN_READY: { status: number; body: unknown } = {
+      status: 200,
+      body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "FORBIDDEN", path: ["markPullRequestReadyForReview"], locations: [{ line: 2, column: 3 }], message: "Resource not accessible by integration" }] },
+    };
+
+    it("a FORBIDDEN refusal to mark ready (after the scope check passed) succeeds the run, leaves the pull request open as a draft, closes nothing and logs one line", async () => {
       const ready = await scene();
-      ready.fake.inject = { label: /^A1 MarkReady$/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "UNPROCESSABLE", message: "nope" }] } } };
-      expect(parsedDone(await ready.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
-      expect(ready.repo.pulls[0]).toMatchObject({ draft: true, state: "closed" });
-      expect(labels(ready.fake)).toContain("A5");
+      const lines: string[] = [];
+      ready.fake.inject = { label: /^A1 MarkReady$/, reply: FORBIDDEN_READY };
+      expect(parsedDone(await ready.call({ deps: { log: (l) => void lines.push(l) } }))).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      expect(ready.repo.pulls[0]).toMatchObject({ draft: true, state: "open" });
+      expect(labels(ready.fake)).not.toContain("A5");
+      // The branch the run was judged on is still recorded with the pull request number.
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: ready.branch });
+      expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.done.pr_failure", run_id: ready.runId, stage: "ready", op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] }]);
+    });
+
+    it("a refusal at the files step still closes the pull request, while a scope violation is still judged before any mark-ready", async () => {
+      const files = await scene();
+      files.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
+      expect(parsedDone(await files.call())).toMatchObject({ outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
+      expect(files.repo.pulls[0]).toMatchObject({ draft: true, state: "closed" });
+      expect(labels(files.fake)).toContain("A5");
+      expect(labels(files.fake)).not.toContain("A1 MarkReady");
     });
 
     it("a permanent refusal reading the changed files closes the draft and ends internal_error with its number", async () => {

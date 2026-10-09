@@ -42,7 +42,9 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  *     scope_unknown` (C23 section 3); any path outside the scope -> close it, `failed scope_violation`; otherwise mark it ready (skipped
  *     for a pull request that is already ready, such as a ready-PR fallback) and the run is `succeeded` with the pull request number.
  *     The branch is always kept. GitHub refusing to open the pull request for good is `failed pr_rejected` (C23 section 4); GitHub refusing for good
- *     after the pull request exists (reading its files, or marking it ready) closes it, draft or ready, and ends `failed internal_error` (C25 section 4).
+ *     while its files are read closes it, draft or ready, and ends `failed internal_error` (C25 section 4). GitHub refusing for good to mark it
+ *     ready (the runner's pull request token cannot make that call) comes AFTER the scope check passed, so the pull request is left open as a
+ *     draft, the run is `succeeded` with its number, and the failure is only logged (C37). Someone with write access marks it ready.
  *     A verdict that names a pull request also records the branch the run was judged on (C25 section 1.2), so a later fix round finds it.
  *  4. GitHub unreachable (transport, 5xx, 429, rate limit, timeout) is 503 `{retry_after}` and NOTHING is written; the runner keeps
  *     heartbeating and sends `done` again.
@@ -274,9 +276,13 @@ async function judgeCommit(
     if (error.retryable) return { kind: "retry" };
     logPullRequestFailure(write, { runId: i.runId, stage, error });
     // GitHub refused to open the pull request for good (or our App did not open the one on the branch): `pr_rejected`. A permanent failure at
-    // any other step has no reason of its own in the Spec, so it is `internal_error`. If the pull request exists by then (its files could not be
-    // read, or it could not be marked ready) its paths were never checked, so it is closed, a draft or a ready fallback alike (C25 section 4 b).
+    // any other step has no reason of its own in the Spec, so it is `internal_error`. If the pull request exists by then because its files could
+    // not be read, its paths were never checked, so it is closed, a draft or a ready fallback alike (C25 section 4 b).
     if (stage === "create") return failed("pr_rejected", error.status === undefined ? {} : { prHttpStatus: error.status });
+    // C37: a permanent refusal to mark ready happens after the scope check passed, so the pull request is already known to be in scope. The
+    // runner's token may not make that mutation, and closing a checked pull request for it would throw away good work. It stays open as a
+    // draft (nothing is closed), the run succeeded, and the log line above is the only trace.
+    if (stage === "ready" && pr) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number });
     if (pr && (await close()) === "retry") return { kind: "retry" };
     return failed("internal_error", { prNumber: pr?.number ?? null });
   }
