@@ -17,6 +17,7 @@
     "tsx": "^4.19.2"
   },
   "devDependencies": {
+    "@fx/github": "workspace:*",
     "@playwright/test": "1.63.0",
     "@types/node": "^24.19.0",
     "live-e2e": "workspace:*",

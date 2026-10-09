@@ -77,6 +77,9 @@ importers:
         specifier: ^4.19.2
         version: 4.23.15
     devDependencies:
+      '@fx/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@playwright/test':
         specifier: 1.63.0
         version: 1.63.0
