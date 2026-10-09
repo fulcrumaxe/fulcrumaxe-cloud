@@ -14,7 +14,7 @@ import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import { sweepSnapshots } from "./snapshot.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
-export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role">;
+export type GitJob = Pick<Job, "repo" | "continues" | "branch_prefix" | "role" | "review">;
 
 /** The only roles whose commits are pushed (C25 section 3.2). Any other role's commit stays in its workspace, which is discarded. */
 export const PUSHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
@@ -66,7 +66,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     async prepare(job, lease, workspace) {
       // Setup: a git older than the May 2024 security releases is refused before any mirror or workspace is made.
       await assertGitVersion(git);
-      return mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues);
+      return mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
     publish: async (job, lease, workspace, base, stopped) =>

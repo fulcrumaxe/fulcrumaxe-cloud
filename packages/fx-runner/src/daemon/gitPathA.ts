@@ -146,7 +146,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
     async prepare(job, lease, workspace) {
       const session = await open(job, lease);
       await assertGitVersion(session.git);
-      return session.mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues);
+      return session.mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
     },
     readGrants: (job) => [forObjects.objects(job.repo)],
     async publish(job, lease, workspace, base, stopped) {

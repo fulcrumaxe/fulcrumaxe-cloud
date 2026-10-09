@@ -1,4 +1,4 @@
-import type { Job } from "@fulcrumaxe/runner-protocol";
+import { isReviewJobRole, type Job } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "./roleTools.js";
 
 /**
@@ -21,6 +21,13 @@ export const PUBLISH_BACKSTOP =
   "This run is on the person's own machine. Stay on the checked-out branch and commit; the runner publishes your commit. Never push, never change a remote.";
 /** The roles whose run ends in a published commit (the same two roles the cloud's `done` judges). */
 const PUBLISHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
+
+/**
+ * D#6 R4d-4 (C33 section 2.3): the same, for the four review roles. The runner has checked out the commit under review, so a cloud
+ * prompt that still tells the reviewer to fetch or check out a commit is corrected here. Fixed text; nothing from a job is in it.
+ */
+export const REVIEW_BACKSTOP =
+  "This review runs on the person's own machine. The runner has checked out the exact commit to review. Do not fetch, check out, reset, push or change a remote.";
 
 const CLOSING = "</untrusted>";
 /** The closing tag as it reads after normalising: space allowed anywhere inside it, any letter case. */
@@ -90,6 +97,7 @@ export function buildPrompt(job: PromptJob): string {
     "",
     "Complete the task described in the untrusted block below. Return an AGENT_OUTPUT JSON envelope at the end of your final message.",
     ...(PUBLISHING_ROLES.has(job.role) ? ["", PUBLISH_BACKSTOP] : []),
+    ...(isReviewJobRole(job.role) ? ["", REVIEW_BACKSTOP] : []),
     "",
     "<untrusted>",
     escapeUntrustedClose(job.task.prompt),

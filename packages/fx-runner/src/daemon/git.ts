@@ -13,6 +13,8 @@ import { gitEnv, type CleanEnvOptions } from "../job/cleanEnv.js";
 export type GitPathCode = "mirror_failed" | "mirror_dir_insecure" | "workspace_failed" | "push_failed" | "push_ref_refused" | "continuation_branch_missing" | "push_rejected" | "snapshot_refused" | "git_version_unsupported"
   // D#6 R4d-2 (C32 sections 2 and 3): the workspace's git folder is not a shape the sandbox is known to leave; HEAD does not grow from the run's base; the commit adds an empty placeholder the sandbox made.
   | "workspace_git_refused" | "head_not_from_base" | "sandbox_stub_committed"
+  // D#6 R4d-4 (C33 section 1.3): the commit a review job names is not on any branch of the mirror.
+  | "review_sha_not_in_mirror"
   // D#6 R5a-3 (C27 section 4): path A. `git_stopped` and `git_revoked` are the relay's 409 and 401 (the run ends quietly, as for a lease stop);
   // the rest are the closed setup details of `run_ended`.
   | "git_stopped" | "git_revoked" | "git_proxy_unpinned" | "git_ticket_refused" | "path_a_no_mirror" | "clone_limited" | "push_too_large" | "push_incomplete";
