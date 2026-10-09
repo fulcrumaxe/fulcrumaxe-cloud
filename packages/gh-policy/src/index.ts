@@ -3,6 +3,10 @@ export { decide, ALLOWED_METHODS } from "./decide.js";
 export { isMergeOrProtectionPath } from "./mergeProtection.js";
 export { parseTarget } from "./pathTarget.js";
 export { parseReceivePackRefUpdates } from "./parseReceivePack.js";
+export { isFullCloneRequest, parseUploadPackRequest } from "./parseUploadPack.js";
+export type { ParsedUploadPackRequest } from "./parseUploadPack.js";
+export { decideRunner, RUNNER_PUSHING_ROLES, RUNNER_TICKET_REF_RE } from "./runnerPolicy.js";
+export type { RunnerRequest } from "./runnerPolicy.js";
 export { isValidRefName } from "./refName.js";
 export {
   ALLOWLISTED_VERDICT_LABELS,

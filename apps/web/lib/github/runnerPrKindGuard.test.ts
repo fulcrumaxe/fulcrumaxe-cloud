@@ -13,6 +13,9 @@ const SOURCE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const TEST_FILE = /\.(?:test|spec)\.[a-z]+$/;
 const ALLOWED = ["apps/web/lib/github/runnerPullRequest.ts", "packages/github/src/installationHttp.ts"];
 
+/** The kind as a whole token: `"runner_pr"`, `'runner_pr'` or a bare word. A longer identifier such as `runner_product_denied` does not count. */
+const KIND = /\brunner_pr\b/;
+
 function sources(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -27,10 +30,17 @@ function sources(dir: string, out: string[] = []): string[] {
 describe("the runner_pr installation-client kind", () => {
   it("is named in non-test source only by its definition and by the pull request port's wiring", () => {
     const named = [...sources(path.join(ROOT, "apps")), ...sources(path.join(ROOT, "packages"))]
-      .filter((file) => readFileSync(file, "utf8").includes("runner_pr"))
+      .filter((file) => KIND.test(readFileSync(file, "utf8")))
       .map((file) => path.relative(ROOT, file).split(path.sep).join("/"))
       .sort();
     expect(named).toEqual([...ALLOWED].sort());
+  });
+
+  it("counts the kind as a whole token only: a longer identifier starting with runner_pr is not a use", () => {
+    expect(KIND.test('open("runner_pr", x)')).toBe(true);
+    expect(KIND.test("kind: 'runner_pr'")).toBe(true);
+    expect(KIND.test('deny("runner_product_denied")')).toBe(false);
+    expect(KIND.test("runner_pr_extra")).toBe(false);
   });
 
   it("opens the kind with a literal in the port's wiring, so the check above sees a caller", () => {
