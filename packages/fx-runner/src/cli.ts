@@ -17,6 +17,8 @@ import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
 import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
+import { configCommand, updateCommand } from "./commands/update.js";
+import type { UpdateHost } from "./update/updater.js";
 
 export interface CliIo {
   /** The arguments after the program name. */
@@ -42,6 +44,8 @@ export interface CliIo {
   doctorHost?: DoctorHost;
   /** What `service` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
   serviceHost?: ServiceHost;
+  /** What `update`, `config` and the daemon's self-update need from the machine. Only `bin/fx-runner.mjs` supplies it. */
+  updateHost?: UpdateHost;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
@@ -61,6 +65,10 @@ Commands:
   logs <run id>      Print the local transcript of a run on this machine.
   service install | uninstall
                      Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
+  update --check | --pin <version> | --unpin | --rollback
+                     --check shows the current and the available version. --pin holds a version (installing it now, older ones included). --rollback returns to the kept previous version.
+  config set auto-update on|off
+                     Turn automatic updates, which happen between jobs only, on or off.
 `;
 
 /** Which flags each command takes, and which of them are switches. */
@@ -76,6 +84,8 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: [], switches: [], positionals: 1 },
+  update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
+  config: { flags: [], switches: [], positionals: 3 },
 };
 
 function parseFlags(command: string, rest: readonly string[]): { flags: Flags; positionals: string[] } {
@@ -137,7 +147,7 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "revoke") return await revokeCommand(flags, ctx);
     if (command === "run") {
       if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");
-      return await runCommand(ctx, io.host);
+      return await runCommand(ctx, io.host, {}, io.updateHost);
     }
     if (command === "attach" || command === "__takeover" || command === "__watch") {
       if (io.host === undefined) throw new CliError(`${command} is only available from the fx-runner program`);
@@ -149,6 +159,10 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
+    }
+    if (command === "update" || command === "config") {
+      if (io.updateHost === undefined) throw new CliError(`${command} is only available from the fx-runner program`);
+      return command === "update" ? await updateCommand(flags, ctx, io.updateHost) : configCommand(positionals, ctx, io.updateHost);
     }
     if (command === "logs") return logsCommand(positionals[0], ctx);
     if (command === "service") {

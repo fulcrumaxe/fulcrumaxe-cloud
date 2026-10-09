@@ -31,6 +31,8 @@ import { createJobHandler } from "../daemon/jobHandler.js";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
+import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
+import { createUpdater, type UpdateHooks } from "./update.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
@@ -89,6 +91,8 @@ export interface RunHooks {
   /** The search path for the agent CLI, bubblewrap and socat. Default: the PATH of the clean environment. */
   searchPath?: string;
   remoteUrl?: (repo: RepoRef) => string;
+  /** The release client for self-update (default: the build's). */
+  updateTuf?: UpdateHooks["tuf"];
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -143,7 +147,10 @@ function describePoll(event: PollEvent): string | undefined {
   return event.event === "claimed" || event.event === "discarded" ? `${event.event} ${event.runId}` : event.event;
 }
 
-export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunHooks = {}): Promise<number> {
+/** The exit code that asks a service manager to start the program again, on the version the stable link now names (`EX_TEMPFAIL`). */
+export const EXIT_RESTART_FOR_UPDATE = 75;
+
+export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunHooks = {}, updateHost?: UpdateHost): Promise<number> {
   const registration = loadRegistration(ctx.stateDir);
   if (!registration) throw new CliError("not registered; run: fx-runner register --code <code> --credential-mode <mode> --cloud-url <url>");
   const key = loadRunnerKey(ctx.stateDir);
@@ -242,8 +249,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       },
     });
     let lastReason: string | undefined;
+    // Self-update (D#6 R6-2b): checked at the top of the claim loop, where no job is in hand, and never while one is.
+    let jobInHand = false;
+    const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
+    const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobInHand, now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
     try {
+      // A previous run that stopped between staging and switching left a partial version directory: gone before anything else.
+      await updater?.cleanup().catch(() => undefined);
       ctx.out(`fx-runner: running as runner ${registration.runner_id}; stop with Ctrl-C`);
       const described = describeToolchain(toolchain);
       ctx.out(`fx-runner: toolchain: ${described.line}`);
@@ -256,7 +269,28 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         clock,
         gate,
         signal: stopped.signal,
-        onClaimed: handle,
+        onClaimed: async (claimed) => {
+          jobInHand = true;
+          try {
+            return await handle(claimed);
+          } finally {
+            jobInHand = false;
+          }
+        },
+        ...(autoUpdate === undefined || updateHost === undefined
+          ? {}
+          : {
+              betweenJobs: async () => {
+                const outcome = await autoUpdate.tick();
+                if (outcome.kind !== "applied") return undefined;
+                if (updateHost.inService) {
+                  ctx.out(`fx-runner: updated to ${outcome.version}; restarting on it`);
+                  return "restart" as const;
+                }
+                ctx.out(`Updated to ${outcome.version}. Restart \`fx-runner run\` to use it.`);
+                return undefined;
+              },
+            }),
         log: (event) => {
           // Said when the answer changes, not on every poll.
           const reason = event.event === "sandbox_unavailable" ? event.reason : event.event === "idle" || event.event === "rate_limited" ? undefined : lastReason;
@@ -266,6 +300,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           if (line !== undefined) ctx.out(`fx-runner: ${line}`);
         },
       });
+      if (end === "restart") return EXIT_RESTART_FOR_UPDATE;
       if (end === "unauthorized") throw new CliError("the cloud no longer accepts this runner's key; run: fx-runner revoke --local, then register again");
       return 0;
     } finally {
