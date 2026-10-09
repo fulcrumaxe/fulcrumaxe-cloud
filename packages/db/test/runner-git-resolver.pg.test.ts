@@ -389,9 +389,9 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
       expect(rows[0]).toEqual({ prosecdef: true, provolatile: 'v', proconfig: ['search_path=pg_catalog, public, pg_temp'], owner: ROLE, grantees: [ROLE, 'run_binding_resolver'].sort(), grantable: false });
     });
 
-    it('run_binding_resolver holds EXECUTE on exactly resolve_sandbox_run and resolve_runner_git_request', async () => {
+    it('run_binding_resolver holds EXECUTE on exactly resolve_sandbox_run, resolve_runner_git_request and (0766) runner_git_bytes_account', async () => {
       const { rows } = await admin.query<{ proname: string }>(`SELECT DISTINCT p.proname FROM pg_proc p, aclexplode(p.proacl) a WHERE a.grantee = 'run_binding_resolver'::regrole::oid AND a.privilege_type = 'EXECUTE' ORDER BY 1`);
-      expect(rows.map((r) => r.proname)).toEqual(['resolve_runner_git_request', 'resolve_sandbox_run']);
+      expect(rows.map((r) => r.proname)).toEqual(['resolve_runner_git_request', 'resolve_sandbox_run', 'runner_git_bytes_account']);
     });
 
     it('app_user, agent_run_writer, platform_ops and partner_user cannot execute it, and calling it as app_user or platform_ops is refused', async () => {

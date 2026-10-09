@@ -110,7 +110,7 @@ export interface ProxyDecisionInput {
  * already validated by its caller and passed through unchanged -- see the
  * `ProxyDecisionQuery` doc comment above for why both shapes exist.
  */
-function normalizeQuery(query: ProxyDecisionQuery): Record<string, string> | null {
+export function normalizeQuery(query: ProxyDecisionQuery): Record<string, string> | null {
   if (!Array.isArray(query)) {
     return query as Record<string, string>;
   }
@@ -180,7 +180,7 @@ export const MAX_PROXY_BODY_BYTES = 50_000_000;
 const GIT_ALLOWED_QUERY_KEYS = new Set(["service"]);
 const API_DENIED_QUERY_KEYS = new Set(["repo", "repository", "owner", "merge", "installation", "token", "access_token"]);
 
-function isQueryAllowed(kind: "git" | "api", query: Record<string, string>): boolean {
+export function isQueryAllowed(kind: "git" | "api", query: Record<string, string>): boolean {
   const keys = Object.keys(query);
   if (kind === "git") {
     return keys.every((k) => GIT_ALLOWED_QUERY_KEYS.has(k));

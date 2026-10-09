@@ -22,8 +22,9 @@ export interface CapturedPost {
   inflated: Uint8Array;
 }
 
-function gitEnv(home: string): Record<string, string> {
+function gitEnv(home: string): NodeJS.ProcessEnv {
   return {
+    NODE_ENV: "test",
     PATH: process.env.PATH ?? "",
     HOME: home,
     GIT_CONFIG_GLOBAL: "/dev/null",

@@ -31,7 +31,7 @@ describe("the runner copy (D#6 R2b)", () => {
       pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
       pushTooLarge:
         "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
-      cloneLimited: "This repository has been cloned in full 3 times today through our proxy, the daily limit. The runner keeps a copy so this is rare. It resets at 00:00 UTC.",
+      cloneLimited: "This repository has used today's download allowance through our proxy. The runner keeps a copy, so this is rare. It resets at 00:00 UTC.",
       pullRequestBody:
         "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
       pullRequestTitleFallback: "Changes from your runner",

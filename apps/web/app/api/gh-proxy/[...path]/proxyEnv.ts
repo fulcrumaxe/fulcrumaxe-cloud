@@ -69,3 +69,33 @@ export function loadProxyOidcEnv(env: Readonly<Record<string, string | undefined
     sandboxProjectId: required(env, "FX_GH_PROXY_SANDBOX_PROJECT_ID"),
   };
 }
+
+/**
+ * The runner path's two settings (D#6 R5a-2c). Unlike the OIDC settings above, a problem here must NOT stop the proxy: the sandbox path keeps
+ * working and only the runner path answers 503. So this returns the problem (the setting's NAME, never its value) instead of throwing.
+ * The issuer is the cloud origin the tickets name as `iss`; the key set is a JWKS of at most two Ed25519 public keys.
+ */
+export type RunnerTicketEnv =
+  | { ok: true; jwks: unknown; issuer: string }
+  | { ok: false; problem: "FX_GIT_TICKET_PUBLIC_JWKS" | "FX_GIT_TICKET_ISSUER" };
+
+export function loadRunnerTicketEnv(env: Readonly<Record<string, string | undefined>>): RunnerTicketEnv {
+  const issuer = env.FX_GIT_TICKET_ISSUER;
+  let issuerOk = false;
+  if (issuer) {
+    try {
+      issuerOk = new URL(issuer).origin === issuer;
+    } catch {
+      // fx-swallow-ok: a value that is not a URL is reported below by the setting's name
+    }
+  }
+  if (!issuerOk || issuer === undefined) return { ok: false, problem: "FX_GIT_TICKET_ISSUER" };
+  const raw = env.FX_GIT_TICKET_PUBLIC_JWKS;
+  if (!raw) return { ok: false, problem: "FX_GIT_TICKET_PUBLIC_JWKS" };
+  try {
+    return { ok: true, jwks: JSON.parse(raw) as unknown, issuer };
+  } catch {
+    // fx-swallow-ok: a value that is not JSON is reported by the setting's name
+    return { ok: false, problem: "FX_GIT_TICKET_PUBLIC_JWKS" };
+  }
+}

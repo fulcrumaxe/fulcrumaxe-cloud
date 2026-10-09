@@ -149,16 +149,17 @@ interface CacheEntry {
 export class InstallationTokenCache {
   private readonly entries = new Map<string, CacheEntry>();
 
-  private static keyFor(installationId: number, appKind: string, role: string, scope: TokenScope | WideScope | MergeGateScope): string {
+  private static keyFor(installationId: number, appKind: string, role: string, scope: TokenScope | WideScope | MergeGateScope, namespace: string): string {
     const perms = Object.entries(scope.permissions)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${k}=${v}`)
       .join(",");
-    return `${appKind}:${installationId}:${role}:${isWide(scope) ? "*wide*" : scope.repositories[0]}:${perms}`;
+    // A namespace (the runner git purpose) keeps its tokens apart from a sandbox run's: same role and same permissions, different authority.
+    return `${namespace}${appKind}:${installationId}:${role}:${isWide(scope) ? "*wide*" : scope.repositories[0]}:${perms}`;
   }
 
-  get(installationId: number, appKind: string, role: string, scope: TokenScope | WideScope | MergeGateScope, nowMs: number): string | undefined {
-    const entry = this.entries.get(InstallationTokenCache.keyFor(installationId, appKind, role, scope));
+  get(installationId: number, appKind: string, role: string, scope: TokenScope | WideScope | MergeGateScope, nowMs: number, namespace = ""): string | undefined {
+    const entry = this.entries.get(InstallationTokenCache.keyFor(installationId, appKind, role, scope, namespace));
     if (!entry || entry.expiresAtMs <= nowMs) return undefined;
     return entry.token;
   }
@@ -170,8 +171,9 @@ export class InstallationTokenCache {
     scope: TokenScope | WideScope | MergeGateScope,
     token: string,
     expiresAtMs: number,
+    namespace = "",
   ): void {
-    this.entries.set(InstallationTokenCache.keyFor(installationId, appKind, role, scope), { token, expiresAtMs });
+    this.entries.set(InstallationTokenCache.keyFor(installationId, appKind, role, scope, namespace), { token, expiresAtMs });
   }
 }
 
@@ -186,7 +188,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -212,6 +214,9 @@ export const MERGE_GATE_PERMISSIONS: Readonly<Record<string, "read" | "write">> 
   contents: "write",
   pull_requests: "write",
 });
+
+/** The only permission keys a `runner_git` token may ask for. GitHub itself refuses a push that touches .github/workflows/** for want of `workflows`. */
+const RUNNER_GIT_PERMISSION_KEYS: readonly string[] = ["metadata", "contents"];
 
 /** The only permissions a `preview_read` token ever asks for: reads, never a write. Issues are read because the preview prompt lists open issues. */
 const PREVIEW_READ_PERMISSIONS: TokenScope["permissions"] = { metadata: "read", contents: "read", issues: "read" };
@@ -275,6 +280,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   let scope: TokenScope | WideScope | MergeGateScope = params.scope;
   let appKind: string;
   let allowed: readonly string[] = ALLOWED_TOKEN_PERMISSIONS;
+  let namespace = "";
   if (params.purpose === "merge_gate") {
     // The write App, one repository, a fixed permission set. A wide scope has no business here.
     assertWriteInstallation(params.appKind);
@@ -285,6 +291,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   } else if (params.purpose === "run") {
     assertWriteInstallation(params.appKind);
     appKind = params.appKind;
+  } else if (params.purpose === "runner_git") {
+    // D#6 R5a-2c: a runner's git request, on the write App, for one repository and `metadata` and `contents` only. A scope that names anything
+    // else (workflows, pull_requests) is refused below, and the tokens are cached apart from a sandbox run's.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    allowed = RUNNER_GIT_PERMISSION_KEYS;
+    appKind = params.appKind;
+    namespace = "runner_git:";
   } else if (params.purpose === "plan_read" && (params.appKind === "team_readonly" || params.appKind === "team")) {
     // D#483 S3: a one-repository, fixed, read-only set. An installation-wide token has no business here.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -306,7 +320,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const cached = params.cache.get(params.installationId, appKind, params.role, scope, nowMs);
+  const cached = params.cache.get(params.installationId, appKind, params.role, scope, nowMs, namespace);
   if (cached) return cached;
 
   const credentials = params.appCredentials(appKind);
@@ -343,6 +357,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     scope,
     minted.token,
     expiresAtMs - EXPIRY_SAFETY_MARGIN_MS,
+    namespace,
   );
   return minted.token;
 }

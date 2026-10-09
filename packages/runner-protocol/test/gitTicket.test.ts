@@ -109,7 +109,7 @@ describe("the new runner_setup details and size_mb (C27 section 4.5)", () => {
 
 describe("what the dashboard shows for a runner_setup event", () => {
   it("clone_limited shows the exact string of the ruling", () => {
-    expect(COPY.cloneLimited).toBe("This repository has been cloned in full 3 times today through our proxy, the daily limit. The runner keeps a copy so this is rare. It resets at 00:00 UTC.");
+    expect(COPY.cloneLimited).toBe("This repository has used today's download allowance through our proxy. The runner keeps a copy, so this is rare. It resets at 00:00 UTC.");
     expect(runnerSetupText("clone_limited")).toBe(COPY.cloneLimited);
   });
 
