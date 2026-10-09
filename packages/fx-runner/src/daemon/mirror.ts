@@ -13,7 +13,7 @@ import path from "node:path";
 import { segmentUnder } from "../job/plainSegment.js";
 import { CREDENTIAL_FLOOR, pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { GitPathError, type Git } from "./git.js";
-import { pushPlan, type PushLease } from "./push.js";
+import { continuesBranch, pushPlan, type PushContinues, type PushLease } from "./push.js";
 
 /** The parts of a job's `repo` the git path reads. */
 export interface RepoRef {
@@ -69,8 +69,13 @@ export interface Mirrors {
   objects(repo: RepoRef): string;
   /** Creates the mirror on first use, brings it up to date with the remote otherwise, and returns the default branch's tip. */
   sync(repo: RepoRef): Promise<{ dir: string; base: string }>;
-  /** Makes `workspace` (an empty directory) a clone of the mirror on a new branch for this lease, and returns the commit it starts at. */
-  prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string): Promise<{ base: string }>;
+  /**
+   * Makes `workspace` (an empty directory) a clone of the mirror and returns the commit it starts at. A fresh run is on a new branch
+   * for this lease; a fix round is on the existing `continues.branch` at its tip, and nothing is made if the mirror has no such branch.
+   */
+  prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string, continues?: PushContinues | null): Promise<{ base: string }>;
+  /** Brings the mirror up to date and returns the tip of `continues.branch`, or throws `continuation_branch_missing`. */
+  continuationTip(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }>;
 }
 
 export function createMirrors(deps: MirrorDeps): Mirrors {
@@ -158,13 +163,27 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     return { dir: mirror, base };
   }
 
+  async function continuationTip(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }> {
+    const branch = continuesBranch(continues);
+    const { dir: mirror } = await sync(repo);
+    const tip = (await deps.git.run("continuation_branch_missing", ["-C", mirror, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`])).trim();
+    return { dir: mirror, tip };
+  }
+
   return {
     url,
     dir,
     objects: (repo) => path.join(dir(repo), "objects"),
     sync,
-    async prepareWorkspace(repo, lease, workspace) {
-      const plan = pushPlan(lease);
+    continuationTip,
+    async prepareWorkspace(repo, lease, workspace, continues = null) {
+      const plan = pushPlan(lease, continues);
+      if (continues !== null) {
+        const { dir: mirror, tip } = await continuationTip(repo, continues);
+        await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
+        await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-B", plan.branch, tip]);
+        return { base: tip };
+      }
       const { dir: mirror, base } = await sync(repo);
       await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
       await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-b", plan.branch]);

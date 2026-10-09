@@ -72,6 +72,22 @@ describe("only an executor job continues an earlier run (C25 section 3.2)", () =
   });
 });
 
+describe("a fix round's branch must have the shape of a run branch (C25 section 1.3)", () => {
+  const U = "2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e";
+  const continuesOn = (branch: string) => ({ parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch });
+  it("refuses anything else, though the signature, the digests and the role are good", () => {
+    for (const branch of ["main", "fx/issue-12", `fx/${U}-g0`, "refs/heads/x", `fx/${U}-g01`, `fx/${U}-g1000000000`, `fx/${U}-g1x`, `fx/${U}`, `fx/${U.toUpperCase()}-g1`, `FX/${U}-g1`, `fx/${U}-g1/x`, `x/fx/${U}-g1`]) {
+      expect(check(signRaw(jobFor({ continues: continuesOn(branch) }))), branch).toEqual({ ok: false, reason: "continues_branch_invalid" });
+    }
+  });
+  it("a name with .. fails the job schema, so it is refused before the shape check is reached", () => {
+    expect(check(signRaw(jobFor({ continues: continuesOn(`fx/${U}-g1/../../main`) }))).ok).toBe(false);
+  });
+  it("accepts the shape of a name a lease makes, and the uuid need not be the parent run's", () => {
+    for (const branch of [`fx/${U}-g1`, `fx/${U}-g12`, `fx/${U}-g999999999`]) expect(check(signRaw(jobFor({ continues: continuesOn(branch) }))).ok, branch).toBe(true);
+  });
+});
+
 describe("repo.private must be the literal true, checked on its own", () => {
   const base = jobFor();
   const withPrivate = (value: unknown) => signRaw({ ...base, repo: { ...base.repo, private: value } });

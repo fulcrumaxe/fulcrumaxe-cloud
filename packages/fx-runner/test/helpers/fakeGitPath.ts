@@ -12,6 +12,10 @@ export function fakeGitPath(over: Partial<GitPath> = {}): GitPath & { calls: str
       calls.push(`check ${lease.runId} g${lease.leaseGeneration} ${job.branch_prefix}`);
       over.check?.(job, lease);
     },
+    async resume(job, lease, workspace) {
+      calls.push(`resume ${lease.runId}`);
+      return over.resume ? over.resume(job, lease, workspace) : null;
+    },
     async prepare(job, lease, workspace) {
       calls.push(`prepare ${lease.runId}`);
       return over.prepare ? over.prepare(job, lease, workspace) : { base: "0".repeat(40) };
@@ -19,9 +23,9 @@ export function fakeGitPath(over: Partial<GitPath> = {}): GitPath & { calls: str
     readGrants(job) {
       return over.readGrants ? over.readGrants(job) : [];
     },
-    async publish(job, lease, workspace, base) {
+    async publish(job, lease, workspace, base, stopped) {
       calls.push(`publish ${lease.runId}`);
-      return over.publish ? over.publish(job, lease, workspace, base) : { pushed: false };
+      return over.publish ? over.publish(job, lease, workspace, base, stopped) : { pushed: false };
     },
   };
 }

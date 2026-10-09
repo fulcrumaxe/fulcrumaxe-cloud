@@ -28,6 +28,8 @@ export const COPY = {
   jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
   agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
   runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
+  /** D#6 R4a-3b (C25 section 1.4): shown when a fix round's push was rejected. */
+  pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
   pushTooLarge:
     "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
   /** The description of the draft pull request our cloud opens when a runner run finishes. Fixed text: the agent's own output never goes into it. */

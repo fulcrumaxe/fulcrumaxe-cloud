@@ -139,10 +139,22 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       let result: RunJobResult;
       try {
         deps.git.check(job, claimed);
+        // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
+        // workspace is left unused and the run starts fresh on the tip (C25 section 1.4). The decision is made here, before the run starts.
+        let planSession = deps.run.planSession;
+        const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
+        if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
+          const resumed = await deps.git.resume(job, claimed, wanted.workspace);
+          if (resumed !== null) started.base = resumed.base;
+          else {
+            const fresh = { kind: "fresh", branch: job.continues.branch } as const;
+            planSession = () => fresh;
+          }
+        }
         const fill = async (workspace: string): Promise<void> => {
           started.base = (await deps.git.prepare(job, claimed, workspace)).base;
         };
-        result = await run(job, { ...deps.run, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, deps.git.readGrants(job)), stopRun), ledger: deps.ledger });
+        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, deps.git.readGrants(job)), stopRun), ledger: deps.ledger });
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
         if (!(error instanceof GitPathError)) throw error;
@@ -177,7 +189,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       }
       try {
         if (started.base === undefined) throw new GitPathError("push_failed");
-        await deps.git.publish(job, claimed, result.workspace, started.base);
+        await deps.git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
       } catch (error) {
         if (!(error instanceof GitPathError)) throw error;
         await lease.flush();
@@ -187,6 +199,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         return { status: "failed", reason: error.code };
       }
       await lease.flush();
+      // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
+      const stoppedAfterPush = lease.ended();
+      if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
       const sent = await sendDone(claimed, result, lease);
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;

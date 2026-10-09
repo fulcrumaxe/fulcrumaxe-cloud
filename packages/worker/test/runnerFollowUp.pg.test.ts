@@ -569,7 +569,7 @@ describe("runner follow-up runs [pg]", () => {
     });
 
     it("every other reason makes no child and dispatches nothing", async () => {
-      const cases: Array<[string, string | undefined]> = [["job_refused", "job_signature_invalid"], ["repo_not_private", undefined], ["agent_failed", undefined], ["wall_clock", undefined], ["runner_setup", "other"]];
+      const cases: Array<[string, string | undefined]> = [["job_refused", "job_signature_invalid"], ["repo_not_private", undefined], ["agent_failed", undefined], ["wall_clock", undefined], ["runner_setup", "other"], ["runner_setup", "continuation_branch_missing"], ["push_rejected", undefined]];
       for (const [reason, detail] of cases) {
         const id = await run({ lease: clock + 60_000 });
         expect(await endWith(id, reason, detail), reason).toMatchObject({ outcome: "accepted" });

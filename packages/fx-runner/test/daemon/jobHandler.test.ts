@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -761,9 +761,9 @@ describe("git path B around the run (D#6 R4a-3)", () => {
   });
 
   it("a job the path will not push is refused before runJob: no workspace, no sandbox", async () => {
-    const rig = makeRig({ handler: { git: fakeGitPath({ check: () => { throw new GitPathError("continuation_unsupported"); } }) } });
+    const rig = makeRig({ handler: { git: fakeGitPath({ check: () => { throw new GitPathError("push_ref_refused"); } }) } });
     const claimed = await rig.claim();
-    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "continuation_unsupported" });
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "push_ref_refused" });
     expect(rig.runJobCalls()).toBe(0);
     expect(existsSync(rig.workspaces)).toBe(false);
     expect(rig.port.calls).toEqual([]);
@@ -776,6 +776,110 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     const claimed = await rig.claim();
     expect((await rig.handle(claimed)).status).toBe("failed");
     expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "prepare"]);
+  });
+
+  const RUN_BRANCH = "fx/22222222-2222-4222-8222-222222222222-g1";
+  const continuing = (branch: string = RUN_BRANCH, over: Partial<ReturnType<typeof jobFor>> = {}) => jobFor({ continues: { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch }, ...over });
+
+  it("a fix round whose branch is not a run branch is refused as job_refused before anything is made, whatever it is", async () => {
+    // The claim client parses the job schema first, so a name with ".." never reaches the handler; verifyJob.test.ts covers the whole list.
+    const bad = ["main", "fx/issue-12", "fx/22222222-2222-4222-8222-222222222222-g0", "refs/heads/x", "fx/22222222-2222-4222-8222-222222222222-g1000000000", "fx/22222222-2222-4222-8222-222222222222-g01", "FX/22222222-2222-4222-8222-222222222222-g1"];
+    for (const branch of bad) {
+      const git = fakeGitPath();
+      const rig = makeRig({ handler: { git } });
+      const claimed = await rig.claim(signRaw(continuing(branch)) as never);
+      expect(await rig.handle(claimed), branch).toEqual({ status: "refused", reason: "continues_branch_invalid" });
+      expect(rig.runJobCalls(), branch).toBe(0);
+      expect(git.calls, branch).toEqual([]);
+      expect(rig.port.calls, branch).toEqual([]);
+      expect(existsSync(rig.workspaces), branch).toBe(false);
+      const end = cloud.runs.get(claimed.runId)?.endedBy;
+      expect(end, branch).toMatchObject({ type: "run_ended", reason: "job_refused" });
+      expect(end?.detail, branch).toBeUndefined();
+      rig.ledger.close();
+    }
+  });
+
+  it("a fix round on a run branch is accepted: the branch need not belong to the parent run", async () => {
+    const git = fakeGitPath({ prepare: async () => ({ base: "a".repeat(40) }) });
+    const rig = makeRig({ handler: { git } });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "prepare", "publish"]);
+  });
+
+  it("a branch that is gone at prepare ends the run runner_setup / continuation_branch_missing and starts nothing", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ prepare: throwing("continuation_branch_missing") }) } });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "continuation_branch_missing" });
+    expect(rig.port.calls).toEqual([]);
+    expect(readdirSync(rig.workspaces)).toEqual([]);
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "continuation_branch_missing" });
+  });
+
+  it("a branch that is gone before the push sends no done and reports continuation_branch_missing", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ publish: throwing("continuation_branch_missing") }) } });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "continuation_branch_missing" });
+    expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
+    expect(ended(claimed.runId)).toMatchObject({ reason: "runner_setup", detail: "continuation_branch_missing" });
+  });
+
+  it("a rejected push sends no done and reports push_rejected, with no detail", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ publish: throwing("push_rejected") }) } });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "push_rejected" });
+    expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
+    const end = ended(claimed.runId);
+    expect(end).toMatchObject({ type: "run_ended", reason: "push_rejected" });
+    expect(end?.detail).toBeUndefined();
+  });
+
+  it("a stop reply seen by the time of the push is passed to the push, and a stop that arrives during it sends no done", async () => {
+    let stopped: (() => boolean) | undefined;
+    const holder: { rig?: ReturnType<typeof makeRig> } = {};
+    const git = fakeGitPath({
+      async publish(_job, _lease, _workspace, _base, askStopped) {
+        stopped = askStopped;
+        expect(askStopped?.()).toBe(false);
+        cloud.force.events.push(stopBody("run_terminal"));
+        holder.rig!.relay.emit(localEvent(0));
+        return { pushed: false };
+      },
+    });
+    const rig = makeRig({ handler: { git } });
+    holder.rig = rig;
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "stopped", reason: "run_terminal" });
+    expect(stopped?.()).toBe(true);
+    expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
+  });
+
+  it("a kept session whose workspace is not at the branch's tip is not resumed: a fresh workspace is made and filled", async () => {
+    const kept = path.join(root, "work", "kept");
+    mkdirSync(kept, { recursive: true });
+    const decided: string[] = [];
+    const git = fakeGitPath({ resume: async () => null, prepare: async () => ({ base: "d".repeat(40) }) });
+    const rig = makeRig({ handler: { git } });
+    rig.deps.run.planSession = (continues) => (decided.push("asked"), continues === null ? { kind: "fresh", branch: null } : { kind: "resume", sessionId: "s1", workspace: kept });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "resume", "prepare", "publish"]);
+    expect(rig.port.starts.map((s) => s.workdir)).not.toContain(kept);
+  });
+
+  it("a kept session whose workspace is at the tip is resumed in place, and the tip is the base the push is checked against", async () => {
+    const kept = path.join(root, "work", "kept");
+    mkdirSync(kept, { recursive: true });
+    let publishedBase: string | undefined;
+    const git = fakeGitPath({ resume: async () => ({ base: "e".repeat(40) }), publish: async (_j, _l, _w, base) => ((publishedBase = base), { pushed: false }) });
+    const rig = makeRig({ handler: { git } });
+    rig.deps.run.planSession = () => ({ kind: "resume", sessionId: "s1", workspace: kept });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "resume", "publish"]);
+    expect(rig.port.starts.map((s) => s.workdir)).toEqual([kept]);
+    expect(publishedBase).toBe("e".repeat(40));
   });
 
   it("an error that is not the git path's own is not swallowed", async () => {

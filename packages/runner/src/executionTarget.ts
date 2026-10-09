@@ -79,7 +79,9 @@ export type FailureReason =
   /** D#6 R4a-2 (C24 section 1): the runner could not start the agent (sandbox, binary, login or flags). Same on a retry, so no follow-up. */
   | "runner_setup_failed"
   /** D#6 R2b (C24 section 2): a repo left `runner_local`, and its queued runner runs were cancelled with it (the user's own change ended them). */
-  | "execution_mode_changed";
+  | "execution_mode_changed"
+  /** D#6 R4a-3b (C25 section 1.4): a fix round's push was rejected because the pull request's branch moved while the agent worked. A retry runs on the new head, so no follow-up. */
+  | "push_rejected";
 
 /** What a target reports once a dispatched run reaches a terminal
  * outcome. `SandboxTarget` builds this from the sandbox's last
