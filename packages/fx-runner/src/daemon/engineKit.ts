@@ -1,6 +1,7 @@
-import type { AgentRuntime, LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
+import type { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import type { CleanEnvOptions, CredentialMode } from "../job/cleanEnv.js";
 import type { SessionPlan } from "../job/runJob.js";
+import type { InterruptibleRuntime } from "../sandbox/hostSandbox.js";
 import type { ProtectedPaths } from "../sandbox/sandboxSettings.js";
 import type { GitCapture } from "./git.js";
 
@@ -36,12 +37,19 @@ export interface EngineKit {
     protectedPaths: ProtectedPaths;
     stateDir: string;
     onLocalEvent: (event: LocalOnlyEvent) => void;
-  }): AgentRuntime;
+  }): InterruptibleRuntime;
   /** Resume or fresh, from the local session index in the state directory. */
   planSession(stateDir: string, continues: { session_id: string; branch: string } | null): SessionPlan;
   recordSession(stateDir: string, sessionId: string, workspace: string): Promise<void>;
   /** The bounded, shell-less capture the daemon runs git through. */
   capture: GitCapture;
+  /**
+   * Runs a program in the foreground on the terminal's own streams (no shell, an explicit environment) and gives its exit code (null if it could
+   * not start). The tmux client of `attach` goes through it.
+   */
+  foreground(command: string, args: readonly string[], env: Record<string, string>): Promise<number | null>;
+  /** Resumes a taken-over run's agent session interactively, in its workspace, under the job's own settings (D#6 R4a-7). Throws an `EngineRefusal` if the run has no session left to resume. */
+  takeOver(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string }): Promise<number | null>;
   /** The same capture with a short piece of the error output kept too: what the sandbox probe (`doctor`) reads its reason from. */
   captureWithStderr(command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 }

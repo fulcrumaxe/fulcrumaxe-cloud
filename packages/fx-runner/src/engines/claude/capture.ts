@@ -45,3 +45,15 @@ export function runCapture(spawnFn: SpawnFn, command: string, args: readonly str
     child.on("close", (code) => finish(code));
   });
 }
+
+/**
+ * Runs `command args` in the foreground with the terminal's own streams, an explicit environment and no shell, and resolves with its exit
+ * code (null when it could not start or was killed). For the two interactive commands: the tmux client of `attach`, and the agent a take-over resumes.
+ */
+export function runForeground(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd?: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawnFn(command, [...args], { cwd, env, shell: false, stdio: "inherit" });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => resolve(code));
+  });
+}

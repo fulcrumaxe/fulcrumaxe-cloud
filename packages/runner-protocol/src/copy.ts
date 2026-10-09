@@ -24,6 +24,8 @@ export const COPY = {
   /** The reason on a queued runner run that was cancelled because its repo left `runner_local` (failure reason `execution_mode_changed`). */
   executionModeChanged: "Cancelled because this repository was moved off your runner. Retry to run it under the new setting.",
   paused: "Paused: Claude usage limit reached.",
+  /** D#6 R4a-7: shown on a run its owner took over by hand on the runner machine (failure reason `taken_over`). `{time}` is the time of the `taken_over` event. */
+  takenOver: "Taken over on the runner machine at {time}",
   /** D#6 R4a-2 (C24 section 1): `{detail}` is the closed code the runner sent, shown as it is; nothing else the runner says is shown. */
   jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
   /** D#6 R4a-6 (C16 section 1.3): on the runner screen for a runner whose sandbox does not work. `{reason}` is the closed code it reported. */

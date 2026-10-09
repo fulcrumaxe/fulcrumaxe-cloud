@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LocalOnlyEvent, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import { createJobHandler, MAX_DONE_ATTEMPTS, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
+import type { JobWatch } from "../../src/daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
 import { GitPathError } from "../../src/daemon/git.js";
@@ -888,5 +889,128 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     const rig = makeRig({ handler: { git: fakeGitPath({ publish: async () => { throw new RangeError("boom"); } }) } });
     const claimed = await rig.claim();
     await expect(rig.handle(claimed)).rejects.toThrow("boom");
+  });
+});
+
+describe("a take-over of a run (D#6 R4a-7)", () => {
+  /** A watch whose take-over request the test raises by hand; it records what the handler does with it. */
+  function fakeWatch() {
+    const log: string[] = [];
+    let raise: (() => void) | undefined;
+    const watch: JobWatch = {
+      async begin(job) {
+        log.push(`begin ${job.role} ${job.repo}`);
+        return {
+          onTakeOver: (callback) => {
+            raise = callback;
+          },
+          handOver: async () => {
+            log.push("handOver");
+            return true;
+          },
+          finish: async () => {
+            log.push("finish");
+          },
+        };
+      },
+    };
+    return { watch, log, ask: () => raise?.() };
+  }
+
+  /** Runs a job whose agent holds until it is interrupted, and takes it over. `obeys`: whether SIGINT ends the agent. */
+  async function takeOver(obeys: boolean) {
+    const w = fakeWatch();
+    const git = fakeGitPath();
+    const interrupts: string[] = [];
+    const rig: ReturnType<typeof makeRig> = makeRig({
+      portOver: { hold: true },
+      handler: {
+        git,
+        watch: w.watch,
+        interrupt: async (handle) => {
+          interrupts.push(handle.sandboxName);
+          if (obeys) await rig.port.port.stop(handle);
+        },
+      },
+    });
+    const claimed = await rig.claim();
+    cloud.force.done.push({ status: 200, body: { continue: false, outcome: "failed", failure_reason: "taken_over", pr_number: null } });
+    const running = rig.handle(claimed);
+    await until(() => rig.port.calls.includes("start"));
+    w.ask();
+    return { result: await running, claimed, git, interrupts, log: w.log, rig };
+  }
+
+  it("sends the agent SIGINT, records one taken_over event and a done with no result, pushes nothing, then hands the pane over", async () => {
+    const t = await takeOver(true);
+    expect(t.result).toEqual({ status: "completed", outcome: "failed", failureReason: "taken_over", prNumber: null });
+    expect(t.interrupts).toHaveLength(1);
+    const events = cloud.runs.get(t.claimed.runId)!.events;
+    expect(events.filter((e) => e.type === "taken_over")).toEqual([{ seq: expect.any(Number), ts: expect.any(String), type: "taken_over" }]);
+    // The take-over is the last thing the run says before done, and done holds neither an envelope nor a verdict.
+    expect(events.at(-1)?.type).toBe("taken_over");
+    expect(sentToCloud().at(-1)).toBe("/api/runner/runs/:id/done");
+    expect(cloud.seen.at(-1)?.body).toEqual({ run_id: t.claimed.runId, lease_generation: 1 });
+    expect(t.git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "prepare"]);
+    const job = signedJob().job;
+    expect(t.log).toEqual([`begin executor ${job.repo.owner}/${job.repo.name}`, "handOver", "finish"]);
+  });
+
+  it("an agent that ignores SIGINT is stopped with its sandbox after the grace, and the take-over is recorded all the same", async () => {
+    const t = await takeOver(false);
+    expect(t.interrupts).toHaveLength(1);
+    expect(t.rig.port.calls).toContain("stop");
+    expect(t.result.status).toBe("completed");
+    expect(cloud.runs.get(t.claimed.runId)!.events.at(-1)?.type).toBe("taken_over");
+  });
+
+  it("a take-over asked for before the sandbox exists waits for it, then interrupts the agent", async () => {
+    const w = fakeWatch();
+    const interrupts: string[] = [];
+    const rig: ReturnType<typeof makeRig> = makeRig({
+      portOver: { hold: true },
+      handler: {
+        watch: w.watch,
+        interrupt: async (handle) => {
+          interrupts.push(handle.sandboxName);
+          await rig.port.port.stop(handle);
+        },
+      },
+    });
+    const claimed = await rig.claim();
+    cloud.force.done.push({ status: 200, body: { continue: false, outcome: "failed", failure_reason: "taken_over", pr_number: null } });
+    const running = rig.handle(claimed);
+    await until(() => w.log.length > 0);
+    w.ask();
+    expect(await running).toMatchObject({ status: "completed", failureReason: "taken_over" });
+    expect(interrupts).toHaveLength(1);
+    expect(cloud.runs.get(claimed.runId)!.events.at(-1)?.type).toBe("taken_over");
+  });
+
+  it("a take-over asked for after the run has ended is ignored: the run is reported as it ended", async () => {
+    const w = fakeWatch();
+    const interrupts: string[] = [];
+    const rig = makeRig({
+      handler: {
+        watch: w.watch,
+        interrupt: async (handle) => {
+          interrupts.push(handle.sandboxName);
+        },
+      },
+    });
+    const claimed = await rig.claim();
+    const result = await rig.handle(claimed);
+    w.ask();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(interrupts).toEqual([]);
+    expect(result).toEqual({ status: "completed", outcome: "succeeded", failureReason: null, prNumber: 7 });
+    expect(cloud.runs.get(claimed.runId)!.events.some((e) => e.type === "taken_over")).toBe(false);
+    expect(w.log).toEqual([expect.stringMatching(/^begin /), "finish"]);
+  });
+
+  it("a run with no watch (no tmux) runs as before", async () => {
+    const rig = makeRig();
+    const claimed = await rig.claim();
+    expect((await rig.handle(claimed)).status).toBe("completed");
   });
 });

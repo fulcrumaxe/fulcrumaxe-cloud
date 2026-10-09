@@ -40,6 +40,10 @@ describe("the error-code allowlist", () => {
     }
   });
 
+  it("keeps the take-over codes of the runner's watch (D#6 R4a-7) instead of folding them into other", () => {
+    for (const code of ["take_over_cancelled", "take_over_in_progress", "take_over_timeout", "take_over_not_handed"]) expect(errorCodeOrOther(code), code).toBe(code);
+  });
+
   it("keeps the sandbox probe's reason codes (D#6 R4a-5) instead of folding them into other, in a block of their own", () => {
     const codes = ["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other"];
     for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);

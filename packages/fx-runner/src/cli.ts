@@ -6,6 +6,7 @@
 import { CliError } from "./cliError.js";
 import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
+import { attachCommand } from "./commands/attach.js";
 import { registerCommand } from "./commands/register.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
@@ -13,6 +14,7 @@ import { logsCommand } from "./commands/logs.js";
 import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
 import { statusCommand } from "./commands/status.js";
+import { takeoverPaneCommand, watchCommand } from "./commands/watchPane.js";
 
 export interface CliIo {
   /** The arguments after the program name. */
@@ -40,6 +42,8 @@ Commands:
                      Register this machine as a runner. The code comes from the workspace, works once and expires in 10 minutes.
   status             Show this machine's registration. Makes no network call.
   run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
+  attach [<run|short id>|--latest] [--take-over]
+                     List this machine's running jobs, or watch one read-only. --take-over stops the agent and hands the session to you.
   revoke [--reason <text>] [--local]
                      Revoke this runner and delete its key. --local only deletes the local files.
   doctor             Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request.
@@ -54,6 +58,10 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   status: { flags: [], switches: [] },
   run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
+  attach: { flags: [], switches: ["take-over", "latest"], positionals: 1 },
+  // The two commands a tmux pane runs; not in --help.
+  __watch: { flags: [], switches: [], positionals: 1 },
+  __takeover: { flags: [], switches: [], positionals: 1 },
   doctor: { flags: [], switches: [] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: [], switches: [], positionals: 1 },
@@ -111,6 +119,13 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "run") {
       if (io.host === undefined) throw new CliError("run is only available from the fx-runner program");
       return await runCommand(ctx, io.host);
+    }
+    if (command === "attach" || command === "__takeover" || command === "__watch") {
+      if (io.host === undefined) throw new CliError(`${command} is only available from the fx-runner program`);
+      // The run named on the command line travels with the flags, under the name the three commands read it by.
+      const named: Flags = positionals[0] === undefined ? flags : new Map([...flags, ["run", positionals[0]]]);
+      if (command === "attach") return await attachCommand(named, ctx, io.host);
+      return command === "__watch" ? await watchCommand(named, ctx) : await takeoverPaneCommand(named, ctx, io.host);
     }
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");

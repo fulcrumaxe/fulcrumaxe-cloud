@@ -15,6 +15,7 @@
  *  - stale leftovers next to the ledger are removed, then the ledger is taken (another `run` holds it: exit non-zero);
  *  - the ledger is not closed by damage (`ledger_closed`): nothing that is not on the ledger runs, so no claim is made.
  * SIGINT or SIGTERM stops the job in hand (the sandbox stops its agent, 3 seconds of grace at most) and reports `runner_shutdown`.
+ * With tmux on the machine, each job also gets a watch session the owner can `attach` to (D#6 R4a-7); without it jobs run unwatched.
  */
 import path from "node:path";
 import { CliError } from "../cliError.js";
@@ -26,6 +27,7 @@ import type { EngineKit } from "../daemon/engineKit.js";
 import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
+import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
 import { mirrorKeepClear, mirrorsRootFor, type RepoRef } from "../daemon/mirror.js";
@@ -40,6 +42,8 @@ import { SandboxRefused } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { commandOnPath, resolveSandboxTools, sandboxToolDirs, selectTier } from "../sandbox/select.js";
+import { socketPath } from "../watch/layout.js";
+import { MAX_SOCKET_PATH_BYTES, findTmux, tmuxEnv } from "../watch/tmux.js";
 
 export const LEDGER_FILE = "jobs.ledger";
 const DEFAULT_MODEL = "sonnet";
@@ -59,6 +63,16 @@ export interface RunHost {
   engine: EngineKit;
   /** The machine behind the sandbox probe (the same host `doctor` uses): the process start and the file reads. */
   sandbox: SandboxHost;
+  /** How this program starts itself again (runtime, its flags, script), for a watch pane. Absent: no watch. */
+  selfCommand?: readonly string[] | undefined;
+  /** `TERM`, looked up by name by the caller: the terminal type the tmux client attaches with. */
+  term?: string | undefined;
+  /** Asks the person one question on the terminal and gives the answer line. Only `attach --take-over` uses it. */
+  ask?: ((question: string) => Promise<string>) | undefined;
+  /** The user id this program runs as, looked up by the caller: the tmux socket and its directory must belong to it. */
+  uid?: number | undefined;
+  /** Whether standard input is a terminal. */
+  interactive?: boolean | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -83,7 +97,7 @@ export function pidIsAlive(kill: RunHost["kill"], pid: number): boolean {
   }
 }
 
-function credentialsOf(registration: Registration): CredentialMode {
+export function credentialsOf(registration: Registration): CredentialMode {
   if (registration.credential_mode === "subscription") return { mode: "subscription" };
   // An API key comes from a local config file that no command writes yet. Until one does, such a runner is refused, never run on a guess.
   throw new CliError("api_key_not_configured: this runner is registered for api_key mode, and no local API key file is supported yet");
@@ -103,7 +117,7 @@ function sandboxDirs(host: RunHost, searchPath: string): string[] {
  * The agent CLI and the sandbox tools' directories, or the refusal for a platform that has no sandbox at all (Windows, WSL1, anything
  * else). A machine that only lacks bubblewrap or socat gets no refusal here: it starts, reports the reason and claims nothing.
  */
-function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
+export function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
   try {
     try {
       selectTier({ platform: host.platform, hasCommand: (name) => commandOnPath(name, searchPath) });
@@ -179,7 +193,16 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       mirrorsRoot,
       makeRuntime: (sandboxSettings, protectedPaths) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit }),
     });
+    const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
+    const tmuxBinary = host.selfCommand === undefined || socketTooLong ? undefined : findTmux(searchPath);
+    if (host.selfCommand !== undefined && socketTooLong) ctx.out("fx-runner: the state directory path is too long for a tmux socket; jobs run without a watch session");
+    else if (host.selfCommand !== undefined && tmuxBinary === undefined) ctx.out("fx-runner: tmux not found; jobs run without a watch session");
+    const watch =
+      tmuxBinary === undefined || host.selfCommand === undefined
+        ? undefined
+        : createJobWatch({ clock, tmux: { binary: tmuxBinary, stateDir, capture: host.engine.capture, env: tmuxEnv({ home, path: searchPath, stateDir, term: host.term }), selfCommand: host.selfCommand } });
     const handle = createJobHandler({
+      ...(watch === undefined ? {} : { watch, interrupt: (job) => sandbox.interrupt(job) }),
       client,
       keyring,
       clock,

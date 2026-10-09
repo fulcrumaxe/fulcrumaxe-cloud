@@ -131,6 +131,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ledger_closed",
   "mirrors_root_overlap",
   "api_key_not_configured",
+  // R4a-7 watch and take-over: the person's `fx-runner attach --take-over` was not confirmed, is already under way, was not answered by the
+  // daemon in time, or the pane command was started for a run that was not handed over.
+  "take_over_cancelled",
+  "take_over_in_progress",
+  "take_over_timeout",
+  "take_over_not_handed",
   // Local runner (D#6 R4a-4): `fx-runner logs` (a run id that is not a uuid, no local log for the run) and `fx-runner service` (a platform with
   // no service manager here, a unit file this command did not write, a path it will not put into a unit).
   "run_id_invalid",

@@ -361,6 +361,14 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(stored).not.toContain(secret);
     });
 
+    it("a taken_over event is stored and ends nothing: the run goes on until its done decides (D#6 R4a-7)", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      expect(await send(id, g, [{ seq: 0, ts: "2026-10-10T12:00:00.000Z", type: "taken_over" }])).toMatchObject({ outcome: "accepted", stored: 1, ended: null });
+      expect((await row(id)).status).toBe("running");
+      expect((await events(id, "runner.event")).map((e) => e.payload)).toEqual([{ seq: 0, ts: "2026-10-10T12:00:00.000Z", type: "taken_over" }]);
+    });
+
     it("usage_limit_reached ends the run failed with usage_limit, credential_mismatch with credential_mismatch", async () => {
       const a = await pending();
       const g = await claimed(a);

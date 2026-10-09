@@ -11,10 +11,12 @@
  * Git path B (D#6 R4a-3) surrounds the run: before it, `git.check` refuses a job it will not push and the fresh workspace is filled from the
  * repo's mirror; after it, the agent's commit is pushed to the run's branch, outside the sandbox, so `done` finds it. A git failure ends the
  * run like any setup failure: a closed code, `run_ended` `runner_setup`.
+ * A take-over (D#6 R4a-7) is asked for by the machine's owner through the tmux watch: the agent gets SIGINT, nothing is pushed, one
+ * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
  */
-import { DONE_RETRY_AFTER_SECONDS, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
-import type { SandboxPort } from "../sandbox/port.js";
+import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import { GitPathError } from "./git.js";
@@ -22,11 +24,14 @@ import type { GitPath } from "./gitPath.js";
 import { startLease, type Clock, type Lease, type LeaseEnd, type createEventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
+import type { JobWatch, WatchedJob } from "./watch.js";
 
 /** How many times `done` is sent when the cloud cannot reach GitHub or the call fails. */
 export const MAX_DONE_ATTEMPTS = 5;
 /** The longest wait between two `done` attempts, whatever the cloud asks for: the lease is kept alive meanwhile. */
 const MAX_DONE_WAIT_SECONDS = 60;
+/** After SIGINT, the agent gets this long to end its turn before its sandbox is stopped. */
+export const TAKEOVER_STOP_GRACE_MS = 10_000;
 
 export type JobResult =
   | { status: "refused"; reason: JobRefusal }
@@ -62,6 +67,15 @@ export interface JobHandlerDeps {
   heartbeatMs?: number;
   flushMs?: number;
   doneAttempts?: number;
+  /** The tmux watch and take-over (R4a-7). Absent: no watch. */
+  watch?: JobWatch;
+  /** Sends the agent in a sandbox SIGINT, which ends its turn cleanly. Required for a take-over to stop the agent. */
+  interrupt?: (handle: SandboxHandle) => void | Promise<void>;
+}
+
+/** What the handler knows of the sandbox it made for the run. */
+interface HeldSandbox {
+  handle?: SandboxHandle;
 }
 
 /** A port whose every start carries these read grants (git path B: the repo mirror's `objects` directory). The host sandbox's builder checks each one again. */
@@ -75,11 +89,12 @@ function withReadGrants(port: SandboxPort, paths: readonly string[]): SandboxPor
 }
 
 /** A port whose sandbox is stopped as soon as `signal` aborts, which ends the agent and so the run. */
-function stopOnAbort(port: SandboxPort, signal: AbortSignal): SandboxPort {
+function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox): SandboxPort {
   return {
     ...port,
     async createSandbox(opts) {
       const handle = await port.createSandbox(opts);
+      held.handle = handle;
       const stop = (): void => {
         void port.stop(handle).catch(() => undefined);
       };
@@ -152,6 +167,25 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const stopRun = deps.shutdown === undefined ? lease.signal : AbortSignal.any([lease.signal, deps.shutdown]);
     const detach = deps.events.attach((event) => lease.push(event));
     let abandonSend = false;
+    const held: HeldSandbox = {};
+    const ran = new AbortController();
+    let takeoverOpen = true;
+    let tookOver = false;
+    const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now() });
+    watched?.onTakeOver(() => {
+      if (!takeoverOpen) return;
+      tookOver = true;
+      void interruptAgent();
+    });
+    /** SIGINT now (after the sandbox exists, if the request came first); if the agent has not ended its turn within the grace, its sandbox is stopped. */
+    async function interruptAgent(): Promise<void> {
+      for (let waited = 0; held.handle === undefined && waited < 40 && !ran.signal.aborted; waited++) await deps.clock.sleep(250, ran.signal);
+      const handle = held.handle;
+      if (handle === undefined) return;
+      await Promise.resolve(deps.interrupt?.(handle)).catch(() => undefined);
+      await deps.clock.sleep(TAKEOVER_STOP_GRACE_MS, ran.signal);
+      if (!ran.signal.aborted) await deps.sandbox.stop(handle).catch(() => undefined);
+    }
     try {
       const started: { base?: string } = {};
       let result: RunJobResult;
@@ -172,7 +206,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         const fill = async (workspace: string): Promise<void> => {
           started.base = (await git.prepare(job, claimed, workspace)).base;
         };
-        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun), ledger: deps.ledger });
+        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun, held), ledger: deps.ledger });
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
         if (!(error instanceof GitPathError)) throw error;
@@ -189,6 +223,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         await reportEnd(lease, endOfRefusal(result.reasons[0]!));
         return { status: "refused", reason: result.reasons[0]! };
       }
+      takeoverOpen = false;
+      ran.abort();
+      // The owner took the run over: no push, no result. The sandbox is down already (runJob stops it), so only the record is left to send.
+      if (tookOver && watched !== undefined && (result.status === "done" || result.status === "failed")) return await recordTakeover(claimed, lease, watched, result.status === "done" ? result.sessionId : undefined);
       const ended = lease.ended();
       if (ended !== undefined) return stoppedBy(ended);
       if (stopRun.aborted) {
@@ -226,16 +264,28 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {
+      ran.abort();
       detach();
       await lease.close({ abandon: abandonSend });
+      await watched?.finish();
     }
   };
 
-  async function sendDone(claimed: Claimed, result: Extract<RunJobResult, { status: "done" }>, lease: ReturnType<typeof startLease>): Promise<JobResult> {
+  /** The take-over, as the cloud is told: one `taken_over` event (a timestamp, nothing else), then `done` with no envelope. Then the pane is handed over. */
+  async function recordTakeover(claimed: Claimed, lease: Lease, watched: WatchedJob, sessionId: string | undefined): Promise<JobResult> {
+    lease.push(LocalOnlyEvent.parse({ seq: (lease.highestSeq() ?? -1) + 1, ts: deps.clock.now().toISOString(), type: "taken_over" }));
+    await lease.flush();
+    const stopped = lease.ended();
+    const sent = stopped !== undefined ? stoppedBy(stopped) : await sendDone(claimed, { ...(sessionId === undefined ? {} : { sessionId }) }, lease);
+    await watched.handOver();
+    return sent;
+  }
+
+  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; workspace?: string }, lease: ReturnType<typeof startLease>): Promise<JobResult> {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput });
       if (reply.kind === "done") {
-        if (result.sessionId !== undefined) {
+        if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);
         }
         return { status: "completed", outcome: reply.outcome, failureReason: reply.failureReason, prNumber: reply.prNumber };

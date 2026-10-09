@@ -31,6 +31,7 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  *  1. the request is verified; the body must name the path's run. `begin` fences it (generation, runner, lease end, wall clock), extends the
  *     lease while GitHub is asked, and answers the STORED verdict again when this runner's earlier `done` already finished the run at
  *     this generation. Any other finished or fenced run is 409 `{continue:false, reason}`.
+ *  1b. a run whose runner sent `taken_over` ends `failed taken_over` at once, with no envelope and no pull request (D#6 R4a-7).
  *  2. a reviewer (or any role that is neither the executor nor the docs-writer) makes no commit: its run ends `succeeded`.
  *  3. an executor or a docs-writer is judged, in this order (C21 section 5.4, C25 section 3.1): a continuation with no recorded dispatch head
  *     -> `failed internal_error` (the cloud cannot judge it, C25 section 4); no commit on its branch (or `aheadBy` null, or a continuation whose
@@ -110,6 +111,8 @@ interface DoneContext {
   dispatchBase: { oid: string | null } | null;
   scope: AcceptanceScope;
   text: RunPullRequestText | null;
+  /** The runner sent a `taken_over` event for this run: its owner stopped the agent and took over by hand (D#6 R4a-7). */
+  takenOver: boolean;
 }
 
 async function loadContext(client: TenantQueryable, i: { accountId: string; runId: string }): Promise<DoneContext | null> {
@@ -127,7 +130,9 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
     `SELECT payload->>'head_oid' AS head_oid FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = $3 ORDER BY seq DESC LIMIT 1`,
     [i.accountId, i.runId, DISPATCH_BASE_KIND],
   );
+  const taken = await client.query(`SELECT 1 FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'runner.event' AND payload->>'type' = 'taken_over' LIMIT 1`, [i.accountId, i.runId]);
   return {
+    takenOver: taken.rows.length > 0,
     role: row.role,
     runtime: row.runtime,
     executionMode: row.execution_mode,
@@ -146,6 +151,9 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   const ctx = await withTenant(deps.appUserPool, i.accountId, (client) => loadContext(client, { accountId: i.accountId, runId: i.runId }));
   // A run that passed the fence has a row; if it vanished since, nothing here can be trusted.
   if (!ctx) return failed("internal_error");
+  // A run its owner took over ends here, for every role, before any commit or pull request is looked at: no result is judged, nothing is opened,
+  // and a reviewer's run can never count toward a merge gate (D#6 R4a-7). The envelope the facade stores for it is none.
+  if (ctx.takenOver) return failed("taken_over");
   // Only the executor and the docs-writer push (C25 section 3.2). Every other role (the reviewers, the panel seats, the advisory roles) ends
   // `succeeded` on its done; its envelope is stored after redaction (C21 section 5.2).
   if (ctx.role !== "executor" && ctx.role !== "docs-writer") return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
