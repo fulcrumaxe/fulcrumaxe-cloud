@@ -49,6 +49,7 @@ function errorCodeFor(err: unknown): string {
   if (name === "RunActionUnavailableError") return "worker_unavailable";
   if (name === "RunActionRefusedError") return "database_refused";
   if (name === "RunActionInputError") return "invalid_input";
+  if (name === "SandboxReapingError") return "sandbox_reaping";
   if (name === "AuthorCheckUnavailableError") return "author_check_unavailable";
   return "perform_failed";
 }

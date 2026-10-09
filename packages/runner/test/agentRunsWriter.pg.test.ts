@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { insertAgentRun, writeRunStatus } from "../src/runStatusWriter.js";
+import { SandboxReapingError, insertAgentRun, writeRunStatus } from "../src/runStatusWriter.js";
 import { RUN_STATUS_TRANSITIONS, isLegalRunTransition, type RunStatus } from "../src/statusTransitions.js";
 import { pgHarness } from "./helpers/pgHarness.js";
-import { seedAccount } from "./helpers/seed.js";
+import { seedAccount, seedRepo } from "./helpers/seed.js";
 
 /**
  * D#2 H09c (correction C37 criteria 3-5) from the runner's side: the
@@ -129,5 +129,18 @@ describe("runner -> agent_runs writer [pg] (H09c)", () => {
     expect(rows[0]).toEqual({ status: "succeeded", envelope: { verdict: "pass" }, tokens_in: "3", tokens_out: "4", usd: "0.2500", cc_session_id: "sess-9" });
     const events = await db.admin.query(`SELECT count(*)::int AS n FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed'`, [id]);
     expect(events.rows[0].n).toBe(2);
+  });
+  it("an executor run whose sandbox is inside a reaper claim raises SandboxReapingError (FXR01, nothing written), and starts once the claim is marked deleted", async () => {
+    const accountId = randomUUID();
+    await seedAccount(db.admin, accountId);
+    const refs = { repoId: randomUUID() };
+    await seedRepo(db.admin, accountId, refs.repoId);
+    const name = `ex-${accountId}-${refs.repoId}-9`;
+    const start = () => insertAgentRun(db.runWriterPool, { id: randomUUID(), accountId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: refs.repoId, dispatchPrNumber: 9 });
+    await db.admin.query(`INSERT INTO sandbox_reaps (sandbox_name, account_id, run_id, reason, state) VALUES ($1, $2, $3, 'idle', 'claimed')`, [name, accountId, randomUUID()]);
+    await expect(start()).rejects.toBeInstanceOf(SandboxReapingError);
+    expect((await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1 AND dispatch_pr_number = 9`, [accountId])).rows[0].n).toBe(0);
+    await db.admin.query(`UPDATE sandbox_reaps SET state = 'deleted', done_at = now() WHERE sandbox_name = $1`, [name]);
+    await expect(start()).resolves.toBeDefined();
   });
 });

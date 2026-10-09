@@ -60,15 +60,6 @@ export interface SweepSandboxReapResult {
   orphans: number;
 }
 
-/** A pass this build does not run yet (idle: REAPER-2). */
-export class SandboxReapNotSupportedError extends Error {
-  readonly code = "not_supported";
-  constructor(public readonly pass: string) {
-    super(`sandbox reap pass "${pass}" is not supported`);
-    this.name = "SandboxReapNotSupportedError";
-  }
-}
-
 export interface SandboxReapDeps {
   /** The runner login's pool. */
   pool: Pool;
@@ -98,8 +89,7 @@ interface RunRow {
 
 export async function sweepSandboxReap(deps: SandboxReapDeps, input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> {
   validate(input);
-  if (input.pass === "idle") throw new SandboxReapNotSupportedError(input.pass);
-  const listCandidates = input.pass === "terminal" ? "sandbox_reap_candidates_terminal" : "sandbox_reap_candidates_ephemeral";
+  const listCandidates = `${{ terminal: "sandbox_reap_candidates_terminal", ephemeral: "sandbox_reap_candidates_ephemeral", idle: "sandbox_reap_candidates_idle" }[input.pass]}($1, $2${input.pass === "idle" ? ", $3" : ""})`;
   const clock = deps.clock ?? (() => performance.now());
   const log = deps.log ?? ((line: string) => console.log(line));
   const started = clock();
@@ -118,7 +108,7 @@ export async function sweepSandboxReap(deps: SandboxReapDeps, input: SweepSandbo
   let stop = false;
   for (let batch = 0; batch < MAX_BATCHES && !stop; batch++) {
     if (batch > 0 && outOfTime()) break;
-    const { rows } = await deps.pool.query<CandidateRow>(`SELECT account_id, run_id, sandbox_name, reason FROM ${listCandidates}($1, $2)`, [BATCH, result.cursor]);
+    const { rows } = await deps.pool.query<CandidateRow>(`SELECT account_id, run_id, sandbox_name, reason FROM ${listCandidates}`, input.pass === "idle" ? [BATCH, result.cursor, SANDBOX_IDLE_CAP_PER_ACCOUNT] : [BATCH, result.cursor]);
     for (const row of rows) {
       if (input.mode === "dry_run") {
         // Computes and reports; no provider call, no claim.
@@ -182,12 +172,15 @@ async function reapOne(deps: SandboxReapDeps, input: SweepSandboxReapInput, row:
   // A name whose compute settle is still owed (`terminal_unsettled`, `ephemeral_unsettled`) is never deleted: the settle needs the
   // stopped sandbox. An ephemeral one that is still at the provider a day after its run ended is reported; one the provider no
   // longer has is nothing to report.
-  if (row.reason !== "terminal" && row.reason !== "ephemeral") {
+  if (row.reason !== "terminal" && row.reason !== "ephemeral" && row.reason !== "idle" && row.reason !== "cap") {
     if (row.reason === "ephemeral_unsettled" && state === "stopped") alert("sandbox_unsettled_stale");
     return skip();
   }
   // "stopped" or "gone": claim (database), then the provider delete with no transaction open, then done.
-  const claim = row.reason === "terminal" ? await sql("SELECT sandbox_reap_claim($1, 'terminal') AS v", row.sandbox_name) : await sql("SELECT sandbox_reap_claim_ephemeral($1) AS v", row.sandbox_name);
+  const claim =
+    row.reason === "terminal" ? await sql("SELECT sandbox_reap_claim($1, 'terminal') AS v", row.sandbox_name)
+    : row.reason === "ephemeral" ? await sql("SELECT sandbox_reap_claim_ephemeral($1) AS v", row.sandbox_name)
+    : await sql("SELECT sandbox_reap_claim_idle($1, $2, $3) AS v", row.sandbox_name, row.reason, SANDBOX_IDLE_CAP_PER_ACCOUNT);
   if (claim.rows[0]?.v !== "claimed") return skip();
   if (state === "stopped") {
     result.callsUsed++;

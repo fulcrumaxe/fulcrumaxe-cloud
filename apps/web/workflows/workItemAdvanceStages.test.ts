@@ -35,6 +35,8 @@ interface SetupOptions {
   panel?: AdvanceStepResult;
   spec?: AdvanceStepResult;
   build?: AdvanceStepResult;
+  /** Build step answers, one per call, before `build` (or the default start) repeats. */
+  buildSequence?: AdvanceStepResult[];
   /** The executor run's statuses, read one per poll (the last repeats). */
   buildOutcomes?: AdvanceRunOutcome[];
   /** What the worker answers for a run other than the first one (a follow-up run, D#6 C22 section 7). */
@@ -66,7 +68,7 @@ function setup(o: SetupOptions = {}) {
     advanceTriage: vi.fn(async () => o.triage ?? { status: "triaged", stage: "discussing", workItemId: ROOT }),
     advancePanel: vi.fn(async (): Promise<AdvanceStepResult> => o.panel ?? { status: "completed", complete: true, missingRoles: [], round2Ran: false }),
     advanceSpec: vi.fn(async (): Promise<AdvanceStepResult> => o.spec ?? { status: "published", stage: "spec_ready", version: 1 }),
-    advanceBuild: vi.fn(async (): Promise<AdvanceStepResult> => o.build ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
+    advanceBuild: vi.fn(async (): Promise<AdvanceStepResult> => (o.buildSequence?.length ? o.buildSequence.shift()! : undefined) ?? o.build ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
@@ -188,6 +190,25 @@ describe("the build for an item at Spec ready", () => {
     setup({ item: AT_SPEC, buildOutcomes: [{ status: "succeeded", done: true, envelope: { summary: "SECRET-MODEL-TEXT" } }] });
     await workItemAdvanceWorkflow(ARGS);
     expect(JSON.stringify(logs)).not.toContain("SECRET");
+  });
+
+  it("a start that meets a reaper claim waits and starts again, with no error on the card: the third try starts the run", async () => {
+    const reaping: AdvanceStepResult = { status: "refused", reason: "start_sandbox_reaping" };
+    const w = setup({ item: AT_SPEC, buildSequence: [reaping, reaping], stages: ["pr_opened"] });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(3);
+    expect(world.sleeps).toBe(2);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(events()).toEqual(["advance.build_waiting", "advance.build_waiting", "advance.build_started", "advance.build_ended", "advance.built", "advance.stopped"]);
+    expect(events()).not.toContain("advance.failed");
+  });
+
+  it("a claim that never ends is given up on after eight waits (705 s, past the claim's 10-minute expiry) with the fixed reason", async () => {
+    const reaping: AdvanceStepResult = { status: "refused", reason: "start_sandbox_reaping" };
+    const w = setup({ item: AT_SPEC, build: reaping });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_sandbox_reaping" });
+    expect(w.advanceBuild).toHaveBeenCalledTimes(9);
+    expect(world.sleeps).toBe(8);
   });
 
   it("a refused build start (no model key, spend refused, another run live) changes nothing: the item stays at Spec ready, approvable again, and the log says why", async () => {

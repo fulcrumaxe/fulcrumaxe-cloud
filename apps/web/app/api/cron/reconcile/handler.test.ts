@@ -72,6 +72,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       ...RECONCILE_JOBS.map((job) => job.name),
       "sandbox_reap_terminal",
       "sandbox_reap_ephemeral",
+      "sandbox_reap_idle",
       "sandbox_inventory",
       "github_installations",
       "github_repos",
@@ -204,7 +205,7 @@ describe("the schedule", () => {
 });
 
 describe("the sandbox reaper's wiring (C82 sections 2 and 3)", () => {
-  const SANDBOX_JOBS = ["sandbox_reap_terminal", "sandbox_reap_ephemeral", "sandbox_inventory"];
+  const SANDBOX_JOBS = ["sandbox_reap_terminal", "sandbox_reap_ephemeral", "sandbox_reap_idle", "sandbox_inventory"];
   const ctx = (): JobContext => ({ pool: {} as never, cursor: null, signal: new AbortController().signal, calls: { limit: 60, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
 
   function worker() {
@@ -237,7 +238,7 @@ describe("the sandbox reaper's wiring (C82 sections 2 and 3)", () => {
     const getWorkerSpy = vi.fn(async () => w);
     expect(await drive({ sandboxReapMode: raw, getWorker: getWorkerSpy })).toEqual(SANDBOX_JOBS.map((n) => [n, "ran"]));
     expect(getWorkerSpy).toHaveBeenCalledTimes(1);
-    expect(sweeps.map((s) => [s.pass, s.mode])).toEqual([["terminal", mode], ["ephemeral", mode]]);
+    expect(sweeps.map((s) => [s.pass, s.mode])).toEqual([["terminal", mode], ["ephemeral", mode], ["idle", mode]]);
     expect(inventories).toHaveLength(1);
   });
 

@@ -279,6 +279,18 @@ export class WorkItemHaltedError extends Error {
   }
 }
 
+/**
+ * Thrown by `insertAgentRun` when the executor sandbox the run would reuse is inside a reaper claim (0761's lock, SQLSTATE FXR01).
+ * Nothing was written. It is transient: the claim ends when the delete is marked done (or expires after 10 minutes), and the same
+ * start then succeeds on a fresh sandbox. Callers retry it with a backoff; none treats it as a refusal of the work.
+ */
+export class SandboxReapingError extends Error {
+  constructor() {
+    super("the executor sandbox is being reaped");
+    this.name = "SandboxReapingError";
+  }
+}
+
 const ONE_LIVE_EXECUTOR_PER_PR_INDEX = "agent_runs_one_live_executor_per_pr";
 
 /** The exposure already frozen for this run's work item (its earliest run
@@ -380,6 +392,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
   } catch (err) {
     const pgErr = err as { code?: string; constraint?: string } | undefined;
     if (pgErr?.code === "HX409") throw new WorkItemHaltedError();
+    if (pgErr?.code === "FXR01") throw new SandboxReapingError();
     if (pgErr?.code === "23505" && pgErr.constraint === ONE_LIVE_EXECUTOR_PER_PR_INDEX) {
       throw new DuplicateExecutorRunError();
     }
