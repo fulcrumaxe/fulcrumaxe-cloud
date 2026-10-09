@@ -20,3 +20,16 @@ export {
 } from "./errorCodes.js";
 export { configureErrorReporter, createErrorReporter, reportError } from "./reportError.js";
 export type { ErrorClass, ErrorReporter, ErrorReporterOptions, ErrorSink, ReportContext } from "./reportError.js";
+export {
+  DIGEST_DEFAULT_WINDOW_HOURS,
+  DIGEST_MAX_CLASSES,
+  DIGEST_MAX_JUMPS,
+  DIGEST_MAX_WINDOW_HOURS,
+  JUMP_BASELINE_HOURS,
+  JUMP_FACTOR,
+  JUMP_MIN_HOURLY,
+  NEW_CLASS_LOOKBACK_HOURS,
+  buildDigest,
+  digestLookbackHours,
+} from "./digest.js";
+export type { BuildDigestInput, Digest, DigestAlert, DigestAlertKind, DigestClass, DigestJump, DigestLap, ErrorEventRow } from "./digest.js";
