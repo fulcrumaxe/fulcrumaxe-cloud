@@ -208,6 +208,16 @@ describe("cleanEnv allowlist", () => {
     expect(envAccessViolations("import vm from 'node:vm';", "src/engines/claude/engine.ts")).not.toEqual([]);
   });
 
+  it("the exact token /proc is allowed in the sandbox probe's file only; a path below it, its environment files and any other file are still refused", () => {
+    const probe = "src/sandbox/probe.ts";
+    expect(envAccessViolations("const a = ['--proc', '/proc'];", probe)).toEqual([]);
+    expect(envAccessViolations("const a = ['--proc', '/proc'];", "src/sandbox/select.ts")).not.toEqual([]);
+    expect(envAccessViolations("const a = ['--proc', '/proc'];")).not.toEqual([]);
+    for (const sample of ["const p = '/proc/';", "const p = '/proc/self/environ';", "const p = '/proc/sys/x';", "const p = '/proc/' + 'self';", "const p = path.join('/proc', 'self');", "const p = 'proc';", "const p = '/proc/net';", "const p = '/' + 'proc';"]) {
+      expect(envAccessViolations(sample, probe), sample).not.toEqual([]);
+    }
+  });
+
   it.each(BYPASSES)("the guard flags a bypass: %s", (_name, sample) => {
     expect(envAccessViolations(sample), sample).not.toEqual([]);
   });

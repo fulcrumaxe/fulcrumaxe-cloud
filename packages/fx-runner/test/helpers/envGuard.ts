@@ -61,7 +61,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
   "src/engines/claude/filePermissions.ts": ["path"],
-  "src/engines/claude/pin.ts": ["fs", "path"],
+  "src/engines/claude/pin.ts": ["crypto", "fs", "path"], // crypto: a random name for the flags-cache temp file, made with an exclusive create
   "src/engines/claude/session.ts": ["crypto", "fs", "path"], // crypto: random temp-file names for the index write
   "src/engines/claude/processGroup.ts": [],
   "src/engines/claude/settingsFile.ts": ["fs", "path"],
@@ -71,9 +71,18 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/hostSandbox.ts": ["fs", "path"],
   "src/sandbox/platform.ts": ["os"],
   "src/sandbox/select.ts": ["fs", "path"],
+  "src/sandbox/probe.ts": ["path"], // the sandbox probe (`doctor`): paths for the probe's rules; the machine itself is reached only through its host argument
+  "src/sandbox/probeHost.ts": ["fs"], // the real machine behind the probe: stat and a bounded read of a few small files; the process start is the engine kit's
   "src/sandbox/sandboxSettings.ts": ["fs", "path"],
   "src/job/plainSegment.ts": ["path"],
 };
+
+/**
+ * Files that may hold the exact string token `/proc` and nothing longer: the sandbox probe hands it to bubblewrap as the mount point of a
+ * fresh process table, as the installed agent CLI does, so the probe fails where a job would on a host that masks it. A path below it
+ * (`/proc/`), the process table's environment files and a `proc` segment anywhere else stay banned in every file.
+ */
+export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts"];
 
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.replace(/^node:/, "")]));
 const BANNED_EXEC_NAMES = new Set(["exec", "execSync", "execFile", "execFileSync", "fork", "spawnSync"]);
@@ -232,7 +241,15 @@ export function envAccessViolations(text: string, file: string = ENV_READER_FILE
       if (node.text.includes("/proc/")) found.add("/proc/ path");
       if (node.text === "constructor") found.add("constructor member");
       if (BANNED_STRINGS.has(node.text)) found.add("child process function named by a string");
-      if (/environ(?!ment)/i.test(node.text) || node.text.split(/[\\/]/).includes("proc")) found.add("proc path segment or environ file");
+      // Allowed only as the element right after "--proc" in an array literal: the mount-point argument, never a path being built.
+      const parent = node.parent;
+      const exactProc =
+        node.text === "/proc" && EXACT_PROC_TOKEN_FILES.includes(file) && ts.isArrayLiteralExpression(parent) &&
+        (() => {
+          const before = parent.elements[parent.elements.indexOf(node as ts.Expression) - 1];
+          return before !== undefined && ts.isStringLiteralLike(before) && before.text === "--proc";
+        })();
+      if (/environ(?!ment)/i.test(node.text) || (!exactProc && node.text.split(/[\\/]/).includes("proc"))) found.add("proc path segment or environ file");
     }
     const load = loadedSpecifier(node);
     if (load) {

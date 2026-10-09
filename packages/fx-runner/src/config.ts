@@ -74,7 +74,14 @@ export function readPrivateFile(dir: string, name: string): string | undefined {
   }
   if (!info.isFile()) throw new CliError(`${target} is not a plain file`);
   if ((info.mode & 0o077) !== 0) throw new CliError(`${target} can be read by other users; run: chmod 600 ${target}`);
-  return readFileSync(target, "utf8");
+  try {
+    return readFileSync(target, "utf8");
+  } catch (error) {
+    // A file at mode 0000 (or owned by another user) passes the mode test above and then cannot be opened.
+    const code = (error as { code?: string }).code;
+    if (code === "EACCES" || code === "EPERM") throw new CliError(`${target} cannot be read by this user (permission denied); check who owns it, then run: chmod 600 ${target}`);
+    throw error;
+  }
 }
 
 /** A lock older than this was left by a run that died; two minutes is far beyond one request's 15-second timeout. */

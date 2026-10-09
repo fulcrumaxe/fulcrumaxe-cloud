@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { runCli } from "../../src/cli.js";
 import { MACOS_PREVIEW_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
+import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 
 let root: string;
 let stateDir: string;
@@ -29,6 +30,11 @@ beforeEach(() => {
   mkdirSync(toolbin);
   fake = makeFake();
   symlinkSync(fake.binary, path.join(toolbin, "claude"));
+  // The sandbox probe looks for the two tools on the search path; the fake sandbox host answers for them.
+  for (const name of ["bwrap", "socat"]) {
+    writeFileSync(path.join(toolbin, name), "#!/bin/sh\n");
+    chmodSync(path.join(toolbin, name), 0o755);
+  }
   // The fake is a shell script, so it needs the system tools too; the fake CLI comes first.
   vi.stubEnv("PATH", `${toolbin}:${HOST_PATH}`);
   for (const name of Object.keys(SECRETS)) vi.stubEnv(name, "");
@@ -53,7 +59,7 @@ interface Result {
 async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date } = {}): Promise<Result> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch) };
-  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), ...over.host };
+  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), ...over.host };
   const code = await doctorCommand(ctx, host);
   return { code, out: lines.join("\n") };
 }
@@ -65,7 +71,7 @@ describe("a healthy machine", () => {
     register();
     const result = await doctor();
     expect(result.code).toBe(0);
-    for (const label of ["Registration", "Cloud", "Claude CLI", "Claude version", "Claude flags", "Claude login", "Shell variables"]) expect(levelOf(result.out, label), label).toBe("PASS");
+    for (const label of ["Registration", "Cloud", "Claude CLI", "Claude version", "Claude flags", "Claude login", "Sandbox", "Shell variables"]) expect(levelOf(result.out, label), label).toBe("PASS");
     expect(result.out).toContain(fake.binary);
     expect(result.out).toContain(`at least ${MIN_CLAUDE_VERSION}: yes`);
     expect(result.out).toContain("Claude login:      yes (claude.ai)");
@@ -203,6 +209,26 @@ describe("files other users can read are a permission fix, not a damaged registr
     expect(result.code).toBe(1);
   });
 
+  it.skipIf(process.getuid?.() === 0)("a registration file the owner cannot read (mode 0000) is a FAIL line with a chmod hint, not a thrown error, and the later checks still run", async () => {
+    register();
+    chmodSync(path.join(stateDir, "registration.json"), 0);
+    const result = await doctor();
+    expect(levelOf(result.out, "Registration")).toBe("FAIL");
+    expect(result.out).toMatch(/registration\.json cannot be read by this user \(permission denied\); check who owns it, then run: chmod 600 .*registration\.json/);
+    for (const label of ["Claude CLI", "Claude version", "Claude flags", "Sandbox"]) expect(levelOf(result.out, label), label).toBe("PASS");
+    expect(result.code).toBe(1);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("a runner key the owner cannot read is the same kind of FAIL line", async () => {
+    register();
+    chmodSync(path.join(stateDir, "runner-key.pem"), 0);
+    const result = await doctor();
+    expect(levelOf(result.out, "Registration")).toBe("FAIL");
+    expect(result.out).toMatch(/runner-key\.pem cannot be read by this user \(permission denied\)/);
+    expect(levelOf(result.out, "Cloud")).toBe("PASS");
+    expect(result.code).toBe(1);
+  });
+
   it("a registration that really is damaged still says so", async () => {
     register();
     writeFileSync(path.join(stateDir, "registration.json"), "{ not json", { mode: 0o600 });
@@ -242,7 +268,7 @@ describe("shell variables and secrets", () => {
       stdout: (t) => (out += t),
       stderr: (t) => (out += t),
       fetchFn: (async () => new Response("")) as typeof fetch,
-      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn) },
+      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost() },
     });
     expect(code).toBe(0);
     expect(out).toContain("ANTHROPIC_API_KEY is set");
@@ -255,5 +281,87 @@ describe("macOS", () => {
     register();
     expect((await doctor({ host: { platform: "darwin" } })).out).toContain(MACOS_PREVIEW_NOTICE);
     expect((await doctor({ host: { platform: "linux" } })).out).not.toContain("not yet verified");
+  });
+});
+
+describe("the sandbox check", () => {
+  const OS = (...lines: string[]): Record<string, string> => ({ "/etc/os-release": `${lines.join("\n")}\n` });
+  const sandboxLines = (out: string): string[] => out.split("\n").filter((line) => line.includes("Sandbox:"));
+
+  it("PASS names the tool that ran the test command, and the CLI is still asked only its three questions", async () => {
+    register();
+    const host = fakeSandboxHost();
+    const result = await doctor({ host: { sandbox: host } });
+    expect(sandboxLines(result.out)).toEqual(["PASS  Sandbox:           a test command ran inside the job's sandbox rules (bubblewrap)"]);
+    expect(host.calls).toHaveLength(1);
+    expect(fake.calls()).toEqual(["--version ", "--help ", "auth status"]);
+  });
+
+  it("macOS PASS names Seatbelt and keeps the preview notice", async () => {
+    register();
+    const result = await doctor({ host: { platform: "darwin", sandbox: fakeSandboxHost({ files: { "/usr/bin/sandbox-exec": "" } }) } });
+    expect(levelOf(result.out, "Sandbox")).toBe("PASS");
+    expect(result.out).toContain("(seatbelt)");
+    expect(result.out).toContain(MACOS_PREVIEW_NOTICE);
+  });
+
+  type Case = [name: string, files: Record<string, string>, sysctls: Record<string, string>, stderr: string, line: string, fix: string];
+  const cases: Case[] = [
+    ["userns_disabled", OS("ID=debian"), { "user.max_user_namespaces": "0\n" }, "bwrap: No permissions to create new namespace", "userns_disabled: this kernel has unprivileged user namespaces switched off", "sudo sysctl -w user.max_user_namespaces=15000"],
+    ["apparmor_userns_restricted on Ubuntu", OS("ID=ubuntu"), { "kernel.apparmor_restrict_unprivileged_userns": "1\n" }, "bwrap: setting up uid map: Permission denied", "apparmor_userns_restricted: AppArmor restricts", "sudo apparmor_parser -r /etc/apparmor.d/bwrap"],
+    ["probe_failed_other on Fedora", OS("ID=fedora"), {}, "bwrap: odd failure", "probe_failed_other: bwrap: odd failure", "Run: sudo dnf install -y bubblewrap socat"],
+    ["probe_failed_other on NixOS", { "/etc/NIXOS": "" }, {}, "bwrap: odd failure", "probe_failed_other: bwrap: odd failure", "environment.systemPackages = [ pkgs.bubblewrap pkgs.socat ];"],
+  ];
+  for (const [name, files, sysctls, stderr, line, fix] of cases) {
+    it(`${name}: a FAIL line with the code and reason, the fix for the distro under it, and exit code 1`, async () => {
+      register();
+      const result = await doctor({ host: { sandbox: fakeSandboxHost({ files, sysctls, outcome: failing(stderr) }) } });
+      expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
+      expect(result.out).toContain(line);
+      expect(result.out).toContain(fix);
+      expect(result.out).toContain("1 check failed.");
+      expect(result.code).toBe(1);
+    });
+  }
+
+  it("a missing bubblewrap is bwrap_missing with the install line for the distro, and nothing is started", async () => {
+    register();
+    const sysbin = path.join(root, "sysbin");
+    mkdirSync(sysbin);
+    // The fake CLI is a shell script that needs `cat`; the host's own search path (which may hold a real bwrap) is left out.
+    symlinkSync(execFileSync("which", ["cat"], { encoding: "utf8" }).trim(), path.join(sysbin, "cat"));
+    rmSync(path.join(toolbin, "bwrap"));
+    vi.stubEnv("PATH", `${toolbin}:${sysbin}`);
+    const host = fakeSandboxHost({ files: OS('ID="arch"') });
+    const result = await doctor({ host: { sandbox: host } });
+    expect(result.out).toContain("FAIL  Sandbox:           bwrap_missing: bubblewrap (bwrap) is not installed");
+    expect(result.out).toContain("      Run: sudo pacman -S --needed bubblewrap socat");
+    expect(host.calls).toEqual([]);
+  });
+
+  it("with no HOME the sandbox cannot be set up: FAIL, and nothing is started", async () => {
+    register();
+    const host = fakeSandboxHost();
+    const result = await doctor({ host: { home: undefined, sandbox: host } });
+    expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
+    expect(result.out).toContain("HOME is not set");
+    expect(host.calls).toEqual([]);
+  });
+
+  it("a failing sandbox stops no other check, and the run is not reported as passed", async () => {
+    register();
+    const result = await doctor({ host: { sandbox: fakeSandboxHost({ outcome: failing("boom") }) } });
+    for (const label of ["Registration", "Cloud", "Claude CLI", "Claude version", "Claude flags", "Claude login"]) expect(levelOf(result.out, label), label).toBe("PASS");
+    expect(result.out).not.toContain("All checks passed.");
+  });
+
+  it("with fake token values in the shell and in the tool's error text, doctor's output holds none of them", async () => {
+    register();
+    for (const [name, value] of Object.entries(SECRETS)) vi.stubEnv(name, value);
+    const host = fakeSandboxHost({ outcome: failing(`bwrap: failed with ${SECRETS.CLAUDE_CODE_OAUTH_TOKEN} and ${SECRETS.ANTHROPIC_API_KEY}`) });
+    const result = await doctor({ host: { sandbox: host, shellVars: ["ANTHROPIC_API_KEY"] } });
+    expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
+    for (const value of Object.values(SECRETS)) expect(result.out).not.toContain(value);
+    expect(JSON.stringify(host.calls)).not.toContain(SECRETS.CLAUDE_CODE_OAUTH_TOKEN);
   });
 });

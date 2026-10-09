@@ -138,6 +138,12 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "service_unsupported",
   "service_unit_foreign",
   "service_path_unsupported",
+  // R4a-5 sandbox probe (D#6, C16): why `fx-runner doctor` finds the machine's sandbox unusable.
+  "bwrap_missing",
+  "socat_missing",
+  "userns_disabled",
+  "apparmor_userns_restricted",
+  "probe_failed_other",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

@@ -14,16 +14,21 @@ import type { CommandContext } from "../context.js";
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_TEXT = 20_000;
+const LINE_BREAKS = /[\n\u2028\u2029]/;
+// Controls (newline and tab kept), the zero-width characters U+200B to U+200D, the bidirectional marks U+200E, U+200F, U+061C, the overrides and embeddings U+202A to U+202E, the isolates U+2066 to U+2069, and U+FEFF.
+const INVISIBLE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
 /** The whole file is read at once, so a transcript past this is refused with a plain message. */
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
 
 /**
  * What may reach the terminal. Control characters (keeping newline and tab) are dropped first, so none can split a secret the
- * redactor would otherwise match; then the redactor runs; then a long line is cut.
+ * redactor would otherwise match; then the redactor runs; then a long line is cut. The bidirectional overrides and isolates and the
+ * zero-width characters go with the control characters, so a line cannot be shown reordered or with text hidden in it. Shared with the
+ * sandbox probe's one-line reason in `doctor`.
  */
-function printable(text: string): string {
-  const clean = redactText(text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ""), []);
-  return clean.length > MAX_TEXT ? `${clean.slice(0, MAX_TEXT)}... (cut)` : clean;
+export function printable(text: string, maxChars: number = MAX_TEXT): string {
+  const clean = redactText(text.replace(INVISIBLE, ""), []);
+  return clean.length > maxChars ? `${clean.slice(0, maxChars)}... (cut)` : clean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -78,8 +83,9 @@ export function logsCommand(run: string | undefined, ctx: CommandContext): numbe
     }
     if (!isRecord(record) || typeof record.line !== "string") continue;
     const lines = record.kind === "stdout" ? renderAgentLine(run, record.line) : record.kind === "stderr" || record.kind === "meta" ? [`${record.kind}: ${record.line}`] : [];
-    // An embedded newline must not start a line that looks like one of ours (`meta:`, `result:`): continuation lines are marked.
-    for (const line of lines) printable(line).split("\n").forEach((part, i) => ctx.out(i === 0 ? part : `  | ${part}`));
+    // An embedded line break must not start a line that looks like one of ours (`meta:`, `result:`): continuation lines are marked.
+    // U+2028 and U+2029 are line breaks to a viewer that renders text, so they split like a newline does.
+    for (const line of lines) printable(line).split(LINE_BREAKS).forEach((part, i) => ctx.out(i === 0 ? part : `  | ${part}`));
   }
   return 0;
 }
