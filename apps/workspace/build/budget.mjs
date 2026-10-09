@@ -16,7 +16,11 @@ export const BOOT_BUDGET = Object.freeze({
   // Total brotli (q11) bytes over the same set.
   // Raised from 250 KB to 320 KB by owner ruling 2026-09-30 (PM correction,
   // D#37 C26): main sat at 249,159 of 256,000 and Launch needs ~45 KB more.
-  maxBrotliBytes: 320 * 1024,
+  // Raised again from 320 KB to 448 KB by owner ruling 2026-10-09 (PM
+  // correction, D#37 C46): main sat at 324,530 of 327,680 and the remaining
+  // Launch UI needs about 55-100 KB more. Lowered again after WS-D4 (comment
+  // stripping) lands.
+  maxBrotliBytes: 448 * 1024,
   // Boot files a single first-party app may ship under apps/<id>/.
   // Raised from 4 to 5 by owner ruling 2026-09-30 (D#37 C40, WS-F15b: the
   // Developer app's API reference tab).
