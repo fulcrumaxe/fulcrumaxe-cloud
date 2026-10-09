@@ -7,7 +7,7 @@
  *
  * Every refusal is the one closed code `push_ref_refused`; no path or file content is put in an error.
  */
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { GitPathError } from "./git.js";
 
@@ -34,6 +34,36 @@ const refuse = (): never => {
 const MAX_ENTRIES = 100_000;
 /** `objects/info/alternates` is one short line. */
 const MAX_ALTERNATES_BYTES = 4096;
+
+/**
+ * Reads a small file of the workspace without ever waiting on it: no-follow, non-blocking open (a FIFO swapped in after the lstat would
+ * block a plain read forever), then the opened descriptor itself must be a regular file no larger than `cap`. Refuses otherwise,
+ * with the one closed code, and never lets a raw open error (which names the path) out.
+ */
+export function readSmallRegular(file: string, cap: number): string {
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch {
+    // fx-swallow-ok: replaced by the closed code; the raw open error (ELOOP, ENOENT, ...) carries the path
+    return refuse();
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > cap) return refuse();
+    const buffer = Buffer.alloc(cap + 1);
+    let length = 0;
+    for (;;) {
+      const read = readSync(fd, buffer, length, cap + 1 - length, null);
+      if (read === 0) break;
+      length += read;
+      if (length > cap) return refuse();
+    }
+    return buffer.toString("utf8", 0, length);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /** Refuses a link, or an entry that is neither a file nor a directory, anywhere under `dir`. */
 function assertPlainTree(dir: string, budget: { left: number }): void {
@@ -105,8 +135,7 @@ export function assertGitDirShape(gitDir: string, mirrorObjects: string, require
   }
   if (kind !== "file") refuse();
   const lines = closed(() => {
-    const text = readFileSync(alternates, "utf8");
-    if (text.length > MAX_ALTERNATES_BYTES) refuse();
+    const text = readSmallRegular(alternates, MAX_ALTERNATES_BYTES);
     return text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
   });
   // Git reads a relative line against `objects/`, not the daemon's directory, so only an absolute line is ever compared.

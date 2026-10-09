@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitCapture } from "../../src/daemon/git.js";
 import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { pushPlan } from "../../src/daemon/push.js";
-import { assertWorkspaceGit } from "../../src/daemon/workspaceGit.js";
+import { assertWorkspaceGit, readSmallRegular } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
 
 let root: string;
@@ -256,5 +256,81 @@ describe("assertWorkspaceGit on its own", () => {
     expect(assertWorkspaceGit(r.workspace, path.join(r.mirror, "objects"))).toBe(r.gitDir);
     expect(readFileSync(path.join(r.gitDir, "objects", "info", "alternates"), "utf8").trim()).toBe(path.join(r.mirror, "objects"));
     expect(existsSync(path.join(r.gitDir, "commondir"))).toBe(false);
+  });
+});
+
+describe("readSmallRegular: an early read of the workspace never waits on it", () => {
+  const file = (): string => path.join(root, "small");
+
+  it("reads a regular file within the cap, and refuses one over it", () => {
+    writeFileSync(file(), "abc\n");
+    expect(readSmallRegular(file(), 4096)).toBe("abc\n");
+    expect(readSmallRegular(file(), 4)).toBe("abc\n");
+    expect(() => readSmallRegular(file(), 3)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+  });
+
+  /**
+   * Runs `readSmallRegular(target, 4096)` in a child process with a timeout. A missing O_NONBLOCK blocks the open of a FIFO on the calling
+   * thread, which no vitest timeout can interrupt, so the read runs where a kill can stop it: a regression fails the test, it does not hang it.
+   */
+  const readInChild = (target: string): { stdout: string; blocked: boolean } => {
+    // Node strips the types itself; the one thing it cannot do is map the sources' `.js` import names to their `.ts` files.
+    const hooks = "export async function resolve(s,c,n){try{return await n(s,c)}catch(e){if(s.endsWith('.js'))return n(s.slice(0,-3)+'.ts',c);throw e}}";
+    const script = [
+      'import { register } from "node:module";',
+      `register("data:text/javascript," + encodeURIComponent(${JSON.stringify(hooks)}));`,
+      `const { readSmallRegular } = await import(${JSON.stringify(new URL("../../src/daemon/workspaceGit.ts", import.meta.url).href)});`,
+      "try { readSmallRegular(process.argv[1], 4096); console.log('read'); } catch (error) { console.log(error.code ?? 'other'); }",
+    ].join("\n");
+    try {
+      const stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script, target], { encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+      return { stdout: stdout.trim(), blocked: false };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ETIMEDOUT") return { stdout: "", blocked: true };
+      throw error;
+    }
+  };
+
+  it("control: the child process reads an ordinary file", () => {
+    writeFileSync(file(), "abc\n");
+    expect(readInChild(file())).toEqual({ stdout: "read", blocked: false });
+  });
+
+  it("refuses a FIFO at once instead of blocking on it (a swap after the lstat)", () => {
+    execFileSync("mkfifo", [file()]);
+    expect(readInChild(file())).toEqual({ stdout: "push_ref_refused", blocked: false });
+  });
+
+  it("refuses a link, and a file over the cap", () => {
+    writeFileSync(path.join(root, "target"), "x\n");
+    symlinkSync(path.join(root, "target"), file());
+    expect(() => readSmallRegular(file(), 4096)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+    rmSync(file());
+    writeFileSync(file(), "x".repeat(5000));
+    expect(() => readSmallRegular(file(), 4096)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+  });
+
+  it("a raw open error (a link: ELOOP, a missing file: ENOENT) never reaches the caller, so no path does", () => {
+    writeFileSync(path.join(root, "target"), "x\n");
+    symlinkSync(path.join(root, "target"), file());
+    for (const target of [file(), path.join(root, "no-such-file")]) {
+      let thrown: unknown;
+      try {
+        readSmallRegular(target, 4096);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: "push_ref_refused", message: "push_ref_refused" });
+      expect(String((thrown as Error).message)).not.toContain(root);
+    }
+  });
+
+  it("assertWorkspaceGit reads alternates through it: an oversize alternates file is refused", () => {
+    const dir = path.join(root, "ws-big");
+    mkdirSync(path.join(dir, ".git", "refs"), { recursive: true });
+    mkdirSync(path.join(dir, ".git", "objects", "info"), { recursive: true });
+    writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/x\n");
+    writeFileSync(path.join(dir, ".git", "objects", "info", "alternates"), `${"/m/objects\n".repeat(1000)}`);
+    expect(() => assertWorkspaceGit(dir, "/m/objects")).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
   });
 });
