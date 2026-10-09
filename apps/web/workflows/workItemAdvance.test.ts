@@ -246,11 +246,62 @@ describe("the workflow body obeys the Workflow builder's rule", () => {
     // node:net, ...) and `next build` refuses. The unit tests cannot see that, so the rule is pinned on the source.
     const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "workItemAdvance.ts"), "utf8");
     const body = src.slice(src.indexOf("export async function workItemAdvanceWorkflow"));
-    for (const name of ["getWorker", "getIssueReader", "loadBody", "runOutcomeBody", "startClassifyBody", "triageBody", "categoryOf", "buildClassifyRunPrompt", "decideFromLabels", "panelBody", "specBody", "buildBody", "buildOutcomeBody", "stageBody", "buildFailedBody", "buildExecutorPrompt", "runSpecForItem", "cancelRunBody", "startLightSpecBody", "publishLightSpecBody", "buildLightSpecPrompt", "openInstallationHttp", "reviewLoadBody", "findPrBody", "reviewPlanBody", "startReviewerBody", "reviewerOutcomeBody", "recordRoundBody", "startFixBody", "mergeGateBody", "eventBody", "buildReviewPrompt", "buildFixPrompt", "securityTriggers", "readVerdict"]) {
+    for (const name of ["getWorker", "getIssueReader", "loadBody", "runOutcomeBody", "startClassifyBody", "triageBody", "categoryOf", "buildClassifyRunPrompt", "decideFromLabels", "panelBody", "specBody", "buildBody", "buildOutcomeBody", "stageBody", "buildFailedBody", "buildExecutorPrompt", "runSpecForItem", "cancelRunBody", "startLightSpecBody", "publishLightSpecBody", "buildLightSpecPrompt", "startRespecBody", "publishRespecBody", "buildRespecPrompt", "openInstallationHttp", "reviewLoadBody", "findPrBody", "reviewPlanBody", "startReviewerBody", "reviewerOutcomeBody", "recordRoundBody", "startFixBody", "mergeGateBody", "eventBody", "buildReviewPrompt", "buildFixPrompt", "securityTriggers", "readVerdict"]) {
       expect(body, name).not.toContain(name);
     }
     const imports = [...src.matchAll(/^import (?!type)[^;]*from "([^"]+)";/gm)].map((m) => m[1]);
-    expect(imports).toEqual(["workflow", "../lib/worker", "../lib/github/issueRead", "../lib/github/installationHttp", "../lib/advanceLightSteps", "../lib/advanceSteps", "../lib/advanceStageSteps", "../lib/advanceReviewSteps"]);
+    expect(imports).toEqual(["workflow", "../lib/worker", "../lib/github/issueRead", "../lib/github/installationHttp", "../lib/advanceLightSteps", "../lib/advanceRespecSteps", "../lib/advanceSteps", "../lib/advanceStageSteps", "../lib/advanceReviewSteps"]);
+  });
+});
+
+describe("workItemAdvanceWorkflow: Re-spec (D#6 R4d-5b)", () => {
+  const RESPEC: AdvanceStartArgs = { ...ARGS, respec: true, specVersion: 4 };
+  function respecWorld(o: { outcomes?: AdvanceRunOutcome[]; published?: { status: string; reason: string | null; version: number | null }; text?: { version: number; body: string } | null; start?: { ok: true; runId: string } | { ok: false; reason: string } } = {}) {
+    const w = setup({ outcomes: o.outcomes ?? [{ status: "succeeded", done: true, envelope: { acceptance_files: ["src/a.ts"] } }], start: o.start });
+    const extra = w as unknown as Record<string, unknown>;
+    extra.advanceLoadSpecText = vi.fn(async () => (o.text === undefined ? { version: 4, body: "SPEC BODY" } : o.text));
+    extra.advanceRespec = vi.fn(async () => o.published ?? { status: "published", reason: null, version: 5 });
+    extra.advanceCancel = vi.fn(async () => undefined);
+    return w as typeof w & { advanceLoadSpecText: ReturnType<typeof vi.fn>; advanceRespec: ReturnType<typeof vi.fn>; advanceCancel: ReturnType<typeof vi.fn> };
+  }
+
+  it("runs the project manager in file-list mode on the pinned Spec, publishes the next version from its run, and stops: no issue read, no build", async () => {
+    const w = respecWorld();
+    expect(await workItemAdvanceWorkflow(RESPEC)).toEqual({ status: "respec_published" });
+    expect(w.advanceLoadItem).not.toHaveBeenCalled();
+    expect(w.advanceLoadSpecText).toHaveBeenCalledWith(expect.objectContaining({ workItemId: ITEM }), 4);
+    expect(w.advanceStartRun).toHaveBeenCalledTimes(1);
+    expect(w.advanceStartRun.mock.calls[0]![0]).toMatchObject({ role: "project-manager", step: `respec:${ARGS.actionId}`, clone: true });
+    expect(w.advanceRespec).toHaveBeenCalledWith(expect.objectContaining({ workItemId: ITEM }), "run-1", ARGS.actionId, 4);
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+    expect(events()).toEqual(["advance.respec_published"]);
+  });
+
+  it("an unreadable list is the worker's refusal: nothing more is done and the result carries the fixed code", async () => {
+    const w = respecWorld({ published: { status: "refused", reason: "invalid_file_scope", version: null } });
+    expect(await workItemAdvanceWorkflow(RESPEC)).toEqual({ status: "respec_refused", detail: "invalid_file_scope" });
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "timed_out", "cancelled"])("a project-manager run that ends %s publishes nothing", async (status) => {
+    const w = respecWorld({ outcomes: [{ status, done: true, envelope: null }] });
+    expect(await workItemAdvanceWorkflow(RESPEC)).toEqual({ status: "respec_failed", detail: `run_${status}` });
+    expect(w.advanceRespec).not.toHaveBeenCalled();
+  });
+
+  it("a Spec that moved on, or a refused start, ends before any run exists", async () => {
+    const moved = respecWorld({ text: null });
+    expect(await workItemAdvanceWorkflow(RESPEC)).toEqual({ status: "failed", detail: "respec_refused:spec_changed" });
+    expect(moved.advanceStartRun).not.toHaveBeenCalled();
+    const refused = respecWorld({ start: { ok: false, reason: "no_model" } });
+    expect(await workItemAdvanceWorkflow(RESPEC)).toEqual({ status: "failed", detail: "respec_refused:no_model" });
+    expect(refused.advanceRespec).not.toHaveBeenCalled();
+  });
+
+  it("a press with no pinned version starts nothing", async () => {
+    const w = respecWorld();
+    expect(await workItemAdvanceWorkflow({ ...ARGS, respec: true, specVersion: null })).toEqual({ status: "failed", detail: "respec_refused:no_spec" });
+    expect(w.advanceStartRun).not.toHaveBeenCalled();
   });
 });
 

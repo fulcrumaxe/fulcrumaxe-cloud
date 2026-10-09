@@ -15,6 +15,8 @@ import { effectiveProvenance } from "./provenance.js";
 /** Criterion 6: a Spec can be (re)published only while the work item is
  * still being specified. */
 const SPEC_PUBLISH_STAGES = ["triaged", "discussing", "spec_ready"] as const;
+/** D#6 R4d-5b (C34 section 2.3): a Re-spec adds a version to a Spec that is already built from, so it is allowed at the two stages a build starts from. */
+const SPEC_RESPEC_STAGES = ["spec_ready", "needs_human"] as const;
 
 export interface SpecVersion {
   id: string;
@@ -75,6 +77,36 @@ export interface PublishSpecInput {
  * `external_requires_human` whatever the stage (HT-3), where "external" is
  * the item's effective provenance (its own or any ancestor's). */
 export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInput): Promise<SpecVersion> {
+  return writeSpecVersion(ctx, input, null);
+}
+
+export interface RespecSpecInput extends PublishSpecInput {
+  /**
+   * The version the new body was made from (its text plus the list). The write refuses `spec_changed` unless that is still the newest unerased version, so a
+   * Re-spec never puts a list chosen for one Spec on a different one.
+   */
+  basedOnVersion: number;
+}
+
+/**
+ * D#6 R4d-5b (C34 section 2.3): `spec.publish` for a Re-spec. Adds version N+1 to a Spec whose newest unerased version (N, which `basedOnVersion` names) stores no
+ * readable file list; the caller made the body (N's text with the list section) and the list. Everything `publishSpec` checks is checked here (a readable list,
+ * the body limit, the redaction, HT-3 on an external item, a question never getting a Spec, a halted item), and:
+ *  - the item must be at `spec_ready` or `needs_human` (any other stage is `spec_frozen`), and N must have no known list (`spec_has_file_list`: nothing to add,
+ *    so a second press after a success changes nothing) and still be the newest unerased version (`spec_changed`);
+ *  - from `spec_ready` the stage is left alone; from `needs_human` the insert and BOTH moves, `needs_human -> discussing -> spec_ready`, happen in this one
+ *    transaction (actor `person`, source `spec_version:<id>`): a failure anywhere leaves the item at `needs_human` with no new version, and it never sits at
+ *    `discussing` with no panel running. The caller has already validated the project manager's list, so this runs only after that.
+ */
+export async function respecSpec(ctx: DiscussionsContext, input: RespecSpecInput): Promise<SpecVersion> {
+  const basedOnVersion: unknown = Object.hasOwn(input, "basedOnVersion") ? input.basedOnVersion : undefined;
+  if (typeof basedOnVersion !== "number" || !Number.isSafeInteger(basedOnVersion) || basedOnVersion < 1) {
+    throw new DiscussionsError("invalid_input", "a Re-spec names the version its body was made from");
+  }
+  return writeSpecVersion(ctx, input, { basedOnVersion });
+}
+
+async function writeSpecVersion(ctx: DiscussionsContext, input: PublishSpecInput, respec: { basedOnVersion: number } | null): Promise<SpecVersion> {
   rejectAccountIdInInput(input as unknown as Record<string, unknown>);
   const access = assertAllowed(ctx.principal, "spec.publish");
   const workItemId = assertUuidOrNotFound(input.workItemId, "work item");
@@ -109,8 +141,20 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
         "a Spec on an external work item may be published only by a signed-in owner or admin",
       );
     }
-    if (!(SPEC_PUBLISH_STAGES as readonly string[]).includes(workItem.stage)) {
+    if (!((respec === null ? SPEC_PUBLISH_STAGES : SPEC_RESPEC_STAGES) as readonly string[]).includes(workItem.stage)) {
       throw new DiscussionsError("spec_frozen", `the Spec is frozen while the work item is "${workItem.stage}"`);
+    }
+    if (respec !== null) {
+      const { rows: latest } = await client.query<{ version: number; acceptance_files: unknown }>(
+        `SELECT version, frontmatter -> 'acceptance_files' AS acceptance_files FROM spec_versions
+          WHERE work_item_id = $1 AND erased_at IS NULL ORDER BY version DESC LIMIT 1`,
+        [workItemId],
+      );
+      if (latest.length === 0) throw new DiscussionsError("no_spec_version", "this work item has no Spec version to add a file list to");
+      if (Number(latest[0]!.version) !== respec.basedOnVersion) throw new DiscussionsError("spec_changed", "the Spec changed while the file list was being made");
+      if (parseAcceptanceScope(latest[0]!.acceptance_files).kind === "known") {
+        throw new DiscussionsError("spec_has_file_list", "the newest Spec version already has a readable file list");
+      }
     }
 
     await chargeStorage(client, accountIdOf(ctx.principal), utf8ByteLength(body));
@@ -133,14 +177,17 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
 
     let stage = workItem.stage;
     if (workItem.stage !== "spec_ready") {
-      await recordStage(client, {
-        workItemId,
-        toStage: "spec_ready",
-        at: new Date(),
-        source: "control_plane",
-        sourceRef: `spec_version:${specVersionId}`,
-        actor: actor.kind === "user" ? "person" : "automatic",
-      });
+      // A Re-spec from Needs a person goes through Discussing (the graph's own edges) and ends at Spec ready, all in this transaction, and is the person's act.
+      for (const toStage of workItem.stage === "needs_human" ? (["discussing", "spec_ready"] as const) : (["spec_ready"] as const)) {
+        await recordStage(client, {
+          workItemId,
+          toStage,
+          at: new Date(),
+          source: "control_plane",
+          sourceRef: `spec_version:${specVersionId}`,
+          actor: respec !== null || actor.kind === "user" ? "person" : "automatic",
+        });
+      }
       stage = "spec_ready";
     }
 

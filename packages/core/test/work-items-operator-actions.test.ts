@@ -12,8 +12,34 @@ import {
 } from '../src/work-items/operatorActions.js';
 
 /** The four ways a person moves a stuck work item. One table; the routes, the activity read and the Pipeline app's buttons all ask it. */
-const BASE: OperatorFacts = { stage: 'needs_human', discussion_id: 'd', kind: 'feature', has_spec: true, provenance: 'internal', repo_id: 'r', gh_number: '12', live_run: false, role: 'admin' };
+const BASE: OperatorFacts = { stage: 'needs_human', discussion_id: 'd', kind: 'feature', has_spec: true, provenance: 'internal', repo_id: 'r', gh_number: '12', live_run: false, role: 'admin', spec_file_list_known: true };
 const at = (over: Partial<OperatorFacts>): OperatorFacts => ({ ...BASE, ...over });
+
+describe('Re-spec (D#6 R4d-5b, C34 section 2.3)', () => {
+  const noList = (over: Partial<OperatorFacts> = {}) => at({ spec_file_list_known: false, ...over });
+
+  it('is offered at Spec ready and at Needs a person when the newest Spec has no readable list, and only then', () => {
+    expect(operatorActionsFor(noList({ stage: 'spec_ready' }))).toEqual(['respec', 'close']);
+    expect(operatorActionsFor(noList())).toEqual(['build_again', 'respec', 'back_to_discussion', 'close']);
+    expect(operatorActionsFor(at({ stage: 'spec_ready' }))).toEqual(['close']);
+    expect(operatorActionsFor(at({}))).not.toContain('respec');
+  });
+
+  it('is not offered at any other stage, without a Spec, for an unbuilt kind, for a member, an external item, a missing repo or issue, or a live run', () => {
+    for (const stage of ['triaged', 'discussing', 'in_progress', 'pr_opened', 'merged', 'closed']) expect(operatorVerdict('respec', noList({ stage })), stage).toMatchObject({ ok: false });
+    expect(operatorVerdict('respec', noList({ has_spec: false }))).toMatchObject({ ok: false });
+    expect(operatorVerdict('respec', noList({ kind: 'question' }))).toMatchObject({ ok: false });
+    expect(operatorVerdict('respec', noList({ role: 'member' }))).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('respec', noList({ provenance: 'external' }))).toMatchObject({ ok: false, reason: 'external' });
+    expect(operatorVerdict('respec', noList({ repo_id: null }))).toMatchObject({ ok: false, reason: 'no_repo' });
+    expect(operatorVerdict('respec', noList({ gh_number: null }))).toMatchObject({ ok: false, reason: 'no_issue' });
+    expect(operatorVerdict('respec', noList({ live_run: true }))).toMatchObject({ ok: false, reason: 'live' });
+  });
+
+  it('is refused (state) once the newest Spec has a list, so a second press after a success changes nothing', () => {
+    expect(operatorVerdict('respec', at({ spec_file_list_known: true }))).toMatchObject({ ok: false, reason: 'state' });
+  });
+});
 
 describe('operatorVerdict / operatorActionsFor', () => {
   it('a Needs-a-person feature with a Spec offers Build again, Back to discussion and Close, in that order', () => {

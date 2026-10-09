@@ -67,6 +67,8 @@ export const COPY = {
   /** D#6 R4d-5a (C34 section 2.4): a build refused at start (`spec_has_no_file_list`) and a run that ended `scope_unknown` with detail `no_file_list`. Exact text; the one place it is written. */
   specHasNoFileList:
     "This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.",
+  /** D#6 R4d-5b (C34 section 2.4): shown after a Re-spec whose project-manager file list could not be read (nothing was changed). Exact text; the one place it is written. */
+  respecListUnreadable: "The project manager's file list for this Spec could not be read, so nothing was changed. Re-spec to try again.",
   /** D#6 R2b-3f (C23 section 3): the one `scope_unknown` variant for a renamed file. It names no path. */
   scopeUnknownRenamed:
     "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",

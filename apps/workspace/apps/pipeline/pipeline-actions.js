@@ -600,6 +600,7 @@ export function approveView(item, approver, liveRun = false) {
 // one it lists, in a fixed order, and nothing else. It never looks at the stage, the kind or the role.
 //
 //   Build again          -> POST /work-items/{id}/approve (the stage driver's rebuild: a fresh build from the same Spec)
+//   Re-spec              -> POST /work-items/{id}/respec (the project manager adds the file list; the next Spec version has the same text plus the list)
 //   Back to discussion   -> POST /work-items/{id}/back-to-discussion (a new panel and a new Spec version)
 //   Treat as a feature   -> POST /work-items/{id}/treat-as-feature (a project has no panel; this runs one as a feature)
 //   Close                -> POST /work-items/{id}/close, after an in-app confirm dialog (never the browser's confirm())
@@ -609,14 +610,15 @@ export function approveView(item, approver, liveRun = false) {
 // for a few moments so a refusal that costs nothing reaches the sentence. An open pull request has no Close: the server says
 // so (`close_on_github`), and the card tells the person to close the pull request on GitHub.
 
-export const OPERATOR_LABELS = { build_again: "Build again", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" };
+export const OPERATOR_LABELS = { build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" };
 /** The order buttons are drawn in. An action the server lists that is not here is not drawn. */
-export const OPERATOR_ORDER = ["build_again", "back_to_discussion", "treat_as_feature", "close", "reopen"];
-const OPERATOR_TESTIDS = { build_again: "pl-op-build", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen" };
+export const OPERATOR_ORDER = ["build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen"];
+const OPERATOR_TESTIDS = { build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen" };
 
 const itemPath = (id) => "/api/v1/work-items/" + encodeURIComponent(id);
 export const OPERATOR_PATHS = {
   build_again: approvePath,
+  respec: (id) => itemPath(id) + "/respec",
   back_to_discussion: (id) => itemPath(id) + "/back-to-discussion",
   treat_as_feature: (id) => itemPath(id) + "/treat-as-feature",
   close: (id) => itemPath(id) + "/close",
@@ -626,6 +628,7 @@ export const OPERATOR_PATHS = {
 /** Under the buttons, before the click: what each one does. */
 export const OPERATOR_NOTES = {
   build_again: "Build again starts a new build from the same Spec. An agent opens a fresh pull request, and the reviewers run on it.",
+  respec: "Re-spec has the project manager read the repository and add the list of files this Spec allows. The Spec's text stays the same. Then Build again.",
   back_to_discussion: "Back to discussion asks the panel again and writes a new Spec. The new Spec replaces the old one.",
   treat_as_feature: "A project has no panel, so it stops here. Treat as a feature changes it to a feature and runs the panel and the Spec as for any feature.",
   close: "Close ends the work item. No agent will work on it any more.",
@@ -636,6 +639,7 @@ export const CLOSE_ON_GITHUB_NOTE = "To close this, close its pull request on Gi
 /** What a person reads once the server accepted the request. */
 export const OPERATOR_STARTED = {
   build_again: "Started. An agent is building this again from the same Spec, and the card moves when it opens a pull request.",
+  respec: "Started. The project manager is adding the file list. A new Spec version appears when it is done; then press Build again.",
   back_to_discussion: "Sent back to the panel. The agents are discussing it again, and a new Spec follows when they are done.",
   treat_as_feature: "Changed to a feature. The agents are discussing it now, and a Spec follows when they are done.",
   close: "Closed.",

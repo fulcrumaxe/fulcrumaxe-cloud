@@ -17,7 +17,12 @@ import { dirname, join } from "node:path";
 import { test, expect, type Page, type Route } from "@playwright/test";
 import { bootToDesktop } from "./helpers/boot";
 
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+// The two sentences are read from the runner protocol's copy file as text (the workspace app does not depend on that package): the server sends exactly these.
+const COPY_SRC = readFileSync(join(SCRIPT_DIR, "..", "..", "..", "packages", "runner-protocol", "src", "copy.ts"), "utf8");
+const copyOf = (key: string): string => new RegExp(`${key}:\\s*"([^"]+)"`).exec(COPY_SRC)![1]!;
+const COPY = { specHasNoFileList: copyOf("specHasNoFileList"), respecListUnreadable: copyOf("respecListUnreadable") };
 const V1 = join(SCRIPT_DIR, "..", "..", "..", "packages", "api", "fixtures", "v1");
 const fx = (...p: string[]) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
 const LIST = fx("listWorkItems", "200-page.json");
@@ -515,5 +520,39 @@ test.describe("D#483: Open the work item in Pipeline, from the Runs app (mocked 
     await expect(tid(page, "pl-detail")).toBeHidden();
     expect(mock.requests.filter((r) => r.endsWith("/activity"))).toEqual([]);
     expect(errors).toEqual([]);
+  });
+});
+
+// D#6 R4d-5b (C34 sections 2.3 and 2.4): Re-spec, in both states, with the file-list sentences the server sends (the runner protocol's copy).
+test.describe("D#6 R4d-5b: Re-spec (mocked API)", () => {
+  const states = [
+    { stage: "spec_ready", base: EMPTY, actions: ["respec", "close"], notice: { kind: "no_file_list", reason: COPY.specHasNoFileList }, testid: "pl-no-file-list", buttons: ["Re-spec", "Close"] },
+    { stage: "needs_human", base: NEEDS_HUMAN, actions: ["build_again", "respec", "back_to_discussion", "close"], notice: { kind: "no_file_list", reason: COPY.specHasNoFileList }, testid: "pl-no-file-list", buttons: ["Build again", "Re-spec", "Back to discussion", "Close"] },
+    { stage: "needs_human", base: NEEDS_HUMAN, actions: ["build_again", "respec", "back_to_discussion", "close"], notice: { kind: "respec_failed", reason: COPY.respecListUnreadable }, testid: "pl-respec-failed", buttons: ["Build again", "Re-spec", "Back to discussion", "Close"] },
+  ] as const;
+
+  for (const st of states) {
+    test(`${st.stage} / ${st.notice.kind}: the button is Re-spec, the notice is exactly the protocol copy, and nothing is restated`, async ({ page }) => {
+      const activity = { ...activityFor(st.base, st.stage, [...st.actions]), notice: st.notice };
+      const { errors, browserDialogs, tt } = await setup(page, { stage: st.stage, kind: "feature", activity: { status: 200, json: activity } });
+      await openDetail(page);
+      await expect(tid(page, "pl-operator").locator("button")).toHaveText([...st.buttons]);
+      await expect(tid(page, st.testid)).toHaveText(st.notice.reason);
+      await expect(tid(page, "pl-op-notes")).toContainText("add the list of files this Spec allows");
+      await expectNoOverflow(page);
+      expect(browserDialogs).toEqual([]);
+      expect(await tt()).toEqual([]);
+      expect(errors).toEqual([]);
+    });
+  }
+
+  test("pressing Re-spec sends one POST to the respec route with NO body, then says it started and locks the buttons", async ({ page }) => {
+    const activity = { ...activityFor(EMPTY, "spec_ready", ["respec", "close"]), notice: { kind: "no_file_list", reason: COPY.specHasNoFileList } };
+    const { mock } = await setup(page, { stage: "spec_ready", kind: "feature", activity: { status: 200, json: activity } });
+    await openDetail(page);
+    await press(page, tid(page, "pl-op-respec"));
+    await expect(tid(page, "pl-op-note")).toContainText("The project manager is adding the file list");
+    expect(mock.posts).toEqual([{ path: `/api/v1/work-items/${ITEM}/respec`, body: null }]);
+    await expect(tid(page, "pl-op-respec")).toHaveAttribute("aria-disabled", "true");
   });
 });

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { COPY } from '@fulcrumaxe/runner-protocol';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -23,7 +24,7 @@ interface Activity {
   runs: Array<{ id: string; role: string; status: string; usd: number | null; created_at: string; summary: string | null; lines: Array<{ at: string; text: string }> }>;
   runs_truncated: boolean;
   steps: Array<{ kind: string; state: string; code: string | null; result: string | null; reasons: string[]; at: string; finished_at: string | null }>;
-  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed'; reason: string } | null;
+  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed'; reason: string } | null;
   actions: string[];
   close_on_github: boolean;
 }
@@ -444,12 +445,32 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       return { actions: body.actions, onGithub: body.close_on_github };
     };
 
-    it.each(['owner', 'admin'] as const)('an %s at Needs a person with a published feature Spec is offered Build again, Back to discussion and Close', async (role) => {
+    it.each(['owner', 'admin'] as const)('an %s at Needs a person with a published feature Spec that has no file list is offered Build again, Re-spec, Back to discussion and Close', async (role) => {
       const { accountId, userId } = await seedAccountWithMember(admin, { role });
       const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
       await seedDiscussion(accountId, itemId);
       await seedSpec(accountId, itemId);
-      expect(await actionsOf(accountId, userId, itemId)).toEqual({ actions: ['build_again', 'back_to_discussion', 'close'], onGithub: false });
+      expect(await actionsOf(accountId, userId, itemId)).toEqual({ actions: ['build_again', 'respec', 'back_to_discussion', 'close'], onGithub: false });
+    });
+
+    it('Re-spec goes once the newest Spec version stores a readable list, and comes back if that version is erased and the one before has none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedDiscussion(accountId, itemId);
+      await seedSpec(accountId, itemId);
+      expect((await actionsOf(accountId, userId, itemId)).actions).toContain('respec');
+      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'spec 2', $3, 'system', '{"acceptance_files":["src/**"]}'::jsonb)`, [accountId, itemId, createHash('sha256').update('spec 2').digest('hex')]);
+      expect((await actionsOf(accountId, userId, itemId)).actions).toEqual(['build_again', 'back_to_discussion', 'close']);
+      await admin.query(`UPDATE spec_versions SET erased_at = now() WHERE work_item_id = $1 AND version = 2`, [itemId]);
+      expect((await actionsOf(accountId, userId, itemId)).actions).toContain('respec');
+    });
+
+    it('Re-spec at Spec ready: offered with Close for a Spec with no list', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin, { role: 'owner' });
+      const { itemId } = await seedItem(accountId, { stage: 'spec_ready' });
+      await seedDiscussion(accountId, itemId);
+      await seedSpec(accountId, itemId);
+      expect((await actionsOf(accountId, userId, itemId)).actions).toEqual(['respec', 'close']);
     });
 
     it('a plain member is offered nothing, at any stage', async () => {
@@ -544,6 +565,62 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     const res = await handleApiRequest(new Request(`http://localhost/api/v1/work-items/${randomUUID()}/activity`), appUserPool, platformOpsPool, ROUTES);
     expect(res.status).toBe(401);
   });
+  /** D#6 R4d-5b (C34 sections 2.3 and 2.4, F12): the notice says what is wrong in the runner protocol's own words, in both states. */
+  describe('Re-spec notices: the file-list sentences come from the runner protocol copy', () => {
+    async function seedPreFix(accountId: string, itemId: string, createdAt = '2026-10-03T08:00:00Z') {
+      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, created_at) VALUES ($1, $2, 1, 'spec', $3, 'system', $4)`, [accountId, itemId, createHash('sha256').update('spec').digest('hex'), createdAt]);
+    }
+    const noticeNow = async (accountId: string, userId: string, itemId: string) => {
+      const body = (await (await get(itemId, { accountId, userId })).json()) as Activity;
+      expect(activityResponseSchema.parse(body)).toEqual(body);
+      return body.notice;
+    };
+    const fact = (accountId: string, itemId: string, kind: string, code: string, key: string) =>
+      admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, dedupe_key) VALUES ($1, $2, $3, $4, $5)`, [accountId, itemId, kind, code, key]);
+
+    it('Spec ready: a build refused for the missing list shows exactly specHasNoFileList; a Spec with a list, or a refusal from before the Spec, shows none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'spec_ready' });
+      await seedPreFix(accountId, itemId);
+      expect(await noticeNow(accountId, userId, itemId)).toBeNull();
+      await fact(accountId, itemId, 'build_refused', 'spec_has_no_file_list', 'b1');
+      expect(await noticeNow(accountId, userId, itemId)).toEqual({ kind: 'no_file_list', reason: COPY.specHasNoFileList });
+      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'spec', $3, 'system', '{"acceptance_files":["src/**"]}'::jsonb)`, [accountId, itemId, createHash('sha256').update('spec').digest('hex')]);
+      expect(await noticeNow(accountId, userId, itemId)).toBeNull();
+    });
+
+    it('Needs a person: a run that ended scope_unknown with the detail no_file_list shows exactly specHasNoFileList; the detail-less scope_unknown does not', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'needs_human' });
+      await seedPreFix(accountId, itemId);
+      const runId = await seedRun(accountId, itemId, { role: 'executor', status: 'failed', createdAt: '2026-10-03T10:00:00Z', envelope: { summary: 'The executor says so.' } });
+      const event = (detail?: string) =>
+        admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, COALESCE((SELECT max(seq) + 1 FROM run_events WHERE run_id = $2), 1), 'run.status_changed', $3::jsonb)`, [accountId, runId, JSON.stringify({ to: 'failed', failureReason: 'scope_unknown', ...(detail ? { detail } : {}) })]);
+      await event();
+      expect(await noticeNow(accountId, userId, itemId)).toMatchObject({ kind: 'needs_human' });
+      await event('no_file_list');
+      expect(await noticeNow(accountId, userId, itemId)).toEqual({ kind: 'no_file_list', reason: COPY.specHasNoFileList });
+    });
+
+    it('F10: after a Re-spec whose list could not be read the notice is exactly respecListUnreadable, at both stages, and it goes when a new version is published', async () => {
+      for (const stage of ['spec_ready', 'needs_human']) {
+        const { accountId, userId } = await seedAccountWithMember(admin);
+        const { itemId } = await seedItem(accountId, { stage });
+        await seedPreFix(accountId, itemId);
+        await fact(accountId, itemId, 'build_refused', 'spec_has_no_file_list', 'b1');
+        await fact(accountId, itemId, 'stopped', 'respec_list_unreadable', 'respec:1');
+        expect(await noticeNow(accountId, userId, itemId), stage).toEqual({ kind: 'respec_failed', reason: COPY.respecListUnreadable });
+        await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 2, 'spec', $3, 'system', '{"acceptance_files":["src/**"]}'::jsonb)`, [accountId, itemId, createHash('sha256').update('spec').digest('hex')]);
+        expect(await noticeNow(accountId, userId, itemId), stage).not.toMatchObject({ kind: 'respec_failed' });
+      }
+    });
+
+    it('the exact words are the ones the issue gave', () => {
+      expect(COPY.specHasNoFileList).toBe("This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.");
+      expect(COPY.respecListUnreadable).toBe("The project manager's file list for this Spec could not be read, so nothing was changed. Re-spec to try again.");
+    });
+  });
+
 });
 
 describe('readOutcomeCodes', () => {

@@ -127,6 +127,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Spec file list (D#6 R4d-5a): a Spec offered without a readable list of the files it allows, and a runner build refused because the stored Spec has none.
   "invalid_file_scope",
   "spec_has_no_file_list",
+  // Re-spec (D#6 R4d-5b): the project manager's list could not be read, the Spec already has one, and the Spec moved on while the list was made.
+  "respec_list_unreadable",
+  "spec_has_file_list",
+  "spec_changed",
   // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
   "continuation_branch_missing",
   "push_rejected",

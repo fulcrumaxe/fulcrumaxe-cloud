@@ -158,6 +158,11 @@ describe("the notice banner", () => {
       expect(noticeBanner(data), JSON.stringify(data)).toBeNull();
     }
     expect(noticeBanner(CHECK_FAILED)).toMatchObject({ kind: "check_failed", title: "Couldn't check the build. ", reason: CHECK_FAILED.notice.reason });
+    // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words around it.
+    for (const kind of ["no_file_list", "respec_failed"]) {
+      const data = { notice: { kind, reason: "The sentence from the server." } };
+      expect(noticeBanner(data)).toEqual({ kind, title: "", lead: "", tail: "", reason: "The sentence from the server." });
+    }
     expect(buildInsight(NOT_FEASIBLE).notice.kind).toBe("not_feasible");
     expect(buildInsight(OK).notice).toBeNull();
   });

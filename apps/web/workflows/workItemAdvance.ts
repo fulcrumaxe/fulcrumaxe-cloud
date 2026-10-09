@@ -4,6 +4,7 @@ import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
+import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
 import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
@@ -208,6 +209,19 @@ export async function advanceLightSpecPublishStep(accountId: string, userId: str
   return publishLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId, actionId);
 }
 
+// ---- Re-spec (D#6 R4d-5b): the project manager's file list for a Spec that has none, then the next Spec version ----------
+
+export async function advanceStartRespecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, specVersion: number | null, actionId: string): Promise<AdvanceRunStart> {
+  "use step";
+  return startRespecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, specVersion, actionId);
+}
+
+/** Publishes version N+1 (the same text plus the list) from the finished PM run. The PM's output stays in the run. */
+export async function advanceRespecPublishStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string, actionId: string, specVersion: number): Promise<RespecPublished> {
+  "use step";
+  return publishRespecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId, actionId, specVersion);
+}
+
 // ---- review steps ---------------------------------------------------------------------------------------------------
 
 export async function advanceReviewLoadStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, pinned: number | null): Promise<ReviewLoaded> {
@@ -288,6 +302,9 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   // A workflow started before the halt marker existed replays without a haltEpoch: read as 0, the epoch of an item never halted.
   const args: AdvanceStartArgs = { ...started, haltEpoch: (started as { haltEpoch?: number }).haltEpoch ?? 0 };
   const { accountId, workItemId, actionId } = args;
+
+  // Re-spec (`respec_work_item`): not an advance. It needs no issue read and stops once the next Spec version is published.
+  if (args.respec === true) return respecPhase(args);
 
   const loaded = await advanceLoadStep(accountId, workItemId);
   if (!loaded.ok) {
@@ -464,6 +481,50 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
   await advanceLogStep("advance.spec_ready", { work_item_id: rootId, at: "light_spec", version: published.version });
   // The Spec is published: the build, pinned to this version, then the review. The pipeline's card for the issue is the root.
   return buildPhase({ ...args, workItemId: rootId }, published.version);
+}
+
+/**
+ * Re-spec (D#6 R4d-5b, C34 section 2.3), for an item at Spec ready or Needs a person whose newest Spec has no readable file list. The project manager runs in
+ * file-list mode on the Spec version the person saw; its list is validated and the next version is published (the same text plus the list). From Needs a person
+ * the publish also moves the item to Spec ready, in its own transaction. Nothing is built: the person presses Build again. A list that cannot be read publishes
+ * nothing and is recorded as a fact of the item (the card's notice says so).
+ */
+async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
+  const { accountId, userId, workItemId, actionId } = args;
+  const version = args.specVersion ?? null;
+  const started = await advanceStartRespecStep(accountId, userId, workItemId, args.haltEpoch, version, actionId);
+  if (!started.ok) {
+    if (isHaltReason(started.reason)) return haltedEnd(args, "respec_start");
+    await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "respec_start", reason: started.reason });
+    return { status: "failed", detail: `respec_refused:${started.reason}` };
+  }
+  let waited = 0;
+  let outcome = await advanceBuildOutcomeStep(accountId, started.runId);
+  let pendingWaited = 0;
+  while (!outcome.done && waited < LIGHT_SPEC_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+    const queued = outcome.queuedOnRunner;
+    await sleep(POLL_MS);
+    if (queued) pendingWaited += POLL_MS;
+    else waited += POLL_MS;
+    outcome = await advanceBuildOutcomeStep(accountId, started.runId);
+  }
+  if (!outcome.done) {
+    await advanceCancelStep(accountId, userId, workItemId, outcome.tailRunId);
+    await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: "wait_timeout" });
+    return { status: "respec_failed", detail: "wait_timeout" };
+  }
+  if (outcome.status !== "succeeded") {
+    await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: `run_${outcome.status}` });
+    return { status: "respec_failed", detail: `run_${outcome.status}` };
+  }
+  const published = await advanceRespecPublishStep(accountId, userId, workItemId, args.haltEpoch, started.runId, actionId, version as number);
+  if (isHaltReason(published.reason)) return haltedEnd(args, "respec");
+  if (published.status !== "published") {
+    await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "respec", reason: published.reason ?? "refused" });
+    return { status: "respec_refused", detail: published.reason ?? undefined };
+  }
+  await advanceLogStep("advance.respec_published", { work_item_id: workItemId, at: "respec", version: published.version });
+  return { status: "respec_published" };
 }
 
 /**

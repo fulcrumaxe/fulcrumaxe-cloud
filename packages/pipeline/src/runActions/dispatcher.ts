@@ -45,6 +45,8 @@ export interface RunActionsWorker {
   performRetryRun?(actionId: string): Promise<PerformResult>;
   /** Optional the same way: a worker without it refuses `advance_unavailable`. Starts the stage driver for an approved work item. */
   performAdvanceWorkItem?(actionId: string): Promise<PerformResult>;
+  /** Optional the same way: a worker without it refuses `respec_unavailable`. Starts the stage driver in Re-spec mode (D#6 R4d-5b). */
+  performRespecWorkItem?(actionId: string): Promise<PerformResult>;
 }
 
 /** A performer is handed the action id and nothing else: the facade derives who it runs as from the database. */
@@ -57,6 +59,7 @@ const PERFORMERS: Readonly<Record<string, Performer>> = Object.freeze({
   start_preview: async (worker, actionId) => (await worker.performStartPreview?.(actionId)) ?? { result: "refused", errorCode: "preview_unavailable" },
   retry_run: async (worker, actionId) => (await worker.performRetryRun?.(actionId)) ?? { result: "refused", errorCode: "retry_unavailable" },
   advance_work_item: async (worker, actionId) => (await worker.performAdvanceWorkItem?.(actionId)) ?? { result: "refused", errorCode: "advance_unavailable" },
+  respec_work_item: async (worker, actionId) => (await worker.performRespecWorkItem?.(actionId)) ?? { result: "refused", errorCode: "respec_unavailable" },
 });
 
 /** The performer for a kind, or undefined (a kind nobody performs is settled refused, never retried). */

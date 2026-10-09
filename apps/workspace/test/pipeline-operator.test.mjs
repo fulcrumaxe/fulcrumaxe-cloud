@@ -71,7 +71,14 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   });
 
   it("the labels are exactly the words the owner approved", () => {
-    expect(OPERATOR_LABELS).toEqual({ build_again: "Build again", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" });
+    expect(OPERATOR_LABELS).toEqual({ build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" });
+  });
+
+  it("Re-spec (D#6 R4d-5b): drawn only when the server lists it, labelled exactly Re-spec, after Build again, on its own route", () => {
+    expect(OPERATOR_LABELS.respec).toBe("Re-spec");
+    expect(operatorActions({ actions: ["close", "respec", "build_again"] })).toEqual(["build_again", "respec", "close"]);
+    expect(operatorActions({ stage: "spec_ready", kind: "feature" })).toEqual([]);
+    expect(OPERATOR_PATHS.respec(ID)).toBe("/api/v1/work-items/" + ID + "/respec");
   });
 
   it("operatorActions keeps the listed actions it knows, in the fixed order; anything else is ignored", () => {
@@ -106,6 +113,7 @@ describe("one rule source: the app draws what the server lists, in a fixed order
 describe("createOperator: the three actions that start the pipeline", () => {
   it.each([
     ["build_again", approvePath(ID)],
+    ["respec", "/api/v1/work-items/" + ID + "/respec"],
     ["back_to_discussion", "/api/v1/work-items/" + ID + "/back-to-discussion"],
     ["treat_as_feature", "/api/v1/work-items/" + ID + "/treat-as-feature"],
   ])("%s: one POST with NO body, the accepted request is followed, the sentence is the fixed one, and the card is told", async (action, path) => {

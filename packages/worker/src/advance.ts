@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/advance.js";
+import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
@@ -70,6 +71,11 @@ export interface AdvanceStartArgs {
    * reviewed is what was approved.
    */
   specVersion?: number | null;
+  /**
+   * D#6 R4d-5b (C34 section 2.3): this is a Re-spec (`respec_work_item`), not an advance. The workflow runs the project manager in file-list mode on the newest
+   * Spec and publishes the next version, then stops: the person presses Build again. Absent on every other start, and on a workflow started before it existed.
+   */
+  respec?: boolean;
 }
 
 /**
@@ -136,6 +142,8 @@ export interface AdvanceModuleDeps {
   panel?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts) => Promise<AdvanceStepResult>) | null;
   spec?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts, options: { attempt?: string }) => Promise<AdvanceStepResult>) | null;
   build?: ((pool: Pool, accountId: string, workItemId: string, approvalId: string, ports: AdvanceStepPorts, options: { expectedVersion?: number }) => Promise<AdvanceStepResult>) | null;
+  /** D#6 R4d-5b, injected from apps/web the same way: the pipeline's `publishRespec`, the next Spec version (the same text plus the file list) from the project manager's result. */
+  respec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown, expectedVersion: number) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** D#483 P3, injected from apps/web: the pipeline's `publishLightSpec`: a small, bug or doc item's short Spec from the PM's result. */
   lightSpec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** Records a build that ended without a pull request (in_progress -> needs_human). */
@@ -313,6 +321,12 @@ export interface AdvanceFacade {
    * can advance, or already triaged), already_running (a run of the item is live).
    */
   performAdvanceWorkItem(actionId: string): Promise<PerformResult>;
+  /**
+   * D#6 R4d-5b (C34 section 2.3): performs a CLAIMED `respec_work_item` action: starts the advance workflow in Re-spec mode. Same checks and refusals as
+   * `performAdvanceWorkItem` (and the same lift of a halt a person's later press resumes), except that the item must be at Spec ready or Needs a person with a
+   * newest Spec that has no readable file list (`not_advanceable` otherwise, `spec_has_file_list` when it has one), and the first seat is the project manager's.
+   */
+  performRespecWorkItem(actionId: string): Promise<PerformResult>;
   advanceLoadItem(accountId: string, workItemId: string): Promise<AdvanceItem | null>;
   /** Starts one run of `req.role` for the item, keyed `advance:<item>:<step>`. Never throws for a refusal: it answers `{ ok: false, reason }`. */
   advanceStartRun(req: AdvanceRunRequest): Promise<AdvanceRunStart>;
@@ -347,6 +361,13 @@ export interface AdvanceFacade {
    * summary, for the card); `refused` carries a fixed code. A replay on an item that already has its Spec publishes nothing more.
    */
   advanceLightSpec(who: AdvanceStepWho, runId: string, actionId: string): Promise<{ status: string; reason: string | null; version: number | null }>;
+  /**
+   * D#6 R4d-5b (C34 section 2.3): publishes the next Spec version from the finished project-manager run `runId` (file-list mode; the worker reads the run's
+   * result itself). `expectedVersion` is the version its prompt was made from. `published` leaves the item at Spec ready (from Needs a person it moved there through
+   * Discussing in the same transaction); `refused` carries a fixed code and publishes nothing, and an unreadable list (`invalid_file_scope`) is recorded as the
+   * fact the card's notice reads (`respec_list_unreadable`). A replay on an item whose newest Spec already has its list publishes nothing more.
+   */
+  advanceRespec(who: AdvanceStepWho, runId: string, actionId: string, expectedVersion: number): Promise<{ status: string; reason: string | null; version: number | null }>;
   /** D#483 P3: the item's review context, or a fixed refusal. Plain data; the Spec text is not in it. */
   advanceLoadReview(who: AdvanceStepWho): Promise<AdvanceReviewLoad>;
   /** D#483 P3: the Spec's text for the version the person approved, or null (erased, or a newer version exists). Read inside the step that builds a prompt, never kept in the workflow. */
@@ -369,21 +390,26 @@ export interface AdvanceFacade {
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): AdvanceFacade {
-  async function performAdvanceWorkItem(actionId: string): Promise<PerformResult> {
+  const performAdvanceWorkItem = (actionId: string): Promise<PerformResult> => performDriven(actionId, "advance_work_item");
+  const performRespecWorkItem = (actionId: string): Promise<PerformResult> => performDriven(actionId, "respec_work_item");
+
+  async function performDriven(actionId: string, wanted: "advance_work_item" | "respec_work_item"): Promise<PerformResult> {
     if (typeof actionId !== "string" || !UUID_RE.test(actionId)) throw new RunActionInputError();
     const { rows } = await runnerPool.query<PrincipalRow>("SELECT * FROM run_action_perform_principal($1::uuid)", [actionId]);
     const who = rows[0];
     if (!who || !who.allowed || who.user_id === null || who.principal_kind !== "session") return refused("principal_not_authorised");
-    if (who.kind !== "advance_work_item") return refused("kind_mismatch");
+    if (who.kind !== wanted) return refused("kind_mismatch");
+    const respec = wanted === "respec_work_item";
     if (!deps.startAdvance) return refused("advance_unavailable");
     const { account_id: accountId, user_id: userId, target_id: workItemId } = who;
 
     const read = await withTenant(runnerPool, accountId, userId, async (client) => {
       const role = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, userId]);
-      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null }>(
+      const item = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; acceptance_files: unknown }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
-                (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS spec_version
+                (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS spec_version,
+                (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files
            FROM work_items w LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
@@ -403,15 +429,20 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (item.gh_number === null) return refused("no_issue_link");
     const verdict = advanceActionFor(item);
     if (!verdict.ok) return refused("not_advanceable");
+    // A Re-spec is for the two stages a build starts from, and only while the newest Spec has no readable list (the same table and parser the route and the card ask).
+    if (respec) {
+      if (verdict.action !== "build" && verdict.action !== "rebuild") return refused("not_advanceable");
+      if (parseAcceptanceScope(item.acceptance_files).kind === "known") return refused("spec_has_file_list");
+    }
     if (read.live > 0) return refused("already_running");
 
     // Every refusal that costs nothing is answered NOW, so the Approve sentence can say it: a role with no card, a model
     // with no key, an unset model budget, no usable GitHub installation. The seat resolver is read-only; it starts nothing.
     // The role asked is the first one the action starts. A refused build is also recorded as a fact of the item.
-    const seatRole = PREFLIGHT_ROLE[verdict.action];
+    const seatRole = respec ? "project-manager" : PREFLIGHT_ROLE[verdict.action];
     const seat = seatRole === null ? null : await deps.resolveRunSeat({ accountId, role: seatRole, workItemId });
     if (seat !== null && !seat.ok) {
-      if (verdict.action === "build" || verdict.action === "rebuild") {
+      if (!respec && (verdict.action === "build" || verdict.action === "rebuild")) {
         await withTenant(runnerPool, accountId, userId, (client) =>
           recordDriverEvent(client, accountId, { workItemId, kind: "build_refused", dedupeKey: `preflight:${actionId}`, code: seat.reason }),
         );
@@ -435,8 +466,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!lifted) return refused("target_not_found");
     if (lifted.halted) return refused("item_halted");
 
-    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version) });
-    console.info(JSON.stringify({ event: "advance.started", work_item_id: workItemId, action_id: actionId }));
+    await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), ...(respec ? { respec: true } : {}) });
+    console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId }));
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
   }
 
@@ -938,6 +969,31 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { status: out.status, reason: out.status === "refused" ? code : null, version: typeof out.version === "number" ? out.version : null };
   }
 
+  async function advanceRespec(who: AdvanceStepWho, runId: string, actionId: string, expectedVersion: number): Promise<{ status: string; reason: string | null; version: number | null }> {
+    const refusedWith = (reason: string) => ({ status: "refused", reason, version: null });
+    if (!deps.respec) return refusedWith("respec_unavailable");
+    if (!UUID_RE.test(runId) || !UUID_RE.test(actionId) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) return refusedWith("invalid_input");
+    const bad = await guardStep(who);
+    if (bad) return refusedWith(bad.reason ?? "refused");
+    const read = await withTenant(runnerPool, who.accountId, async (client) => {
+      const run = await client.query<{ status: string; role: string; envelope: unknown }>("SELECT status, role, envelope FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [runId, who.accountId, who.workItemId]);
+      const spec = await client.query<{ version: number; acceptance_files: unknown }>(
+        "SELECT version, frontmatter -> 'acceptance_files' AS acceptance_files FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND erased_at IS NULL ORDER BY version DESC LIMIT 1",
+        [who.accountId, who.workItemId],
+      );
+      return { run: run.rows[0], spec: spec.rows[0] };
+    });
+    if (!read.run || read.run.role !== "project-manager" || read.run.status !== "succeeded") return refusedWith("run_not_usable");
+    // A replay after the new version was published: nothing more is published (a second publish would add a version). The newest version then has its list.
+    if (read.spec && Number(read.spec.version) > expectedVersion && parseAcceptanceScope(read.spec.acceptance_files).kind === "known") return { status: "published", reason: null, version: Number(read.spec.version) };
+    const out = await deps.respec(runnerPool, who.accountId, who.workItemId, read.run.envelope, expectedVersion);
+    const code = typeof out.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(out.reason) ? out.reason : null;
+    console.info(JSON.stringify({ event: "advance.respec", work_item_id: who.workItemId, status: out.status, reason: out.status === "refused" ? code : null, version: out.version ?? null }));
+    // A list that could not be read is a fact of the item: the card's notice says so, in the words of the runner protocol's copy.
+    if (out.status === "refused" && code === "invalid_file_scope") await writeEvent(who, { kind: "stopped", dedupeKey: `respec:${actionId}`, code: "respec_list_unreadable", runId });
+    return { status: out.status, reason: out.status === "refused" ? code : null, version: typeof out.version === "number" ? out.version : null };
+  }
+
   async function advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult> {
     if (!deps.review) return { outcome: "refused", reason: "review_unavailable" };
     if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return { outcome: "refused", reason: "invalid_input" };
@@ -959,6 +1015,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   return {
     performAdvanceWorkItem,
+    performRespecWorkItem,
     advanceLoadItem,
     advanceStartRun,
     advanceRunOutcome,
@@ -969,6 +1026,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceBuildFailed,
     advancePrFound,
     advanceLightSpec,
+    advanceRespec,
     advanceLoadReview,
     advanceLoadSpecText,
     advanceRecordRound,

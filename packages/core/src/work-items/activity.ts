@@ -4,6 +4,7 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { PROGRESS_EVENT_KINDS, buildFeed } from '../onboarding/previewProgress.js';
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
 import { redactText } from '@fx/runtime/src/redact.js';
+import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, closeOnGithub, operatorActionsFor, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
@@ -74,11 +75,19 @@ export interface ActivityStep {
  * model text: credential shapes are redacted, and it is plain text for the caller to show as text only. `check_failed` is
  * neither: at In progress, the newest recorded stop of "Check the build" says the check could not decide (GitHub could not be
  * read, or more than one pull request matched), and `reason` is a fixed sentence.
+ *
+ * D#6 R4d-5b (C34 section 2): `no_file_list` and `respec_failed` are about a newest Spec with no readable file list, at Spec ready or Needs a person.
+ * `no_file_list`: a build was refused for it, or the newest executor run ended `scope_unknown` with that detail. `respec_failed`: the newest Re-spec's
+ * project-manager list could not be read, so nothing was changed. Their `reason` is the KEY of the sentence in the runner protocol's `COPY`
+ * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed';
   reason: string;
 }
+
+/** The `COPY` key each Re-spec notice carries as its `reason` until the API route replaces it with the sentence. */
+export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasNoFileList', respec_failed: 'respecListUnreadable' } as const);
 export interface WorkItemActivity {
   stage: string;
   /** A customer halted this item and no person has resumed it since (the halt marker, not the stage: a halted item can sit at any stage). */
@@ -104,7 +113,7 @@ export interface WorkItemActivity {
   notice: ActivityNotice | null;
   /**
    * What the CALLER may do to this item now, from the one table in operatorActions.ts (the routes ask the same table): Build
-   * again, Back to discussion, Treat as a feature, Close. Empty for a member, an external item, a live run or a stage none applies to.
+   * again, Re-spec, Back to discussion, Treat as a feature, Close. Empty for a member, an external item, a live run or a stage none applies to.
    * The Pipeline app draws a button only for an action listed here.
    */
   actions: OperatorAction[];
@@ -216,6 +225,40 @@ export async function readRunLines(
   return { linesByRun, capped };
 }
 
+/**
+ * D#6 R4d-5b (C34 section 2): why an item at Spec ready or Needs a person cannot be built (or Re-spec'd) for want of a file list. Only while the newest unerased
+ * Spec has no readable list (a Re-spec that succeeds publishes a version that has one, and the notice goes). The newest of two recorded facts since that Spec was
+ * written wins: a Re-spec whose list could not be read (`respec_failed`), and a build refused for the missing list (`no_file_list`). A run that ended
+ * `scope_unknown` with the detail `no_file_list` counts as the second one. Fixed codes only; nothing here is model text.
+ */
+async function readFileListNotice(
+  client: PoolClient,
+  workItemId: string,
+  stage: string,
+  spec: { created_at: Date; acceptance_files: unknown } | undefined,
+): Promise<ActivityNotice | null> {
+  if ((stage !== 'spec_ready' && stage !== 'needs_human') || !spec || parseAcceptanceScope(spec.acceptance_files).kind === 'known') return null;
+  const ev = (
+    await client.query<{ code: string | null }>(
+      `SELECT e.code FROM work_item_driver_events e
+        WHERE e.work_item_id = $1::uuid AND e.created_at > $2::timestamptz
+          AND ((e.kind = 'stopped' AND e.code = 'respec_list_unreadable') OR (e.kind = 'build_refused' AND e.code = 'spec_has_no_file_list'))
+        ORDER BY e.seq DESC LIMIT 1`,
+      [workItemId, spec.created_at],
+    )
+  ).rows[0];
+  if (ev?.code === 'respec_list_unreadable') return { kind: 'respec_failed', reason: FILE_LIST_NOTICE_COPY_KEY.respec_failed };
+  if (ev?.code === 'spec_has_no_file_list') return { kind: 'no_file_list', reason: FILE_LIST_NOTICE_COPY_KEY.no_file_list };
+  const run = await client.query(
+    `SELECT 1 FROM run_events e
+      WHERE e.run_id = (SELECT r.id FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.role = 'executor' ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+        AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'scope_unknown' AND e.payload->>'detail' = 'no_file_list'
+      LIMIT 1`,
+    [workItemId],
+  );
+  return run.rowCount === 1 ? { kind: 'no_file_list', reason: FILE_LIST_NOTICE_COPY_KEY.no_file_list } : null;
+}
+
 export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string): Promise<WorkItemActivity> {
   if (!UUID_RE.test(workItemId)) throw new NotFoundError(`work item ${workItemId} not found`);
   const { accountId, userId } = ctx.principal;
@@ -261,8 +304,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     const comments = commentRows.slice(0, ACTIVITY_LIMITS.maxComments).reverse();
 
     const specRow = (
-      await client.query<{ version: number; body: string }>(
-        `SELECT version, left(body, $2::int) AS body FROM spec_versions
+      await client.query<{ version: number; body: string; created_at: Date; acceptance_files: unknown }>(
+        `SELECT version, left(body, $2::int) AS body, created_at, frontmatter -> 'acceptance_files' AS acceptance_files FROM spec_versions
           WHERE work_item_id = $1::uuid AND erased_at IS NULL ORDER BY version DESC LIMIT 1`,
         [workItemId, ACTIVITY_LIMITS.maxSpecChars + 1],
       )
@@ -308,8 +351,11 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         [workItemId, ACTIVITY_LIMITS.maxNoticeChars],
       )
     ).rows[0];
+    const fileListNotice = await readFileListNotice(client, workItemId, item.stage, specRow);
     if (pm) {
       notice = { kind: 'not_feasible', reason: safeModelText(pm.reason, ACTIVITY_LIMITS.maxNoticeChars) };
+    } else if (fileListNotice) {
+      notice = fileListNotice;
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.
