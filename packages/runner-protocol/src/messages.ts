@@ -20,6 +20,8 @@ export type CredentialMode = z.infer<typeof CredentialMode>;
 const uuid = z.string().uuid();
 /** Every integer on the wire is a safe integer, so arithmetic on it is exact. */
 const safeInt = z.number().int().safe();
+/** The most tokens one `usage` event may carry; the database function that adds them refuses more (migration 0768). */
+export const USAGE_TOKENS_MAX = 1_000_000_000_000;
 const leaseGeneration = safeInt.min(0);
 
 /** An Ed25519 public key as a JWK (RFC 8037). Strict parsing refuses the private member `d`. */
@@ -111,7 +113,18 @@ export const LocalOnlyEvent = z
     engine_version: z.string().regex(/^\d{1,6}\.\d{1,6}\.\d{1,6}$/).optional(),
     // Display only; the cloud settles no money against it. `input` and `output` count model tokens (the name avoids
     // the word G1 reserves for credentials).
-    usage: z.object({ input: safeInt.min(0).optional(), output: safeInt.min(0).optional(), usd: z.number().min(0).finite().optional() }).strict().optional(),
+    // D#6 R2b-5a (C32 section 5.3; additive under C8 section 6, the cloud first): `cache_read` and `cache_write` are the cache token counts, which the CLI's `input` leaves out. An older runner sends neither.
+    // `usd` is the runner's own figure; the cloud never stores or sums it and recomputes the API-equivalent from the token counts.
+    usage: z
+      .object({
+        input: safeInt.min(0).max(USAGE_TOKENS_MAX).optional(),
+        output: safeInt.min(0).max(USAGE_TOKENS_MAX).optional(),
+        cache_read: safeInt.min(0).max(USAGE_TOKENS_MAX).optional(),
+        cache_write: safeInt.min(0).max(USAGE_TOKENS_MAX).optional(),
+        usd: z.number().min(0).finite().optional(),
+      })
+      .strict()
+      .optional(),
     // D#6 R2b-3 (comment 27 item 7; additive under C8 section 6): when the plan's usage limit resets, on a `usage_limit_reached`
     // event only. Display data: the follow-up run becomes claimable from it, and a false value only affects the tenant that sent it.
     reset_at: z.string().datetime().optional(),

@@ -316,3 +316,21 @@ describe("hostile input fails closed (D#6 R2a follow-ups 1, 2 and 4)", () => {
     expect(register(`fxrr_${"a".repeat(1_000_000)}`)).toBe(false);
   });
 });
+
+
+describe("usage event cache counts (D#6 R2b-5a E7, additive under C8 section 6)", () => {
+  const usageEvent = (usage: object) => ({ seq: 3, ts: "2026-10-04T12:00:00.000Z", type: "usage" as const, usage });
+
+  it("accepts cache_read and cache_write when present, and an older runner's event without them", () => {
+    expect(LocalOnlyEvent.safeParse(usageEvent({ input: 1000, output: 200, cache_read: 5000, cache_write: 300, usd: 0.5 })).success).toBe(true);
+    expect(LocalOnlyEvent.safeParse(usageEvent({ input: 1000, output: 200, usd: 0.5 })).success).toBe(true);
+    expect(LocalOnlyEvent.safeParse(usageEvent({ input: 1000, output: 200 })).success).toBe(true);
+  });
+
+  it("refuses a negative, fractional, non-finite or out-of-range count and any other key", () => {
+    for (const bad of [{ cache_read: -1 }, { cache_write: 1.5 }, { cache_read: Infinity }, { cache_write: 1_000_000_000_001 }, { input: 1_000_000_000_001 }, { cache: 1 }]) {
+      expect(LocalOnlyEvent.safeParse(usageEvent(bad)).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(LocalOnlyEvent.safeParse(usageEvent({ cache_read: 1_000_000_000_000 })).success).toBe(true);
+  });
+});

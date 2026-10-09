@@ -110,6 +110,12 @@ export const statsResponseSchema = z.object({
   }),
   generated_at: z.string(),
   metrics: metricsSchema,
+  // D#6 R2b-5a: outside `metrics` on purpose (its key set is exactly the KPI registry's), and fed by nothing a cost KPI reads.
+  runner_api_equivalent_usd: z
+    .number()
+    .describe(
+      "What the runs on the person's own machine recorded in this window (and repo, when repo_id is given) would have cost at API prices. Information, never spend: no cost KPI includes it. The same figure that work items and /usage call own_plan_api_equivalent_usd (named differently here because this endpoint's key guard refuses keys containing plan).",
+    ),
 });
 
 const statsQuerySchema = z.object({

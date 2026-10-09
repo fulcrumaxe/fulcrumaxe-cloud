@@ -15,6 +15,8 @@ export const workItemResponseSchema = z.object({
   priority: z.enum(WORK_ITEM_PRIORITIES),
   queue_rank: z.number().int().nullable(),
   cost_usd: z.number(),
+  // D#6 R2b-5a: the API-equivalent of this item's runner runs, kept apart from `cost_usd`; information, never spend.
+  own_plan_api_equivalent_usd: z.number().describe("What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."),
   created_at: z.string(),
   updated_at: z.string(),
 });

@@ -31,5 +31,6 @@
       "minutes": 32.0,
       "target_minutes": 60
     }
-  }
+  },
+  "runner_api_equivalent_usd": 12.3456
 }

@@ -57,6 +57,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * changed file for a write, and the run's token and cost totals from the final `result` line. There is no field for
  * model text, tool input or tool output, and every event is parsed by the shared schema before it is returned.
  */
+/** A cache token count the CLI reported, as an event field; absent when it sent none or something that is not a count. */
+const tokenCount = <K extends "cache_read" | "cache_write">(key: K, n: number | undefined): { [P in K]?: number } =>
+  typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? ({ [key]: n } as { [P in K]?: number }) : {};
+
 export function projectLocalOnly(message: Record<string, unknown>, normalized: NormalizedEvent, nextSeq: () => number, repoRoot: string): LocalOnlyEvent[] {
   const events: LocalOnlyEvent[] = [];
   const names = new Map<string, string>();
@@ -85,7 +89,7 @@ export function projectLocalOnly(message: Record<string, unknown>, normalized: N
         seq: nextSeq(),
         ts: normalized.ts,
         type: "usage",
-        usage: { input: normalized.usage.inputTokens, output: normalized.usage.outputTokens, ...(typeof usd === "number" && Number.isFinite(usd) && usd >= 0 ? { usd } : {}) },
+        usage: { input: normalized.usage.inputTokens, output: normalized.usage.outputTokens, ...tokenCount("cache_read", normalized.usage.cacheReadTokens), ...tokenCount("cache_write", normalized.usage.cacheWriteTokens), ...(typeof usd === "number" && Number.isFinite(usd) && usd >= 0 ? { usd } : {}) },
       }),
     );
   }

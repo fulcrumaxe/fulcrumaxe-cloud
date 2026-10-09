@@ -598,6 +598,9 @@
                           "status": {
                             "type": "string"
                           },
+                          "runtime": {
+                            "type": "string"
+                          },
                           "usd": {
                             "type": [
                               "number",
@@ -614,6 +617,66 @@
                             "type": [
                               "number",
                               "null"
+                            ]
+                          },
+                          "runner_usage": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "credential_mode": {
+                                    "type": "string",
+                                    "enum": [
+                                      "subscription",
+                                      "api_key"
+                                    ]
+                                  },
+                                  "model": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "tokens_in": {
+                                    "type": "number"
+                                  },
+                                  "tokens_out": {
+                                    "type": "number"
+                                  },
+                                  "cache_read_tokens": {
+                                    "type": "number"
+                                  },
+                                  "cache_write_tokens": {
+                                    "type": "number"
+                                  },
+                                  "api_equivalent_usd": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "price_table_version": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "credential_mode",
+                                  "model",
+                                  "tokens_in",
+                                  "tokens_out",
+                                  "cache_read_tokens",
+                                  "cache_write_tokens",
+                                  "api_equivalent_usd",
+                                  "price_table_version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
                             ]
                           },
                           "created_at": {
@@ -668,6 +731,7 @@
                           "parent_run_id",
                           "role",
                           "status",
+                          "runtime",
                           "usd",
                           "tokens_in",
                           "tokens_out",
@@ -835,6 +899,9 @@
                     "status": {
                       "type": "string"
                     },
+                    "runtime": {
+                      "type": "string"
+                    },
                     "usd": {
                       "type": [
                         "number",
@@ -851,6 +918,66 @@
                       "type": [
                         "number",
                         "null"
+                      ]
+                    },
+                    "runner_usage": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "credential_mode": {
+                              "type": "string",
+                              "enum": [
+                                "subscription",
+                                "api_key"
+                              ]
+                            },
+                            "model": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "tokens_in": {
+                              "type": "number"
+                            },
+                            "tokens_out": {
+                              "type": "number"
+                            },
+                            "cache_read_tokens": {
+                              "type": "number"
+                            },
+                            "cache_write_tokens": {
+                              "type": "number"
+                            },
+                            "api_equivalent_usd": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
+                            "price_table_version": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "credential_mode",
+                            "model",
+                            "tokens_in",
+                            "tokens_out",
+                            "cache_read_tokens",
+                            "cache_write_tokens",
+                            "api_equivalent_usd",
+                            "price_table_version"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
                     },
                     "created_at": {
@@ -905,6 +1032,7 @@
                     "parent_run_id",
                     "role",
                     "status",
+                    "runtime",
                     "usd",
                     "tokens_in",
                     "tokens_out",
@@ -1160,6 +1288,10 @@
                           "cost_usd": {
                             "type": "number"
                           },
+                          "own_plan_api_equivalent_usd": {
+                            "type": "number",
+                            "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                          },
                           "created_at": {
                             "type": "string"
                           },
@@ -1177,6 +1309,7 @@
                           "priority",
                           "queue_rank",
                           "cost_usd",
+                          "own_plan_api_equivalent_usd",
                           "created_at",
                           "updated_at"
                         ],
@@ -1386,6 +1519,10 @@
                     "cost_usd": {
                       "type": "number"
                     },
+                    "own_plan_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -1403,6 +1540,7 @@
                     "priority",
                     "queue_rank",
                     "cost_usd",
+                    "own_plan_api_equivalent_usd",
                     "created_at",
                     "updated_at"
                   ],
@@ -1648,6 +1786,10 @@
                     "cost_usd": {
                       "type": "number"
                     },
+                    "own_plan_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                    },
                     "created_at": {
                       "type": "string"
                     },
@@ -1665,6 +1807,7 @@
                     "priority",
                     "queue_rank",
                     "cost_usd",
+                    "own_plan_api_equivalent_usd",
                     "created_at",
                     "updated_at"
                   ],
@@ -2877,12 +3020,17 @@
                         "first_pr_from_install"
                       ],
                       "additionalProperties": false
+                    },
+                    "runner_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What the runs on the person's own machine recorded in this window (and repo, when repo_id is given) would have cost at API prices. Information, never spend: no cost KPI includes it. The same figure that work items and /usage call own_plan_api_equivalent_usd (named differently here because this endpoint's key guard refuses keys containing plan)."
                     }
                   },
                   "required": [
                     "window",
                     "generated_at",
-                    "metrics"
+                    "metrics",
+                    "runner_api_equivalent_usd"
                   ],
                   "additionalProperties": false
                 }
@@ -4543,6 +4691,66 @@
                         "text"
                       ],
                       "additionalProperties": false
+                    },
+                    "runner_usage": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "credential_mode": {
+                              "type": "string",
+                              "enum": [
+                                "subscription",
+                                "api_key"
+                              ]
+                            },
+                            "model": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "tokens_in": {
+                              "type": "number"
+                            },
+                            "tokens_out": {
+                              "type": "number"
+                            },
+                            "cache_read_tokens": {
+                              "type": "number"
+                            },
+                            "cache_write_tokens": {
+                              "type": "number"
+                            },
+                            "api_equivalent_usd": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
+                            "price_table_version": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "credential_mode",
+                            "model",
+                            "tokens_in",
+                            "tokens_out",
+                            "cache_read_tokens",
+                            "cache_write_tokens",
+                            "api_equivalent_usd",
+                            "price_table_version"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -8379,13 +8587,18 @@
                         "limit_usd"
                       ],
                       "additionalProperties": false
+                    },
+                    "own_plan_api_equivalent_usd": {
+                      "type": "number",
+                      "description": "What this month's runs on the person's own machine would have cost at API prices. Information, never spend, and not part of any budget above. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
                     }
                   },
                   "required": [
                     "period_start",
                     "model",
                     "foreground_compute",
-                    "background_compute"
+                    "background_compute",
+                    "own_plan_api_equivalent_usd"
                   ],
                   "additionalProperties": false
                 }

@@ -3,6 +3,18 @@ import { getRun, listRuns } from "@fx/core/src/runs/read.js";
 import type { RouteEntry } from "../registry.js";
 import { decodeCursor, encodeCursor, parseLimit } from "../pagination.js";
 
+/** D#6 R2b-5a: the API-equivalent usage of a run on the person's own machine. `api_equivalent_usd` is null for a model with no price row. */
+export const runnerUsageSchema = z.object({
+  credential_mode: z.enum(["subscription", "api_key"]),
+  model: z.string().nullable(),
+  tokens_in: z.number(),
+  tokens_out: z.number(),
+  cache_read_tokens: z.number(),
+  cache_write_tokens: z.number(),
+  api_equivalent_usd: z.number().nullable(),
+  price_table_version: z.string().nullable(),
+});
+
 /** "The v1 contract" > run DTO (API-3a criterion 3). */
 export const runResponseSchema = z.object({
   id: z.string().uuid(),
@@ -10,9 +22,12 @@ export const runResponseSchema = z.object({
   parent_run_id: z.string().uuid().nullable(),
   role: z.string(),
   status: z.string(),
+  runtime: z.string(),
   usd: z.number().nullable(),
   tokens_in: z.number().nullable(),
   tokens_out: z.number().nullable(),
+  // D#6 R2b-5a: a runner run only. What it would have cost at API prices, as information; never part of any spend figure.
+  runner_usage: runnerUsageSchema.nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
   approved_by: z.object({ id: z.string().uuid(), name: z.string() }).nullable(),

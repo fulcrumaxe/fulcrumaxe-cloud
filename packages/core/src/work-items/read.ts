@@ -32,6 +32,8 @@ export interface WorkItemDTO {
   priority: WorkItemPriority;
   queue_rank: number | null;
   cost_usd: number;
+  /** D#6 R2b-5a: what this item's runner runs would have cost at API prices. Information; NEVER part of `cost_usd` or any spend. */
+  own_plan_api_equivalent_usd: number;
   created_at: string;
   updated_at: string;
 }
@@ -46,6 +48,7 @@ interface WorkItemRow {
   priority: number;
   queue_rank: string | null; // bigint arrives as text
   cost_usd: string;
+  own_plan_api_equivalent_usd: string;
   created_at: Date;
   updated_at: Date;
   created_at_cursor: string; // fix round 1: see runs/read.ts's RunRow.created_at_cursor
@@ -66,7 +69,10 @@ const WORK_ITEM_SELECT = `
   SELECT wi.id, wi.repo_id, wi.kind, wi.gh_number, wi.stage, wi.provenance, wi.priority, wi.queue_rank,
          wi.created_at, wi.updated_at,
          to_char(wi.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
-         COALESCE(SUM(ar.usd), 0) AS cost_usd
+         COALESCE(SUM(ar.usd), 0) AS cost_usd,
+         -- D#6 R2b-5a: its own subquery over its own table, so the join above (and cost_usd) is untouched by runner runs.
+         COALESCE((SELECT SUM(u.api_equivalent_usd) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id
+                    WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_api_equivalent_usd
     FROM work_items wi
     LEFT JOIN agent_runs ar ON ar.work_item_id = wi.id AND ar.account_id = wi.account_id
 `;
@@ -91,6 +97,7 @@ function toDTO(row: WorkItemRow): WorkItemDTO {
     priority: WORK_ITEM_PRIORITIES[row.priority] ?? failPriority(row.priority),
     queue_rank: toQueueRank(row.queue_rank),
     cost_usd: Number(row.cost_usd),
+    own_plan_api_equivalent_usd: Number(row.own_plan_api_equivalent_usd),
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   };

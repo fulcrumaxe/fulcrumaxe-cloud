@@ -4,6 +4,7 @@ import { resolveRunLimits } from '../run-limits/resolve.js';
 import type { RunLimits } from '../run-limits/types.js';
 import { ACTIVITY_LIMITS, capText, readRunLines, type ActivityLine } from '../work-items/activity.js';
 import type { RunsReadCtx } from './read.js';
+import { RUNNER_USAGE_COLUMN, toRunnerUsage, type RunnerUsage } from './runnerUsage.js';
 
 /**
  * D#483 P5: everything the Runs app's detail shows about ONE run that `GET /api/v1/runs/{id}` does not carry: the agent's
@@ -77,6 +78,8 @@ export interface RunInsight {
    * made from these by the API (it holds the wording); the tag itself is never read here.
    */
   outside_meter: { state: 'pending' | 'matches' | 'higher' | 'unavailable' | 'off'; reason: string | null; added_usd: number | null };
+  /** D#6 R2b-5a: a runner run only (absent on any other): what it would have cost at API prices. Information; never part of `cost`, which stays spend. */
+  runner_usage?: RunnerUsage | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -112,6 +115,7 @@ interface RunRow {
   om_state: string | null;
   om_reason: string | null;
   om_true_up_usd: string | null;
+  runner_usage_json: unknown;
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -150,7 +154,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
                                    END)
                     FROM (SELECT f FROM jsonb_array_elements(envelope->'findings') AS f LIMIT $4::int) s
                 ) END AS findings,
-                om_state, om_reason, om_true_up_usd
+                om_state, om_reason, om_true_up_usd, ${RUNNER_USAGE_COLUMN}
            FROM agent_runs WHERE id = $1::uuid`,
         [id, ACTIVITY_LIMITS.maxSummaryChars + 1, INSIGHT_LIMITS.maxFindingChars + 1, INSIGHT_LIMITS.maxFindings + 1],
       )
@@ -210,6 +214,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       )
     ).rows[0]?.code;
 
+    const runnerUsage = toRunnerUsage(r.runtime, r.runner_usage_json);
     return {
       server_time: now.toISOString(),
       run: {
@@ -257,6 +262,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       escalated_from: escalatedFrom,
       children,
       outside_meter: outsideMeterOf(r),
+      ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage }),
     };
   });
 }

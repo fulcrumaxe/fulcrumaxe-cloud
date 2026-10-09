@@ -22,6 +22,8 @@ describe("stream", () => {
     expect(local[1]).toMatchObject({ tool_name: "Write", file_path: "src/a.ts" });
     expect(local[2]).toMatchObject({ type: "file_changed", file_path: "src/a.ts" });
     expect(local[3]).toMatchObject({ usage: { input: 12, output: 7, usd: 0.0123 } });
+    // This stream's result line has no cache counts, so the event carries none (an absent field, never a zero).
+    expect(Object.keys((local[3] as { usage: object }).usage).sort()).toEqual(["input", "output", "usd"]);
     expect(local.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
     for (const event of local) expect(LocalOnlyEvent.safeParse(event).success).toBe(true);
     expect(JSON.stringify(local)).not.toMatch(/PRIVATE-/);

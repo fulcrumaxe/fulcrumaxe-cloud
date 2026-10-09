@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { RUNNER_USAGE_COLUMN, toRunnerUsage, type RunnerUsage } from './runnerUsage.js';
 
 /**
  * D#31 comment 18494573 (C7): every domain module in this codebase keeps
@@ -27,9 +28,13 @@ export interface RunDTO {
   parent_run_id: string | null;
   role: string;
   status: string;
+  /** D#6 R2b-5a: where the run ran (`sandbox` or `runner`). */
+  runtime: string;
   usd: number | null;
   tokens_in: number | null;
   tokens_out: number | null;
+  /** D#6 R2b-5a: a runner run only (absent on any other): what it would have cost at API prices, never spend. Null until the runner reports usage. */
+  runner_usage?: RunnerUsage | null;
   created_at: string;
   updated_at: string;
   /**
@@ -51,9 +56,11 @@ interface RunRow {
   parent_run_id: string | null;
   role: string;
   status: string;
+  runtime: string;
   usd: string | null;
   tokens_in: string | null;
   tokens_out: string | null;
+  runner_usage_json: unknown;
   created_at: Date;
   updated_at: Date;
   created_at_cursor: string; // fix round 1: full-precision text cursor, cursor-only, never in the DTO
@@ -64,7 +71,7 @@ interface RunRow {
 /** Shown where a member has no name on record. Never an email, an id or the word null (the same text the runner read model uses). */
 const UNNAMED_MEMBER = 'A team member';
 
-const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, usd, tokens_in, tokens_out, created_at, updated_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor, approved_by,
+const RUN_COLUMNS = `id, work_item_id, parent_run_id, role, status, runtime, usd, tokens_in, tokens_out, ${RUNNER_USAGE_COLUMN}, created_at, updated_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor, approved_by,
   (SELECT COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), '${UNNAMED_MEMBER}') FROM users u WHERE u.id = agent_runs.approved_by) AS approved_by_name`;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,17 +93,20 @@ async function autoApprovedIds(client: PoolClient, accountId: string, rows: RunR
 }
 
 function toRunDTO(row: RunRow, auto: Set<string>): RunDTO {
+  const runnerUsage = toRunnerUsage(row.runtime, row.runner_usage_json);
   return {
     id: row.id,
     work_item_id: row.work_item_id,
     parent_run_id: row.parent_run_id,
     role: row.role,
     status: row.status,
+    runtime: row.runtime,
     // usd (numeric) and the two bigint token columns come back from pg as
     // strings; Number(...) is safe here since neither ever nears MAX_SAFE_INTEGER.
     usd: row.usd === null ? null : Number(row.usd),
     tokens_in: row.tokens_in === null ? null : Number(row.tokens_in),
     tokens_out: row.tokens_out === null ? null : Number(row.tokens_out),
+    ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage }),
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
     approved_by: row.approved_by === null ? null : { id: row.approved_by, name: row.approved_by_name ?? UNNAMED_MEMBER },
