@@ -5,6 +5,7 @@
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
@@ -30,6 +31,20 @@ const code = await runCli({
     kill: (pid, signal) => process.kill(pid, signal),
     engine,
     sandbox: createSandboxHost(engine.captureWithStderr),
+    // How a tmux pane starts this program again (the watch and take-over panes), the terminal type, and the one question take-over asks.
+    selfCommand: [process.execPath].concat(process.execArgv, [realpathSync(fileURLToPath(import.meta.url))]),
+    term: process.env.TERM,
+    uid: process.getuid?.(),
+    // The take-over confirmation must be typed by a person: a piped stdin is not one.
+    interactive: process.stdin.isTTY === true,
+    ask: async (question) => {
+      const lines = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return await lines.question(question);
+      } finally {
+        lines.close();
+      }
+    },
   },
   doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr) },
   serviceHost: {

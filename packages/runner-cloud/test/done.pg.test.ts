@@ -568,6 +568,46 @@ describe("done route [pg]", () => {
     });
   });
 
+  describe("a run its owner took over (D#6 R4a-7)", () => {
+    /** The `taken_over` event the runner sent, stored the way the events route stores a runner's event. */
+    async function storeTakenOver(runId: string): Promise<void> {
+      await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 5, 'runner.event', $3::jsonb)", [
+        A.accountId,
+        runId,
+        JSON.stringify({ seq: 3, ts: "2026-10-10T12:00:00.000Z", type: "taken_over" }),
+      ]);
+    }
+
+    it("an executor with a commit inside the scope still ends failed taken_over: no GitHub call, no pull request, no number", async () => {
+      const s = await scene();
+      await storeTakenOver(s.runId);
+      const res = await s.call();
+      expect(parsedDone(res)).toEqual({ continue: false, outcome: "failed", failure_reason: "taken_over", pr_number: null });
+      expect(s.fake.calls).toEqual([]);
+      expect(s.repo.pulls).toHaveLength(0);
+      expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "taken_over", prNumber: null });
+    });
+
+    it("a reviewer's run that was taken over fails too, so it can never count toward a merge gate", async () => {
+      for (const role of ["code-reviewer", "security-reviewer", "acceptance-tester", "debater"]) {
+        finished.length = 0;
+        const s = await scene({ role, port: "none", pushed: false });
+        await storeTakenOver(s.runId);
+        const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, agentOutput: { verdict: "pass" } } });
+        expect(parsedDone(res), role).toEqual({ continue: false, outcome: "failed", failure_reason: "taken_over", pr_number: null });
+        expect(s.fake.calls, role).toEqual([]);
+      }
+    });
+
+    it("only that run: another run's taken_over event changes nothing here, and a stored event of another kind does not count", async () => {
+      const other = await scene({ role: "code-reviewer", port: "none", pushed: false });
+      await storeTakenOver(other.runId);
+      const s = await scene({ role: "code-reviewer", port: "none", pushed: false });
+      await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 5, 'runner.event', $3::jsonb)", [A.accountId, s.runId, JSON.stringify({ seq: 3, type: "tool_use" })]);
+      expect(parsedDone(await s.call())).toMatchObject({ outcome: "succeeded", failure_reason: null });
+    });
+  });
+
   describe("other roles", () => {
     for (const role of ["code-reviewer", "security-reviewer", "acceptance-tester", "debater", "project-manager"]) {
       it(`${role}: makes no commit, succeeds, and needs neither GitHub nor a configured port`, async () => {

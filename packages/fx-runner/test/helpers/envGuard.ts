@@ -55,6 +55,11 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/staleTemp.ts": ["fs", "path"], // `fx-runner run` at start: lstat and unlink of exact-name regular files next to the ledger, nothing else
   "src/commands/logs.ts": ["fs", "path"], // `fx-runner logs`: a size check, then the log file <state dir>/logs/<run id>.jsonl through the private-file reader
   "src/commands/service.ts": ["crypto", "fs", "path"], // `fx-runner service`: lstat, an atomic write (random temp name) and an unlink of the one per-user unit file
+  "src/watch/layout.ts": ["fs", "path"], // the watch's own files under the state directory: the tmux socket directory, one record per running job, the take-over request
+  "src/watch/tmux.ts": ["fs", "path"], // finds the tmux binary on the search path; tmux itself is run through the injected capture
+  "src/engines/claude/takeover.ts": ["fs", "path"], // reads a taken-over run's transcript, session index and job files to resume its session
+  "src/commands/attach.ts": [],
+  "src/commands/watchPane.ts": ["path"], // the transcript's path under the state directory
   "src/commands/run.ts": ["path"], // the composition root: the runner's own directory layout; the process start and the pid check arrive through its host argument
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
   "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path
@@ -162,7 +167,7 @@ function spawnValueProblem(node: ts.Identifier, file: string): boolean {
       ts.isCallExpression(parent.parent) &&
       parent.parent.arguments[0] === parent &&
       ts.isIdentifier(parent.parent.expression) &&
-      parent.parent.expression.text === "runCapture";
+      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground");
     return !(seamLeft || runCaptureArg);
   }
   return true;

@@ -182,6 +182,33 @@ describe("LocalOnlyEvent", () => {
     });
   });
 
+  describe("taken_over (D#6 R4a-7)", () => {
+    const taken = { seq: 0, ts: EVENT.ts, type: "taken_over" };
+
+    it("is a local-only event type that carries a timestamp and nothing else", () => {
+      expect(LOCAL_ONLY_EVENT_TYPES).toContain("taken_over");
+      expect(LocalOnlyEvent.safeParse(taken).success).toBe(true);
+      const extras: Record<string, unknown> = {
+        tool_name: "Read", file_path: "a.ts", exit_code: 0, duration_ms: 1, engine_version: "2.1.289", usage: { input: 1 }, reset_at: "2026-10-04T17:00:00.000Z", reason: "agent_failed", detail: "other",
+      };
+      for (const [key, value] of Object.entries(extras)) expect(LocalOnlyEvent.safeParse({ ...taken, [key]: value }).success, key).toBe(false);
+    });
+
+    it("needs a real timestamp and a sequence number, like every event", () => {
+      expect(LocalOnlyEvent.safeParse({ type: "taken_over", seq: 0 }).success).toBe(false);
+      expect(LocalOnlyEvent.safeParse({ ...taken, ts: "not a time" }).success).toBe(false);
+    });
+  });
+
+  it("has no message that starts, attaches to or types into a session: the cloud cannot drive a runner's agent or its tmux", () => {
+    const names = Object.keys(RUNNER_MESSAGES);
+    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "register", "revoke", "rotate"]);
+    expect(names.filter((n) => /attach|session|tmux|terminal|input|keys|takeover|take_over|start|exec|command/i.test(n))).toEqual([]);
+    // And no message has a field that could carry something to type or run.
+    const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => Object.keys((schema as unknown as { shape?: Record<string, unknown> }).shape ?? {}));
+    expect(fields.filter((f) => /command|keys|stdin|input|attach|tmux|exec|script/i.test(f))).toEqual([]);
+  });
+
   it("refuses model text, tool output, file content or a message under any name", () => {
     for (const key of ["text", "output", "content", "message", "stdout", "diff", "body"]) {
       expect(LocalOnlyEvent.safeParse({ ...EVENT, [key]: "anything" }).success, key).toBe(false);

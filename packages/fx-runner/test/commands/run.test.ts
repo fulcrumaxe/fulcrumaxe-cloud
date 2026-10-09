@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,6 +14,7 @@ import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { PINNED_JOB_KEYS, keyringFor, originHash } from "../../src/keyring.js";
 import { runCli } from "../../src/cli.js";
 import { pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
+import { readEntries, requestTakeover, takeoverState } from "../../src/watch/layout.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { until } from "../helpers/manualClock.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
@@ -474,4 +475,72 @@ describe("the command line wiring", () => {
     expect(used.sort()).toEqual(["api_key_not_configured", "job_keyring_missing", "ledger_closed", "mirrors_root_overlap"]);
     for (const code of used) expect(list).toContain(`"${code}"`);
   });
+});
+
+describe("6. the composed daemon with a tmux watch (D#6 R4a-7)", () => {
+  /** A `tmux` that only writes its arguments, one call per line, to a file. */
+  function fakeTmux(): string {
+    const log = path.join(root, "tmux.log");
+    writeFileSync(path.join(toolbin, "tmux"), `#!/bin/sh\necho "$*" >> '${log}'\nexit 0\n`);
+    chmodSync(path.join(toolbin, "tmux"), 0o755);
+    return log;
+  }
+  const lines = (log: string): string[] => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []);
+  /** A local bare repository the git path fetches from instead of the real host. */
+  function localRemote(): () => string {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    return () => pathToFileURL(remote).href;
+  }
+
+  it.skipIf(process.platform !== "linux")("each job gets a watch session; a take-over request stops the agent, records taken_over, sends done with no result, swaps the pane and pushes nothing", async () => {
+    const log = fakeTmux();
+    fake.set("hang", "");
+    const job = signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    cloud.enqueue(job);
+    const runId = job.job.run_id;
+    const run = start({ host: { selfCommand: ["/opt/fx/node", "/opt/fx/fx-runner.mjs"], term: "xterm" }, hooks: { searchPath: toolbin, remoteUrl: localRemote() } });
+    await until(() => existsSync(path.join(fake.dir, "argv.txt")), 20_000);
+    await until(() => lines(log).some((l) => l.includes("new-session")), 5_000);
+    const created = lines(log).find((l) => l.includes("new-session"))!;
+    expect(created).toContain(`-S ${path.join(stateDir, "tmux", "s")}`);
+    expect(created).toContain(`-s fx-${runId.slice(0, 8)}`);
+    expect(created).toContain(`/opt/fx/node /opt/fx/fx-runner.mjs __watch ${runId}`);
+    expect(readEntries(stateDir).map((e) => e.run_id)).toEqual([runId]);
+    expect((lstatSync(path.join(stateDir, "tmux")).mode & 0o777).toString(8)).toBe("700");
+
+    const asked = Date.now();
+    expect(requestTakeover(stateDir, runId)).toBe(true);
+    await until(() => takeoverState(stateDir, runId) === "ready", 20_000);
+    // The agent ended on SIGINT, not on the sandbox stop that follows 10 seconds later for an agent that ignores it.
+    expect(Date.now() - asked).toBeLessThan(5_000);
+    const events = cloud.runs.get(runId)!.events;
+    expect(events.at(-1)).toMatchObject({ type: "taken_over" });
+    expect(Object.keys(events.at(-1)!).sort()).toEqual(["seq", "ts", "type"]);
+    const done = cloud.seen.filter((s) => s.path.endsWith("/done"));
+    expect(done).toHaveLength(1);
+    expect(Object.keys(done[0]!.body as object).sort()).toEqual(["lease_generation", "run_id"]);
+    expect(lines(log).some((l) => l.includes(`respawn-pane -k -t fx-${runId.slice(0, 8)} /opt/fx/node /opt/fx/fx-runner.mjs __takeover ${runId}`))).toBe(true);
+    // The person's session stays: it is not killed with the job, and its record says it was handed over.
+    expect(lines(log).some((l) => l.includes("kill-session"))).toBe(false);
+    expect(readEntries(stateDir)).toEqual([expect.objectContaining({ run_id: runId, taken_over: true })]);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+
+  it("without tmux the job runs and no watch files are made", async () => {
+    const job = signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    cloud.enqueue(job);
+    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl"));
+    const run = start({ host: { selfCommand: ["/opt/fx/node", "/opt/fx/fx-runner.mjs"] }, hooks: { remoteUrl: localRemote() } });
+    await until(() => cloud.seen.some((s) => s.path.endsWith("/done")), 20_000);
+    expect(existsSync(path.join(stateDir, "tmux"))).toBe(false);
+    expect(existsSync(path.join(stateDir, "watch"))).toBe(false);
+    expect((await stop(run)).code).toBe(0);
+  }, 60_000);
 });

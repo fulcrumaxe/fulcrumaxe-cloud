@@ -31,7 +31,7 @@ import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
  */
 
 /** The reasons a `done` can end a run `failed` with. All are `FailureReason`s (checked at compile time). */
-export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error"] as const satisfies readonly FailureReason[];
+export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error", "taken_over"] as const satisfies readonly FailureReason[];
 export type DoneFailureReason = (typeof DONE_FAILURE_REASONS)[number];
 
 /** What the cloud decided about a run that sent `done`. */
@@ -156,7 +156,8 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
         requireLease(input);
         requireVerdict(input.verdict);
         if (input.sessionId !== undefined && (typeof input.sessionId !== "string" || !SESSION_ID_PATTERN.test(input.sessionId))) throw new RunActionInputError();
-        const envelope = input.agentOutput === undefined ? undefined : storedAgentOutput(input.agentOutput);
+        // A taken-over run stores no envelope (D#6 R4a-7): nothing the agent said before the owner stopped it can count as a result.
+        const envelope = input.agentOutput === undefined || input.verdict.failureReason === "taken_over" ? undefined : storedAgentOutput(input.agentOutput);
         const at = new Date(now());
         return withTenant(runnerPool, input.accountId, async (client): Promise<FinishRunnerDoneResult> => {
           // Fenced again, in the transaction that writes: the lease may have ended while GitHub was being asked. The fence takes the run

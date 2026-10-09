@@ -208,6 +208,7 @@ describe("runner done [pg]", () => {
         { outcome: "failed", failureReason: "pr_rejected", prNumber: null, prHttpStatus: 422 },
         { outcome: "failed", failureReason: "pr_rejected", prNumber: null },
         { outcome: "failed", failureReason: "internal_error", prNumber: 9 },
+        { outcome: "failed", failureReason: "taken_over", prNumber: null },
       ];
       expect(new Set(cases.map((c) => c.failureReason))).toEqual(new Set(DONE_FAILURE_REASONS));
       for (const verdict of cases) {
@@ -228,6 +229,16 @@ describe("runner done [pg]", () => {
       const g = await claimed(id);
       await facade.finishRunnerDone({ ...lease(id, g), verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null }, sessionId: "sess-9", agentOutput: { verdict: "fail" } });
       expect(await row(id)).toMatchObject({ status: "failed", cc_session_id: "sess-9", envelope: { verdict: "fail" } });
+    });
+
+    it("a taken-over run is recorded failed taken_over with the session id and NO envelope, even when the runner sent one (D#6 R4a-7)", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const result = await facade.finishRunnerDone({ ...lease(id, g), verdict: { outcome: "failed", failureReason: "taken_over", prNumber: null }, sessionId: "sess-9", agentOutput: { verdict: "pass" } });
+      expect(result).toMatchObject({ kind: "recorded", verdict: { outcome: "failed", failureReason: "taken_over" } });
+      const r = await row(id);
+      expect(r).toMatchObject({ status: "failed", cc_session_id: "sess-9" });
+      expect(r.envelope).toBeNull();
     });
 
     it("drops an envelope that is still over the byte cap once redacted, instead of storing it", async () => {

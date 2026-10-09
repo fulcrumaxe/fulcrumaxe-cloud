@@ -59,6 +59,24 @@ function renderAgentLine(runId: string, line: string): string[] {
   return out;
 }
 
+/**
+ * One line of the local log file as the lines to print for it: nothing for a damaged line or one of a kind that is not shown. `fx-runner logs`
+ * prints them all at once; a tmux watch pane (`__watch`, D#6 R4a-7) prints them as the file grows, with this same function.
+ */
+export function renderLogRecord(runId: string, raw: string): string[] {
+  let record: unknown;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    // fx-swallow-ok: a damaged line in a local log is skipped; the rest of the transcript is still shown
+    return [];
+  }
+  if (!isRecord(record) || typeof record.line !== "string") return [];
+  const lines = record.kind === "stdout" ? renderAgentLine(runId, record.line) : record.kind === "stderr" || record.kind === "meta" ? [`${record.kind}: ${record.line}`] : [];
+  // An embedded newline must not start a line that looks like one of ours (`meta:`, `result:`): continuation lines are marked.
+  return lines.flatMap((line) => printable(line).split(LINE_BREAKS).map((part, i) => (i === 0 ? part : `  | ${part}`)));
+}
+
 export function logsCommand(run: string | undefined, ctx: CommandContext): number {
   if (run === undefined) throw new CliError("usage: fx-runner logs <run id>", 2);
   if (!RUN_ID.test(run)) throw new CliError("run_id_invalid: a run id looks like 3f6c1a52-8d0e-4b7a-9c14-0a5e6d2b7f38", 2);
@@ -72,20 +90,6 @@ export function logsCommand(run: string | undefined, ctx: CommandContext): numbe
   if (size > MAX_LOG_BYTES) throw new CliError("this run's local log is too large to print (over 64 MiB); open the file in the logs directory with a pager instead");
   const text = readPrivateFile(logDir, `${run}.jsonl`);
   if (text === undefined) throw new CliError("run_log_missing: this machine has no local log for that run");
-  for (const raw of text.split("\n")) {
-    if (raw === "") continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(raw);
-    } catch {
-      // fx-swallow-ok: a damaged line in a local log is skipped; the rest of the transcript is still shown
-      continue;
-    }
-    if (!isRecord(record) || typeof record.line !== "string") continue;
-    const lines = record.kind === "stdout" ? renderAgentLine(run, record.line) : record.kind === "stderr" || record.kind === "meta" ? [`${record.kind}: ${record.line}`] : [];
-    // An embedded line break must not start a line that looks like one of ours (`meta:`, `result:`): continuation lines are marked.
-    // U+2028 and U+2029 are line breaks to a viewer that renders text, so they split like a newline does.
-    for (const line of lines) printable(line).split(LINE_BREAKS).forEach((part, i) => ctx.out(i === 0 ? part : `  | ${part}`));
-  }
+  for (const raw of text.split("\n")) if (raw !== "") for (const line of renderLogRecord(run, raw)) ctx.out(line);
   return 0;
 }

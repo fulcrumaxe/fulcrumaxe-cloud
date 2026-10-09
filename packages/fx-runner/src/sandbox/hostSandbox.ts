@@ -14,6 +14,9 @@ import {
 } from "./port.js";
 import { assertEnabledSandbox, protectedPaths, sandboxSettings, type ProtectedPaths } from "./sandboxSettings.js";
 
+/** An agent runtime that can also be sent an interrupt (SIGINT, which ends the agent's turn cleanly), for a take-over (D#6 R4a-7). */
+export type InterruptibleRuntime = AgentRuntime & { interrupt?(handle: AgentHandle): void };
+
 export interface HostSandboxConfig {
   credentials: CredentialMode;
   /** The same extra PATH directories the job runner and the engine are given; the environment check compares against them. */
@@ -22,7 +25,7 @@ export interface HostSandboxConfig {
    * Builds the agent runtime for one job from the `sandbox` block this tier computed for it. The runtime writes the
    * block into the settings file it starts the agent with; nothing else decides what the shell sandbox allows.
    */
-  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths): AgentRuntime;
+  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths): InterruptibleRuntime;
   /** The user's home directory (absolute). Its reads are denied to the job. */
   home: string;
   /** Per-job temp directories are made under here (0700) and removed with the sandbox. */
@@ -68,7 +71,7 @@ function failureOf(outcome: unknown): string | undefined {
 interface Entry {
   tempDir: string;
   timeoutMs: number;
-  runtime?: AgentRuntime;
+  runtime?: InterruptibleRuntime;
   agent?: AgentHandle;
   /** Settles when the agent process exists (or its start failed). A stop waits on this, never on the run's end. */
   agentUp?: Promise<unknown>;
@@ -80,6 +83,8 @@ interface Entry {
 export interface HostSandbox extends SandboxPort {
   /** The sandbox's current wall-clock limit, or `undefined` for a name that is gone. */
   timeoutMsOf(handle: SandboxHandle): number | undefined;
+  /** Sends the sandbox's agent SIGINT once it exists. Does nothing for a name that is gone or an agent already ended. */
+  interrupt(handle: SandboxHandle): Promise<void>;
 }
 
 function sameEnv(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -251,5 +256,10 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       return entry === undefined ? "gone" : entry.running ? "running" : "stopped";
     },
     timeoutMsOf: (handle) => entryOf(handle)?.timeoutMs,
+    async interrupt(handle) {
+      const entry = entryOf(handle);
+      await entry?.agentUp?.catch(noop);
+      if (entry?.runtime !== undefined && entry.agent !== undefined) entry.runtime.interrupt?.(entry.agent);
+    },
   };
 }

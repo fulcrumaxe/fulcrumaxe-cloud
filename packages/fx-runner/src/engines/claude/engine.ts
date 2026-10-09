@@ -107,7 +107,7 @@ function sandboxIsOn(sandbox: Record<string, unknown>): boolean {
  * the role must be known, the binary must pass the version and flag checks, and a login of the right kind must be present. Then the binary
  * is spawned (no shell, explicit argv, `cleanEnv` as its whole environment) with the prompt on standard input.
  */
-export function createClaudeEngine(config: EngineConfig): AgentRuntime {
+export function createClaudeEngine(config: EngineConfig): AgentRuntime & { interrupt(handle: AgentHandle): void } {
   const spawnFn = config.spawn ?? spawn;
   const graceMs = config.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
@@ -243,6 +243,10 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime {
 
   return {
     start: (opts: StartOptions) => run(opts, (opts as EngineStartOptions).resumeSessionId),
+    interrupt(handle) {
+      // SIGINT to the agent process itself: it ends its turn cleanly (SIGTERM would leave it unfinished). The group is stopped later, with the sandbox.
+      (handle.child as ChildProcess | undefined)?.kill("SIGINT");
+    },
     async stop(handle) {
       const child = handle.child as ChildProcess | undefined;
       // The whole process group, not the pid alone: a tool call's background process must not outlive the job.

@@ -75,6 +75,17 @@ It only calls out (no listening socket).
   minutes. A registration for `api_key` mode is refused until a local key file is supported. Residual risk, accepted: if three
   runs start at once on a lock a crash left behind, two may both take it; there is no `flock`, and `service install` runs one
   instance per user.
+- `fx-runner attach [<run | short id> | --latest] [--take-over]`: watch a job running on this machine, or take it over. With tmux
+  installed, `run` makes one tmux session per job (`fx-<short id>`) on a private socket (`<state dir>/tmux/`, directory 0700,
+  socket 0600, inside the sandbox's deny lists). The agent is never started by tmux: the pane only renders the job's local
+  transcript, so a tmux crash cannot touch the job, and the tmux server starts with an environment of four names (no credential).
+  With no argument `attach` lists the running jobs; with a job it attaches read-only (`tmux attach-session -r`). `--take-over`
+  asks you to type the job's short id, then the daemon sends the agent SIGINT, tells the cloud once that the run was taken over
+  (a `taken_over` event, then `done` with no result, so the cloud ends it `failed` with reason `taken_over` and a review run
+  never counts toward a merge gate), pushes nothing, and swaps the pane to the agent's own interactive resume (the job's
+  settings and sandbox, `--permission-mode default`, so you approve each action). Commit and push with your own git. Only this
+  OS user can attach, and no message in the runner protocol starts, attaches to or types into a session. Without tmux, jobs run
+  unwatched.
 
 - `fx-runner doctor`: one PASS, WARN or FAIL line per check, and a non-zero exit if any FAIL. It checks the registration and its
   key, that the cloud answers, that the Claude Code CLI is found (the same lookup `run` makes), that its version is at least the

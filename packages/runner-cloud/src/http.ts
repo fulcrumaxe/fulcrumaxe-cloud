@@ -151,7 +151,7 @@ export interface RunnerLeaseOps {
 /** What a finished-by-`done` run stored (the shape of packages/worker `RunnerDoneVerdict`, which this package cannot import). */
 export interface RunnerDoneStored {
   outcome: "succeeded" | "failed";
-  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | null;
+  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | "taken_over" | null;
   prNumber: number | null;
   /** The run branch the verdict was judged on (`fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise); set exactly when `prNumber` is (C25 section 1.2). */
   branch?: string;
