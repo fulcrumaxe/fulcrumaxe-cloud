@@ -10,8 +10,10 @@ import { h } from "../_lib/dom.js";
 import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
+import { createAllowancePanel } from "./repos-allowances.js";
 
 const REPOS_URL = "/api/v1/repos";
+const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
 const LIVE_EVENTS = ["installation.changed", "repos.changed"];
 const MAX_PAGES = 50;
 const ADMIN_ONLY = "Only owners and admins can change this.";
@@ -78,6 +80,8 @@ function mountRepos(host, installNote) {
     installBusy: false, note: installNote || "",
   };
   let destroyed = false, listGen = 0, settingsGen = 0;
+  // D#6 R7d: the sandbox allowance panel for the open repo. Its own state survives the detail pane being rebuilt.
+  const allowances = createAllowancePanel({ call: (method, id, body) => api(method, allowancesUrl(id), body, abort.signal), isCancelled: () => destroyed });
 
   const root = h("div", { class: "repos-app", "data-testid": "repos-app" });
   const headEl = h("div", { class: "repos-head" });
@@ -196,6 +200,8 @@ function mountRepos(host, installNote) {
       ...(st.isAdmin ? [] : [h("p", { id: "repos-admin-only-detail", class: "repos-muted", "data-testid": "repos-settings-admin-only" }, ADMIN_ONLY)]),
       ...(st.saveError ? [line(st.saveError, "repos-save-error", "repos-error", "alert")] : [])
     );
+    // dom-insert-ok: allowances.el is the section element createAllowancePanel built with h(); it keeps its own state across this rebuild
+    detailEl.append(allowances.el);
   }
 
   function render() {
@@ -263,6 +269,7 @@ function mountRepos(host, installNote) {
     st.openId = id;
     st.pendingOff = false; st.ack = false; st.ackError = false; st.saveError = "";
     loadSettings(id, false);
+    allowances.show(openRepo());
   }
 
   async function patch(body) {
@@ -317,6 +324,7 @@ function mountRepos(host, installNote) {
   return {
     destroy() {
       destroyed = true;
+      allowances.clear();
       gate.cancel();
       abort.abort();
       unsubscribe();
