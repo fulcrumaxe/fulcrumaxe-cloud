@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { COPY, runnerSetupText } from "../src/copy.js";
+import { COPY, GIT_PATH_LINES, runnerSetupText } from "../src/copy.js";
 import { GIT_TICKET_LIFETIME_SECONDS, GitTicketReply, RUNNER_REPLIES } from "../src/replies.js";
 import { DETAILS_OF_RUN_ENDED, GIT_TICKET_PATH, GitTicketMessage, LocalOnlyEvent, PUSH_TOO_LARGE_SIZE_MB, RUNNER_MESSAGES, RUNNER_SETUP_DETAILS } from "../src/messages.js";
 import { redactDeep, redactText } from "../src/redact.js";
@@ -69,9 +69,10 @@ describe("G2: a minted ticket is removed by redaction (it is a JWT)", () => {
 describe("the new runner_setup details and size_mb (C27 section 4.5)", () => {
   const NEW = ["git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete"];
 
-  it("RUNNER_SETUP_DETAILS gains exactly the six, after every earlier detail (and before the later model_unsupported)", () => {
-    expect(RUNNER_SETUP_DETAILS.slice(-7, -1)).toEqual(NEW);
-    expect(RUNNER_SETUP_DETAILS.slice(0, -7)).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
+  it("RUNNER_SETUP_DETAILS gains exactly the six, after every earlier detail (and before the later model_unsupported and the R4d-2 git-path details)", () => {
+    expect(RUNNER_SETUP_DETAILS.slice(10, 16)).toEqual(NEW);
+    expect(RUNNER_SETUP_DETAILS[16]).toBe("model_unsupported");
+    expect(RUNNER_SETUP_DETAILS.slice(0, 10)).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
     expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(RUNNER_SETUP_DETAILS);
   });
 
@@ -118,8 +119,20 @@ describe("what the dashboard shows for a runner_setup event", () => {
     expect(runnerSetupText("push_too_large", 7)).not.toContain("{");
   });
 
+  it("R4d-2: the three details of a run that published nothing show the rulings' exact words, and every git-path detail has its own line with no placeholder", () => {
+    expect(runnerSetupText("head_not_from_base")).toBe("The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.");
+    expect(runnerSetupText("sandbox_stub_committed")).toBe("The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.");
+    expect(runnerSetupText("workspace_git_refused")).toBe("The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.");
+    expect(Object.keys(GIT_PATH_LINES).sort()).toEqual(["git_version_unsupported", "head_not_from_base", "mirror_dir_insecure", "mirror_failed", "push_failed", "push_ref_refused", "sandbox_stub_committed", "snapshot_refused", "workspace_failed", "workspace_git_refused"]);
+    for (const [detail, line] of Object.entries(GIT_PATH_LINES)) {
+      expect(RUNNER_SETUP_DETAILS as readonly string[], detail).toContain(detail);
+      expect(runnerSetupText(detail)).toBe(line);
+      expect(line).not.toMatch(/undefined|null|NaN|\{|\}/);
+    }
+  });
+
   it("every other detail shows the setup sentence with the closed code as sent, and nothing shows null, undefined or a brace", () => {
-    for (const detail of RUNNER_SETUP_DETAILS.filter((d) => d !== "clone_limited" && d !== "push_too_large")) {
+    for (const detail of RUNNER_SETUP_DETAILS.filter((d) => d !== "clone_limited" && d !== "push_too_large" && !(d in GIT_PATH_LINES))) {
       expect(runnerSetupText(detail)).toBe(`Your runner could not start the agent (${detail}). Check the runner's setup, then retry.`);
     }
     // A size that is missing or out of range falls back to the plain code instead of printing "undefined MB".

@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_ELIGIBLE_ROLES, RUNNER_MAX_RUN_WALL_CLOCK_MS, RUNNER_SETUP_DETAILS, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
@@ -396,6 +396,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
         ["runner_setup", "other", "failed", "runner_setup_failed"],
         ["runner_setup", "continuation_branch_missing", "failed", "runner_setup_failed"],
         ["push_rejected", undefined, "failed", "push_rejected"],
+        // D#6 R4d-2 (C32 section 3): every closed detail the runner's git path can send. The strict event accepts each, and each ends the run like any setup failure.
+        ...[...RUNNER_SETUP_DETAILS.slice(RUNNER_SETUP_DETAILS.indexOf("model_unsupported") + 1)].map((detail): [string, string, string, string] => ["runner_setup", detail, "failed", "runner_setup_failed"]),
       ];
 
       for (const [reason, detail, status, failureReason] of TABLE) {

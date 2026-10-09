@@ -100,8 +100,8 @@ async function rig(withCapture: GitCapture = capture) {
 }
 
 /** The daemon refuses, nothing reaches the remote, no private ref is left in the mirror, and the victim's commit is not in the mirror. */
-async function expectRefused(r: Awaited<ReturnType<typeof rig>>): Promise<void> {
-  await expect(r.gitPath.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "push_ref_refused", message: "push_ref_refused" });
+async function expectRefused(r: Awaited<ReturnType<typeof rig>>, code = "push_ref_refused"): Promise<void> {
+  await expect(r.gitPath.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code, message: code });
   expect(refsOf(remote)).toEqual(["refs/heads/main"]);
   expect(refsOf(r.mirror).filter((ref) => ref.startsWith("refs/fx-push/"))).toEqual([]);
   expect(has(r.mirror, victimCommit)).toBe(false);
@@ -150,7 +150,7 @@ describe("the agent cannot point the daemon's fetch at another repository", () =
   it("a `commondir` file inside a real `.git` directory", async () => {
     const r = await rig();
     writeFileSync(path.join(r.gitDir, "commondir"), `${path.join(victim, ".git")}\n`);
-    await expectRefused(r);
+    await expectRefused(r, "workspace_git_refused");
   });
 
   it("alternates naming the other repo's objects, with HEAD set to its commit", async () => {
@@ -194,14 +194,14 @@ describe("the agent cannot point the daemon's fetch at another repository", () =
     await expectRefused(r);
   });
 
-  it("backstop: a commit with no link anywhere, but no ancestry in the run's base, is not pushed", async () => {
+  it("backstop: a commit with no link anywhere, but no ancestry in the run's base, is not pushed (head_not_from_base)", async () => {
     const r = await rig();
     sh("-C", r.workspace, "checkout", "--orphan", "unrelated");
     writeFileSync(path.join(r.workspace, "other.txt"), "other history\n");
     sh("-C", r.workspace, "add", "other.txt");
     sh("-C", r.workspace, "commit", "-m", "unrelated root");
     const unrelated = sh("-C", r.workspace, "rev-parse", "HEAD").trim();
-    await expect(r.gitPath.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "push_ref_refused" });
+    await expect(r.gitPath.publish(job, lease, r.workspace, r.base)).rejects.toMatchObject({ code: "head_not_from_base" });
     expect(refsOf(remote)).toEqual(["refs/heads/main"]);
     expect(refsOf(r.mirror).filter((ref) => ref.startsWith("refs/fx-push/"))).toEqual([]);
     expect(has(remote, unrelated)).toBe(false);
@@ -235,7 +235,6 @@ describe("assertWorkspaceGit on its own", () => {
     ["no .git at all", (dir) => rmSync(path.join(dir, ".git"), { recursive: true })],
     ["a .git file", (dir) => (rmSync(path.join(dir, ".git"), { recursive: true }), writeFileSync(path.join(dir, ".git"), "gitdir: /x\n"))],
     ["a .git link", (dir) => (renameSync(path.join(dir, ".git"), path.join(dir, "g")), symlinkSync(path.join(dir, "g"), path.join(dir, ".git")))],
-    ["a commondir", (dir) => writeFileSync(path.join(dir, ".git", "commondir"), "../x\n")],
     ["a HEAD link", (dir) => (rmSync(path.join(dir, ".git", "HEAD")), symlinkSync(path.join(victim, ".git", "HEAD"), path.join(dir, ".git", "HEAD")))],
     ["a config link", (dir) => (rmSync(path.join(dir, ".git", "config")), symlinkSync(path.join(victim, ".git", "config"), path.join(dir, ".git", "config")))],
     ["a packed-refs link", (dir) => symlinkSync(path.join(victim, ".git", "HEAD"), path.join(dir, ".git", "packed-refs"))],
