@@ -94,6 +94,19 @@ export interface PanelRunner {
   runSeat(request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult>;
 }
 
+/**
+ * D#6 C29: a follower's third way to end, next to a result and a failure. The step that is waiting on a runner's seat has used
+ * up its own time (it cannot finish inside the platform's step limit), so it hands control back WITHOUT stopping the run:
+ * nothing is cancelled and nothing is recorded as missing. The caller starts the same step again; every run is keyed, so the
+ * second call follows the runs the first started. It is not an abort: an abort stops the run and rejects with a seat error.
+ */
+export class PanelYieldError extends Error {
+  constructor() {
+    super("panel_yield");
+    this.name = "PanelYieldError";
+  }
+}
+
 export interface PanelDeps {
   /** An app_user pool: every read and write runs under `withTenant`. */
   pool: Pool;
@@ -334,7 +347,7 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
     // whose run waits `pending` does not use up its time waiting while another seat's run works.
     const roundController = new AbortController();
     const outputs: RoundResult["outputs"] = [];
-    const seat = async (role: PanelRole): Promise<SeatStatus> => {
+    const seat = async (role: PanelRole): Promise<SeatStatus | "yielded"> => {
       const missing = (reason: SeatFailure): SeatStatus => ({ role, status: "missing", reason });
       const controller = new AbortController();
       const abortSeat = (): void => controller.abort();
@@ -360,6 +373,8 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
           deadline,
         ]);
       } catch (err) {
+        // The step handed control back: this seat's run is still live and is neither failed nor timed out.
+        if (err instanceof PanelYieldError) return "yielded";
         // A runner that rejects the moment the deadline aborts its signal settles
         // before the deadline promise does: that is the timeout, not a failure.
         if (!controller.signal.aborted) reportError(err, { stage: "plan.panel_seat" });
@@ -392,13 +407,23 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
       outputs.push({ role, output });
       return { role, status: "posted" };
     };
+    let settled: Array<SeatStatus | "yielded">;
     try {
-      const seats = await Promise.all(roles.map(seat));
-      return { seats, outputs };
+      settled = await Promise.all(roles.map(seat));
     } catch (err) {
       roundController.abort(); // the step fails: nothing else in this round should keep running
       throw err;
     }
+    // Every seat has settled: those that finished have posted, and those that yielded still have live runs. Handing control back
+    // only now (not as soon as one seat yields) keeps a yield from aborting a sibling seat, which would cancel its run.
+    const seats: SeatStatus[] = [];
+    let yielded = false;
+    for (const s of settled) {
+      if (s === "yielded") yielded = true;
+      else seats.push(s);
+    }
+    if (yielded) throw new PanelYieldError();
+    return { seats, outputs };
   };
 
   const r1 = await runRound(1, expectedRoles, []);

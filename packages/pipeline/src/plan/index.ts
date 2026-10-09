@@ -26,6 +26,7 @@ export { decideFromLabels, isTrustedLabel, DECISIVE_LABELS, ESCALATING_LABELS, M
 export { selectPanel, PANEL_ROLES, type PanelRole } from "./panelRoles.js";
 export {
   runPanel,
+  PanelYieldError,
   buildSeatPrompt,
   readSignedComments,
   MAX_CHALLENGE_ROUNDS,

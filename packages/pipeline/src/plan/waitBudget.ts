@@ -24,6 +24,12 @@ export const RUNNER_PENDING_CEILING_MS = RUNNER_QUEUE_TTL_MS + RUNNER_PENDING_MA
 export interface WaitClock {
   pause(): void;
   resume(): void;
+  /**
+   * D#6 C29: counts `ms` as already spent. A step that was handed back and called again builds a fresh budget, but its run has been
+   * working since before; the follower calls this once with the time the run has really been `running`, so the deadline is
+   * measured from the run's own record and a re-entry does not reset it. Optional: a clock that cannot do it is a plain timeout.
+   */
+  consume?(ms: number): void;
 }
 
 export class WaitBudget implements WaitClock {
@@ -84,6 +90,20 @@ export class WaitBudget implements WaitClock {
       this.pausedAt = null;
     }
     this.start();
+  }
+
+  consume(ms: number): void {
+    if (this.done || !Number.isFinite(ms) || ms <= 0) return;
+    if (this.startedAt !== null) {
+      // Running: settle what ran so far, take the credit off, and re-arm the timer for what is left.
+      clearTimeout(this.timer);
+      const at = this.now();
+      this.remainingMs = Math.max(this.remainingMs - (at - this.startedAt) - ms, 0);
+      this.startedAt = at;
+      this.timer = setTimeout(() => this.expire(), this.remainingMs);
+    } else {
+      this.remainingMs = Math.max(this.remainingMs - ms, 0);
+    }
   }
 
   /** Stops the budget for good. Safe to call twice and after it expired. */

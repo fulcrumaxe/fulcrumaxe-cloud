@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { runPanel } from "../plan/panel.js";
+import { PanelYieldError, runPanel } from "../plan/panel.js";
 import { runSpecStep } from "../plan/spec.js";
 import { createFollowedRunner, type FollowedRunnerOptions } from "./followedRunner.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -39,10 +39,21 @@ export const PM_TIMEOUT_MS = 10 * 60_000;
 export const REPLAY_PANEL_TIMEOUT_MS = 90_000;
 /** The function time limit a workflow step runs under (the 800 s the long-running routes use). */
 export const STEP_LIMIT_MS = 800_000;
+/**
+ * D#6 C29: how much of its own time a step may spend waiting on a live RUNNER run before it hands control back. The runner plan
+ * runs one job at a time, so a panel's seats go one after another and a round alone would run past `STEP_LIMIT_MS`. After this
+ * the step returns `waiting`/`queued_on_runner` and the workflow calls it again. It must leave room for the longest wait that can
+ * still follow the yield point, a seat round or the PM run (a test pins both sums under `STEP_LIMIT_MS`). Sandbox runs never yield.
+ */
+export const STEP_YIELD_MS = 180_000;
+/** The word a yielding step answers with (the workflow repeats it: a workflow body imports no value from a package). */
+export const QUEUED_ON_RUNNER = "queued_on_runner";
 
 export type PanelForItemResult =
   | { status: "completed"; complete: boolean; missingRoles: string[]; round2Ran: boolean }
-  | { status: "refused"; reason: string };
+  | { status: "refused"; reason: string }
+  /** D#6 C29: the step handed control back without stopping any run; call it again. */
+  | { status: "waiting"; reason: typeof QUEUED_ON_RUNNER };
 
 export interface SpecFlowOptions extends FollowedRunnerOptions {
   /** Panel step: the wait per round. Spec step: the wait for the panel re-entry. */
@@ -53,8 +64,14 @@ export interface SpecFlowOptions extends FollowedRunnerOptions {
 }
 
 export async function runPanelForItem(pool: Pool, accountId: string, workItemId: string, ports: AdvanceRunPorts, options: SpecFlowOptions = {}): Promise<PanelForItemResult> {
-  const { panel } = createFollowedRunner(ports, options);
-  const out = await runPanel({ pool, accountId, runner: panel, timeoutMs: options.roundTimeoutMs ?? SEAT_ROUND_TIMEOUT_MS }, { workItemId });
+  const { panel } = createFollowedRunner(ports, { yieldAfterMs: STEP_YIELD_MS, ...options });
+  let out;
+  try {
+    out = await runPanel({ pool, accountId, runner: panel, timeoutMs: options.roundTimeoutMs ?? SEAT_ROUND_TIMEOUT_MS }, { workItemId });
+  } catch (err) {
+    if (err instanceof PanelYieldError) return { status: "waiting", reason: QUEUED_ON_RUNNER };
+    throw err;
+  }
   if (out.status === "refused") return { status: "refused", reason: out.reason };
   return { status: "completed", complete: out.complete, missingRoles: [...out.missingRoles], round2Ran: out.round2Ran };
 }
@@ -69,12 +86,18 @@ export interface SpecForItemResult {
 }
 
 export async function runSpecForItem(pool: Pool, accountId: string, workItemId: string, ports: AdvanceRunPorts, options: SpecFlowOptions = {}): Promise<SpecForItemResult> {
-  const { panel, writer } = createFollowedRunner(ports, options);
+  const { panel, writer } = createFollowedRunner(ports, { yieldAfterMs: STEP_YIELD_MS, ...options });
   // No `trigger`: the build is a separate, human-approved step (the driver starts it from `spec_ready` on approval).
-  const out = await runSpecStep(
-    { pool, accountId, runner: panel, writer, timeoutMs: options.roundTimeoutMs ?? REPLAY_PANEL_TIMEOUT_MS, writerTimeoutMs: options.pmTimeoutMs ?? PM_TIMEOUT_MS, ...(options.attempt ? { pmAttempt: options.attempt } : {}) },
-    { workItemId },
-  );
+  let out;
+  try {
+    out = await runSpecStep(
+      { pool, accountId, runner: panel, writer, timeoutMs: options.roundTimeoutMs ?? REPLAY_PANEL_TIMEOUT_MS, writerTimeoutMs: options.pmTimeoutMs ?? PM_TIMEOUT_MS, ...(options.attempt ? { pmAttempt: options.attempt } : {}) },
+      { workItemId },
+    );
+  } catch (err) {
+    if (err instanceof PanelYieldError) return { status: "waiting", reason: QUEUED_ON_RUNNER };
+    throw err;
+  }
   switch (out.status) {
     case "published":
       return { status: "published", stage: out.stage, version: out.version, replayed: out.replayed };
