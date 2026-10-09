@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MACOS_PREVIEW_LABEL, MACOS_PREVIEW_NOTICE } from "../src/platformSupport.js";
+import { MACOS_PREVIEW_LABEL, MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE } from "../src/platformSupport.js";
 import { PACKAGE_DIR, srcFiles } from "./helpers/srcFiles.js";
 
 const readme = readFileSync(path.join(PACKAGE_DIR, "README.md"), "utf8");
@@ -21,19 +21,31 @@ describe("the macOS preview label lives in one place", () => {
   });
 });
 
+describe("the Windows notice lives in one place", () => {
+  it("is spelled once in src, in platformSupport.ts", () => {
+    const files = srcFiles().filter(([, text]) => text.includes("does not support Windows yet"));
+    expect(files.map(([name]) => name)).toEqual(["src/platformSupport.ts"]);
+    expect(WINDOWS_UNSUPPORTED_NOTICE).toBe("fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported.");
+  });
+});
+
 describe("the README's support matrix", () => {
-  it("lists the supported platforms, WSL2 on the Linux install, and the two unsupported ones", () => {
+  it("lists macOS and Linux as supported, and native Windows, WSL2 and WSL1 as not", () => {
     expect(matrix).toEqual([
       ["macOS arm64 and x64", "supported as a **preview, not yet verified** (see below)"],
       ["Linux x64 and arm64", "supported"],
-      ["Windows 10 and 11 through WSL2 (x64 and arm64)", "supported, using the Linux install inside WSL2"],
       ["Native Windows", "not supported"],
+      ["WSL2", "not supported"],
       ["WSL1", "not supported"],
     ]);
   });
 
   it("gives one install path per OS", () => {
     expect(readme).toMatch(/one install path per OS/);
-    expect(readme).toMatch(/WSL2 uses the Linux one/);
+    expect(readme).not.toMatch(/WSL2 uses the Linux one/);
+  });
+
+  it("the README states exactly the Windows notice the program prints", () => {
+    expect(readme).toContain(WINDOWS_UNSUPPORTED_NOTICE);
   });
 });

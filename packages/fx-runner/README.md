@@ -91,7 +91,7 @@ It only calls out (no listening socket).
   key, that the cloud answers, that the Claude Code CLI is found (the same lookup `run` makes), that its version is at least the
   minimum the runner supports and that its `--help` lists every flag the runner passes, and whether a login of the right kind
   exists (yes, no or unknown, with the method label). It also runs a sandbox probe: one fixed test command inside the sandbox rules
-  a job gets (bubblewrap on Linux and WSL2, Seatbelt on macOS; no network, no model request). A failure carries one of five reason
+  a job gets (bubblewrap on Linux, Seatbelt on macOS; no network, no model request). A failure carries one of five reason
   codes (`bwrap_missing`, `socat_missing`, `userns_disabled`, `apparmor_userns_restricted`, `probe_failed_other`) and the exact fix
   for your distro: Debian and Ubuntu, Fedora, Arch, NixOS (the configuration line, never `nix-env`), or a generic line. On Ubuntu
   with the AppArmor restriction on user namespaces it prints a profile that allows them for `bwrap` only, and the weaker
@@ -117,15 +117,15 @@ It only calls out (no listening socket).
 |---|---|
 | macOS arm64 and x64 | supported as a **preview, not yet verified** (see below) |
 | Linux x64 and arm64 | supported |
-| Windows 10 and 11 through WSL2 (x64 and arm64) | supported, using the Linux install inside WSL2 |
 | Native Windows | not supported |
+| WSL2 | not supported |
 | WSL1 | not supported |
 
 macOS support is a preview, not yet verified: jobs run in Claude Code's own sandbox, which has not been proven on macOS yet.
-`fx-runner doctor` repeats this on macOS. Native Windows and WSL1 have no sandbox path, so the runner refuses to start there.
+`fx-runner doctor` repeats this on macOS. Native Windows, WSL1 and WSL2 are not supported in v1, so the runner refuses to start there (`windows_unsupported`, `wsl1_unsupported`, `wsl2_unsupported`). Windows support is planned. The runner prints: "fx-runner does not support Windows yet, including WSL2. Linux and macOS are supported."
 
 There is one install path per OS: the installer script, which arrives with the release change, installs the macOS build on
-macOS and the Linux build on Linux, and WSL2 uses the Linux one. Claude Code itself must already be installed and signed in.
+macOS and the Linux build on Linux. Claude Code itself must already be installed and signed in.
 
 `FX_RUNNER_HOME` moves the state directory. A key over 90 days old is refused by the cloud: revoke and register again.
 

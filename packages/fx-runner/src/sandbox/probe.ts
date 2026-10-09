@@ -3,7 +3,7 @@
  * answer is a pass or a failure with one reason code from a closed set and a one-line reason.
  *
  * The Claude Code shell sandbox only runs on a model turn, so the probe does not use the agent CLI. It starts the machine's own sandbox tool
- * directly (bubblewrap on Linux and WSL2, `sandbox-exec` on macOS) with arguments translated from the object `sandboxSettings()` builds, the
+ * directly (bubblewrap on Linux, `sandbox-exec` on macOS) with arguments translated from the object `sandboxSettings()` builds, the
  * same function the job path uses, and runs one fixed command that prints a marker. There is no network in it (the network namespace is
  * unshared, the macOS profile denies it), no model request, and no fallback: a machine that fails here is told so, and runs nothing.
  *

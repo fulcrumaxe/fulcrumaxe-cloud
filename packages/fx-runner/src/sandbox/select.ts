@@ -24,8 +24,8 @@ export interface SelectDeps extends PlatformProbe {
 
 /**
  * The isolation tier for this machine. Only tier (d) exists in this build, so the answer is `host_sandbox` or a
- * `SandboxRefused`: there is no `none`, and no unsandboxed path. The shell sandbox needs bubblewrap and socat on Linux
- * and WSL2; macOS has its own built in.
+ * `SandboxRefused`: there is no `none`, and no unsandboxed path. The shell sandbox needs bubblewrap and socat on Linux;
+ * macOS has its own built in.
  */
 export function selectTier(deps: SelectDeps): IsolationTier {
   const platform = detectPlatform(deps);

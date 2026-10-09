@@ -11,7 +11,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { runCli } from "../../src/cli.js";
-import { MACOS_PREVIEW_NOTICE } from "../../src/platformSupport.js";
+import { MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
 import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { findOnPath } from "../helpers/findOnPath.js";
@@ -316,6 +316,18 @@ describe("the sandbox check", () => {
     expect(sandboxLines(result.out)).toEqual(["PASS  Sandbox:           a test command ran inside the job's sandbox rules (bubblewrap)"]);
     expect(host.calls).toHaveLength(1);
     expect(fake.calls()).toEqual(["--version ", "--help ", "auth status"]);
+  });
+
+  it.each([
+    ["5.15.167.4-microsoft-standard-WSL2", "wsl2_unsupported"],
+    ["4.4.0-19041-Microsoft", "wsl1_unsupported"],
+  ])("a %s kernel FAILs with %s and the probe never runs", async (release, code) => {
+    register();
+    const host = fakeSandboxHost();
+    const result = await doctor({ host: { sandbox: host, osrelease: release } });
+    expect(sandboxLines(result.out)).toEqual([`FAIL  Sandbox:           ${code}: ${WINDOWS_UNSUPPORTED_NOTICE}`]);
+    expect(host.calls).toEqual([]);
+    expect(result.code).not.toBe(0);
   });
 
   it("macOS PASS names Seatbelt and keeps the preview notice", async () => {

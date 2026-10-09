@@ -8,7 +8,7 @@
 # workspace (directly and through links), the inside calls work, and nothing outside changes. The probes are the
 # operator's own self-test, written into the job's role card (the trusted part of the prompt), because a model refuses
 # the same instructions inside the untrusted block and a refused probe tests nothing. A probe the model does not call
-# is reported FAIL. It needs bwrap and socat on PATH on Linux and WSL2 (it exits 2 before planting anything if not).
+# is reported FAIL. It needs bwrap and socat on PATH on Linux (it exits 2 before planting anything if not).
 #
 # It plants canary files in ~/.fx-runner, ~/.ssh and the binary's directory, swaps in a decoy ~/.bashrc (the real one is
 # restored on exit, or the decoy removed if you had none), runs test/canary.live.test.ts, then removes everything it
