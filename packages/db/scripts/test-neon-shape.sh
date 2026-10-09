@@ -1074,6 +1074,10 @@ SANDBOX_IDLE_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs
 SANDBOX_CLAIM_GUARD_FUNCTIONS="'sandbox_reap_claimed'"
 SANDBOX_CLAIM_GUARD_PRIVILEGES="'column sandbox_reaps.sandbox_name SELECT','column sandbox_reaps.state SELECT','column sandbox_reaps.claimed_at SELECT','schema public USAGE'"
 
+# The role of 0762 and what it may hold and own (see the migration header).
+SANDBOX_REAP_AUDIT_WRITER_FUNCTIONS="'sandbox_reap_settings_audit_write'"
+SANDBOX_REAP_AUDIT_WRITER_PRIVILEGES="'table sandbox_reap_settings_audit INSERT','column sandbox_reap_settings.mode SELECT','column sandbox_reap_settings.updated_by SELECT'"
+
 # D#2 SANDBOX-REAPER-2 (0761): the one SECURITY DEFINER owned by sandbox_claim_guard (sandbox_reap_claimed(text)), matched by exact
 # signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp whose ACL holds platform_ops (the owner of
 # agent_run_create, its only caller) and nobody else but the owner, with no PUBLIC entry and no grant option; SHAPE_FAIL:<count> when a
@@ -1178,6 +1182,64 @@ check_plan_kind_audit_role_shape() {
   problems="$out"
   if [ -n "$problems" ]; then
     echo "neon-shape ($dbname): plan_kind_audit_writer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
+# D#2 SANDBOX-REAPER-2b (0762): the one SECURITY DEFINER owned by sandbox_reap_audit_writer (sandbox_reap_settings_audit_write(text)), matched by
+# exact signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp with EXECUTE for platform_ops (the
+# invoking trigger) and no one else, and no grant option; SHAPE_FAIL:<count> when a definer owned by the role is not that; nothing when
+# the role owns none.
+check_sandbox_reap_settings_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname = 'sandbox_reap_settings_audit_write'
+        AND p.proargtypes = array_to_string('{text}'::regtype[]::oid[], ' ')::oidvector
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 'platform_ops'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> 'platform_ops'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'sandbox_reap_audit_writer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'sandbox-reap-settings-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by sandbox_reap_audit_writer fail the exception shape (not sandbox_reap_settings_audit_write(text), a loose search_path, or EXECUTE for anyone but platform_ops)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#2 SANDBOX-REAPER-2b (0762): the two tables' grants and policies. Only platform_ops may read or update the settings (UPDATE of exactly
+# mode, updated_by and updated_at; no INSERT, DELETE or TRUNCATE for anyone), the audit table is SELECT for platform_ops and INSERT for
+# sandbox_reap_audit_writer and nobody else, no PUBLIC entry on either, and the policies name exactly those roles. A no-op when the table
+# does not exist.
+check_sandbox_reap_settings_tables() {
+  local dbname="$1" out rc=0 grants_expected policies_expected
+  grants_expected="'sandbox_reap_settings platform_ops SELECT','sandbox_reap_settings_audit platform_ops SELECT','sandbox_reap_settings_audit sandbox_reap_audit_writer INSERT','sandbox_reap_settings.mode platform_ops UPDATE','sandbox_reap_settings.updated_by platform_ops UPDATE','sandbox_reap_settings.updated_at platform_ops UPDATE','sandbox_reap_settings.mode sandbox_reap_audit_writer SELECT','sandbox_reap_settings.updated_by sandbox_reap_audit_writer SELECT'"
+  policies_expected="'sandbox_reap_settings platform_ops_read SELECT platform_ops','sandbox_reap_settings platform_ops_update UPDATE platform_ops','sandbox_reap_settings audit_writer_read SELECT sandbox_reap_audit_writer','sandbox_reap_settings_audit platform_ops_read SELECT platform_ops','sandbox_reap_settings_audit audit_writer_insert INSERT sandbox_reap_audit_writer'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH held AS (
+      SELECT c.relname || ' ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || ' ' || a.privilege_type AS x
+        FROM pg_class c, aclexplode(c.relacl) a WHERE c.relname IN ('sandbox_reap_settings', 'sandbox_reap_settings_audit') AND a.grantee <> c.relowner
+      UNION ALL SELECT c.relname || '.' || t.attname || ' ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a
+        WHERE c.relname IN ('sandbox_reap_settings', 'sandbox_reap_settings_audit') AND a.grantee <> c.relowner),
+    pol AS (SELECT tablename || ' ' || policyname || ' ' || cmd || ' ' || array_to_string(roles, ',') AS x FROM pg_policies WHERE tablename IN ('sandbox_reap_settings', 'sandbox_reap_settings_audit'))
+    SELECT concat_ws('; ',
+      CASE WHEN (SELECT count(*) FROM held) <> 8 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$grants_expected])) THEN 'grants are not exactly the 8 granted by 0762' END,
+      CASE WHEN (SELECT count(*) FROM pol) <> 5 OR EXISTS (SELECT 1 FROM pol WHERE x <> ALL (ARRAY[$policies_expected])) THEN 'policies are not exactly the 5 created by 0762' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_class c WHERE c.relname IN ('sandbox_reap_settings', 'sandbox_reap_settings_audit') AND NOT (c.relrowsecurity AND c.relforcerowsecurity)) THEN 'row security is not forced on both tables' END,
+      CASE WHEN (SELECT count(*) FROM sandbox_reap_settings) <> 1 THEN 'sandbox_reap_settings does not hold exactly one row' END)
+    WHERE to_regclass('public.sandbox_reap_settings') IS NOT NULL;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'sandbox-reap-settings-tables' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): sandbox reap settings tables wrong: $out" >&2
     exit 1
   fi
 }
@@ -1753,6 +1815,15 @@ if [ -n "$PLAN_KIND_AUDIT_RESULT" ] && ! [[ "$PLAN_KIND_AUDIT_RESULT" =~ ^[0-9]+
   echo "neon-shape: internal error -- plan_kind_audit_writer exempt function oid was not numeric: $PLAN_KIND_AUDIT_RESULT" >&2
   exit 1
 fi
+SANDBOX_REAP_SETTINGS_RESULT="$(check_sandbox_reap_settings_exception_shape fx_neon)"
+if [[ "$SANDBOX_REAP_SETTINGS_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${SANDBOX_REAP_SETTINGS_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$SANDBOX_REAP_SETTINGS_RESULT" ] && ! [[ "$SANDBOX_REAP_SETTINGS_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- sandbox_reap_audit_writer exempt function oid was not numeric: $SANDBOX_REAP_SETTINGS_RESULT" >&2
+  exit 1
+fi
 PROPOSAL_WI_RESULT="$(check_proposal_work_item_exception_shape fx_neon)"
 if [[ "$PROPOSAL_WI_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${PROPOSAL_WI_RESULT#SHAPE_FAIL:}" >&2
@@ -1816,7 +1887,7 @@ if [ -n "$RUNNER_NOTICE_RESULT" ] && ! [[ "$RUNNER_NOTICE_RESULT" =~ ^[0-9]+(,\ 
   echo "neon-shape: internal error -- runner_notice_lister exempt function oid was not numeric: $RUNNER_NOTICE_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1840,6 +1911,8 @@ check_sandbox_net_role_shape fx_neon sandbox_idle_reaper SANDBOX_IDLE_REAPER
 check_sandbox_net_role_shape fx_neon sandbox_claim_guard SANDBOX_CLAIM_GUARD
 check_sandbox_claim_guard_platform_ops fx_neon
 check_plan_kind_audit_role_shape fx_neon
+check_sandbox_net_role_shape fx_neon sandbox_reap_audit_writer SANDBOX_REAP_AUDIT_WRITER
+check_sandbox_reap_settings_tables fx_neon
 check_sandbox_settle_definer_role_shape fx_neon
 check_work_item_halt_definer_role_shape fx_neon
 check_proposal_work_item_role_shape fx_neon

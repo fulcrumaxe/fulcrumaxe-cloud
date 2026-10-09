@@ -10,7 +10,7 @@ import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RunnerTarget, createJobIssuer, createJobSigner, type ExecutionRun, type ExecutionTarget, type ExecutionTargetRegistry } from "@fx/runner";
 import { markBuildNeedsHuman } from "@fx/pipeline";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
-import { createRunnerLeaseSweeper, type RunnerLeaseSweepResult } from "../src/runnerLeaseSweep.js";
+import { createRunnerLeaseSweeper, RUNNER_LEASE_SWEEP_BATCH, type RunnerLeaseSweepResult } from "../src/runnerLeaseSweep.js";
 import { createFollowUpPorts, requestFollowUp, type FollowUpPorts, type FollowUpPortsDeps } from "../src/runnerFollowUp.js";
 import { createAdvanceModule, FOLLOW_UP_CHAIN_MAX_RUNS } from "../src/advance.js";
 import { createFakeRunnerLimits } from "../../runner/test/helpers/runnerTargetFakes.js";
@@ -172,6 +172,57 @@ describe("runner follow-up runs [pg]", () => {
       expect(c.id).not.toBe(parent);
       expect(calls.dispatched).toEqual([c.id]);
       expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [parent])).rows[0].status).toBe("failed");
+    });
+
+    describe("while the sandbox reaper holds a claim on the pull request's sandbox (0761)", () => {
+      /** A reaper claim on the sandbox the parent's follow-up would reuse (the name sandboxNameFor builds). */
+      async function claim(parent: string, ageMinutes = 0): Promise<string> {
+        const { rows } = await admin.query("SELECT 'ex-' || account_id || '-' || dispatch_repo_id || '-' || dispatch_pr_number AS name FROM agent_runs WHERE id = $1", [parent]);
+        const name = rows[0].name as string;
+        await admin.query(
+          "INSERT INTO sandbox_reaps (sandbox_name, account_id, run_id, reason, state, claimed_at) VALUES ($1, $2, $3, 'idle', 'claimed', now() - $4::int * interval '1 minute')",
+          [name, A.accountId, parent, ageMinutes],
+        );
+        return name;
+      }
+      const sweepQuiet = async (errors: string[]) => createRunnerLeaseSweeper(writerPool, { now: () => clock, followUp: ports, onError: (runId) => errors.push(runId) }).sweepRunnerLeases();
+
+      it("is a wait, not a failure: nothing is reported, the parent stays running with no child, and the follow-up is made once the claim is marked deleted", async () => {
+        const parent = await run({ lease: clock - 1 });
+        const name = await claim(parent);
+        const errors: string[] = [];
+        const first = await sweepQuiet(errors);
+        expect(first).toMatchObject({ leasesListed: 1, leasesSkipped: 1, leasesFailed: 0, lost: 0, followUpsCreated: 0, followUpsFailed: 0, nextDueAt: clock + 5 * 60_000 });
+        expect(errors).toEqual([]);
+        expect(await child(parent)).toEqual([]);
+        expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [parent])).rows[0].status).toBe("running");
+        expect((await admin.query("SELECT 1 FROM run_events WHERE run_id = $1 AND payload->>'to' = 'failed' AND payload->>'failureReason' = 'runner_lost'", [parent])).rows).toEqual([]);
+        expect(calls.dispatched).toEqual([]);
+        await admin.query("UPDATE sandbox_reaps SET state = 'deleted', done_at = now() WHERE sandbox_name = $1", [name]);
+        expect(await sweepQuiet(errors)).toMatchObject({ lost: 1, followUpsCreated: 1, leasesFailed: 0, leasesSkipped: 0 });
+        expect(errors).toEqual([]);
+        expect(await child(parent)).toHaveLength(1);
+        expect((await admin.query("SELECT status FROM agent_runs WHERE id = $1", [parent])).rows[0].status).toBe("failed");
+      });
+
+      it("a full page whose only movement is a reap wait is not due again at once: the next run is after the retry delay, not now", async () => {
+        const waiting = await run({ lease: clock - 1 });
+        await claim(waiting);
+        for (let i = 0; i < RUNNER_LEASE_SWEEP_BATCH - 1; i++) await run({ lease: clock + HOUR });
+        const errors: string[] = [];
+        const result = await sweepQuiet(errors);
+        expect(result).toMatchObject({ leasesListed: RUNNER_LEASE_SWEEP_BATCH, leasesSkipped: 1, held: RUNNER_LEASE_SWEEP_BATCH - 1, lost: 0, leasesFailed: 0 });
+        expect(result.nextDueAt).toBe(clock + 5 * 60_000);
+        expect(errors).toEqual([]);
+      });
+
+      it("a claim that is more than ten minutes old has expired, so the next tick makes the follow-up", async () => {
+        const parent = await run({ lease: clock - 1 });
+        await claim(parent, 11);
+        const errors: string[] = [];
+        expect(await sweepQuiet(errors)).toMatchObject({ lost: 1, followUpsCreated: 1, leasesSkipped: 0, leasesFailed: 0 });
+        expect(errors).toEqual([]);
+      });
     });
 
     it("the child commits with the status move or not at all: a follow-up that fails leaves the run running and no child behind", async () => {

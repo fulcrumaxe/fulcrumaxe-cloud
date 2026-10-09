@@ -156,6 +156,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_reap_unconfigured",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2): an executor run met a reaper claim on its sandbox; the start is retried after a wait.
   "sandbox_reaping",
+  // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
+  "sandbox_reap_mode_unreadable",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

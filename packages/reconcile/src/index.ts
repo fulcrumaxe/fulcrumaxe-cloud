@@ -67,6 +67,7 @@ export {
   type ModelKeyHealthDeps,
 } from './jobs/modelKeyHealth.js';
 export {
+  effectiveSandboxReapMode,
   parseSandboxReapMode,
   sandboxJobGate,
   sandboxReapJobs,
@@ -77,6 +78,7 @@ export {
   SANDBOX_REAP_IDLE_JOB,
   SANDBOX_REAP_TERMINAL_JOB,
   type SandboxInventorySummary,
+  type SandboxReapDbSetting,
   type SandboxReapJobDeps,
   type SandboxReapMode,
   type SandboxReapModeSetting,

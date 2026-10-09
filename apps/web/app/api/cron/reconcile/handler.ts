@@ -12,6 +12,7 @@ import {
   buildReconcileJobs,
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
+  effectiveSandboxReapMode,
   parseSandboxReapMode,
   RECONCILE_ROUTE,
   runTick,
@@ -19,6 +20,7 @@ import {
   sandboxReapJobs,
   type ReconcileJob,
   type ReportError,
+  type SandboxReapDbSetting,
   type SandboxReapWorker,
   type TickDeps,
   type TickSummary,
@@ -51,6 +53,28 @@ export interface ReconcileHandlerDeps {
    * defaultReconcileDeps always supplies it.
    */
   getWorker?(): Promise<SandboxReapWorker | null>;
+  /**
+   * Reads `sandbox_reap_settings.mode` (C85). Called at the start of every reap pass, never cached. Absent (a test double) is NULL, no override;
+   * defaultReconcileDeps always supplies it, over the platform_ops pool.
+   */
+  readSandboxReapDbMode?(): Promise<SandboxReapDbSetting>;
+}
+
+/**
+ * The database half of the reaper's kill switch. One row is expected; no row, an error or a value that is none of the three is
+ * `unreadable`, which the jobs read as `off` (fail closed) and report as sandbox_reap_mode_unreadable.
+ */
+export async function readSandboxReapDbMode(pool: Pick<TickDeps["pool"], "query">): Promise<SandboxReapDbSetting> {
+  try {
+    const { rows } = await pool.query<{ mode: string | null }>("SELECT mode FROM sandbox_reap_settings");
+    const row = rows.length === 1 ? rows[0] : undefined;
+    if (!row) return "unreadable";
+    if (row.mode === null || row.mode === "off" || row.mode === "dry_run" || row.mode === "on") return row.mode;
+    return "unreadable";
+  } catch {
+    // fx-swallow-ok: the failed read is the result (unreadable), which the sandbox jobs report as sandbox_reap_mode_unreadable on every pass
+    return "unreadable";
+  }
 }
 
 /**
@@ -119,6 +143,7 @@ export function defaultReconcileDeps(): ReconcileHandlerDeps {
     reportError,
     sandboxReapMode: process.env.FX_SANDBOX_REAP_MODE,
     getWorker,
+    readSandboxReapDbMode: () => readSandboxReapDbMode(cachedPlatformOpsPool!),
   };
 }
 
@@ -155,7 +180,12 @@ export async function reconcileHandler(
       deps.reportError(err, { stage: "reconcile.sandbox_worker", route: RECONCILE_ROUTE });
       return null;
     });
-    const sandboxDeps = { mode: sandbox, reportError: deps.reportError };
+    // C85: the mode in force for a reap pass is the stricter of the environment and the database setting, worked out at the start of each pass.
+    const sandboxDeps = {
+      mode: sandbox,
+      reportError: deps.reportError,
+      effectiveMode: async () => effectiveSandboxReapMode(deps.sandboxReapMode, (await deps.readSandboxReapDbMode?.()) ?? null),
+    };
     return runTickFn({
       pool: deps.platformOpsPool,
       jobs: buildReconcileJobs({

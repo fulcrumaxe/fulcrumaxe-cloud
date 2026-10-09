@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { RECONCILE_JOBS, type JobContext, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
+import { effectiveSandboxReapMode, RECONCILE_JOBS, type JobContext, type SandboxReapDbSetting, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
-import { defaultReconcileDeps, modelKeyHealthJobFromEnv, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
+import { defaultReconcileDeps, modelKeyHealthJobFromEnv, readSandboxReapDbMode, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
 import { getWorker } from "../../../../lib/worker";
 
@@ -288,5 +288,125 @@ describe("the sandbox reaper's wiring (C82 sections 2 and 3)", () => {
     const res = await reconcileHandler(requestWithAuth("Bearer wrong"), fakeDeps({ getWorker: getWorkerSpy }), vi.fn());
     expect(res.status).toBe(401);
     expect(getWorkerSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("the reaper's kill switch also reads a database setting (C85)", () => {
+  const SANDBOX_JOBS = ["sandbox_reap_terminal", "sandbox_reap_ephemeral", "sandbox_reap_idle", "sandbox_inventory"];
+  const REAP_JOBS = SANDBOX_JOBS.slice(0, 3);
+  const ctx = (): JobContext => ({ pool: {} as never, cursor: null, signal: new AbortController().signal, calls: { limit: 60, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
+  const sweeps = (): { w: SandboxReapWorker; seen: string[]; inventories: number[] } => {
+    const seen: string[] = [];
+    const inventories: number[] = [];
+    const w: SandboxReapWorker = {
+      sweepSandboxReap: async (input) => (seen.push(`${input.pass}:${input.mode}`), { cursor: null, wrapped: true, callsUsed: 0, deleted: 0, stopped: 0, skipped: 0, candidates: [], alerts: [], orphans: 0 }),
+      sandboxInventory: async () => (inventories.push(1), { accounts: 0, live: 0, stoppedExecutor: 0, stoppedEphemeral: 0, orphans: 0, alerts: [] }),
+    };
+    return { w, seen, inventories };
+  };
+  /** One request to the handler, then each sandbox job it built, in order. */
+  async function pass(deps: ReconcileHandlerDeps): Promise<Record<string, string>> {
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+    const res = await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+    expect(res.status).toBe(200);
+    const out: Record<string, string> = {};
+    for (const job of runTickFn.mock.calls[0]![0].jobs.filter((j) => SANDBOX_JOBS.includes(j.name))) out[job.name] = (await job.run(ctx())).code ?? "ran";
+    return out;
+  }
+
+  // Written out by hand, not computed: the stricter of the two, off < dry_run < on; a database NULL leaves the environment alone.
+  const ENVS: [string, string | undefined][] = [["unset", undefined], ["off", "off"], ["dry_run", "dry_run"], ["on", "on"], ["invalid", "ON"]];
+  const DBS: SandboxReapDbSetting[] = [null, "off", "dry_run", "on"];
+  const EXPECTED: Record<string, ("off" | "dry_run" | "on")[]> = {
+    unset: ["dry_run", "off", "dry_run", "dry_run"],
+    off: ["off", "off", "off", "off"],
+    dry_run: ["dry_run", "off", "dry_run", "dry_run"],
+    on: ["on", "off", "dry_run", "on"],
+    invalid: ["off", "off", "off", "off"],
+  };
+  const CELLS = ENVS.flatMap(([label, raw]) => DBS.map((db, i) => [label, raw, db, EXPECTED[label]![i]!] as const));
+
+  it("the full matrix: 5 environment values times 4 database values is the stricter one in all 20 cells", () => {
+    expect(CELLS).toHaveLength(20);
+    for (const [label, raw, db, want] of CELLS) expect(effectiveSandboxReapMode(raw, db).mode, `${label} x ${String(db)}`).toBe(want);
+  });
+
+  it.each(CELLS)("through the handler, env %s (%s) with database %s: the passes run as %s", async (_label, raw, db, want) => {
+    const { w, seen, inventories } = sweeps();
+    const out = await pass(fakeDeps({ sandboxReapMode: raw, getWorker: async () => w, readSandboxReapDbMode: async () => db }));
+    if (want === "off") {
+      for (const name of REAP_JOBS) expect(out[name]).toBe("disabled");
+      expect(seen).toEqual([]);
+    } else {
+      expect(seen).toEqual([`terminal:${want}`, `ephemeral:${want}`, `idle:${want}`]);
+    }
+    // The inventory deletes nothing and is not gated by the database setting: it goes by the environment alone.
+    const envOff = raw !== undefined && raw !== "dry_run" && raw !== "on";
+    expect(inventories).toHaveLength(envOff ? 0 : 1);
+  });
+
+  it("no redeploy: in one handler instance with the environment fixed at on, a database off stops the next pass at zero worker calls, and a NULL lets it delete again", async () => {
+    const { w, seen } = sweeps();
+    let db: SandboxReapDbSetting = null;
+    const reports: string[] = [];
+    const deps = fakeDeps({ sandboxReapMode: "on", getWorker: async () => w, readSandboxReapDbMode: async () => db, reportError: (_e, c) => void reports.push(c.code ?? "") });
+    expect(await pass(deps)).toMatchObject({ sandbox_reap_terminal: "ran" });
+    expect(seen).toEqual(["terminal:on", "ephemeral:on", "idle:on"]);
+    db = "off";
+    seen.length = 0;
+    const second = await pass(deps);
+    expect(REAP_JOBS.map((n) => second[n])).toEqual(["disabled", "disabled", "disabled"]);
+    expect(seen).toEqual([]);
+    db = null;
+    expect(await pass(deps)).toMatchObject({ sandbox_reap_terminal: "ran" });
+    expect(seen).toEqual(["terminal:on", "ephemeral:on", "idle:on"]);
+    expect(reports).toEqual([]);
+  });
+
+  it("the setting is read before each pass, not once per tick: a change between two jobs of one tick reaches the second", async () => {
+    const { w, seen } = sweeps();
+    let reads = 0;
+    const runTickFn = vi.fn(async (_deps: TickDeps) => summary);
+    const deps = fakeDeps({ sandboxReapMode: "on", getWorker: async () => w, readSandboxReapDbMode: async () => (++reads === 1 ? null : "off") });
+    await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), deps, runTickFn);
+    const jobs = runTickFn.mock.calls[0]![0].jobs.filter((j) => REAP_JOBS.includes(j.name));
+    expect((await jobs[0]!.run(ctx())).code).toBeUndefined();
+    expect((await jobs[1]!.run(ctx())).code).toBe("disabled");
+    expect(seen).toEqual(["terminal:on"]);
+    expect(reads).toBe(2);
+  });
+
+  it("a failed read is off: zero worker calls and one sandbox_reap_mode_unreadable report for each reap pass", async () => {
+    const { w, seen } = sweeps();
+    const reports: string[] = [];
+    const out = await pass(fakeDeps({ sandboxReapMode: "on", getWorker: async () => w, readSandboxReapDbMode: async () => "unreadable", reportError: (_e, c) => void reports.push(c.code ?? "") }));
+    expect(REAP_JOBS.map((n) => out[n])).toEqual(["disabled", "disabled", "disabled"]);
+    expect(seen).toEqual([]);
+    expect(reports.filter((c) => c === "sandbox_reap_mode_unreadable")).toHaveLength(3);
+  });
+
+  it("a reader that throws is read as unreadable too", async () => {
+    const { w, seen } = sweeps();
+    const reports: string[] = [];
+    const out = await pass(fakeDeps({ sandboxReapMode: "on", getWorker: async () => w, readSandboxReapDbMode: async () => { throw new Error("boom"); }, reportError: (_e, c) => void reports.push(c.code ?? "") }));
+    expect(out.sandbox_reap_terminal).toBe("disabled");
+    expect(seen).toEqual([]);
+    expect(reports.filter((c) => c === "sandbox_reap_mode_unreadable")).toHaveLength(3);
+  });
+
+  describe("readSandboxReapDbMode", () => {
+    const poolOf = (rows: { mode: string | null }[] | Error) => ({ query: async () => { if (rows instanceof Error) throw rows; return { rows }; } }) as never;
+    it.each([
+      [[{ mode: null }], null],
+      [[{ mode: "off" }], "off"],
+      [[{ mode: "dry_run" }], "dry_run"],
+      [[{ mode: "on" }], "on"],
+      [[], "unreadable"],
+      [[{ mode: "on" }, { mode: "off" }], "unreadable"],
+      [[{ mode: "ON" }], "unreadable"],
+      [new Error("permission denied"), "unreadable"],
+    ])("%j reads as %s", async (rows, want) => {
+      expect(await readSandboxReapDbMode(poolOf(rows as never))).toBe(want);
+    });
   });
 });
