@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+import { RUNNER_VERSION } from "../src/version.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 
@@ -17,12 +18,40 @@ const shellVars = [];
 if (process.env.ANTHROPIC_API_KEY) shellVars.push("ANTHROPIC_API_KEY");
 if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");
 
+// What self-update needs (D#6 R6-2b): the version, where this program really is, whether a service manager started it (the unit sets
+// FX_RUNNER_SERVICE=1), and a way to run a freshly installed program for its start check, in a clean environment and on a time limit.
+const execPath = realpathSync(process.execPath);
+const updateHost = {
+  version: RUNNER_VERSION,
+  platform: process.platform,
+  arch: process.arch,
+  execPath,
+  inService: process.env.FX_RUNNER_SERVICE === "1",
+  run: (file, args, timeoutMs) =>
+    new Promise((resolve) => {
+      let stdout = "";
+      const env = { PATH: process.env.PATH, HOME: process.env.HOME, FX_RUNNER_HOME: process.env.FX_RUNNER_HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME };
+      for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+      try {
+        const child = spawn(file, args, { env, stdio: ["ignore", "pipe", "ignore"], timeout: timeoutMs, killSignal: "SIGKILL" });
+        child.stdout.on("data", (chunk) => {
+          if (stdout.length < 65536) stdout += chunk.toString("utf8");
+        });
+        child.on("error", () => resolve({ code: null, stdout: "" }));
+        child.on("close", (exit) => resolve({ code: exit, stdout }));
+      } catch {
+        resolve({ code: null, stdout: "" });
+      }
+    }),
+};
+
 // Run from the single-executable release build (scripts/build-sea.mjs), the program is process.execPath itself and there is no script file to name:
 // the bundle is CommonJS (no top-level await, no import.meta), so this file is one promise chain and the script path is only looked up when it exists.
 const sea = isSea();
 const scriptPath = () => realpathSync(fileURLToPath(import.meta.url));
 
 runCli({
+  updateHost,
   argv: process.argv.slice(2),
   home: process.env.HOME,
   stateDirOverride: process.env.FX_RUNNER_HOME,
@@ -57,13 +86,14 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr) },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
     command: sea ? [process.execPath, "run"] : [process.execPath, scriptPath(), "run"],
     path: process.env.PATH,
+    execPath,
   },
 }).then((code) => {
   process.exitCode = code;

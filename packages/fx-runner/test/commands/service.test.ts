@@ -42,6 +42,7 @@ describe("the generated text, exactly", () => {
         "Type=simple",
         "ExecStart=/opt/node/bin/node /opt/fx-runner/bin/fx-runner.mjs run",
         'Environment="PATH=/usr/bin:/home/someone/.local/bin"',
+        'Environment="FX_RUNNER_SERVICE=1"',
         "Restart=on-failure",
         "RestartSec=30",
         "TimeoutStopSec=20",
@@ -51,6 +52,26 @@ describe("the generated text, exactly", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("an installed version runs from the stable path, so an update takes effect at the next restart (systemd and launchd)", () => {
+    const stateDir = path.join(home, ".fx-runner");
+    const execPath = path.join(stateDir, "versions", "1.2.3", "fx-runner");
+    const linux = run("install", { host: { execPath, command: [execPath, "run"] } });
+    expect(linux.code).toBe(0);
+    const unit = readFileSync(linuxFile(), "utf8");
+    expect(unit).toContain(`ExecStart=${stateDir}/bin/fx-runner run`);
+    expect(unit).not.toContain("versions/1.2.3");
+    expect(unit).toContain('Environment="FX_RUNNER_SERVICE=1"');
+    run("install", { host: { platform: "darwin", execPath, command: [execPath, "run"] } });
+    const plist = readFileSync(macFile(), "utf8");
+    expect(plist).toContain(`<string>${stateDir}/bin/fx-runner</string>`);
+    expect(plist).not.toContain("versions/1.2.3");
+  });
+
+  it("a program that is not an installed version (a source checkout) keeps the command the entry point gave", () => {
+    run("install", { host: { execPath: "/opt/node/bin/node" } });
+    expect(readFileSync(linuxFile(), "utf8")).toContain("ExecStart=/opt/node/bin/node /opt/fx-runner/bin/fx-runner.mjs run");
   });
 
   it("systemd unit with another state directory and no PATH", () => {
@@ -79,6 +100,8 @@ describe("the generated text, exactly", () => {
         "  <dict>",
         "    <key>PATH</key>",
         "    <string>/usr/bin:/opt/homebrew/bin</string>",
+        "    <key>FX_RUNNER_SERVICE</key>",
+        "    <string>1</string>",
         "  </dict>",
         "  <key>RunAtLoad</key>",
         "  <true/>",

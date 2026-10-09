@@ -23,7 +23,7 @@ export type PollEvent =
   | { event: "discarded"; runId: string }
   | { event: "job_error" };
 
-export type PollEnd = "stopped" | "unauthorized";
+export type PollEnd = "stopped" | "unauthorized" | "restart";
 
 export interface PollDeps {
   client: Pick<RunnerClient, "claim">;
@@ -33,6 +33,8 @@ export interface PollDeps {
   signal: AbortSignal;
   /** Deals with a claimed run and resolves when it is over. */
   onClaimed: (claimed: Claimed) => Promise<unknown>;
+  /** Called before each claim, while no job is in hand. Resolving `"restart"` ends the loop (self-update switched the program and a service manager should start it again). */
+  betweenJobs?: () => Promise<"restart" | undefined>;
   log?: (event: PollEvent) => void;
   /** In [0, 1). Default `Math.random`. */
   random?: () => number;
@@ -49,6 +51,16 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   const wait = (seconds: number): Promise<void> => deps.clock.sleep(seconds * 1000, deps.signal);
 
   while (!deps.signal.aborted) {
+    // No job is in hand here (a claimed run is awaited to its end below), so this is the one place self-update may act.
+    if (deps.betweenJobs !== undefined) {
+      try {
+        if ((await deps.betweenJobs()) === "restart") return "restart";
+      } catch {
+        // fx-swallow-ok: a failed update step never stops claiming; the closed code is logged and the loop goes on
+        log({ event: "job_error" });
+      }
+      if (deps.signal.aborted) break;
+    }
     const gate = await deps.gate.check();
     const reply = await deps.client.claim(gate.open ? undefined : gate.reason);
     if (!gate.open && reply.kind === "claimed") {

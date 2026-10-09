@@ -91,6 +91,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/update/pinnedFetcher.ts": ["http", "https", "stream"],
   // The client's own files under <state dir>/tuf: SHA-256 of a downloaded release file, a random temp-file name for the root, a 0700 directory, and the saved metadata and verified download.
   "src/update/tuf.ts": ["crypto", "fs", "path"],
+  // D#6 R6-2b, applying updates. The installed layout under the state directory: a random name for a staging directory and a link, lstat/readlink/symlink/rename for the atomic switch of the stable link, a copy of the verified file with exclusive create, and SHA-256 of the staged file. No process is started here: the entry point hands in the one function that runs a program for the start check.
+  "src/update/versions.ts": ["crypto", "fs", "path"],
+  "src/update/updater.ts": ["crypto", "fs", "path"],
 };
 
 /**

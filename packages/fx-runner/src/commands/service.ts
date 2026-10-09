@@ -25,6 +25,8 @@ export const SYSTEMD_UNIT_NAME = "fx-runner.service";
 export const LAUNCHD_LABEL = "dev.fulcrumaxe.fx-runner";
 /** The first line of a file this command wrote (inside a comment, in both formats). */
 export const SERVICE_MARKER = "Managed by fx-runner service install.";
+/** Set to 1 in the unit: `run` then asks the service manager to start it again (exit 75) after it switched to a new version. */
+export const SERVICE_ENV_NAME = "FX_RUNNER_SERVICE";
 
 /** What `service` needs from the machine. Only `bin/fx-runner.mjs` fills it in. */
 export interface ServiceHost {
@@ -36,6 +38,14 @@ export interface ServiceHost {
   command: readonly string[];
   /** The shell's PATH, looked up by name by the caller; its plain absolute entries go into the unit. */
   path: string | undefined;
+  /** Where this program really is. When it is a file under `<state dir>/versions/`, the unit runs the stable path `<state dir>/bin/fx-runner` instead of `command`, so an update takes effect at the next restart. */
+  execPath?: string | undefined;
+}
+
+/** `[<state dir>/bin/fx-runner, "run"]` when the running program is an installed version; otherwise the command the entry point gave. */
+export function serviceCommandFor(host: ServiceHost, stateDir: string): readonly string[] {
+  const versions = path.join(stateDir, "versions") + path.sep;
+  return host.execPath !== undefined && path.resolve(host.execPath).startsWith(versions) ? [path.join(stateDir, "bin", "fx-runner"), "run"] : host.command;
 }
 
 const PLAIN = /^[A-Za-z0-9_.\/@+=-]+$/;
@@ -68,6 +78,7 @@ export function renderSystemdUnit(input: UnitInput): string {
     `ExecStart=${input.command.join(" ")}`,
   ];
   if (input.pathEntries.length > 0) lines.push(`Environment="PATH=${input.pathEntries.join(":")}"`);
+  lines.push(`Environment="${SERVICE_ENV_NAME}=1"`);
   if (input.stateDir !== undefined) lines.push(`Environment="FX_RUNNER_HOME=${input.stateDir}"`);
   if (input.bypassFile !== undefined) lines.push(`Environment="${BYPASS_ENV_NAME}=${input.bypassFile}"`);
   lines.push("Restart=on-failure", "RestartSec=30", "TimeoutStopSec=20", "", "[Install]", "WantedBy=default.target", "");
@@ -79,6 +90,7 @@ const xml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, 
 export function renderLaunchdPlist(input: UnitInput): string {
   const env: string[] = [];
   if (input.pathEntries.length > 0) env.push(`    <key>PATH</key>\n    <string>${xml(input.pathEntries.join(":"))}</string>`);
+  env.push(`    <key>${SERVICE_ENV_NAME}</key>\n    <string>1</string>`);
   if (input.stateDir !== undefined) env.push(`    <key>FX_RUNNER_HOME</key>\n    <string>${xml(input.stateDir)}</string>`);
   if (input.bypassFile !== undefined) env.push(`    <key>${BYPASS_ENV_NAME}</key>\n    <string>${xml(input.bypassFile)}</string>`);
   return [
@@ -173,8 +185,9 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
     return 0;
   }
 
-  if (host.command.length < 2 || host.command[host.command.length - 1] !== "run") throw new CliError("service_path_unsupported: the service command must end with run");
-  const command = host.command.map((arg, i) => (i === host.command.length - 1 ? arg : plainPath(arg, "the command the service runs")));
+  const chosen = serviceCommandFor(host, ctx.stateDir);
+  if (chosen.length < 2 || chosen[chosen.length - 1] !== "run") throw new CliError("service_path_unsupported: the service command must end with run");
+  const command = chosen.map((arg, i) => (i === chosen.length - 1 ? arg : plainPath(arg, "the command the service runs")));
   const stateDir = ctx.stateDir === path.join(home, STATE_DIR_NAME) ? undefined : plainPath(ctx.stateDir, "the state directory");
   const bypassFile = ctx.bypassFile === undefined || ctx.bypassFile === "" ? undefined : plainPath(ctx.bypassFile, BYPASS_ENV_NAME);
   const pathEntries = (host.path ?? "").split(":").filter((entry) => path.isAbsolute(entry) && PLAIN.test(entry));

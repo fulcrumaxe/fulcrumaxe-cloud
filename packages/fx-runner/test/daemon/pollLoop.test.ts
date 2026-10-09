@@ -28,8 +28,8 @@ function rig(replies: Array<ClaimResult | (() => ClaimResult)>, clock: ReturnTyp
     },
   };
   const handled: string[] = [];
-  const run = (over: { onClaimed?: (c: unknown) => Promise<unknown>; random?: () => number } = {}) =>
-    pollLoop({ client, clock, gate: OPEN_GATE, signal: controller.signal, onClaimed: over.onClaimed ?? (async (c) => void handled.push((c as { runId: string }).runId)), log: (e) => log.push(e), random: over.random ?? (() => 1) });
+  const run = (over: { onClaimed?: (c: unknown) => Promise<unknown>; random?: () => number; betweenJobs?: () => Promise<"restart" | undefined> } = {}) =>
+    pollLoop({ client, clock, gate: OPEN_GATE, signal: controller.signal, onClaimed: over.onClaimed ?? (async (c) => void handled.push((c as { runId: string }).runId)), log: (e) => log.push(e), random: over.random ?? (() => 1), ...(over.betweenJobs === undefined ? {} : { betweenJobs: over.betweenJobs }) });
   return { run, clock, controller, log, handled, claims: () => calls };
 }
 
@@ -120,6 +120,54 @@ describe("stopping", () => {
     source.emit("SIGTERM");
     expect(source.listenerCount("SIGTERM")).toBe(0);
     expect(controller.signal.aborted).toBe(false);
+  });
+});
+
+describe("between jobs (D#6 R6-2b: the one place self-update may act)", () => {
+  it("runs before each claim, and never while a claimed run is being handled", async () => {
+    const order: string[] = [];
+    const r = rig([claimed, claimed]);
+    const end = await r.run({
+      onClaimed: async () => {
+        order.push("job-start");
+        await new Promise((resolve) => setImmediate(resolve));
+        order.push("job-end");
+      },
+      betweenJobs: async () => {
+        order.push("between");
+        return undefined;
+      },
+    });
+    expect(end).toBe("stopped");
+    // every "between" sits outside a job-start .. job-end pair
+    let inJob = false;
+    for (const step of order) {
+      if (step === "job-start") inJob = true;
+      else if (step === "job-end") inJob = false;
+      else expect(inJob, order.join(",")).toBe(false);
+    }
+    expect(order.filter((s) => s === "job-end")).toHaveLength(2);
+    expect(order[0]).toBe("between");
+  });
+
+  it('"restart" ends the loop with that result, before another claim', async () => {
+    const r = rig([{ kind: "idle", retryAfter: 1 }]);
+    const end = await r.run({ betweenJobs: async () => "restart" });
+    expect(end).toBe("restart");
+    expect(r.claims()).toBe(0);
+  });
+
+  it("a step that throws is logged as a closed code and claiming goes on", async () => {
+    const r = rig([{ kind: "idle", retryAfter: 1 }]);
+    const end = await r.run({
+      betweenJobs: async () => {
+        throw new Error("secret text from a failed update");
+      },
+    });
+    expect(end).toBe("stopped");
+    expect(r.claims()).toBeGreaterThan(0);
+    expect(r.log[0]).toEqual({ event: "job_error" });
+    expect(JSON.stringify(r.log)).not.toContain("secret");
   });
 });
 

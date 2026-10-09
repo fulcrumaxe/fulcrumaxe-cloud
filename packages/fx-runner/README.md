@@ -192,6 +192,28 @@ handed back in a private directory under `<state dir>/tuf/`.
 - Tests use the real client against metadata built with the reference model classes and signed with throwaway keys, served
   from a local HTTPS server (`test/fixtures/`). No real key or root is committed.
 
+### Applying updates (`fx-runner update`, `fx-runner config`)
+
+`src/update/updater.ts` is the only code that installs what the TUF client verified. The layout is the one `install.sh` makes:
+`<state dir>/versions/<v>/fx-runner` and a relative link `<state dir>/bin/fx-runner` to the version in use. The service unit
+runs the link, so a switch takes effect at the next start.
+
+- `update --check` shows the current and the available version. `--pin <v>` holds a version and installs it now (an explicit
+  pin may go down). `--unpin`. `--rollback` returns to the one kept previous version. `config set auto-update on|off`.
+- The daemon checks at most every 6 hours, only at the top of the claim loop (no job in hand), and never when automatic updates
+  are off, a version is pinned, the build has no root or the install is Homebrew's. It never goes to an older version by itself.
+- An update is staged in a private directory, hashed again, moved to `versions/<v>/`, asked to start (`--version`, then
+  `doctor --sandbox-only`), and only then does the link change, by renaming a new link over the old one. If the program fails
+  the same check through the link, the link goes back and that version is skipped from then on. Any error leaves the current
+  version in use. Nothing is overwritten in place, so a running job keeps the file it started from.
+- Under the service unit (`FX_RUNNER_SERVICE=1`) `run` exits with 75 after a switch so systemd or launchd starts it on the new
+  version; in the foreground it prints "Updated to {v}. Restart `fx-runner run` to use it." and goes on.
+- A crash between staging and switching leaves the old version in use; the next `run` removes the partial directory.
+- A Homebrew install (or a program that does not start out of `versions/`) never self-replaces: `--check` prints
+  "A newer version is available: run brew upgrade fx-runner".
+- `doctor` has an `Updates` line: the version, pinned or not, automatic updates on or off, the last check, and "updates paused:
+  {reason}" when they are.
+
 ## Boundaries
 
 No `@anthropic-ai/*` package is a dependency or an import. `test/` checks that, that no host-side tool is defined, that

@@ -144,23 +144,12 @@ export class TufClient {
     }
 
     const dir = tufDir(this.stateDir);
-    const targets = path.join(dir, "targets");
     let pinned: PinnedFetcher | undefined;
     let destination: string | undefined;
     try {
-      // Built inside the try: a base address that is not plain https is a refusal like any other.
-      pinned = this.fetcher === undefined ? new PinnedFetcher({ allowedBases: [metadataBaseUrl, targetBaseUrl], ca: this.ca }) : undefined;
-      const fetcher = this.fetcher ?? pinned;
-      seedRoot(dir, root);
-      ensurePrivateDir(targets);
-      const updater = new Updater({
-        metadataDir: dir,
-        metadataBaseUrl,
-        targetDir: targets,
-        targetBaseUrl,
-        ...(fetcher === undefined ? {} : { fetcher }),
-        config: { prefixTargetsWithHash: false, userAgent: "fx-runner" },
-      });
+      const opened = this.open(root, metadataBaseUrl, targetBaseUrl, dir);
+      pinned = opened.pinned;
+      const { updater, targets } = opened;
       await updater.refresh();
       const info = await updater.getTargetInfo(targetPath);
       if (info === undefined) return { ok: false, state: "refused", code: "target_not_found", message: "the release metadata does not list that file" };
@@ -183,6 +172,49 @@ export class TufClient {
       // fx-swallow-ok: fail closed; every failure becomes a typed refusal below, and the raw text is classified, never shown
       if (destination !== undefined) rmSync(destination, { force: true });
       return this.refusal(error, pinned, dir);
+    }
+  }
+
+  /** The updater over the state directory's `tuf` folder. Called inside the callers' try: a base address that is not plain https is a refusal like any other. */
+  private open(root: string, metadataBaseUrl: string, targetBaseUrl: string, dir: string): { updater: Updater; pinned: PinnedFetcher | undefined; targets: string } {
+    const targets = path.join(dir, "targets");
+    const pinned = this.fetcher === undefined ? new PinnedFetcher({ allowedBases: [metadataBaseUrl, targetBaseUrl], ca: this.ca }) : undefined;
+    const fetcher = this.fetcher ?? pinned;
+    seedRoot(dir, root);
+    ensurePrivateDir(targets);
+    const updater = new Updater({
+      metadataDir: dir,
+      metadataBaseUrl,
+      targetDir: targets,
+      targetBaseUrl,
+      ...(fetcher === undefined ? {} : { fetcher }),
+      config: { prefixTargetsWithHash: false, userAgent: "fx-runner" },
+    });
+    return { updater, pinned, targets };
+  }
+
+  /**
+   * The paths the verified top-level targets metadata lists (D#6 R6-2b: how the updater learns which versions exist). The metadata is
+   * verified exactly as for `fetchTarget` and nothing is downloaded. The list is read from the client's trusted set, which
+   * `getTargetInfo` fills only after every check passed (tuf-js is an exact version in the lockfile for that reason).
+   */
+  async listTargets(): Promise<{ ok: true; paths: string[] } | Exclude<TufOutcome, { ok: true }>> {
+    const { root, metadataBaseUrl, targetBaseUrl } = this.build;
+    if (root === undefined || metadataBaseUrl === undefined || targetBaseUrl === undefined) return { ok: false, state: "not_configured", message: NOT_CONFIGURED_TEXT };
+    const dir = tufDir(this.stateDir);
+    let pinned: PinnedFetcher | undefined;
+    try {
+      const opened = this.open(root, metadataBaseUrl, targetBaseUrl, dir);
+      pinned = opened.pinned;
+      await opened.updater.refresh();
+      await opened.updater.getTargetInfo("v0.0.0/none");
+      const trusted = (opened.updater as unknown as { trustedSet?: { targets?: { signed?: { targets?: Record<string, unknown> } } } }).trustedSet;
+      const listed = trusted?.targets?.signed?.targets;
+      if (listed === undefined || typeof listed !== "object") return { ok: false, state: "refused", code: "invalid_metadata", message: "release metadata could not be verified; nothing was installed" };
+      return { ok: true, paths: Object.keys(listed) };
+    } catch (error) {
+      // fx-swallow-ok: fail closed; every failure becomes a typed refusal
+      return this.refusal(error, pinned, dir) as Exclude<TufOutcome, { ok: true }>;
     }
   }
 
