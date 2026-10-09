@@ -2,7 +2,8 @@
  * The job the cloud hands a runner. Every field is a bounded identifier, an enum, a digest, a number or a timestamp,
  * apart from three pieces of prose for the agent: `spec.text`, `task.prompt` and `role_card.text`. No field can carry a
  * command, a URL, an image or binary reference, an environment map or a settings object, and strict parsing refuses any
- * unlisted key. The job travels signed (jobSignature.ts); the runner trusts nothing in it unsigned.
+ * unlisted key. The one list of values is `sandbox_allowances` (D#6 R7a): entries of a closed kind, each a path, a plain host or the
+ * loopback address, which the cloud signs only after an admin approved them and the runner refuses if they cross the floor. The job travels signed (jobSignature.ts); the runner trusts nothing in it unsigned.
  *
  * D#6 R3b (correction C12 section 2.3): the job was reshaped before any runner shipped. `spec` may be null (a run with
  * no Spec), `task` and `role_card` carry the prompt and the role card with a digest each, the repository is always
@@ -11,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { JobAllowancesSchema } from "./sandboxAllowances.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
 export const MAX_SPEC_TEXT_CHARS = 256 * 1024;
@@ -89,6 +91,9 @@ export const JobSchema = z
     // D#6 R4d-4 (C33): present exactly on a review-role job (REVIEW_JOB_ROLES), omitted (never null) on every other job so their canonical JSON
     // and signature are unchanged. The signature covers it. 40 or 64 lowercase hex, the commit under review.
     review: z.object({ head_sha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) }).strict().optional(),
+    // D#6 R7a (C35): the repo's admin-approved sandbox allowances, present only when the approved set has entries and omitted (never null or empty)
+    // on every other job, so their canonical JSON and signature are unchanged. The signature covers it. The runner floor-checks it (R7b).
+    sandbox_allowances: JobAllowancesSchema.optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

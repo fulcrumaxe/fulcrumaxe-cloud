@@ -6,9 +6,11 @@ import {
   RUNNER_ELIGIBLE_ROLES,
   SESSION_ID_PATTERN,
   JobSchema,
+  parseAllowanceSet,
   canonicalJson,
   sha256Text,
   signJob,
+  type AllowanceSet,
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
@@ -51,6 +53,7 @@ export type JobIssueErrorCode =
   | "continues_role_not_executor"
   | "review_without_head"
   | "review_sha_prompt_mismatch"
+  | "sandbox_allowances_invalid"
   | "job_invalid"
   | "job_not_recorded";
 
@@ -102,6 +105,11 @@ export interface JobContext {
    * fix round's branch comes from: it is never derived from the issue.
    */
   parentBranch: string | null;
+  /**
+   * D#6 R7a (C35): the repo's approved sandbox allowances as stored (the newest approval, unless it was set aside), or null/absent when there
+   * are none. Read from the database only: nothing here comes from the repository's contents.
+   */
+  sandboxAllowances?: AllowanceSet | null;
 }
 
 export interface JobContextPort {
@@ -149,7 +157,14 @@ export function createPgJobContext(pool: Pool): JobContextPort {
           spec = { discussion, version: Number(row.version), sha256: row.body_sha256, text: row.body };
         }
         const parentBranch = options.parentRunId ? await readRecordedRunnerBranch(client, { accountId: run.accountId, runId: options.parentRunId }) : null;
-        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch };
+        // The newest approval wins; one that was set aside (the repo left runner_local) signs nothing until an admin approves again.
+        const { rows: approved } = await client.query<{ entries: unknown; command_timeout_s: number | null; set_aside: boolean }>(
+          `SELECT entries, command_timeout_s, set_aside FROM repo_runner_sandbox_allowances WHERE account_id = $1 AND repo_id = $2 ORDER BY version DESC LIMIT 1`,
+          [run.accountId, run.repoId],
+        );
+        const latest = approved[0];
+        const sandboxAllowances = latest && !latest.set_aside ? { entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }) } : null;
+        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, sandboxAllowances };
       });
     },
   };
@@ -247,6 +262,15 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         }
       }
 
+      // D#6 R7a (C35): the approved allowances ride in the job only when the set has entries, and only after they clear the floor again here (the
+      // constant may have tightened since the approval). A set that does not is refused and nothing is recorded: never signed without it.
+      let sandboxAllowances: Job["sandbox_allowances"];
+      if (context.sandboxAllowances) {
+        const set = parseAllowanceSet(context.sandboxAllowances);
+        if (!set.ok) throw new JobIssueError("sandbox_allowances_invalid");
+        if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };
+      }
+
       const issuedAt = now();
       const candidate: Job = {
         schema_version: 1,
@@ -261,6 +285,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         role_tools_sha256: roleToolsDigest(role),
         continues,
         ...(review ? { review } : {}),
+        ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),

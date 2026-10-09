@@ -8,6 +8,7 @@ export * from "./redact.js";
 export * from "./messages.js";
 export * from "./replies.js";
 export * from "./job.js";
+export * from "./sandboxAllowances.js";
 export * from "./jobSignature.js";
 export * from "./httpSignature.js";
 export * from "./copy.js";

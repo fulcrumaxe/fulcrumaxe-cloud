@@ -2,8 +2,9 @@
  * Ed25519 signature over a job's canonical JSON. The cloud signs; the runner verifies with the public key that
  * `key_id` names. Verification returns the job or throws a `JobSignatureError`; it never throws anything else.
  */
-import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 import { JobSchema, jobDigestMismatches, type Job, type SignedJob } from "./job.js";
+import type { AllowanceSet } from "./sandboxAllowances.js";
 
 export type JobSignatureErrorCode =
   | "missing_signature"
@@ -42,6 +43,11 @@ export function canonicalJson(value: unknown): string {
     return `{${parts.join(",")}}`;
   }
   throw new TypeError("canonicalJson: unsupported value");
+}
+
+/** SHA-256 of the canonical JSON of a parsed allowance set (D#6 R7a): the digest the cloud stores, audits and shows beside the set. */
+export function allowanceSetSha256(set: AllowanceSet): string {
+  return createHash("sha256").update(canonicalJson(set), "utf8").digest("hex");
 }
 
 /** Signs `job` with the cloud's job-signing private key. `job.key_id` must name that key. */

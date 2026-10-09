@@ -35,6 +35,7 @@ runners/approvals/route.ts
 runners/registration-codes/route.ts
 runners/repos/[id]/execution-mode/route.ts
 runners/repos/[id]/plan-approval-dial/route.ts
+runners/repos/[id]/sandbox-allowances/route.ts
 runners/revoke-all/route.ts
 runners/route.ts
 runners/runs/[id]/approve/route.ts

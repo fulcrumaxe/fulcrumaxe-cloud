@@ -169,3 +169,39 @@ describe("job.review and the signature (D#6 R4d-4a, C33)", () => {
     expect(codeOf(() => verifyJob({ ...plain, job: { ...plain.job, review: { head_sha: "a".repeat(40) } } }, keyring, { now: NOW }))).toBe("bad_signature");
   });
 });
+
+describe("job.sandbox_allowances and the signature (D#6 R7a, C35)", () => {
+  const golden = (name: string): string => readFileSync(new URL(`./golden/${name}`, import.meta.url), "utf8");
+  const allowances = { entries: [{ kind: "domain" as const, value: "registry.npmjs.org", access: "connect" as const, reason: "pnpm install --frozen-lockfile fetches the locked packages" }], command_timeout_s: 900 };
+  const withAllowances = (): Job => ({ ...GOLDEN_JOBS.executor, sandbox_allowances: allowances });
+
+  it("the job with allowances has a pinned canonical JSON and signature", () => {
+    const signed = signJob(withAllowances(), GOLDEN_KEY);
+    expect(canonicalJson(signed.job)).toBe(golden("job-allowances.canonical.json"));
+    expect(signed.signature).toBe(golden("job-allowances.signature.txt"));
+  });
+
+  it("the same job without the key is the executor golden: adding the field to the schema changed nothing for other jobs", () => {
+    const signed = signJob(GOLDEN_JOBS.executor, GOLDEN_KEY);
+    expect(canonicalJson(signed.job)).toBe(golden("job-executor.canonical.json"));
+    expect(canonicalJson(signed.job)).not.toContain("sandbox_allowances");
+  });
+
+  it("changing, adding or removing an entry, or the timeout, on a signed job makes verifyJob throw bad_signature", () => {
+    const signed = signJob(withAllowances(), privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW }).sandbox_allowances).toEqual(allowances);
+    const entry = allowances.entries[0] as (typeof allowances.entries)[number];
+    const variants: Array<Record<string, unknown>> = [
+      { entries: [{ ...entry, value: "example.com" }], command_timeout_s: 900 },
+      { entries: [entry, { ...entry, value: "example.com" }], command_timeout_s: 900 },
+      { entries: [{ ...entry, access: "connect", reason: "another reason" }], command_timeout_s: 900 },
+      { entries: [entry], command_timeout_s: 1800 },
+    ];
+    for (const sandbox_allowances of variants) expect(codeOf(() => verifyJob({ ...signed, job: { ...signed.job, sandbox_allowances } }, keyring, { now: NOW }))).toBe("bad_signature");
+    const stripped = { ...signed, job: { ...signed.job } };
+    delete stripped.job.sandbox_allowances;
+    expect(codeOf(() => verifyJob(stripped, keyring, { now: NOW }))).toBe("bad_signature");
+    const added = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...added, job: { ...added.job, sandbox_allowances: allowances } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+});

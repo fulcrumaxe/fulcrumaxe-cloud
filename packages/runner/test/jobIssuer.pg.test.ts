@@ -480,6 +480,76 @@ describe("JobIssuer [pg]", () => {
       expect(await stored(run2.id)).toBeNull();
     });
   });
+
+  describe("sandbox allowances ride in the job only as approved (D#6 R7a, C35)", () => {
+    const NPM = { kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "pnpm install fetches the locked packages" };
+    const STORE = { kind: "path", value: "/nix/store", access: "read", reason: "the dev shell's tools live in the store" };
+    const approve = async (w: { accountId: string; userId: string; repoId: string }, version: number, entries: unknown[], timeout: number | null, setAside = false) =>
+      db.admin.query(
+        "INSERT INTO repo_runner_sandbox_allowances (account_id, repo_id, version, entries, command_timeout_s, set_sha256, set_aside, approved_by) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)",
+        [w.accountId, w.repoId, version, JSON.stringify(entries), timeout, "c".repeat(64), setAside, w.userId],
+      );
+    const issued = async (w: Awaited<ReturnType<typeof world>>, role = "executor") => {
+      const run = await runnerRun(w, role);
+      await issuer().issuer.issue({ run });
+      return verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW });
+    };
+
+    it("the newest approved set is signed into the job, and a runner can verify it", async () => {
+      const w = await world();
+      await approve(w, 1, [NPM], 300);
+      await approve(w, 2, [NPM, STORE], 900);
+      expect((await issued(w)).sandbox_allowances).toEqual({ entries: [NPM, STORE], command_timeout_s: 900 });
+      // Every runner role carries it, a review job included.
+      expect((await issued(w, "code-reviewer")).sandbox_allowances?.command_timeout_s).toBe(900);
+    });
+
+    it("no approval, an empty set and a set set aside leave the key out entirely: the job's canonical JSON has no trace of it", async () => {
+      const none = await world();
+      const empty = await world();
+      await approve(empty, 1, [NPM], 600);
+      await approve(empty, 2, [], null);
+      const aside = await world();
+      await approve(aside, 1, [NPM], 600);
+      await approve(aside, 2, [NPM], 600, true);
+      for (const w of [none, empty, aside]) {
+        const run = await runnerRun(w, "executor");
+        await issuer().issuer.issue({ run });
+        const signed = await stored(run.id);
+        expect("sandbox_allowances" in verifyJob(signed, { "job-key-1": publicKey }, { now: NOW })).toBe(false);
+        expect(canonicalJson(signed.job)).not.toContain("sandbox_allowances");
+      }
+    });
+
+    it("is per repo: another repo's job, in the same account, carries none of it", async () => {
+      const a = await world();
+      const otherRepo = randomUUID();
+      const otherItem = randomUUID();
+      await seedRepo(db.admin, a.accountId, otherRepo, { executionMode: "runner_local" });
+      await db.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'gadgets' WHERE id = $1", [otherRepo]);
+      await seedWorkItem(db.admin, a.accountId, otherItem, otherRepo, { ghNumber: 13 });
+      await approve(a, 1, [NPM], 900);
+      expect((await issued(a)).sandbox_allowances).toEqual({ entries: [NPM], command_timeout_s: 900 });
+      expect((await issued({ ...a, repoId: otherRepo, workItemId: otherItem })).sandbox_allowances).toBeUndefined();
+    });
+
+    it("a stored set that no longer clears the floor is refused sandbox_allowances_invalid, and no job is written", async () => {
+      const w = await world();
+      await approve(w, 1, [{ kind: "path", value: "/home/ian/.ssh", access: "read", reason: "stored before the floor tightened" }], 900);
+      const run = await runnerRun(w, "executor");
+      expect(await codeOf(issuer().issuer.issue({ run }))).toBe("sandbox_allowances_invalid");
+      expect(await stored(run.id)).toBeNull();
+    });
+
+    it("a context port that returns a hand-made set is held to the floor too", async () => {
+      const w = await world();
+      const run = await runnerRun(w, "executor");
+      const real = createPgJobContext(db.runWriterPool);
+      const context: JobContextPort = { load: async (r, o) => ({ ...(await real.load(r, o)), sandboxAllowances: { entries: [{ kind: "domain", value: "*.example.com", access: "connect", reason: "x" }], command_timeout_s: 60 } }) };
+      expect(await codeOf(issuer({ context }).issuer.issue({ run }))).toBe("sandbox_allowances_invalid");
+      expect(await stored(run.id)).toBeNull();
+    });
+  });
 });
 
 describe("roleToolsDigest and the signer", () => {
