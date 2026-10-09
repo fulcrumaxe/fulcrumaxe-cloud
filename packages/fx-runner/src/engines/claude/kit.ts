@@ -1,8 +1,10 @@
 import path from "node:path";
 import type { EngineKit } from "../../daemon/engineKit.js";
 import { runCapture, type SpawnFn } from "./capture.js";
+import { cleanEnv } from "../../job/cleanEnv.js";
+import { authState } from "./authStatus.js";
 import { createClaudeEngine } from "./engine.js";
-import { resolveClaudePath, storedBinarySource } from "./pin.js";
+import { MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
 import { planSession, readSessionIndex, recordSession } from "./session.js";
 
 /** The kit for the user's installed Claude Code CLI. `spawnFn` is the real process start, handed in by the program's entry point. */
@@ -11,6 +13,19 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
   const sessionsFile = (stateDir: string): string => path.join(stateDir, "sessions.json");
   return {
     locate: resolveClaudePath,
+    inspect: async (input) => {
+      const env = cleanEnv({ mode: "subscription" }, input.envOptions);
+      const binary = await inspectBinary({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }, env);
+      const login = input.loginMode === undefined ? { state: "unknown" as const } : await authState(input.loginMode, { binaryPath: input.binaryPath, env, spawn: spawnFn });
+      return {
+        version: binary.version,
+        minimumVersion: MIN_CLAUDE_VERSION,
+        versionSupported: binary.version !== undefined && versionSupported(binary.version),
+        missingFlags: binary.missingFlags,
+        login: login.state,
+        ...(login.authMethod === undefined ? {} : { authMethod: login.authMethod }),
+      };
+    },
     makeRuntime: (input) =>
       createClaudeEngine({
         binary: storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }),

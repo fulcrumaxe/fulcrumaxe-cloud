@@ -131,6 +131,13 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ledger_closed",
   "mirrors_root_overlap",
   "api_key_not_configured",
+  // Local runner (D#6 R4a-4): `fx-runner logs` (a run id that is not a uuid, no local log for the run) and `fx-runner service` (a platform with
+  // no service manager here, a unit file this command did not write, a path it will not put into a unit).
+  "run_id_invalid",
+  "run_log_missing",
+  "service_unsupported",
+  "service_unit_foreign",
+  "service_path_unsupported",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",
