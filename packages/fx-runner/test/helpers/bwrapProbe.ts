@@ -10,7 +10,19 @@ import { spawnSync } from "node:child_process";
  */
 const MARKER = "fx-bwrap-probe-ok";
 
+/**
+ * Whether this process runs inside a runner job: the runner sets `FX_RUNNER_JOB=1` in every job's environment (`FIXED_ENV` in `src/job/cleanEnv.ts`). In a job bubblewrap can
+ * create namespaces but the nested view fails, so the runner's own real-Nix and real-bubblewrap suites skip there (D#6 R7e). This is the one place that reads the marker.
+ */
+export function insideRunnerJob(): boolean {
+  return process.env["FX_RUNNER_JOB"] === "1";
+}
+
 export function bwrapCanCreateNamespaces(bwrap: string | undefined): boolean {
+  if (insideRunnerJob()) {
+    console.info(`[skip] ${JOB_SKIP_REASON}`);
+    return false;
+  }
   const bin = process.env["FX_TEST_BWRAP_PROBE_BIN"] ?? bwrap;
   if (bin === undefined) return false;
   const out = spawnSync(
@@ -29,3 +41,6 @@ export function bwrapCanCreateNamespaces(bwrap: string | undefined): boolean {
 
 /** Why a suite skipped, printed when the probe fails. */
 export const BWRAP_SKIP_REASON = "bwrap cannot create namespaces here";
+
+/** Why a suite skipped inside a runner job. */
+export const JOB_SKIP_REASON = "inside a runner job (FX_RUNNER_JOB=1): the nested bubblewrap view fails here";

@@ -25,10 +25,12 @@ export const SUBSCRIPTION_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN";
 /**
  * Set on every run. The runner uses the user's own installed agent binary, so it does not set `DISABLE_UPDATES`: the
  * user's install keeps managing its updates, and the per-job version and flag checks catch a build that no longer fits.
+ *  - `FX_RUNNER_JOB` marks a process running inside a runner job. The runner's own real-Nix and real-bubblewrap suites read it and skip: inside a job
+ *    bubblewrap can create namespaces but the nested view fails (D#6 R7e). It is set here, so a host value cannot clear it.
  *  - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` removes the API key, auth token and OAuth token from the environment of every
  *    tool subprocess, so a shell command the agent runs does not inherit the credential the CLI itself needs.
  */
-export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
+export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1" });
 
 /**
  * How the run authenticates. Subscription mode has no field for an API key, so none can be passed. API-key mode takes
@@ -54,7 +56,7 @@ export interface CleanEnvOptions {
 }
 
 /** The only names a job's own environment may set. A repo's Nix dev shell (D#6 R7c) adds only the names in `NIX_ENV_NAMES`, each value checked again. */
-export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["XDG_CACHE_HOME", "npm_config_store_dir", "npm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
+export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["XDG_CACHE_HOME", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
 
 /** True for a PATH entry that is an absolute directory with no NUL byte. */
 function isAbsoluteEntry(entry: string): boolean {

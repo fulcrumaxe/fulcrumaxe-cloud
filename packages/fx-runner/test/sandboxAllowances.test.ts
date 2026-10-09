@@ -92,12 +92,12 @@ describe("R7b: the per-job environment", () => {
   it("carries the timeout in milliseconds for the Bash tool, a cache directory under the job's temp directory and the repo's store with integrity checks on", () => {
     expect(jobEnvFor({ tempDir: "/t/rn-1", store: "/c/pnpm-store/acme__widgets", commandTimeoutS: 900 })).toEqual({
       XDG_CACHE_HOME: "/t/rn-1/xdg-cache",
-      npm_config_store_dir: "/c/pnpm-store/acme__widgets",
-      npm_config_verify_store_integrity: "true",
+      pnpm_config_store_dir: "/c/pnpm-store/acme__widgets",
+      pnpm_config_verify_store_integrity: "true",
       BASH_DEFAULT_TIMEOUT_MS: "900000",
       BASH_MAX_TIMEOUT_MS: "900000",
     });
-    expect(jobEnvFor({ tempDir: "/t/rn-1", commandTimeoutS: 1800 })).not.toHaveProperty("npm_config_store_dir");
+    expect(jobEnvFor({ tempDir: "/t/rn-1", commandTimeoutS: 1800 })).not.toHaveProperty("pnpm_config_store_dir");
     // keyed by the repo's id, like the mirrors: a name with ".." is valid, and a recreated repo (new id) never inherits the old store
     expect(storeKeyOf({ id: "0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f" })).toBe("0b1b6c52-7a43-4d5e-8a77-0f0f0f0f0f0f");
   });
@@ -235,7 +235,7 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
     expect(a!.filesystem.allowWrite).toEqual(expect.arrayContaining([SCRATCH_A, path.join(r.storeRoot, "acme__widgets")]));
     expect(a!.network.allowedDomains).toContain("registry.npmjs.org");
     expect(a!.network.allowLocalBinding).toBe(true);
-    expect(r.envs[0]).toMatchObject({ BASH_DEFAULT_TIMEOUT_MS: "1200000", BASH_MAX_TIMEOUT_MS: "1200000", npm_config_store_dir: path.join(r.storeRoot, "acme__widgets"), npm_config_verify_store_integrity: "true" });
+    expect(r.envs[0]).toMatchObject({ BASH_DEFAULT_TIMEOUT_MS: "1200000", BASH_MAX_TIMEOUT_MS: "1200000", pnpm_config_store_dir: path.join(r.storeRoot, "acme__widgets"), pnpm_config_verify_store_integrity: "true" });
     // repo B: the plain block, exactly, and no per-job environment
     // (the store root is in B's denyRead, like everyone's; it is in no allow list)
     expect(JSON.stringify({ ...b!.filesystem, denyRead: [] })).not.toMatch(/r7b-scratch-a|pnpm-store/);
@@ -261,7 +261,7 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
     const r = rig();
     await r.launch(grant({ storeKey: "acme__one" }));
     await r.launch(grant({ storeKey: "acme__two", entries: [rw("/nix/store"), rw(SCRATCH_B, "write")] }));
-    const stores = r.envs.map((env) => env?.npm_config_store_dir);
+    const stores = r.envs.map((env) => env?.pnpm_config_store_dir);
     expect(new Set(stores).size).toBe(2);
     const second = r.blocks[1]!;
     expect(second.filesystem.allowWrite).not.toContain(stores[0]);

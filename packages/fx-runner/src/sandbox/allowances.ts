@@ -147,7 +147,7 @@ export function jobEnvFor(input: { tempDir: string; store?: string; commandTimeo
   const ms = String(input.commandTimeoutS * 1000);
   return {
     XDG_CACHE_HOME: `${input.tempDir.replace(/\/+$/, "")}/xdg-cache`,
-    ...(input.store === undefined ? {} : { npm_config_store_dir: input.store, npm_config_verify_store_integrity: "true" }),
+    ...(input.store === undefined ? {} : { pnpm_config_store_dir: input.store, pnpm_config_verify_store_integrity: "true" }),
     BASH_DEFAULT_TIMEOUT_MS: ms,
     BASH_MAX_TIMEOUT_MS: ms,
   };

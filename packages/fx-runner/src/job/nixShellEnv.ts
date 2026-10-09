@@ -8,12 +8,15 @@
 export const NIX_PATH_VARS: readonly string[] = Object.freeze(["PATH", "PKG_CONFIG_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "NODE_PATH", "PYTHONPATH"]);
 
 /** Variables that name one tool or one install: a bare command name or a Nix store path. */
-export const NIX_TOOL_VARS: readonly string[] = Object.freeze(["CC", "CXX", "AR", "AS", "LD", "NM", "RANLIB", "STRIP", "OBJCOPY", "OBJDUMP", "READELF", "SIZE", "STRINGS", "JAVA_HOME", "GOROOT"]);
+export const NIX_TOOL_VARS: readonly string[] = Object.freeze(["CC", "CXX", "AR", "AS", "LD", "NM", "RANLIB", "STRIP", "OBJCOPY", "OBJDUMP", "READELF", "SIZE", "STRINGS", "JAVA_HOME", "GOROOT", "PLAYWRIGHT_BROWSERS_PATH"]);
 
 export const NIX_ENV_NAMES: readonly string[] = Object.freeze([...NIX_PATH_VARS, ...NIX_TOOL_VARS]);
 
 /** The only directory a dev shell's entries may sit in, and the one read the job is granted for them. */
 export const NIX_STORE = "/nix/store";
+
+/** Tool variables that name a directory: a bare command name makes no sense for them, so only a Nix store path is kept. */
+const STORE_ONLY_VARS: readonly string[] = Object.freeze(["PLAYWRIGHT_BROWSERS_PATH"]);
 
 const STORE_ENTRY = /^\/nix\/store\/[A-Za-z0-9._+-]+(?:\/[A-Za-z0-9._+-]+)*$/;
 const TOOL_NAME = /^[A-Za-z0-9_+.-]{1,64}$/;
@@ -31,6 +34,7 @@ export function nixEnvValue(name: string, value: unknown): string | undefined {
     const kept = value.split(":").filter(isStoreEntry);
     return kept.length === 0 ? undefined : [...new Set(kept)].join(":");
   }
+  if (STORE_ONLY_VARS.includes(name)) return isStoreEntry(value) ? value : undefined;
   if (NIX_TOOL_VARS.includes(name)) return TOOL_NAME.test(value) || isStoreEntry(value) ? value : undefined;
   return undefined;
 }
