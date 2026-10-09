@@ -68,3 +68,13 @@
 .repos-toggle span { display: flex; flex-direction: column; }
 .repos-confirm { margin: 0 0 10px; padding: 8px 10px; border: 1px solid #ff6b6b; }
 .repos-actions { margin-top: 8px; }
+
+/* D#6 R7d: the sandbox allowance panel. Entries stack on a phone; value and reason wrap rather than widen the window. */
+.repos-allow { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.repos-allow-head { margin: 10px 0 4px; font-size: 0.85rem; }
+.repos-allow-list { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.repos-allow-entry { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); overflow-wrap: anywhere; }
+.repos-allow-kind { font-size: 0.78rem; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.repos-allow-file, .repos-allow-name { box-sizing: border-box; max-width: 100%; min-height: 32px; color: inherit; font: inherit; }
+.repos-allow-name { width: 100%; padding: 4px 8px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.repos-allow-confirm { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; overflow-wrap: anywhere; }

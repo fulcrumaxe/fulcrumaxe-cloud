@@ -137,13 +137,17 @@ export async function api(method, path, body, signal, opts) {
         // server's message and details never reach the screen.
         throw new ApiFailure(res.status, appCode ? err.code : "server_error", SERVER_ERROR_MESSAGE, undefined, retryAfter);
       }
-      throw new ApiFailure(
+      const failure = new ApiFailure(
         res.status,
         typeof err.code === "string" ? err.code : "http_" + res.status,
         typeof err.message === "string" ? err.message : "Request failed (" + res.status + ").",
         data && Array.isArray(data.details) ? data.details : undefined,
         retryAfter
       );
+      // A runner route names its closed refusal beside the error (a short code and an entry index); never free text.
+      if (data && typeof data.reason === "string" && /^[a-z_]{1,48}$/.test(data.reason)) failure.reason = data.reason;
+      if (data && Number.isInteger(data.index) && data.index >= 0) failure.index = data.index;
+      throw failure;
     }
   } catch (e) {
     if (timedOut) throw new ApiFailure(0, "timeout", TIMEOUT_MESSAGE);
