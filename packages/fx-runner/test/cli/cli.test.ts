@@ -19,6 +19,19 @@ describe("command line", () => {
     expect((await run([])).code).toBe(2);
   });
 
+  it("prints the version for --version and -V (exit 0), and says it is a run from source", async () => {
+    for (const flag of ["--version", "-V"]) {
+      const result = await run([flag]);
+      expect(result.code).toBe(0);
+      expect(result.out).toBe("fx-runner 0.1.0 (from source)\n");
+    }
+  });
+
+  it("takes --sandbox-only for doctor only", async () => {
+    expect((await run(["status", "--sandbox-only"])).code).toBe(2);
+    expect((await run(["doctor", "--sandbox-only=yes"])).code).toBe(2);
+  });
+
   it("refuses an unknown command, an unknown or repeated option, a stray argument, and a missing value, all with exit 2", async () => {
     for (const argv of [["frobnicate"], ["constructor"], ["status", "--verbose"], ["status", "extra"], ["revoke", "--reason"], ["revoke", "--local=yes"], ["revoke", "--local", "--local"], ["register", "--code"]]) {
       const result = await run(argv);

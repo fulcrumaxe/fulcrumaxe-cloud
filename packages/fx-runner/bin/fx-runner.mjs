@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
@@ -16,7 +17,12 @@ const shellVars = [];
 if (process.env.ANTHROPIC_API_KEY) shellVars.push("ANTHROPIC_API_KEY");
 if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");
 
-const code = await runCli({
+// Run from the single-executable release build (scripts/build-sea.mjs), the program is process.execPath itself and there is no script file to name:
+// the bundle is CommonJS (no top-level await, no import.meta), so this file is one promise chain and the script path is only looked up when it exists.
+const sea = isSea();
+const scriptPath = () => realpathSync(fileURLToPath(import.meta.url));
+
+runCli({
   argv: process.argv.slice(2),
   home: process.env.HOME,
   stateDirOverride: process.env.FX_RUNNER_HOME,
@@ -37,7 +43,7 @@ const code = await runCli({
     engine,
     sandbox: createSandboxHost(engine.captureWithStderr),
     // How a tmux pane starts this program again (the watch and take-over panes), the terminal type, and the one question take-over asks.
-    selfCommand: [process.execPath].concat(process.execArgv, [realpathSync(fileURLToPath(import.meta.url))]),
+    selfCommand: sea ? [process.execPath] : [process.execPath].concat(process.execArgv, [scriptPath()]),
     term: process.env.TERM,
     uid: process.getuid?.(),
     // The take-over confirmation must be typed by a person: a piped stdin is not one.
@@ -56,8 +62,9 @@ const code = await runCli({
     home: process.env.HOME,
     platform: process.platform,
     xdgConfigHome: process.env.XDG_CONFIG_HOME,
-    command: [process.execPath, realpathSync(fileURLToPath(import.meta.url)), "run"],
+    command: sea ? [process.execPath, "run"] : [process.execPath, scriptPath(), "run"],
     path: process.env.PATH,
   },
+}).then((code) => {
+  process.exitCode = code;
 });
-process.exitCode = code;
