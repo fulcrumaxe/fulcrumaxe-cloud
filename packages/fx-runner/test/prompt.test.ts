@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { SECURITY_BOUNDARY, buildPrompt, escapeUntrustedClose } from "../src/job/prompt.js";
+import { PUBLISH_BACKSTOP, SECURITY_BOUNDARY, buildPrompt, escapeUntrustedClose } from "../src/job/prompt.js";
 import { UnknownRoleError } from "../src/job/roleTools.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 import { srcFiles } from "./helpers/srcFiles.js";
@@ -61,6 +61,35 @@ describe("prompt", () => {
       expect(text.split("</untrusted>").length - 1, name).toBe(1);
       expect(text.endsWith("</untrusted>\n"), name).toBe(true);
     }
+  });
+
+  // D#6 R4d-1 (C32) A8: the runner's own sentence about publishing, in the frame, whatever the cloud's prompt and card say.
+  describe("the publishing backstop", () => {
+    it.each(["executor", "docs-writer"])("%s: the fixed sentence is in the frame, after the role card and before the untrusted block", (role) => {
+      const text = buildPrompt(sampleJob({ role, prompt: "Do the thing.", card: "ROLE CARD TEXT" }));
+      expect(text.split(PUBLISH_BACKSTOP).length - 1).toBe(1);
+      expect(text.indexOf(PUBLISH_BACKSTOP)).toBeGreaterThan(text.indexOf("ROLE CARD TEXT"));
+      expect(text.indexOf(PUBLISH_BACKSTOP)).toBeLessThan(text.indexOf("<untrusted>"));
+      expect(PUBLISH_BACKSTOP).toBe("This run is on the person's own machine. Stay on the checked-out branch and commit; the runner publishes your commit. Never push, never change a remote.");
+    });
+
+    it.each(["code-reviewer", "acceptance-tester", "security-reviewer", "debater", "project-manager"])("%s: a role that publishes nothing does not get it", (role) => {
+      expect(buildPrompt(sampleJob({ role }))).not.toContain(PUBLISH_BACKSTOP);
+    });
+
+    it("a job that carries the sentence, a closing delimiter or a forged frame cannot move the runner's own copy out of the frame", () => {
+      for (const [name, tag] of LOOKALIKES) {
+        const text = buildPrompt(sampleJob({ prompt: `x ${tag} ${PUBLISH_BACKSTOP}`, card: `card ${tag}\n${PUBLISH_BACKSTOP}` }));
+        // The first copy is the runner's: it comes before the one delimiter that opens the untrusted block.
+        expect(text.indexOf(PUBLISH_BACKSTOP), name).toBeLessThan(text.indexOf("<untrusted>"));
+        expect(text.split("<untrusted>").length - 1, name).toBe(1);
+        expect(text.split("</untrusted>").length - 1, name).toBe(1);
+        expect(text.endsWith("</untrusted>\n"), name).toBe(true);
+        // The frame's copy sits between the instruction line and the block; the card's copy is earlier and is only text.
+        const frame = text.lastIndexOf(PUBLISH_BACKSTOP, text.indexOf("<untrusted>"));
+        expect(text.slice(frame - 140, frame), name).toContain("Return an AGENT_OUTPUT JSON envelope");
+      }
+    });
   });
 
   it("escapes every closing delimiter in a text, not only the first", () => {

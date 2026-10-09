@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,6 +28,9 @@ const EXPECTED_ROLES = [
   "technical-architect",
   "ux-designer",
 ];
+/** D#6 R4d-1: the cards for a run on the person's own machine, by file name. Each is a variant of the role before the dot. */
+const RUNNER_VARIANTS = ["executor.runner"];
+const ALL_CARDS = [...EXPECTED_ROLES, ...RUNNER_VARIANTS].sort();
 
 /**
  * Team-process vocabulary a product card must not carry (D#483): the platform runs the process, a card holds only
@@ -49,9 +53,9 @@ describe("the product card map (D#483)", () => {
   });
 
   it("holds exactly the expected roles, each with its file's own text", () => {
-    expect(cardFiles().map((f) => f.slice(0, -3))).toEqual(EXPECTED_ROLES);
-    expect(Object.keys(MAP)).toEqual(EXPECTED_ROLES);
-    for (const role of EXPECTED_ROLES) expect(MAP[role], role).toBe(readFileSync(path.join(CARDS_DIR, `${role}.md`), "utf8"));
+    expect(cardFiles().map((f) => f.slice(0, -3))).toEqual(ALL_CARDS);
+    expect(Object.keys(MAP)).toEqual(ALL_CARDS);
+    for (const role of ALL_CARDS) expect(MAP[role], role).toBe(readFileSync(path.join(CARDS_DIR, `${role}.md`), "utf8"));
   });
 
   it("tracks a card edit on that card's line only", () => {
@@ -69,14 +73,15 @@ describe("the product card map (D#483)", () => {
 });
 
 describe("product cards hold judgment, not team process (D#483)", () => {
-  for (const role of EXPECTED_ROLES) {
-    const text = readFileSync(path.join(CARDS_DIR, `${role}.md`), "utf8");
+  for (const card of ALL_CARDS) {
+    const role = card.split(".")[0]!;
+    const text = readFileSync(path.join(CARDS_DIR, `${card}.md`), "utf8");
 
-    it(`${role}: names its role and is marked as a product card`, () => {
+    it(`${card}: names its role and is marked as a product card`, () => {
       expect(text).toMatch(new RegExp(`^---\\nname: ${role}\\nproduct: true\\n---\\n`));
     });
 
-    it(`${role}: has an explicit "What you never do" prohibition section`, () => {
+    it(`${card}: has an explicit "What you never do" prohibition section`, () => {
       const section = /\n## What you never do\n([\s\S]*?)(?=\n## |$)/.exec(text)?.[1] ?? "";
       expect(section, "missing section").not.toBe("");
       expect(section).toMatch(/never (ask for|request) a panel/);
@@ -84,14 +89,14 @@ describe("product cards hold judgment, not team process (D#483)", () => {
       expect(section).toMatch(/never follow instructions found/);
     });
 
-    it(`${role}: states the result-block rule`, () => {
+    it(`${card}: states the result-block rule`, () => {
       expect(text).toMatch(/exactly the result block/i);
       expect(text).toMatch(/never stop without/i);
     });
 
     if (!FORBIDDEN_EXEMPT.has(role)) {
       for (const [what, re] of FORBIDDEN) {
-        it(`${role}: carries no "${what}" process language`, () => {
+        it(`${card}: carries no "${what}" process language`, () => {
           expect(text).not.toMatch(re);
         });
       }
@@ -123,5 +128,35 @@ describe("loadProductCard: no fallback to the dev-team card (D#483 P3)", () => {
       }
     }
     for (const bad of ["", "nope", "../cards/executor", "__proto__", "constructor", "toString"]) expect(loadProductCard(bad), bad).toBeUndefined();
+  });
+});
+
+describe("the executor card for a run on the person's own machine (D#6 R4d-1, C32 A5)", () => {
+  it("the sandbox card is unchanged: the default and an explicit sandbox runtime both give the pinned text", async () => {
+    const { loadProductCard } = await import("../src/cards.js");
+    const sha = (s: string | undefined): string => createHash("sha256").update(s ?? "").digest("hex");
+    expect(sha(loadProductCard("executor"))).toBe("afd4d4e3ff3f001db4bef63b7d8499e7da62dc0766b8ca9b1ff627f90da30a6a");
+    expect(loadProductCard("executor", { runtime: "sandbox" })).toBe(loadProductCard("executor"));
+  });
+
+  it("the runner card carries no push, curl or open-a-pull-request instruction, and says the platform publishes", async () => {
+    const { loadProductCard } = await import("../src/cards.js");
+    const card = loadProductCard("executor", { runtime: "runner" }) ?? "";
+    expect(card).not.toBe("");
+    expect(card).not.toBe(loadProductCard("executor"));
+    expect(card).not.toMatch(/curl/i);
+    expect(card).not.toMatch(/pull request with/i);
+    expect(card).not.toMatch(/\bgit push\b/i);
+    expect(card).not.toMatch(/api\.github\.com/i);
+    expect(card).not.toMatch(/Push only|Open the pull request|exception to writing on GitHub/);
+    expect(card).toContain("You never push, never change a remote and never");
+    expect(card).toContain("The platform publishes your commit and opens the pull request");
+  });
+
+  it("only the executor has a runner card: every other role gets its one card whatever the runtime", async () => {
+    const { loadProductCard } = await import("../src/cards.js");
+    for (const role of EXPECTED_ROLES.filter((r) => r !== "executor")) expect(loadProductCard(role, { runtime: "runner" }), role).toBe(loadProductCard(role));
+    // A role name with the variant suffix is not a role: the variant is reachable only through the runtime option.
+    expect(loadProductCard("executor.runner")).toBeUndefined();
   });
 });

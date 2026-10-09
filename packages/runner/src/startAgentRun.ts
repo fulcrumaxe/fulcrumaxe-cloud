@@ -77,6 +77,12 @@ export interface StartAgentRunInput {
   initiatedBy?: string | null;
   role: Role;
   product: Product;
+  /**
+   * D#6 R4d-1 (C32): the `repos.execution_mode` the caller built the run's prompt and role card for. When the mode this start
+   * reads is different, it throws `ExecutionModeChangedError` before anything is written: a sandbox prompt never reaches a runner
+   * and a runner prompt never reaches a sandbox. Absent: no check. Not copied onto the run.
+   */
+  expectedExecutionMode?: string;
   /** Required, and only meaningful, for the executor role. */
   pr?: number;
   headSha?: string | null;
@@ -171,6 +177,21 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     spend: input.spend,
     funding: input.funding,
   };
+}
+
+/** D#6 R4d-1 (C32): the repository's execution mode is not the one the caller built the run's prompt for. Nothing was written. */
+export class ExecutionModeChangedError extends Error {
+  /** The closed code a caller reports (the same word as the failure reason on a queued run cancelled by a mode change). */
+  readonly code = "execution_mode_changed";
+  constructor() {
+    super("the repository's execution mode changed since the run's prompt was built");
+    this.name = "ExecutionModeChangedError";
+  }
+}
+
+/** Throws `ExecutionModeChangedError` when the caller named the mode it built for and the mode just read is another. */
+export function assertExpectedExecutionMode(input: { expectedExecutionMode?: string }, mode: string): void {
+  if (input.expectedExecutionMode !== undefined && input.expectedExecutionMode !== mode) throw new ExecutionModeChangedError();
 }
 
 /** Exported for `workflows/agentRun.ts`: the post-dispatch watchdog (H09.7)
@@ -297,6 +318,7 @@ export async function startAgentRun(
   // createSandbox call and no status write." Resolved BEFORE the INSERT
   // below, so an unknown mode never creates a row at all.
   const mode = await readExecutionMode(pool, input.accountId, input.repoId);
+  assertExpectedExecutionMode(input, mode);
   const target = resolveExecutionTarget(mode, registry);
 
   // C16.3: fails closed for unsupported funding BEFORE anything is

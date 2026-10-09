@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { insertAgentRun, writeRunStatus } from "@fx/runner";
+import { ExecutionModeChangedError, insertAgentRun, writeRunStatus } from "@fx/runner";
 import { ForeignSessionError, ResumeBackendError, lookupOwnedExecutorSession } from "../../src/build/resumeOwnership.js";
 import { resumeAgentRun } from "../../src/build/resumeAgentRun.js";
 import type { ExecutionTargetRegistry } from "@fx/runner";
@@ -159,6 +159,24 @@ describe("H14a resumeOwnership [pg]", () => {
     }
     const after = await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [accountId]);
     expect(after.rows[0].n).toBe(before.rows[0].n);
+  });
+
+  // D#6 R4d-1: a fix round's prompt is built for a mode; a repository that is in another by the time the round starts is refused.
+  it("refuses a round whose prompt was built for another execution mode, before any run row or target call", async () => {
+    const accountId = randomUUID();
+    const repoId = randomUUID();
+    const workItemId = randomUUID();
+    await seedAccount(db.admin, accountId);
+    await seedRepo(db.admin, accountId, repoId); // execution_mode = 'sandbox'
+    await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 7 });
+    await seedExecutorRunWithSession(accountId, workItemId, repoId, "cc-session-owned");
+    const count = async () => (await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [accountId])).rows[0].n as number;
+    const before = await count();
+    // An empty registry: if the mode check came after the target was resolved, this would throw UnknownExecutionModeError instead.
+    const registry = {} as ExecutionTargetRegistry;
+    const base = { accountId, repoId, workItemId, pr: 7, role: "executor" as const, product: "team" as const, roleCard: "c", prompt: "p", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter" as const, estimateComputeUsd: 1, trigger: "foreground" as const } };
+    await expect(resumeAgentRun(db.runWriterPool, registry, { ...base, expectedExecutionMode: "runner_local" })).rejects.toBeInstanceOf(ExecutionModeChangedError);
+    expect(await count()).toBe(before);
   });
 
   it("fails closed when the run being continued has no backend on record", async () => {

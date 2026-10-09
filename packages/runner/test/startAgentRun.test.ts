@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
+import { ExecutionModeChangedError, startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { SandboxTarget, type ModelConnectionPort } from "../src/targets/sandboxTarget.js";
 import { DispatchFailedError, type ExecutionRun, type ExecutionTarget, type ExecutionTargetRegistry } from "../src/executionTarget.js";
 import { writeRunStatus } from "../src/runStatusWriter.js";
@@ -70,6 +70,27 @@ describe("startAgentRun", () => {
     expect(rows).toHaveLength(0);
     const reservations = await db.admin.query(`SELECT 1 FROM spend_reservations WHERE account_id = $1`, [accountId]);
     expect(reservations.rows).toHaveLength(0);
+  });
+
+  it("D#6 R4d-1: a start that names the mode its prompt was built for is refused ExecutionModeChangedError when the repo is in another, before anything is written; the matching mode (and none named) starts", async () => {
+    const { accountId, repoId } = await seedRepoFixture(); // execution_mode = 'sandbox'
+    const harness = createSandboxTargetHarness(db.runWriterPool);
+    const registry: ExecutionTargetRegistry = { sandbox: new SandboxTarget(harness.deps) };
+    const rows = async (table: string) => (await db.admin.query(`SELECT 1 FROM ${table} WHERE account_id = $1`, [accountId])).rows.length;
+
+    await expect(startAgentRun(db.runWriterPool, registry, { ...baseInput(accountId, repoId), expectedExecutionMode: "runner_local" })).rejects.toBeInstanceOf(ExecutionModeChangedError);
+    expect(await rows("agent_runs")).toBe(0);
+    expect(await rows("spend_reservations")).toBe(0);
+    expect(harness.fakeSandbox.state.created).toHaveLength(0);
+    expect(new ExecutionModeChangedError().code).toBe("execution_mode_changed");
+
+    // The check is exact: it is not a prefix match and it is not skipped for a mode that merely looks alike.
+    for (const wrong of ["", "Sandbox", "sandbox ", "runner"]) await expect(startAgentRun(db.runWriterPool, registry, { ...baseInput(accountId, repoId), expectedExecutionMode: wrong }), JSON.stringify(wrong)).rejects.toBeInstanceOf(ExecutionModeChangedError);
+    expect(await rows("agent_runs")).toBe(0);
+
+    await startAgentRun(db.runWriterPool, registry, { ...baseInput(accountId, repoId), expectedExecutionMode: "sandbox" });
+    await startAgentRun(db.runWriterPool, registry, baseInput(accountId, repoId));
+    expect(await rows("agent_runs")).toBe(2);
   });
 
   it("pass/fail 11 (queue TTL): when dispatch (createSandbox) never resolves, the run becomes timed_out, cancel has run, and the compute row waits for its figures (never released)", async () => {

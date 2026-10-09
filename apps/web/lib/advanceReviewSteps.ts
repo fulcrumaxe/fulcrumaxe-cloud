@@ -7,6 +7,7 @@ import {
   buildReviewPrompt,
   findPullRequestForItem,
   listChangedFiles,
+  promptRuntimeOf,
   readVerdict,
   reviewPlanFor,
   securityTriggers,
@@ -269,7 +270,7 @@ export async function startFixBody(
   }
   let prompt: string;
   try {
-    prompt = buildFixPrompt({ owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings });
+    prompt = buildFixPrompt({ owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime: promptRuntimeOf(ctx.executionMode) });
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
@@ -282,6 +283,7 @@ export async function startFixBody(
     actionId,
     reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
     failingRunId: first.runId,
+    expectedExecutionMode: ctx.executionMode,
   });
   return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: started.reason };
 }

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PREVIEW_WORKDIR, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
-import { DuplicateExecutorRunError } from "@fx/runner";
+import { DuplicateExecutorRunError, ExecutionModeChangedError } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -614,6 +614,31 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(await t.module.advanceStartFix(who(a, w), fixRequest(a))).toEqual({ ok: false, reason: "already_running" });
       expect(resume.fn).not.toHaveBeenCalled();
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_refused", code: "already_running" })]);
+    });
+
+    it("D#6 R4d-1: the mode the fix prompt was built for reaches the seat and the resume; a resume that finds the repository in another mode is refused execution_mode_changed and recorded, and a bad mode word is invalid input", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await buildRun(a, w);
+      const resume = realResume();
+      const t = build({}, review({ resume: resume.fn }));
+      expect((await t.module.advanceStartFix(who(a, w), fixRequest(a, { expectedExecutionMode: "runner_local" }))).ok).toBe(true);
+      expect(resume.inputs[0]).toMatchObject({ expectedExecutionMode: "runner_local" });
+      expect(t.deps.resolveRunSeat).toHaveBeenCalledWith(expect.objectContaining({ role: "executor", expectedExecutionMode: "runner_local" }));
+
+      const a2 = await seedAccount(admin, randomUUID());
+      const w2 = await item(a2);
+      await buildRun(a2, w2);
+      const changed = vi.fn(async () => {
+        throw new ExecutionModeChangedError();
+      });
+      const t2 = build({}, review({ resume: changed as never }));
+      expect(await t2.module.advanceStartFix(who(a2, w2), fixRequest(a2, { expectedExecutionMode: "runner_local" }))).toEqual({ ok: false, reason: "execution_mode_changed" });
+      expect((await events(w2)).at(-1)).toMatchObject({ kind: "fix_round_refused", code: "execution_mode_changed" });
+
+      const resume3 = realResume();
+      expect(await build({}, review({ resume: resume3.fn })).module.advanceStartFix(who(a2, w2), fixRequest(a2, { expectedExecutionMode: "Runner Local; DROP" }))).toEqual({ ok: false, reason: "invalid_input" });
+      expect(resume3.fn).not.toHaveBeenCalled();
     });
 
     it("two fix rounds racing (two approvals) lose to the database: one runs, the other is told already_running", async () => {

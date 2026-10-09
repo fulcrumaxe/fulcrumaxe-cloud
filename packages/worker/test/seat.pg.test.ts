@@ -83,6 +83,21 @@ describe("seat resolver [pg]", () => {
     () => admin,
   );
 
+  it("D#6 R4d-1: the executor's card follows the mode its prompt was built for (the repository's own when none is named); no other role's card changes", async () => {
+    const { loadProductCard } = await import("@fx/roles/cards");
+    const a = await team();
+    const seatCard = async (role: string, expectedExecutionMode?: string) => (await okSeat({ ...request(a, role), ...(expectedExecutionMode !== undefined ? { expectedExecutionMode } : {}) } as SeatRequest)).roleCard;
+    // A sandbox repository.
+    expect(await seatCard("executor")).toBe(loadProductCard("executor"));
+    expect(await seatCard("executor", "runner_local")).toBe(loadProductCard("executor", { runtime: "runner" }));
+    // A runner repository.
+    await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [a.repoId]);
+    expect(await seatCard("executor")).toBe(loadProductCard("executor", { runtime: "runner" }));
+    expect(await seatCard("executor", "sandbox")).toBe(loadProductCard("executor"));
+    expect(await seatCard("code-reviewer")).toBe(loadProductCard("code-reviewer"));
+    expect(await seatCard("code-reviewer", "runner_local")).toBe(loadProductCard("code-reviewer"));
+  });
+
   it("P6: every manifest role WITH a product card gets an ok seat (one without is refused no_card, below) whose model is priced and which SandboxTarget.admit does not refuse as unknown_model", async () => {
     const { loadProductCard } = await import("@fx/roles/cards");
     for (const { name } of ROLE_MANIFEST.filter((r) => loadProductCard(r.name) !== undefined)) {
