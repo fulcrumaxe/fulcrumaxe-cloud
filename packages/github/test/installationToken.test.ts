@@ -305,7 +305,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -313,6 +313,8 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
 
   it.each(MINT_PURPOSES.map((p) => [p]))("%s: every requested permission key is in the fixed allowlist and none is administration", async (purpose) => {
     for (const scope of scopes) {
+      // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
+      if (purpose === "runner_git") continue;
       if ((purpose === "merge_gate" || purpose === "plan_read") && "installationWide" in scope) continue; // refused outright: see the merge_gate and plan_read tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
       const requester = vi.fn(async () => ({ token: "ghs_x", expiresAt: new Date(Date.now() + 3600_000).toISOString(), permissions: { metadata: "read" } }));

@@ -4,21 +4,31 @@ import { NextRequest, NextResponse } from "next/server";
 import { githubProxyForwardUrl, loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
 import { resolveChecked, NetGuardError, type HostLookup } from "@fx/net-guard";
 import { reportError } from "@fx/telemetry";
+import { waitUntil } from "@vercel/functions";
 import {
+  createRunnerGitTicketKeys,
   decideProxyRequest,
+  decideRunnerGitRequest,
   defaultSandboxRunResolver,
   InstallationTokenCache,
   loadAppCredentials,
+  MAX_RUNNER_GIT_BODY_BYTES,
   MintTimeoutError,
+  RUNNER_UPLOAD_PACK_CHECKPOINT_BYTES,
+  RunnerGitTicketError,
+  verifyRunnerGitTicket,
   verifySandboxOidcToken,
   OidcVerifyError,
   type AccessTokenRequester,
   type ProxyDecisionDeps,
+  type RunnerCloneBudget,
+  type RunnerGitDenyReason,
+  type RunnerGitResolver,
   type SandboxRunResolver,
 } from "@fx/github";
 import type { JWTVerifyGetKey } from "jose";
 import { createRemoteJWKSet } from "jose";
-import { loadProxyOidcEnv } from "./proxyEnv";
+import { loadProxyOidcEnv, loadRunnerTicketEnv } from "./proxyEnv";
 
 /**
  * D#2 H13b: the gh-proxy route's Next.js glue. All decision logic (OIDC
@@ -30,7 +40,11 @@ import { loadProxyOidcEnv } from "./proxyEnv";
  */
 
 const OIDC_HEADER = "vercel-sandbox-oidc-token";
+/** D#6 R5a-2c: a runner's credential. Never `Authorization` (the proxy sets that itself), and never forwarded: it is not in FORWARD_HEADER_ALLOWLIST. */
+const TICKET_HEADER = "fx-git-ticket";
 export const MAX_PROXY_BODY_BYTES = 50_000_000;
+/** The runner path's body cap (C27 section 2.1 step 6): 4 MiB, the largest push or upload-pack request a runner may send. */
+export const MAX_RUNNER_GIT_BODY = MAX_RUNNER_GIT_BODY_BYTES;
 
 class BodyTooLargeError extends Error {}
 
@@ -85,6 +99,20 @@ export interface GhProxyHandlerDeps extends ProxyDecisionDeps {
   resolveUpstream: (host: string, lookup?: HostLookup) => Promise<string[]>;
   /** O3: performs the pinned forward; injectable so tests never open a real socket. */
   forwardPinned: PinnedRequester;
+  /**
+   * D#6 R5a-2c: the runner path's ticket settings. Absent or `{ problem }` means the runner path answers 503 and the sandbox path is unaffected.
+   * Optional so the sandbox path's own fixtures need no change.
+   */
+  runnerTicket?: { keys: JWTVerifyGetKey; issuer: string } | { problem: string };
+  /** The database lookup of a runner's lease (migration 0765), on the proxy's narrow login. Unset: the runner path answers 503. */
+  resolveRunnerGit?: RunnerGitResolver;
+  /** The per-repository daily byte budget for upload-pack responses (migration 0766). Unset: the runner path answers 503. */
+  cloneBudget?: RunnerCloneBudget;
+  /**
+   * Keeps the invocation alive until a promise settles (Vercel's `waitUntil`). The runner path hands the last add of a metered response to it, so
+   * the count is not lost when the response closes and the instance is frozen. Injectable so tests need no platform. Unset: the runner path answers 503.
+   */
+  defer?: (work: Promise<unknown>) => void;
 }
 
 export interface PinnedRequestParams {
@@ -415,7 +443,16 @@ export function defaultGhProxyHandlerDeps(
     () => ({ ok: false }),
   );
   const forwardPinned = nodeHttpsPinnedRequester;
+  // A bad ticket setting never throws: only the runner path is down, and it says so (503) on every request.
+  const ticketEnv = loadRunnerTicketEnv(process.env);
+  const ticketKeys = ticketEnv.ok ? createRunnerGitTicketKeys(ticketEnv.jwks) : null;
+  const runnerTicket: GhProxyHandlerDeps["runnerTicket"] = !ticketEnv.ok
+    ? { problem: ticketEnv.problem }
+    : ticketKeys === null
+      ? { problem: "FX_GIT_TICKET_PUBLIC_JWKS" }
+      : { keys: ticketKeys, issuer: ticketEnv.issuer };
   return {
+    runnerTicket,
     githubForward,
     coldStartCheck,
     oidcJwks: createRemoteJWKSet(new URL(oidc.jwksUrl)),
@@ -432,6 +469,7 @@ export function defaultGhProxyHandlerDeps(
       resolveUpstream,
       forwardPinned,
     }),
+    defer: waitUntil,
   };
 }
 
@@ -513,6 +551,10 @@ export async function ghProxyHandler(
     return NextResponse.json({ error: "proxy_unavailable" }, { status: 503 });
   }
 
+  // A request that carries a ticket takes the runner path; one without it takes the sandbox path below, unchanged.
+  const ticketToken = req.headers.get(TICKET_HEADER);
+  if (ticketToken !== null) return runnerGitHandler(req, deps, ticketToken);
+
   const oidcToken = req.headers.get(OIDC_HEADER);
   if (!oidcToken) {
     // Reason code only, like the denial log below: no header names, no claims.
@@ -593,8 +635,202 @@ export async function ghProxyHandler(
     return NextResponse.json({ error: "denied" }, { status: decision.status });
   }
 
-  const target = path.startsWith("/repos/") ? "api" : "git";
+  return forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
+}
 
+/** A runner-path refusal as an Error, so `reportError` has something to log; its message is the closed code and nothing else. */
+class RunnerRefusal extends Error {
+  readonly code: string;
+  constructor(code: string) {
+    super(code);
+    this.name = "RunnerRefusal";
+    this.code = code;
+  }
+}
+
+/**
+ * Every runner-path refusal goes through here: it is reported as a coded class (`code` must be on the telemetry allowlist) and answered with a
+ * public code that never carries a policy detail. Never a ticket, a claim, a header or body text.
+ */
+function runnerRefusal(status: number, code: string, publicCode: string, retryAfterSeconds?: number): NextResponse {
+  reportError(new RunnerRefusal(code), { stage: "gh_proxy.runner", route: "/api/gh-proxy", code });
+  console.warn("gh-proxy: runner refused", { reason: code });
+  return NextResponse.json(
+    { error: publicCode },
+    { status, ...(retryAfterSeconds !== undefined ? { headers: { "retry-after": String(retryAfterSeconds) } } : {}) },
+  );
+}
+
+export interface MeterBytesDeps {
+  /** Adds bytes to the repository's daily count and answers whether it is now spent (`null`: could not be counted). */
+  record: (bytes: number) => Promise<boolean | null>;
+  /** Keeps the invocation alive for the last add, which is not awaited by the stream. */
+  defer: (work: Promise<unknown>) => void;
+  /** Called when the stream is ended because the budget is spent or could not be counted. */
+  onAbort: (reason: "spent" | "uncounted") => void;
+  /** Bytes between two awaited adds. */
+  checkpoint: number;
+}
+
+/**
+ * Counts the bytes of a streamed response while they pass, so a ticket holder cannot read past the daily budget: every `checkpoint` bytes the
+ * stream AWAITS an add to the count and ends the response with an error when that answers spent (or cannot be answered: fail closed). The chunk
+ * that crosses a checkpoint is counted before it is sent and is not sent when the answer is spent. The remainder below one checkpoint is added
+ * when the response finishes, fails or is cut off by the reader (whichever comes first), through `defer` so it is not lost when the response
+ * closes. Bytes of a response killed at the function's maximum duration after its last checkpoint are the one thing not counted.
+ */
+export function meterBytes(stream: ReadableStream<Uint8Array> | null, deps: MeterBytesDeps): ReadableStream<Uint8Array> | null {
+  if (!stream) return stream;
+  const reader = stream.getReader();
+  let pending = 0;
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    if (pending > 0) deps.defer(deps.record(pending));
+    pending = 0;
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          end();
+          controller.close();
+          return;
+        }
+        pending += value.byteLength;
+        if (pending >= deps.checkpoint) {
+          const n = pending;
+          pending = 0;
+          const spent = await deps.record(n);
+          if (spent !== false) {
+            ended = true;
+            deps.onAbort(spent === null ? "uncounted" : "spent");
+            controller.error(new RunnerRefusal("clone_bytes_limited"));
+            void reader.cancel().catch(() => {
+              // fx-swallow-ok: the response is already ended with an error; failing to cancel the upstream read changes nothing the reader sees
+            });
+            return;
+          }
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        // fx-swallow-ok: the failure reaches the reader through controller.error below, and the response is counted up to here
+        end();
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      end();
+      return reader.cancel(reason);
+    },
+  });
+}
+
+/**
+ * D#6 R5a-2c (C27 section 2.1, steps 3 to 12): a request that carries `fx-git-ticket`. The ticket is checked with a public key and no database
+ * before anything else is read; the lease is then re-checked in the database on EVERY request, so a revoked runner stops at its next request.
+ */
+async function runnerGitHandler(req: NextRequest, deps: GhProxyHandlerDeps, ticketToken: string): Promise<NextResponse> {
+  if (req.headers.get(OIDC_HEADER) !== null) return runnerRefusal(401, "ambiguous_credentials", "ambiguous_credentials");
+
+  const ticketConfig = deps.runnerTicket;
+  const { resolveRunnerGit, cloneBudget, defer } = deps;
+  if (!ticketConfig || "problem" in ticketConfig || !resolveRunnerGit || !cloneBudget || !defer) {
+    // On every request, not only the first: the sandbox path keeps working, so this is the only place the misconfiguration shows.
+    console.error("gh-proxy runner path: not configured -- every runner request is refused until this is fixed", {
+      problem: ticketConfig && "problem" in ticketConfig ? ticketConfig.problem : "not_wired",
+    });
+    return runnerRefusal(503, "runner_path_not_configured", "runner_path_not_configured");
+  }
+
+  const nowFn = deps.now ?? Date.now;
+  let claims;
+  try {
+    claims = await verifyRunnerGitTicket(ticketToken, {
+      keys: ticketConfig.keys,
+      issuer: ticketConfig.issuer,
+      // The one audience function, the same one the cloud signs with.
+      audience: githubProxyForwardUrl(deps.githubForward),
+      now: () => new Date(nowFn()),
+    });
+  } catch (err) {
+    // fx-swallow-ok: a ticket that does not verify is answered 401 below and logged by its fixed code
+    console.warn("gh-proxy: unauthorized", { reason: `ticket_${err instanceof RunnerGitTicketError ? err.code : "signature"}` });
+    return runnerRefusal(401, "ticket_invalid", "ticket_invalid");
+  }
+
+  let rawBody: Uint8Array;
+  try {
+    rawBody = await readBodyCapped(req, MAX_RUNNER_GIT_BODY);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return runnerRefusal(413, "push_too_large", "push_too_large");
+    throw err;
+  }
+
+  const url = new URL(req.url);
+  const path = pathFromParams(url.pathname.replace(/^\/api\/gh-proxy\//, "").split("/"));
+  const query: Array<[string, string]> = [];
+  url.searchParams.forEach((value, key) => {
+    query.push([key, value]);
+  });
+
+  const decision = await decideRunnerGitRequest(
+    { method: req.method, path, query, rawBody, contentEncoding: req.headers.get("content-encoding"), ticket: claims },
+    {
+      resolveRunnerGit,
+      appCredentials: deps.appCredentials,
+      tokenCache: deps.tokenCache,
+      accessTokenRequester: deps.accessTokenRequester,
+      cloneBudget,
+      ...(deps.now ? { now: deps.now } : {}),
+    },
+  );
+  if (!decision.allow) {
+    const publicCode: string = (decision.status === 403 ? (decision.reason === "installation_not_writable" ? decision.reason : "denied") : decision.status === 502 ? "upstream_unavailable" : decision.status === 429 ? "clone_limited" : decision.reason);
+    return runnerRefusal(decision.status, decision.reason satisfies RunnerGitDenyReason, publicCode, decision.retryAfterSeconds);
+  }
+
+  const repoId = claims.repo.id;
+  return forwardUpstream(req, deps, {
+    path,
+    rawBody,
+    decision,
+    target: "git",
+    onRefusal: (code) => {
+      reportError(new RunnerRefusal(code), { stage: "gh_proxy.runner", route: "/api/gh-proxy", code });
+    },
+    ...(decision.meterResponse
+      ? {
+          meter: (stream: ReadableStream<Uint8Array> | null) =>
+            meterBytes(stream, {
+              record: (n) => cloneBudget.record(repoId, n),
+              defer,
+              onAbort: () => {
+                reportError(new RunnerRefusal("clone_bytes_limited"), { stage: "gh_proxy.runner", route: "/api/gh-proxy", code: "clone_bytes_limited" });
+              },
+              checkpoint: RUNNER_UPLOAD_PACK_CHECKPOINT_BYTES,
+            }),
+        }
+      : {}),
+  });
+}
+
+interface AllowedForward {
+  path: string;
+  rawBody: Uint8Array;
+  decision: { upstreamHost: "github.com" | "api.github.com"; installationToken: string; query: Record<string, string>; forwardContentEncoding: boolean };
+  target: "git" | "api";
+  /** The runner path reports each refusal by a closed code; the sandbox path leaves this unset. */
+  onRefusal?: (code: "runner_upstream_unavailable" | "runner_upstream_timeout") => void;
+  /** The runner path wraps the response stream to count its bytes against the repository's daily budget. */
+  meter?: (stream: ReadableStream<Uint8Array> | null) => ReadableStream<Uint8Array> | null;
+}
+
+/** O3 and the rest of the forward, shared by both paths: resolve the upstream address, rebuild the validated query, forward byte-identical, stream the answer back. */
+async function forwardUpstream(req: NextRequest, deps: GhProxyHandlerDeps, args: AllowedForward): Promise<NextResponse> {
+  const { path, rawBody, decision, target } = args;
   // O3: resolved fresh for THIS request's actual forward -- a blocked or
   // unresolvable address means 502 with no upstream connection at all;
   // `deps.forwardPinned` below is never reached.
@@ -607,6 +843,7 @@ export async function ghProxyHandler(
     console.warn("gh-proxy: upstream host refused", {
       reason: err instanceof NetGuardError ? err.code : "dns_failed",
     });
+    args.onRefusal?.("runner_upstream_unavailable");
     return NextResponse.json({ error: "upstream_unavailable" }, { status: 502 });
   }
 
@@ -641,16 +878,19 @@ export async function ghProxyHandler(
     // change at that point, so it just aborts the stream, also logged.
     if (err instanceof UpstreamTimeoutError && err.stage === "headers") {
       console.warn("gh-proxy: upstream timeout", { reason: "headers", path });
+      args.onRefusal?.("runner_upstream_timeout");
       return NextResponse.json({ error: "upstream_timeout" }, { status: 504 });
     }
     throw err;
   }
 
-  return new NextResponse(countBytes(upstream.bodyStream, target, path), {
+  const counted = countBytes(upstream.bodyStream, target, path);
+  return new NextResponse(args.meter ? args.meter(counted) : counted, {
     status: upstream.status,
     headers: upstream.headers,
   });
 }
+
 
 /**
  * Body criterion 6, first half: "confirm the clone response is streamed

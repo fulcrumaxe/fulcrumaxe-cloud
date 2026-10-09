@@ -62,12 +62,14 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
 
     const loadGithubForwardConfig = vi.fn(() => ({ someConfig: true }));
     const createRunResolver = vi.fn(() => "resolver" as unknown);
+    const createRunnerGitResolver = vi.fn(() => "runner-resolver" as unknown);
+    const createRunnerCloneBudget = vi.fn(() => "budget" as unknown);
     const createPool = vi.fn(() => "pool" as unknown);
     const ghProxyHandler = vi.fn(async () => new Response(null));
     const defaultGhProxyHandlerDeps = vi.fn(() => ({}) as Record<string, unknown>);
 
     vi.doMock("@fx/runner", () => ({ loadGithubForwardConfig }));
-    vi.doMock("@fx/github", () => ({ createRunResolver }));
+    vi.doMock("@fx/github", () => ({ createRunResolver, createRunnerGitResolver, createRunnerCloneBudget }));
     vi.doMock("@fx/db/src/pool", () => ({ createPool }));
     vi.doMock("./handler", () => ({ defaultGhProxyHandlerDeps, ghProxyHandler }));
 
@@ -77,6 +79,11 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
 
     expect(createPool).toHaveBeenCalledTimes(1);
     expect(createRunResolver).toHaveBeenCalledTimes(1);
+    // D#6 R5a-2c: the runner path's lease lookup is built once, on the SAME narrow pool as the sandbox resolver.
+    expect(createRunnerGitResolver).toHaveBeenCalledTimes(1);
+    expect(createRunnerGitResolver).toHaveBeenCalledWith("pool");
+    expect(createRunnerCloneBudget).toHaveBeenCalledWith("pool");
+    expect(createRunResolver).toHaveBeenCalledWith("pool");
     expect(defaultGhProxyHandlerDeps).toHaveBeenCalledTimes(1);
     expect(ghProxyHandler).toHaveBeenCalledTimes(2);
   });

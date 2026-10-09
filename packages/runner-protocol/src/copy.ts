@@ -36,8 +36,8 @@ export const COPY = {
   pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
   pushTooLarge:
     "This push is {size} MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).",
-  /** D#6 R5a-2b (C27 section 4.5): shown for a `run_ended` `clone_limited`. Exact text; the daily figure is pinned to the database function by a test. */
-  cloneLimited: "This repository has been cloned in full 3 times today through our proxy, the daily limit. The runner keeps a copy so this is rare. It resets at 00:00 UTC.",
+  /** D#6 R5a-2b (C27 section 4.5): shown for a `run_ended` `clone_limited`. Exact text (C28 section 3 item 7); the one place it is written. */
+  cloneLimited: "This repository has used today's download allowance through our proxy. The runner keeps a copy, so this is rare. It resets at 00:00 UTC.",
   /** The description of the draft pull request our cloud opens when a runner run finishes. Fixed text: the agent's own output never goes into it. */
   pullRequestBody: "Opened by fulcrumaxe for run {run} on work item {item}. The agent ran on your own machine; this description is fixed text and holds nothing the agent wrote.",
   /** The pull request title when the work item has none. */

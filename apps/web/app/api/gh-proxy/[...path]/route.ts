@@ -1,6 +1,6 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
-import { createRunResolver } from "@fx/github";
+import { createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
 import { createPool } from "@fx/db/src/pool";
 import { defaultGhProxyHandlerDeps, ghProxyHandler, type GhProxyHandlerDeps } from "./handler";
 
@@ -60,7 +60,11 @@ function deps(): GhProxyHandlerDeps {
     // D#2 H13c: the production resolver. handler.ts (H13b) stays fail-
     // closed by default (`defaultSandboxRunResolver`) -- this is the one
     // line that overrides it with the real, Postgres-backed resolver.
-    built.resolveSandboxRun = createRunResolver(createPool(ghProxyUrl));
+    const ghProxyPool = createPool(ghProxyUrl);
+    built.resolveSandboxRun = createRunResolver(ghProxyPool);
+    // D#6 R5a-2c: the runner path's lease lookup, on the same narrow login (it may execute the two resolver functions and nothing else).
+    built.resolveRunnerGit = createRunnerGitResolver(ghProxyPool);
+    built.cloneBudget = createRunnerCloneBudget(ghProxyPool);
     cachedDeps = built;
   }
   return cachedDeps;

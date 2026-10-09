@@ -54,6 +54,20 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// R4a-5 sandbox probe");
   });
 
+  it("keeps the proxy's runner-path refusal codes (D#6 R5a-2c) instead of folding them into other, in a block of their own", () => {
+    const codes = [
+      "runner_path_not_configured", "ticket_invalid", "push_too_large", "lease_stale", "lease_ended", "runner_revoked", "clone_limited", "clone_bytes_limited",
+      "runner_path_refused", "runner_query_refused", "runner_repo_mismatch", "runner_content_encoding", "runner_inflate_refused", "runner_upload_pack_unparsable",
+      "runner_lease_unresolved", "runner_policy_denied", "runner_mint_failed", "runner_upstream_unavailable", "runner_upstream_timeout",
+    ];
+    for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
+    const first = OWN_ERROR_CODES.indexOf(codes[0]!);
+    expect(OWN_ERROR_CODES.slice(first, first + codes.length)).toEqual(codes);
+    expect(first).toBeLessThan(OWN_ERROR_CODES.length - codes.length);
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// GitHub proxy, runner path (D#6 R5a-2c)");
+  });
+
   it("has no duplicate in our own list", () => {
     expect(new Set(OWN_ERROR_CODES).size).toBe(OWN_ERROR_CODES.length);
   });

@@ -152,6 +152,27 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "probe_failed_other",
   // Cloud-verified runner git ticket (D#6 R5a-2b): the ticket route refused a run that is not cloud-verified.
   "not_cloud_verified",
+  // GitHub proxy, runner path (D#6 R5a-2c): why a request that carried a git ticket was refused. The ticket itself, the lease, the policy and the
+  // upstream each have their own code; none is ever a claim, a header or body text.
+  "runner_path_not_configured",
+  "ticket_invalid",
+  "push_too_large",
+  "lease_stale",
+  "lease_ended",
+  "runner_revoked",
+  "clone_limited",
+  "clone_bytes_limited",
+  "runner_path_refused",
+  "runner_query_refused",
+  "runner_repo_mismatch",
+  "runner_content_encoding",
+  "runner_inflate_refused",
+  "runner_upload_pack_unparsable",
+  "runner_lease_unresolved",
+  "runner_policy_denied",
+  "runner_mint_failed",
+  "runner_upstream_unavailable",
+  "runner_upstream_timeout",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",
