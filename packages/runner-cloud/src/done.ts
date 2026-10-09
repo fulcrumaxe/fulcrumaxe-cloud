@@ -158,7 +158,7 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
 }
 
 /** The `fx/<run>-g<generation>` branch a fresh run pushes, or a continuation's own branch (C25 section 1.2). */
-const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }): string => (job.continues ? job.continues.branch : `${job.branch_prefix}${i.runId}-g${i.leaseGeneration}`);
+export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }): string => (job.continues ? job.continues.branch : `${job.branch_prefix}${i.runId}-g${i.leaseGeneration}`);
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
 async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }): Promise<Decision> {

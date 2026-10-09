@@ -144,6 +144,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "userns_disabled",
   "apparmor_userns_restricted",
   "probe_failed_other",
+  // Cloud-verified runner git ticket (D#6 R5a-2b): the ticket route refused a run that is not cloud-verified.
+  "not_cloud_verified",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

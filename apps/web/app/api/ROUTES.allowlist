@@ -20,6 +20,7 @@ internal/run-actions/kick/route.ts
 mode/route.ts
 rum/route.ts
 runner/claim/route.ts
+runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts
 runner/register/route.ts

@@ -23,6 +23,6 @@ describe("agent-runtime types and errors", () => {
   it("the package index re-exports the runtime errors, the envelope reader, redaction and the protocol", () => {
     expect(protocol.LocalRunnerRefused).toBe(LocalRunnerRefused);
     for (const name of ["extractAgentOutputEnvelope", "redactText", "verifyJob", "verifyRunnerRequest"] as const) expect(typeof protocol[name], name).toBe("function");
-    expect(Object.keys(protocol.RUNNER_MESSAGES)).toHaveLength(8);
+    expect(Object.keys(protocol.RUNNER_MESSAGES)).toHaveLength(9);
   });
 });

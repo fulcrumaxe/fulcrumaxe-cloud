@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { MAX_CREATED_SKEW_SECONDS, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { MAX_CREATED_SKEW_SECONDS, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 
@@ -126,6 +126,16 @@ export interface RunnerLeaseOps {
   beginRunnerDone(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     { kind: "proceed" } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }
   >;
+  /**
+   * `git-ticket`, first half (D#6 R5a-2b, C27 section 1.1): the fence WITHOUT extending the lease, then the run's own facts. A stop, or the
+   * role, runtime, own execution mode, dispatch repository and signed job the route decides on.
+   */
+  gitTicketContext(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    | { kind: "fenced"; reason: StopReason }
+    | { kind: "context"; role: string; runtime: string; executionMode: string; repo: { id: string; owner: string; name: string } | null; job: Job | null }
+  >;
+  /** `git-ticket`, second half: the signed ticket, or null while the signing key or the forward host is not configured (the route then answers 503). */
+  signGitTicket(input: { issuer: string; runnerId: string; accountId: string; runId: string; leaseGeneration: number; repo: { id: string; owner: string; name: string }; ref: string }): Promise<{ ticket: string; expiresAt: Date; proxyOrigin: string } | null>;
   /** `done`, second half: records the cloud's verdict under the fence, in one transaction. */
   finishRunnerDone(input: {
     accountId: string;

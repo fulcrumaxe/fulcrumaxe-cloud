@@ -54,9 +54,20 @@ export const RUNNER_SETUP_DETAILS = [
   // D#6 R4a-3b (C25 section 1.4): a fix round's branch was gone at prepare or before the push.
   "continuation_branch_missing",
   "other",
+  // D#6 R5a-2b (C27 section 4.5; additive under C8 section 6): the cloud-verified path (path A) could not start or finish its pushes.
+  // `push_too_large` is the only detail that comes with a `size_mb`.
+  "git_proxy_unpinned",
+  "git_ticket_refused",
+  "path_a_no_mirror",
+  "clone_limited",
+  "push_too_large",
+  "push_incomplete",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];
+
+/** D#6 R5a-2b (C27 section 4.5): the size of the largest commit, in whole MB, rounded up. Over the proxy's 4 MB push limit, so it starts at 5. */
+export const PUSH_TOO_LARGE_SIZE_MB = { min: 5, max: 10_000 } as const;
 
 export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetail[]> = {
   job_refused: JOB_REFUSED_DETAILS,
@@ -89,9 +100,13 @@ export const LocalOnlyEvent = z
     // D#6 R4a-2 (C24 section 1), on a `run_ended` event only: why the run ended, and for two reasons which closed code. Neither holds job content.
     reason: RunEndedReason.optional(),
     detail: z.enum(RUN_ENDED_DETAILS).optional(),
+    // D#6 R5a-2b (C27 section 4.5), on a `run_ended` event with detail `push_too_large` only: the largest commit's size in whole MB.
+    size_mb: safeInt.min(PUSH_TOO_LARGE_SIZE_MB.min).max(PUSH_TOO_LARGE_SIZE_MB.max).optional(),
   })
   .strict()
   .superRefine((event, ctx) => {
+    if (event.size_mb !== undefined && !(event.type === "run_ended" && event.reason === "runner_setup" && event.detail === "push_too_large"))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "size_mb belongs to run_ended push_too_large only", path: ["size_mb"] });
     if (event.reset_at !== undefined && event.type !== "usage_limit_reached") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "reset_at belongs to usage_limit_reached only", path: ["reset_at"] });
     if (event.type !== "run_ended") {
       if (event.reason !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "reason belongs to run_ended only", path: ["reason"] });
@@ -121,6 +136,12 @@ export const HelloMessage = z
 export const ClaimMessage = z.object({}).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+
+/** D#6 R5a-2b (C27 section 1.1): a cloud-verified run asks for a git ticket. The run and generation are checked against the lease; nothing else travels. */
+export const GitTicketMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+
+/** The signed route a runner asks for a git ticket on. The signature covers the cloud origin plus this constant path. */
+export const GIT_TICKET_PATH = "/api/runner/git-ticket";
 
 export const EventsMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, events: z.array(LocalOnlyEvent).min(1).max(MAX_EVENTS_PER_BATCH) }).strict();
 
@@ -185,6 +206,7 @@ export const RUNNER_MESSAGES = {
   hello: HelloMessage,
   claim: ClaimMessage,
   heartbeat: HeartbeatMessage,
+  git_ticket: GitTicketMessage,
   events: EventsMessage,
   done: DoneMessage,
   register: RegisterMessage,

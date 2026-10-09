@@ -31,6 +31,8 @@ const leases: RunnerLeaseOps = {
   ingestRunnerEvents: async (input) => (await requireWorker()).ingestRunnerEvents(input),
   beginRunnerDone: async (input) => (await requireWorker()).beginRunnerDone(input),
   finishRunnerDone: async (input) => (await requireWorker()).finishRunnerDone(input),
+  gitTicketContext: async (input) => (await requireWorker()).gitTicketContext(input),
+  signGitTicket: async (input) => (await requireWorker()).signGitTicket(input),
 };
 
 /** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */

@@ -38,6 +38,13 @@ describe("lease routes [pg]", () => {
       if (refuse) throw refuse;
       return ingestResult;
     },
+    // `git-ticket` has its own suite (gitTicket.pg.test.ts), as `done` has (done.pg.test.ts); these routes' tests never reach either.
+    gitTicketContext: async () => {
+      throw new Error("not used by these tests");
+    },
+    signGitTicket: async () => {
+      throw new Error("not used by these tests");
+    },
     // `done` has its own suite (done.pg.test.ts); these routes' tests never reach it.
     beginRunnerDone: async () => {
       throw new Error("not used by these tests");

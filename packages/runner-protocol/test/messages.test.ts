@@ -13,6 +13,7 @@ const VALID: Record<RunnerMessageName, unknown> = {
   hello: { protocol_version: 1, binary_version: "0.1.0", model_auth_present: true, isolation: "container" },
   claim: {},
   heartbeat: { run_id: UUID, lease_generation: 3 },
+  git_ticket: { run_id: UUID, lease_generation: 3 },
   events: { run_id: UUID, lease_generation: 3, events: [EVENT] },
   done: { run_id: UUID, lease_generation: 3, agentOutput: { verdict: "pass" } },
   register: { code: `fxrr_${"A1".repeat(16)}`, public_key_jwk: JWK },
@@ -21,8 +22,8 @@ const VALID: Record<RunnerMessageName, unknown> = {
 };
 
 describe("the runner-to-cloud messages", () => {
-  it("are exactly hello, claim, heartbeat, events, done, register, rotate and revoke", () => {
-    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "heartbeat", "hello", "register", "revoke", "rotate"]);
+  it("are exactly hello, claim, heartbeat, git_ticket, events, done, register, rotate and revoke", () => {
+    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "register", "revoke", "rotate"]);
   });
 
   it("accept a valid message of each kind", () => {
@@ -119,7 +120,7 @@ describe("LocalOnlyEvent", () => {
   });
 
   it("has only the Spec's fields, and reset_at (D#6 R2b-3, comment 27 item 7)", () => {
-    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "tool_name", "ts", "type", "usage"]);
+    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "size_mb", "tool_name", "ts", "type", "usage"]);
   });
 
   it("takes a reset time on usage_limit_reached only, as an ISO timestamp", () => {
@@ -142,7 +143,7 @@ describe("LocalOnlyEvent", () => {
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
       for (const reason of Object.keys(DETAILS_OF_RUN_ENDED)) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
       expect(DETAILS_OF_RUN_ENDED.job_refused).toEqual(["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role"]);
-      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
+      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other", "git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete"]);
       for (const [reason, details] of Object.entries(DETAILS_OF_RUN_ENDED)) {
         for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail }).success, `${reason}/${detail}`).toBe(true);
       }

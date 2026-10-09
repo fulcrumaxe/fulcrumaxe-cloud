@@ -10,6 +10,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { RunActionInputError } from "../src/index.js";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
+import { createRunnerGitTicketFacade } from "../src/runnerGitTicket.js";
 import { DONE_FAILURE_REASONS, DROPPED_AGENT_OUTPUT, createRunnerDoneFacade, type RunnerDoneFacade, type RunnerDoneVerdict } from "../src/runnerDone.js";
 import { FAKE_APP_LOGIN, FakeGithub } from "../../runner-cloud/test/helpers/githubFake.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
@@ -31,6 +32,8 @@ describe("runner done [pg]", () => {
   let runner: string;
   let facade: RunnerDoneFacade;
   let claims: ReturnType<typeof createRunnerClaimFacade>;
+  // The ticket methods are part of the lease ops; this suite never calls them (gitTicket.pg.test.ts does).
+  const gitTickets = createRunnerGitTicketFacade(null as never, { signer: null, audience: null });
 
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
@@ -351,7 +354,7 @@ describe("runner done [pg]", () => {
       fake = new FakeGithub();
       fake.addRepo("acme", "widgets");
       const port = createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN });
-      deps = { appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: { ...claims, ...facade }, pullRequests: port };
+      deps = { appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: { ...claims, ...facade, ...gitTickets }, pullRequests: port };
       runnerKeyed = await newRunner(key);
     });
 
