@@ -64,6 +64,8 @@ export interface FakeRepoState {
   merges: Array<{ sha: string | undefined; method: unknown }>;
   posts: Array<{ sha: string; body: Record<string, unknown> }>;
   requests: GitHubHttpRequest[];
+  /** D#6 R3c: the pull request's head branch as the local-only fake lists it (a runner run's `fx/<run>-g<n>`). */
+  runBranch?: string;
 }
 
 export function freshRepo(over: Partial<FakeRepoState> = {}): FakeRepoState {

@@ -14,6 +14,7 @@ export { gitTicketRun } from "./gitTicket.js";
 export {
   GITHUB_GRAPHQL_DOCUMENTS,
   LOCAL_ONLY_ALLOWLIST,
+  LOCAL_ONLY_REVIEW_STATUS_CONTEXT,
   LocalOnlyGithubError,
   localOnlyGithub,
   localOnlyViolation,

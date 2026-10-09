@@ -107,6 +107,10 @@ describe("recorded pipeline steps", () => {
     expect(reasonWord("run_not_succeeded_security_reviewer")).toBe("the security review did not finish");
     expect(reasonWord("some_new_code")).toBe("some new code");
   });
+
+  it("D#6 R3c: the advisory reason reads as reviews passed on the person's machine, not as missing reviews", () => {
+    expect(reasonWord("local_reviews_passed_advisory")).toBe("Reviews passed on your machine. A person merges this pull request.");
+  });
 });
 
 describe("the Ready to merge banner reads the real state", () => {

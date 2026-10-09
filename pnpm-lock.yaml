@@ -840,6 +840,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/runner-cloud':
+        specifier: workspace:*
+        version: link:../runner-cloud
       '@fx/runtime':
         specifier: workspace:*
         version: link:../runtime

@@ -65,6 +65,12 @@ export interface InstallationHttpTarget {
   repoId: string;
   owner: string;
   name: string;
+  /**
+   * D#6 R3c: lets a `read` or `merge_gate` client send `POST /graphql` (and nothing else beyond its own list). Off by default. Only a
+   * caller that puts the client behind `localOnlyGithub` sets it: this package cannot see which document or variables are sent, so the
+   * fence, not this flag, decides what a GraphQL call may ask for. A `runner_pr` client always may.
+   */
+  allowGraphql?: boolean;
 }
 
 const CALL_TIMEOUT_MS = 15_000;
@@ -114,13 +120,13 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
 
     return {
       async request(req) {
-        const graphql = kind === "runner_pr" && req.method === "POST" && req.path === GRAPHQL_PATH;
+        const graphql = (kind === "runner_pr" || target.allowGraphql === true) && req.method === "POST" && req.path === GRAPHQL_PATH;
         const allowed = graphql || (req.method === "GET" && req.path === repoRoot) || (req.path.startsWith(prefix) && PATH_RE.test(req.path));
         if (!allowed || req.path.includes("..")) throw new InstallationHttpError("path_refused");
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
-        if (kind === "read" && req.method !== "GET") throw new InstallationHttpError("method_refused");
+        if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
         if (req.method === "PATCH" && kind !== "runner_pr") throw new InstallationHttpError("method_refused");
         if (kind === "runner_pr" && req.method === "PUT") throw new InstallationHttpError("method_refused");

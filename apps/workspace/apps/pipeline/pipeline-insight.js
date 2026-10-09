@@ -136,6 +136,7 @@ const REASON_WORDS = {
   ci_not_green: "CI is not green",
   auto_merge_not_allowed: "auto-merge is not allowed",
   human_merge_only: "the operator set this repository so that a person merges",
+  local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
 };
 const ROLE_CODES = { code_reviewer: "code review", security_reviewer: "security review", acceptance_tester: "acceptance test", debater: "debate" };

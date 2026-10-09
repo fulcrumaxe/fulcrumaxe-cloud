@@ -51,6 +51,24 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
     expect(statements.slice(0, statements.indexOf(read!)).some((s) => s.params?.includes(ACCOUNT))).toBe(true);
   });
 
+  it("D#6 R3c: a runner_local repo's gate gets a client opened with GraphQL allowed and fenced; a sandbox repo's gets the plain one", async () => {
+    const plain = { request: vi.fn(async () => ({ status: 200, body: {} })) };
+    const open = vi.fn(async () => plain as never);
+    const { pool } = fakePool(true);
+    mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" } });
+    await createReviewDeps(open).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
+    expect(open).toHaveBeenLastCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets", allowGraphql: true });
+    const fenced = (mocks.runMergeGateForItem.mock.calls[0]![0] as { http: { request(r: unknown): Promise<unknown>; graphql: unknown } }).http;
+    expect(typeof fenced.graphql).toBe("function");
+    await expect(fenced.request({ method: "GET", path: "/repos/acme/widgets/pulls/7/files" })).rejects.toThrow(/local-only github: refused/);
+    expect(plain.request).not.toHaveBeenCalled();
+
+    mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx: { repoId: REPO, owner: "acme", name: "widgets", executionMode: "sandbox" } });
+    await createReviewDeps(open).mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
+    expect(open).toHaveBeenLastCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets" });
+    expect((mocks.runMergeGateForItem.mock.calls[1]![0] as { http: unknown }).http).toBe(plain);
+  });
+
   it("the port answers off when the setting is not there", async () => {
     const deps = createReviewDeps(async () => ({}) as never);
     const { pool } = fakePool(false);

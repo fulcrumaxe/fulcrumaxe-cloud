@@ -1,5 +1,5 @@
 import { REVIEW_STATUS_CONTEXT_NAME } from "../build/mergeGate.js";
-import type { GitHubHttp } from "../build/githubMergePort.js";
+import type { GitHubHttp, LocalGitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
 import { branchFor } from "../advance/build.js";
 import { isSafeRef } from "./reviewPrompts.js";
@@ -66,7 +66,8 @@ export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: strin
  * number (a runner run pushes `fx/<run>-g<generation>`, so `fx/issue-<n>` names nothing). Open and of this repository, and its head
  * branch must be the recorded one: a pull request whose head is some other branch is not the run's, and is `malformed`, not found.
  */
-export async function findRecordedPullRequest(http: GitHubHttp, repo: { owner: string; name: string }, recorded: { number: number; branch: string }): Promise<FindPullRequestResult> {
+export async function findRecordedPullRequest(http: GitHubHttp, repo: { owner: string; name: string }, recorded: { number: number; branch: string }, options: { local?: boolean } = {}): Promise<FindPullRequestResult> {
+  if (options.local === true) return findRecordedPullRequestLocal(http, repo, recorded);
   const res = await http.request({ method: "GET", path: `${repoPath(repo.owner, repo.name)}/pulls/${recorded.number}` });
   if (res.status === 404) return { ok: false, reason: "no_open_pr" };
   if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
@@ -75,6 +76,23 @@ export async function findRecordedPullRequest(http: GitHubHttp, repo: { owner: s
   if (p.number !== recorded.number || (p.head as Json).ref !== recorded.branch) return { ok: false, reason: "malformed" };
   if (p.state !== "open") return { ok: false, reason: "no_open_pr" };
   return readPull(p, recorded.branch);
+}
+
+/**
+ * D#6 R3c: the same lookup for a `runner_local` repo, through the allowlist's list call (A3) only: the open pull requests whose head is
+ * the recorded branch, then the recorded number among them. `GET pulls/{n}` is not on the allowlist. No match is `no_open_pr`, and a
+ * list that holds pull requests but not this number is `malformed`, as the by-number lookup would have answered.
+ */
+async function findRecordedPullRequestLocal(http: GitHubHttp, repo: { owner: string; name: string }, recorded: { number: number; branch: string }): Promise<FindPullRequestResult> {
+  const res = await http.request({ method: "GET", path: `${repoPath(repo.owner, repo.name)}/pulls`, query: { state: "open", head: `${repo.owner}:${recorded.branch}`, per_page: 5 } });
+  if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
+  if (!Array.isArray(res.body)) return { ok: false, reason: "malformed" };
+  if (res.body.length === 0) return { ok: false, reason: "no_open_pr" };
+  const here = `${repo.owner}/${repo.name}`.toLowerCase();
+  const mine = res.body.filter((p): p is Json => isHeadOf(p, here) && p.number === recorded.number && (p.head as Json).ref === recorded.branch);
+  if (mine.length !== 1) return { ok: false, reason: "malformed" };
+  if (mine[0]!.state !== "open") return { ok: false, reason: "no_open_pr" };
+  return readPull(mine[0]!, recorded.branch);
 }
 
 /** Where an item's pull request comes from: `repos.execution_mode` and, for a runner repo, what its run's `done` recorded. */
@@ -89,7 +107,8 @@ export interface PullRequestSource {
  */
 export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: string; name: string; issue: number } & PullRequestSource): Promise<FindPullRequestResult> {
   if (repo.executionMode === "runner_local") {
-    return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr);
+    // D#6 R3c: a runner repo's lookup uses only the allowlist's list call (A3); the composition root hands it the fenced client.
+    return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr, { local: true });
   }
   return findOpenPullRequest(http, repo);
 }
@@ -119,6 +138,38 @@ export async function listChangedFiles(http: GitHubHttp, repo: { owner: string; 
     if (res.body.length < FILES_PER_PAGE) return { ok: true, files, truncated: false };
   }
   // A full last page at the cap: there may be more files than GitHub will list.
+  return { ok: true, files, truncated: true };
+}
+
+/**
+ * D#6 R3c: the changed files of a `runner_local` repo's pull request: PATHS and change types only (the `PullRequestFiles` document, A1).
+ * GitHub gives no patch and our cloud never asks for one. Because no diff is seen, a file counts as "diff not shown" to the security
+ * check (`changes: 1`, a stand-in for "some change, size unknown"), so `securityTriggers` fires and the security reviewer is always
+ * required on such a repo. That is the fail-closed side. A list that is cut short (the cap, or fewer files than GitHub's total) is `truncated`.
+ */
+export async function listChangedFilesLocal(http: LocalGitHubHttp, repo: { owner: string; name: string; pr: number }): Promise<ListFilesResult> {
+  const files: ChangedFile[] = [];
+  let cursor: string | null = null;
+  let total = 0;
+  for (let page = 1; page <= FILES_MAX_PAGES; page++) {
+    const res = await http.graphql("PullRequestFiles", { owner: repo.owner, name: repo.name, number: repo.pr, ...(cursor === null ? {} : { cursor }) });
+    if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
+    // GraphQL reports an error with status 200 and an errors array: that is a failure, never an empty list.
+    if (!isObj(res.body) || res.body.errors !== undefined) return { ok: false, reason: "github_unavailable" };
+    const data = isObj(res.body.data) ? res.body.data : null;
+    const repository = data !== null && isObj(data.repository) ? data.repository : null;
+    const pull = repository !== null && isObj(repository.pullRequest) ? repository.pullRequest : null;
+    const list = pull !== null && isObj(pull.files) ? pull.files : null;
+    if (list === null || !Array.isArray(list.nodes) || !isObj(list.pageInfo) || typeof list.totalCount !== "number") return { ok: false, reason: "malformed" };
+    total = list.totalCount;
+    for (const f of list.nodes) {
+      if (!isObj(f) || typeof f.path !== "string") return { ok: false, reason: "malformed" };
+      files.push({ path: f.path, previousPath: null, patch: null, changes: 1 });
+    }
+    if (list.pageInfo.hasNextPage !== true) return { ok: true, files, truncated: files.length < total };
+    if (typeof list.pageInfo.endCursor !== "string") return { ok: false, reason: "malformed" };
+    cursor = list.pageInfo.endCursor;
+  }
   return { ok: true, files, truncated: true };
 }
 

@@ -6,7 +6,9 @@ import {
   buildFixPrompt,
   buildReviewPrompt,
   findPullRequestForItem,
+  isLocalGitHubHttp,
   listChangedFiles,
+  listChangedFilesLocal,
   promptRuntimeOf,
   readVerdict,
   reviewPlanFor,
@@ -14,6 +16,7 @@ import {
   type FixFinding,
   type ReviewPromptRole,
 } from "@fx/pipeline";
+import { openForRepo } from "./github/localOnlyHttp";
 import type { StepWho } from "./advanceStageSteps";
 import { isQueuedOnRunner } from "./advanceSteps";
 
@@ -88,10 +91,16 @@ export type PrLookup = PrFound | { ok: false; reason: string };
 export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<PrLookup> {
   if (!open) return { ok: false, reason: "github_unavailable" };
   try {
-    const http = await open("read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
+    // D#6 R3c: a runner_local repo is read through the local-only fence (paths only, never a patch).
+    const http = await openForRepo(open, ctx.executionMode, "read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
     const found = await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: ctx.executionMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
-    const files = await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: found.pr.number });
+    const files =
+      ctx.executionMode === "runner_local"
+        ? isLocalGitHubHttp(http)
+          ? await listChangedFilesLocal(http, { owner: ctx.owner, name: ctx.name, pr: found.pr.number })
+          : ({ ok: false, reason: "github_unavailable" } as const)
+        : await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: found.pr.number });
     if (!files.ok) return { ok: false, reason: files.reason };
     const codes = securityTriggers({ files: files.files, truncated: files.truncated });
     return { ok: true, number: found.pr.number, headSha: found.pr.headSha, baseRef: found.pr.baseRef, branch: found.pr.branch, securityCodes: codes };

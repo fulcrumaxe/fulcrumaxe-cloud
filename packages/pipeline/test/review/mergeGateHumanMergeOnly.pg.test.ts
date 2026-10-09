@@ -4,6 +4,7 @@ import { runMergeGateForItem, type LocalReviewOptInPort } from "../../src/review
 import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
+import { fakeGitHubLocal } from "./helpers/fakeGitHubLocal.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
 
 /**
@@ -13,6 +14,7 @@ import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGit
  */
 const h = pgHarness();
 const HEAD = "a".repeat(40);
+const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
 const greenCheck = { name: "ci", status: "completed", conclusion: "success" };
 const ENV = "FX_HUMAN_MERGE_ONLY_REPO_IDS";
 const saved = process.env[ENV];
@@ -28,6 +30,7 @@ interface World {
   repoId: string;
   ghRepoId: number;
   gh: FakeRepoState;
+  local: boolean;
 }
 
 async function world(mode: Mode): Promise<World> {
@@ -52,7 +55,17 @@ async function world(mode: Mode): Promise<World> {
       `INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription')`,
       [runnerId, accountId, admin, JSON.stringify({ kty: "OKP", crv: "Ed25519", x: k }), k],
     );
-    for (const role of ["code-reviewer", "acceptance-tester"]) {
+    // What the runner's `done` recorded: the pull request and run branch the local-only gate checks the review against (R3c).
+    const executor = randomUUID();
+    await h.admin.query(
+      `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded', 'runner_local', $4)`,
+      [executor, accountId, workItemId, runnerId],
+    );
+    await h.admin.query(
+      `INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`,
+      [accountId, executor, JSON.stringify({ from: "running", to: "succeeded", viaRunnerDone: true, prNumber: freshRepo({ headSha: HEAD }).prNumber, branch: BRANCH })],
+    );
+    for (const role of ["code-reviewer", "acceptance-tester", "security-reviewer"]) {
       await h.admin.query(
         `INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha, execution_mode, runner_id) VALUES ($1, $2, $3, 'runner', 'succeeded', '{"verdict":"pass"}'::jsonb, $4, 'runner_local', $5)`,
         [accountId, workItemId, role, HEAD, runnerId],
@@ -66,13 +79,13 @@ async function world(mode: Mode): Promise<World> {
       );
     }
   }
-  const gh = freshRepo({ headSha: HEAD, checks: { [HEAD]: [greenCheck] }, protectedWithoutChecks: true });
-  return { accountId, workItemId, repoId, ghRepoId, gh };
+  const gh = freshRepo({ headSha: HEAD, checks: { [HEAD]: [greenCheck] }, protectedWithoutChecks: true, runBranch: BRANCH });
+  return { accountId, workItemId, repoId, ghRepoId, gh, local: mode !== "cloud" };
 }
 
 const optIn = (mode: Mode): LocalReviewOptInPort => ({ enabled: async () => mode === "runner_local_on" });
 const gate = (w: World, mode: Mode) =>
-  runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: optIn(mode) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  runMergeGateForItem({ pool: h.runWriterPool, http: w.local ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh), localReviewOptIn: optIn(mode) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>) => (out.outcome === "ready_human_merges" ? out.reasons : []);
 
 const MODES: Mode[] = ["cloud", "runner_local_off", "runner_local_on"];

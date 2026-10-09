@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@fx/db": "workspace:*",
+    "@fx/runner-cloud": "workspace:*",
     "@fx/runtime": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
