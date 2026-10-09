@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import { runCli } from "../../src/cli.js";
 import { MACOS_PREVIEW_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
 import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
+import { findOnPath } from "../helpers/findOnPath.js";
 
 let root: string;
 let stateDir: string;
@@ -329,7 +330,9 @@ describe("the sandbox check", () => {
     const sysbin = path.join(root, "sysbin");
     mkdirSync(sysbin);
     // The fake CLI is a shell script that needs `cat`; the host's own search path (which may hold a real bwrap) is left out.
-    symlinkSync(execFileSync("which", ["cat"], { encoding: "utf8" }).trim(), path.join(sysbin, "cat"));
+    const cat = findOnPath("cat", HOST_PATH);
+    if (cat === undefined) throw new Error("no cat on the host search path");
+    symlinkSync(cat, path.join(sysbin, "cat"));
     rmSync(path.join(toolbin, "bwrap"));
     vi.stubEnv("PATH", `${toolbin}:${sysbin}`);
     const host = fakeSandboxHost({ files: OS('ID="arch"') });
