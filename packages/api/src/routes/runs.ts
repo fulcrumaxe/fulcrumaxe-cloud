@@ -15,6 +15,8 @@ export const runResponseSchema = z.object({
   tokens_out: z.number().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+  approved_by: z.object({ id: z.string().uuid(), name: z.string() }).nullable(),
+  approval: z.enum(['auto', 'manual']).nullable(),
 });
 
 const listRunsResponseSchema = z.object({
