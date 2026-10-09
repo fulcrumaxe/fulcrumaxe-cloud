@@ -33,7 +33,7 @@ interface Run {
 }
 function exec(file: string, args: readonly string[], env: Record<string, string>): Promise<Run> {
   return new Promise((resolve) => {
-    execFile(file, args, { env: { PATH: process.env.PATH ?? "", FX_FORBID_MODEL_CALLS: "1", ...env }, maxBuffer: 1 << 24 }, (error, stdout, stderr) =>
+    execFile(file, args, { env: { PATH: process.env.PATH ?? "", TMPDIR: tmpdir(), FX_FORBID_MODEL_CALLS: "1", ...env }, maxBuffer: 1 << 24 }, (error, stdout, stderr) =>
       resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout, stderr }),
     );
   });

@@ -34,7 +34,7 @@ describe.skipIf(!REACHABLE)("a real SEA through the updater", () => {
     root = mkdtempSync(path.join(tmpdir(), "fx-upd-sea-"));
     const out = path.join(root, "out");
     await new Promise<void>((resolve, reject) => {
-      execFile(process.execPath, [SCRIPT, "--out-dir", out], { env: { PATH: process.env.PATH ?? "", FX_FORBID_MODEL_CALLS: "1", SOURCE_DATE_EPOCH: "1780000000", FX_SEA_NODE_CACHE_DIR: path.join(root, "node-cache") } }, (error) => (error === null ? resolve() : reject(error)));
+      execFile(process.execPath, [SCRIPT, "--out-dir", out], { env: { PATH: process.env.PATH ?? "", TMPDIR: tmpdir(), FX_FORBID_MODEL_CALLS: "1", SOURCE_DATE_EPOCH: "1780000000", FX_SEA_NODE_CACHE_DIR: path.join(root, "node-cache") } }, (error) => (error === null ? resolve() : reject(error)));
     });
     sea = readFileSync(path.join(out, "fx-runner-linux-x64"));
   }, 300_000);

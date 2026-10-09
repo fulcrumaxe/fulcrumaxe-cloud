@@ -56,7 +56,7 @@ function build(m: Mirror, outDir: string): Promise<{ code: number; stderr: strin
     execFile(
       process.execPath,
       [SCRIPT, "--out-dir", outDir],
-      { env: { PATH: process.env.PATH ?? "", NODE_EXTRA_CA_CERTS: m.caFile, FX_SEA_NODE_DIST_URL: m.url, SOURCE_DATE_EPOCH: "1780000000", FX_FORBID_MODEL_CALLS: "1" } },
+      { env: { PATH: process.env.PATH ?? "", TMPDIR: tmpdir(), NODE_EXTRA_CA_CERTS: m.caFile, FX_SEA_NODE_DIST_URL: m.url, SOURCE_DATE_EPOCH: "1780000000", FX_FORBID_MODEL_CALLS: "1" } },
       (error, stdout, stderr) => resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : 1, stdout, stderr }),
     );
   });
