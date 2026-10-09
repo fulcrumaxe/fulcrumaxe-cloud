@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { createNixShell, findTool, identityVia, NIX_FIXED_ARGS } from "../src/daemon/nixShell.js";
+import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
 /**
  * D#6 R7c fix round 1 (CWE-15), with the real `nix`: a host nix.conf that turns the dangerous settings on, and flakes that try to use them. The step's fixed
@@ -30,7 +31,8 @@ const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap
 const GIT = findTool("git", process.env["PATH"] ?? "");
 const usable = ((): boolean => {
   if (NIX === undefined || BWRAP === undefined || process.platform !== "linux" || process.arch !== "x64") return false;
-  return spawnSync(NIX, ["--version"], { stdio: "ignore" }).status === 0 && spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  if (spawnSync(NIX, ["--version"], { stdio: "ignore" }).status !== 0 || spawnSync("git", ["--version"], { stdio: "ignore" }).status !== 0) return false;
+  return bwrapCanCreateNamespaces(BWRAP);
 })();
 
 const LOCK = JSON.stringify({ nodes: { root: {} }, root: "root", version: 7 });
