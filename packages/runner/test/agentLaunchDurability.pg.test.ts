@@ -7,7 +7,7 @@ import { sandboxNameFor } from "../src/sandboxNaming.js";
 import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { configureAgentRunWiring, followStatusBody } from "../src/workflows/agentRun.js";
-import { sweepLostRuns } from "../src/lostRunSweep.js";
+import { LOST_SWEEP_BATCH_SIZE, sweepLostRuns } from "../src/lostRunSweep.js";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
@@ -215,10 +215,17 @@ describe("agent launch survives the invocation that started it [pg]", () => {
     }
   }
 
-  /** The sweep over the whole database, acting on `mine` only (other tests' leftover runs are reported alive), repeated until it has met them all. */
+  /**
+   * The sweep over the whole database, acting on `mine` only (other tests' leftover runs are reported alive), repeated until it has met them all.
+   * The lister picks a random batch of LOST_SWEEP_BATCH_SIZE running runs per tick (by design: a fixed order would let healthy long runs hide a stuck one),
+   * and every [pg] file of this package shares one database, so hundreds of other files' running runs may be in the pool. The tick bound is therefore
+   * derived from the real total: each tick meets a given run with probability BATCH/total, so 30 times total/BATCH ticks leave a miss chance near e^-30.
+   */
   async function sweepUntilSeen(target: SandboxTarget, mine: readonly string[]): Promise<void> {
+    const total = (await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE status = 'running' AND sandbox_requested_at IS NOT NULL`)).rows[0].n as number;
+    const maxTicks = Math.max(60, Math.ceil((30 * total) / LOST_SWEEP_BATCH_SIZE));
     const seen = new Set<string>();
-    for (let tick = 0; tick < 60 && seen.size < mine.length; tick++) {
+    for (let tick = 0; tick < maxTicks && seen.size < mine.length; tick++) {
       await sweepLostRuns({
         pool: db.runWriterPool,
         target: {
@@ -230,6 +237,7 @@ describe("agent launch survives the invocation that started it [pg]", () => {
         },
       });
     }
+    if (seen.size < mine.length) throw new Error(`the sweep did not meet ${mine.length - seen.size} of its runs in ${maxTicks} ticks over ${total} running runs`);
   }
 
   it("a run left running before this code existed: the sweep settles it with no manual edit, on a fresh instance", async () => {
