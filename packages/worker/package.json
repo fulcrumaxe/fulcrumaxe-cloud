@@ -12,8 +12,9 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "test:e2e-runner": "env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN FX_FORBID_MODEL_CALLS=1 vitest run --config vitest.e2e.config.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/e2e",
+    "lint": "tsc --noEmit && tsc --noEmit -p test/e2e"
   },
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
@@ -31,6 +32,7 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
+    "@fulcrumaxe/fx-runner": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/plan-data": "workspace:*",
     "@fx/runner-cloud": "workspace:*",

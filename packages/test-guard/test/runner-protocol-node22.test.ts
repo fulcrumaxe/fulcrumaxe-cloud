@@ -31,8 +31,8 @@ describe("the Node 22 step in CI", () => {
   it("is a step of the existing check job, after the checks, with no job, matrix or hosted runner of its own", () => {
     expect(checkJob).toContain(`- name: ${STEP}`);
     expect(ci.indexOf(`- name: ${STEP}`)).toBeGreaterThan(ci.indexOf("- name: Run checks"));
-    // The jobs are the public-PR gates, the check job and the e2e job; the Node 22 step adds no job to them.
-    expect(ci.slice(ci.indexOf("\njobs:")).match(/^ {2}[a-z][a-z0-9-]*:\s*$/gm)).toEqual(["  pr-gates:", "  check:", "  workspace-e2e:"]);
+    // The jobs are the public-PR gates, the check job, the e2e job and the runner end-to-end job; the Node 22 step adds no job to them.
+    expect(ci.slice(ci.indexOf("\njobs:")).match(/^ {2}[a-z][a-z0-9-]*:\s*$/gm)).toEqual(["  pr-gates:", "  check:", "  workspace-e2e:", "  e2e-runner:"]);
     // The check job's runner is the repository-wide guarded expression, not something the step chose.
     expect(checkJob).toContain("runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}");
     expect(step).not.toMatch(/^\s*(continue-on-error|runs-on|strategy):/m);
