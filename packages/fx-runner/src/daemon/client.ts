@@ -5,7 +5,7 @@
  */
 import {
   ClaimMessage, ClaimRateLimitedReply, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
-  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type LocalOnlyEvent, type SignedJob, type StopReason,
+  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -47,7 +47,11 @@ export interface DoneInput {
 }
 
 export interface RunnerClient {
-  claim(): Promise<ClaimResult>;
+  /**
+   * Asks for a run. With `sandboxUnavailable` it is the status poll of a runner that cannot sandbox a job (C16 section 1.3): the reply is
+   * `retry_after` only, and a reply that carries a job is an error, never a claim, so nothing a misbehaving cloud sends can be run.
+   */
+  claim(sandboxUnavailable?: SandboxUnavailableReason): Promise<ClaimResult>;
   heartbeat(runId: string, leaseGeneration: number): Promise<HeartbeatResult>;
   events(runId: string, leaseGeneration: number, events: readonly LocalOnlyEvent[]): Promise<EventsResult>;
   done(input: DoneInput): Promise<DoneResult>;
@@ -77,11 +81,13 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
   };
 
   return {
-    async claim() {
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse({}));
+    async claim(sandboxUnavailable) {
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable === undefined ? {} : { sandbox_unavailable: sandboxUnavailable }));
       if (reply?.status === 200) {
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");
+        // A status poll takes no job: a reply with one is refused here, so no code path past this point can run it.
+        if (sandboxUnavailable !== undefined && "signed_job" in parsed.data) return fail(reply, "invalid_reply");
         // The reply schema also refuses a claim whose `run_id` differs from the signed job's own.
         return "signed_job" in parsed.data
           ? { kind: "claimed", signedJob: parsed.data.signed_job, runId: parsed.data.run_id, leaseGeneration: parsed.data.lease_generation }

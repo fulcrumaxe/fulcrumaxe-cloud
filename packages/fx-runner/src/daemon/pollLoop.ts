@@ -5,8 +5,10 @@
  * stops, after the run in hand has been dealt with, when `signal` aborts (SIGTERM or SIGINT, see `abortOnSignals`), and
  * stops for good when the cloud no longer knows this runner (401).
  */
+import type { SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import type { Claimed, RunnerClient } from "./client.js";
 import type { Clock } from "./lease.js";
+import type { SandboxGate } from "./sandboxGate.js";
 
 export const BACKOFF_START_SECONDS = 5;
 export const BACKOFF_MAX_SECONDS = 300;
@@ -16,6 +18,7 @@ export type PollEvent =
   | { event: "idle"; waitSeconds: number }
   | { event: "rate_limited"; waitSeconds: number }
   | { event: "error"; status: number; code?: string; waitSeconds: number }
+  | { event: "sandbox_unavailable"; reason: SandboxUnavailableReason; waitSeconds: number }
   | { event: "claimed"; runId: string }
   | { event: "discarded"; runId: string }
   | { event: "job_error" };
@@ -25,6 +28,8 @@ export type PollEnd = "stopped" | "unauthorized";
 export interface PollDeps {
   client: Pick<RunnerClient, "claim">;
   clock: Clock;
+  /** Asked before every claim (C16 section 1.3). A closed gate means no claim: the poll reports the reason and takes no job. Required: no loop runs without one. */
+  gate: SandboxGate;
   signal: AbortSignal;
   /** Deals with a claimed run and resolves when it is over. */
   onClaimed: (claimed: Claimed) => Promise<unknown>;
@@ -44,8 +49,13 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
   const wait = (seconds: number): Promise<void> => deps.clock.sleep(seconds * 1000, deps.signal);
 
   while (!deps.signal.aborted) {
-    const reply = await deps.client.claim();
-    if (reply.kind === "claimed") {
+    const gate = await deps.gate.check();
+    const reply = await deps.client.claim(gate.open ? undefined : gate.reason);
+    if (!gate.open && reply.kind === "claimed") {
+      // Not reachable with the real client, which refuses a job on a status poll. Whatever sent it, nothing is run on a closed gate.
+      log({ event: "discarded", runId: reply.runId });
+      await wait(backoff());
+    } else if (reply.kind === "claimed") {
       failures = 0;
       // Asked to stop while the claim was in flight: the run is not started. Its lease runs out and the cloud reissues it.
       if (deps.signal.aborted) {
@@ -62,7 +72,7 @@ export async function pollLoop(deps: PollDeps): Promise<PollEnd> {
       }
     } else if (reply.kind === "idle" || reply.kind === "rate_limited") {
       failures = 0;
-      log({ event: reply.kind, waitSeconds: reply.retryAfter });
+      log(gate.open ? { event: reply.kind, waitSeconds: reply.retryAfter } : { event: "sandbox_unavailable", reason: gate.reason, waitSeconds: reply.retryAfter });
       await wait(reply.retryAfter);
     } else {
       if (reply.status === 401) return "unauthorized";

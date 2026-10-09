@@ -295,7 +295,7 @@ describe("the read model [pg]", () => {
     const list = (f: F2Fixture, userId: string) => respond(() => listRunners(deps(), { accountId: f.accountId, userId }));
     type Body = { runners: Array<Record<string, unknown>>; copy: Record<string, string> };
 
-    it("lets any member see the runners with their state, who registered them, and the four copy strings", async () => {
+    it("lets any member see the runners with their state, who registered them, and the copy strings", async () => {
       const f = await fresh();
       const id = await runner(f);
       await h.admin.query("UPDATE users SET name = 'Ada Admin' WHERE id = $1", [f.a1]);
@@ -304,20 +304,31 @@ describe("the read model [pg]", () => {
         expect(res.status).toBe(200);
         const body = res.body as Body;
         expect(body.runners).toEqual([
-          { id, credential_mode: "subscription", registered_by: { id: f.a1, name: "Ada Admin" }, binary_version: "0.9.1", last_seen_at: ago(5).toISOString(), state: "online_idle" },
+          { id, credential_mode: "subscription", registered_by: { id: f.a1, name: "Ada Admin" }, binary_version: "0.9.1", last_seen_at: ago(5).toISOString(), state: "online_idle", sandbox_unavailable: null },
         ]);
-        expect(body.copy).toEqual({ usageLimits: COPY.usageLimits, approval: COPY.approval, runner: COPY.runner, localOnly: COPY.localOnly });
+        expect(body.copy).toEqual({ usageLimits: COPY.usageLimits, approval: COPY.approval, runner: COPY.runner, localOnly: COPY.localOnly, sandboxUnavailable: COPY.sandboxUnavailable });
       }
     });
 
-    it("returns none of the excluded fields: the key-set of a runner is exactly the six, and no key, thumbprint, repo list or nonce appears anywhere", async () => {
+    it("shows a runner's stored sandbox reason for the screen, and nothing for a revoked runner (C16 section 1.3)", async () => {
+      const f = await fresh();
+      const id = await runner(f);
+      await h.admin.query("INSERT INTO runner_sandbox_status (runner_id, account_id, reason) VALUES ($1, $2, 'userns_disabled')", [id, f.accountId]);
+      expect(((await list(f, f.m1)).body as Body).runners[0]).toMatchObject({ sandbox_unavailable: "userns_disabled" });
+      expect(((await list(f, f.m1)).body as Body).copy.sandboxUnavailable).toBe(COPY.sandboxUnavailable);
+      expect(COPY.sandboxUnavailable).toContain("Sandbox not working on this machine");
+      await h.admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [id]);
+      expect(((await list(f, f.m1)).body as Body).runners[0]).toMatchObject({ sandbox_unavailable: null, state: "revoked" });
+    });
+
+    it("returns none of the excluded fields: the key-set of a runner is exactly the seven, and no key, thumbprint, repo list or nonce appears anywhere", async () => {
       const f = await fresh();
       const id = await runner(f);
       await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [id, randomUUID()]);
       await h.admin.query("INSERT INTO runner_request_nonces (account_id, runner_id, nonce) VALUES ($1, $2, 'abcdefghijklmnopqrst')", [f.accountId, id]);
       const res = await list(f, f.m1);
       const body = res.body as Body;
-      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "credential_mode", "id", "last_seen_at", "registered_by", "state"]);
+      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "credential_mode", "id", "last_seen_at", "registered_by", "sandbox_unavailable", "state"]);
       const text = JSON.stringify(res.body);
       const row = (await h.admin.query("SELECT jkt, public_key_jwk, allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0];
       expect(text).not.toContain(row.jkt);

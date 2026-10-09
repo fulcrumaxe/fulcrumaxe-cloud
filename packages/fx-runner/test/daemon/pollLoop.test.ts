@@ -7,6 +7,7 @@ import { BACKOFF_MAX_SECONDS, abortOnSignals, pollLoop, type PollEvent } from ".
 import { filesUnder, PACKAGE_DIR } from "../helpers/srcFiles.js";
 import { instantClock, manualClock } from "../helpers/manualClock.js";
 import { signedJob } from "../helpers/signedJob.js";
+import { OPEN_GATE } from "../helpers/openGate.js";
 
 const signed = signedJob();
 const claimed: ClaimResult = { kind: "claimed", signedJob: signed, runId: signed.job.run_id, leaseGeneration: 1 };
@@ -28,7 +29,7 @@ function rig(replies: Array<ClaimResult | (() => ClaimResult)>, clock: ReturnTyp
   };
   const handled: string[] = [];
   const run = (over: { onClaimed?: (c: unknown) => Promise<unknown>; random?: () => number } = {}) =>
-    pollLoop({ client, clock, signal: controller.signal, onClaimed: over.onClaimed ?? (async (c) => void handled.push((c as { runId: string }).runId)), log: (e) => log.push(e), random: over.random ?? (() => 1) });
+    pollLoop({ client, clock, gate: OPEN_GATE, signal: controller.signal, onClaimed: over.onClaimed ?? (async (c) => void handled.push((c as { runId: string }).runId)), log: (e) => log.push(e), random: over.random ?? (() => 1) });
   return { run, clock, controller, log, handled, claims: () => calls };
 }
 

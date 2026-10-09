@@ -19,6 +19,7 @@ import { generateRunnerKey } from "../../src/keys.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { KEYRING, jobFor, signRaw, signedJob } from "../helpers/signedJob.js";
 import { until } from "../helpers/manualClock.js";
+import { OPEN_GATE } from "../helpers/openGate.js";
 import { retryBody, startStrictRunnerCloud, stopBody, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 
 /** Retry waits of seconds are shortened to a millisecond; everything else (a heartbeat interval) really waits, until aborted. */
@@ -681,6 +682,7 @@ describe("the pieces together: poll, verify, run, done, then idle", () => {
     const end = await pollLoop({
       client: rig.client,
       clock: { ...rig.clock, sleep: async (ms) => void (rig.clock.slept.push(ms), controller.abort()) },
+      gate: OPEN_GATE,
       signal: controller.signal,
       onClaimed: async (claimed) => void handled.push(await rig.handle(claimed)),
     });

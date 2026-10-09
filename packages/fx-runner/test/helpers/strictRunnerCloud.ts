@@ -135,6 +135,10 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       const message = schemas[route].safeParse(json);
       if (!message.success) return refuse(400, "invalid_message");
       if (route === "claim") {
+        // As the real route: a poll that names `sandbox_unavailable` takes no job, whatever is queued, and answers retry_after only.
+        if ((message.data as { sandbox_unavailable?: string }).sandbox_unavailable !== undefined) {
+          return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
+        }
         const next = queue.shift();
         if (!next) return send(200, ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) });
         const run = state.runs.get(next.job.run_id) ?? { generation: 0, over: false, lastSeq: -1, stop: undefined, doneReply: undefined, events: [], endedBy: undefined };
