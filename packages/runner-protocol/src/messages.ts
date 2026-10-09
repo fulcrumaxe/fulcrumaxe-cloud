@@ -41,7 +41,7 @@ export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_fail
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
-export const JOB_REFUSED_DETAILS = ["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role"] as const;
+export const JOB_REFUSED_DETAILS = ["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role", "review_sha_missing", "review_wrong_role"] as const;
 export const RUNNER_SETUP_DETAILS = [
   "sandbox_unavailable",
   "claude_binary_missing",
@@ -76,6 +76,8 @@ export const RUNNER_SETUP_DETAILS = [
   "workspace_git_refused",
   "head_not_from_base",
   "sandbox_stub_committed",
+  // D#6 R4d-4 (C33; additive under C8 section 6): the commit a review job names is not on any branch of the runner's copy of the repository. The cloud deploys first.
+  "review_sha_not_in_mirror",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];

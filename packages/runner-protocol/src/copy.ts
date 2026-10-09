@@ -92,7 +92,18 @@ export const GIT_PATH_LINES = {
   workspace_git_refused: COPY.workspaceGitRefused,
   head_not_from_base: COPY.headNotFromBase,
   sandbox_stub_committed: COPY.sandboxStubCommitted,
+  review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
 } as const;
+
+/** D#6 R4d-4 (C33 section 3): the line for a review job the runner refused before starting it (`job_refused`). */
+export const REVIEW_REFUSED_LINE = "The runner refused a review job it could not check. Update fx-runner, then review again.";
+export const JOB_REFUSED_LINES = { review_sha_missing: REVIEW_REFUSED_LINE, review_wrong_role: REVIEW_REFUSED_LINE } as const;
+
+/** What the dashboard shows for a `run_ended` `job_refused` event's detail: a line of its own for the review refusals, else the plain code. */
+export function jobRefusedText(detail: string): string {
+  const own = (JOB_REFUSED_LINES as Readonly<Record<string, string>>)[detail];
+  return own !== undefined ? own : `Your runner refused this job (${detail}).`;
+}
 
 /**
  * What the dashboard shows for a `run_ended` `runner_setup` event (C24 section 1, C27 section 4.5). The closed `detail` code is shown as the runner

@@ -771,7 +771,11 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
     for (const req of t.started) {
       expect(req.prompt).toContain(`Its branch is ${RUN_BRANCH};`);
-      expect(req.prompt).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${H1}`);
+      // D#6 R4d-4a (C33): a runner repo's reviewers are told the workspace is already at the head (detached), with no fetch or checkout.
+      expect(req.prompt).toContain(`already checked out at commit ${H1}, with a detached HEAD`);
+      expect(req.prompt).toContain("git diff origin/main...HEAD");
+      for (const banned of ["git fetch", "git checkout", "git push", "api.github.com", "/pulls", "--force"]) expect(req.prompt, banned).not.toContain(banned);
+      expect(req.expectedExecutionMode).toBe("runner_local");
       expect(req.prompt).not.toContain("fx/issue-7");
     }
     expect(listCalls(t.requests)).toEqual([]);
@@ -851,6 +855,12 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     expect(listCalls(t.requests)).toHaveLength(1);
     expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(false);
     for (const req of t.started) expect(req.prompt).toContain("Its branch is fx/issue-7;");
+    // D#6 R4d-4a (C33): the reviewers' prompt is the sandbox variant, with its fetch and checkout, and says which mode it was built for.
+    for (const req of t.started) {
+      expect(req.prompt).toContain(`git fetch origin fx/issue-7 && git checkout ${H1}`);
+      expect(req.prompt).not.toContain("detached HEAD");
+      expect(req.expectedExecutionMode).toBe("sandbox");
+    }
   });
 });
 

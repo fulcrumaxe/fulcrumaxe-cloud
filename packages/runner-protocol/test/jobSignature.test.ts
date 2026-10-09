@@ -1,7 +1,9 @@
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { Job } from "../src/job.js";
 import { JobSignatureError, canonicalJson, signJob, verifyJob, type JobSignatureErrorCode } from "../src/jobSignature.js";
+import { GOLDEN_JOBS, GOLDEN_KEY } from "./helpers/goldenJobs.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -135,5 +137,35 @@ describe("job signature", () => {
 
   it("refuses to sign a job that does not match the schema", () => {
     expect(() => signJob({ ...job, role: "researcher" } as unknown as Job, privateKey)).toThrow();
+  });
+});
+
+describe("job.review and the signature (D#6 R4d-4a, C33)", () => {
+  const golden = (name: string): string => readFileSync(new URL(`./golden/${name}`, import.meta.url), "utf8");
+
+  it.each(["executor", "advise", "docs-writer"] as const)("G2: the %s job's canonical JSON and signature are byte-identical to the ones made before `review` existed, and carry no review key", (name) => {
+    const signed = signJob(GOLDEN_JOBS[name], GOLDEN_KEY);
+    expect(canonicalJson(signed.job)).toBe(golden(`job-${name}.canonical.json`));
+    expect(signed.signature).toBe(golden(`job-${name}.signature.txt`));
+    expect(canonicalJson(signed.job)).not.toContain('"review"');
+    expect("review" in signed.job).toBe(false);
+  });
+
+  const reviewJob = (): Job => ({ ...job, role: "code-reviewer", task: { ...job.task, kind: "review" }, review: { head_sha: "a".repeat(40) } });
+
+  it("G3: changing review.head_sha on a signed job makes verifyJob throw JobSignatureError", () => {
+    const signed = signJob(reviewJob(), privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW }).review).toEqual({ head_sha: "a".repeat(40) });
+    const tampered = { ...signed, job: { ...signed.job, review: { head_sha: "b".repeat(40) } } };
+    expect(codeOf(() => verifyJob(tampered, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("G3: removing review from, or adding it to, a signed job also fails the signature", () => {
+    const signed = signJob(reviewJob(), privateKey);
+    const without: Record<string, unknown> = { ...signed.job };
+    delete without.review;
+    expect(codeOf(() => verifyJob({ ...signed, job: without }, keyring, { now: NOW }))).toBe("bad_signature");
+    const plain = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...plain, job: { ...plain.job, review: { head_sha: "a".repeat(40) } } }, keyring, { now: NOW }))).toBe("bad_signature");
   });
 });

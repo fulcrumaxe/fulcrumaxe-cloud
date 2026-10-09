@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { JOB_MODES, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
+import { JOB_MODES, REVIEW_JOB_ROLES, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 describe("job schema", () => {
@@ -8,7 +8,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -130,5 +130,36 @@ describe("job schema", () => {
 
   it("a signed job wraps the job and one signature, and nothing else", () => {
     expect(Object.keys(SignedJobSchema.shape).sort()).toEqual(["job", "signature"]);
+  });
+});
+
+describe("job.review (D#6 R4d-4a, C33)", () => {
+  const reviewJob = (review: unknown, role = "code-reviewer"): unknown => sampleJob({ role, task: { ...(sampleJob() as { task: object }).task, kind: "review" }, review });
+  const SHA40 = "0123456789abcdef0123456789abcdef01234567";
+  const SHA64 = "0123456789abcdef".repeat(4);
+
+  it("REVIEW_JOB_ROLES is the four review roles, all runner eligible", () => {
+    expect([...REVIEW_JOB_ROLES]).toEqual(["code-reviewer", "security-reviewer", "acceptance-tester", "debater"]);
+    for (const role of REVIEW_JOB_ROLES) expect((RUNNER_ELIGIBLE_ROLES as readonly string[]).includes(role)).toBe(true);
+  });
+
+  it.each(REVIEW_JOB_ROLES)("G1: %s job accepts review.head_sha of 40 and of 64 lowercase hex", (role) => {
+    expect(JobSchema.safeParse(reviewJob({ head_sha: SHA40 }, role)).success).toBe(true);
+    expect(JobSchema.safeParse(reviewJob({ head_sha: SHA64 }, role)).success).toBe(true);
+  });
+
+  it("G1: refuses an uppercase, short, long, odd-length or non-hex head_sha, an extra key inside review, an empty review and review: null", () => {
+    for (const bad of [SHA40.toUpperCase(), SHA40.slice(1), SHA40 + "a", SHA64 + "a", "g".repeat(40), "", "a".repeat(41), "a".repeat(63)]) {
+      expect(JobSchema.safeParse(reviewJob({ head_sha: bad })).success, bad).toBe(false);
+    }
+    expect(JobSchema.safeParse(reviewJob({ head_sha: SHA40, base_sha: SHA40 })).success).toBe(false);
+    expect(JobSchema.safeParse(reviewJob({ head_sha: SHA40, branch: "fx/a" })).success).toBe(false);
+    expect(JobSchema.safeParse(reviewJob({})).success).toBe(false);
+    expect(JobSchema.safeParse(reviewJob(null)).success).toBe(false);
+  });
+
+  it("a job without the key still parses, and the parsed job has no review key", () => {
+    const parsed = JobSchema.parse(sampleJob());
+    expect("review" in parsed).toBe(false);
   });
 });

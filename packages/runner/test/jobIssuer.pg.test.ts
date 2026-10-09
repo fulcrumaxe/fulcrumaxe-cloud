@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -39,10 +39,19 @@ describe("JobIssuer [pg]", () => {
     return { accountId, userId, repoId, workItemId, specBody };
   }
 
-  async function runnerRun(w: { accountId: string; userId: string; repoId: string; workItemId: string }, role = "code-reviewer", parentRunId: string | null = null): Promise<ExecutionRun> {
+  /** A fresh commit id per run: the database allows one live reviewer run per head and role. */
+  const freshHead = (): string => (randomUUID() + randomUUID()).replace(/-/g, "").slice(0, 40);
+  /**
+   * A review role's run carries the pull request head it reviews (stored on the row, as `advanceStartRun` stores it) and a prompt that names it.
+   * `over.headSha` / `over.prompt` replace either; `over.headSha: null` is a run with no stored head.
+   */
+  async function runnerRun(w: { accountId: string; userId: string; repoId: string; workItemId: string }, role = "code-reviewer", parentRunId: string | null = null, over: { headSha?: string | null; prompt?: string } = {}): Promise<ExecutionRun> {
     const id = randomUUID();
-    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId });
-    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, roleCard: CARD, prompt: PROMPT, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
+    const reviews = (REVIEW_JOB_ROLES as readonly string[]).includes(role);
+    const headSha = over.headSha !== undefined ? over.headSha : reviews ? freshHead() : null;
+    const prompt = over.prompt ?? (reviews ? `${PROMPT}Review exactly commit ${headSha}.\n` : PROMPT);
+    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
+    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
   function issuer(over: { visibility?: "private" | "public" | "unknown" | "throw"; context?: JobContextPort; base?: ContinuationBasePort | null } = {}) {
@@ -87,10 +96,11 @@ describe("JobIssuer [pg]", () => {
       role: "code-reviewer",
       mode: "local",
       spec: { discussion: 6, version: 1, sha256: createHash("sha256").update(w.specBody!).digest("hex"), text: w.specBody },
-      task: { kind: "review", prompt: PROMPT, prompt_sha256: sha256Text(PROMPT) },
+      task: { kind: "review", prompt: run.prompt, prompt_sha256: sha256Text(run.prompt) },
       role_card: { text: CARD, sha256: sha256Text(CARD) },
       role_tools_sha256: roleToolsDigest("code-reviewer"),
       continues: null,
+      review: { head_sha: run.headSha },
       branch_prefix: "fx/",
       model_hint: "haiku-4.5",
       issued_at: NOW.toISOString(),
@@ -98,6 +108,62 @@ describe("JobIssuer [pg]", () => {
       key_id: "job-key-1",
     });
     expect(jobDigestMismatches(job)).toEqual([]);
+  });
+
+  describe("a review job names the commit to review (D#6 R4d-4a, C33)", () => {
+    const rows = async (id: string) => (await db.admin.query("SELECT head_sha, job_signed FROM agent_runs WHERE id = $1", [id])).rows[0];
+
+    it.each(REVIEW_JOB_ROLES)("G4: a %s run's job has task.kind review and review.head_sha equal to the stored agent_runs.head_sha", async (role) => {
+      const w = await world();
+      const run = await runnerRun(w, role);
+      await issuer().issuer.issue({ run });
+      const row = await rows(run.id);
+      expect(row.head_sha).toBe(run.headSha);
+      const job = verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW });
+      expect(job.task.kind).toBe("review");
+      expect(job.review).toEqual({ head_sha: row.head_sha });
+    });
+
+    it("G4: an executor run's job (a build and a fix round) has no review key, and neither do the advise roles", async () => {
+      const w = await world();
+      const { parent, run: fix } = await fixPair(w);
+      for (const run of [await runnerRun(w, "executor"), fix, await runnerRun(w, "docs-writer"), await runnerRun(w, "project-manager"), await runnerRun(w, "accessibility-reviewer")]) {
+        await issuer().issuer.issue({ run, ...(run.id === fix.id ? { continues: { parentRunId: parent.id, sessionId: "sess-1" } } : {}) });
+        const signed = (await rows(run.id)).job_signed;
+        expect("review" in verifyJob(signed, { "job-key-1": publicKey }, { now: NOW }), run.role).toBe(false);
+        expect(canonicalJson(signed.job)).not.toContain('"review"');
+      }
+    });
+
+    it("G5: a review run with head_sha NULL is refused review_without_head, and no job row is written", async () => {
+      const w = await world();
+      const run = await runnerRun(w, "code-reviewer", null, { headSha: null });
+      expect((await rows(run.id)).head_sha).toBeNull();
+      expect(await codeOf(issuer().issuer.issue({ run }))).toBe("review_without_head");
+      expect((await rows(run.id)).job_signed).toBeNull();
+    });
+
+    it.each(["", "C0FFEE".repeat(6) + "ABCD", "abc123", "g".repeat(40)])("G5: a head the run carries that is not a sha (%j) is refused review_without_head, and no job row is written", async (bad) => {
+      const w = await world();
+      const run = await runnerRun(w, "security-reviewer");
+      expect(await codeOf(issuer().issuer.issue({ run: { ...run, headSha: bad } }))).toBe("review_without_head");
+      expect((await rows(run.id)).job_signed).toBeNull();
+    });
+
+    it.each(REVIEW_JOB_ROLES)("G5: a %s run whose prompt does not contain its head sha is refused review_sha_prompt_mismatch, and no job row is written", async (role) => {
+      const w = await world();
+      const run = await runnerRun(w, role, null, { prompt: `Review exactly commit ${"d".repeat(40)}.\n` });
+      expect(await codeOf(issuer().issuer.issue({ run }))).toBe("review_sha_prompt_mismatch");
+      expect((await rows(run.id)).job_signed).toBeNull();
+    });
+
+    it("the sha comes from the run's stored head, never from the prompt: a prompt naming two commits still gets the run's own", async () => {
+      const w = await world();
+      const head = freshHead();
+      const run = await runnerRun(w, "code-reviewer", null, { headSha: head, prompt: `Earlier ${"e".repeat(40)} and now ${head}.\n` });
+      await issuer().issuer.issue({ run });
+      expect(verifyJob((await rows(run.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).review).toEqual({ head_sha: head });
+    });
   });
 
   it("expires 72 hours after dispatch, the queue TTL", () => {
@@ -355,7 +421,8 @@ describe("JobIssuer [pg]", () => {
 
   it("refuses a job the schema refuses (an oversized prompt) and records nothing", async () => {
     const w = await world();
-    const run = { ...(await runnerRun(w)), prompt: "x".repeat(128 * 1024 + 1) };
+    const made = await runnerRun(w);
+    const run = { ...made, prompt: `${made.headSha}${"x".repeat(128 * 1024 + 1)}` };
     expect(await codeOf(issuer().issuer.issue({ run }))).toBe("job_invalid");
     expect(await stored(run.id)).toBeNull();
   });

@@ -169,6 +169,7 @@ export async function startReviewerBody(
       branch: pr.branch,
       version: spec.version,
       spec: spec.body,
+      runtime: promptRuntimeOf(ctx.executionMode),
       ...(role === "debater" ? { prior: priorSummaries } : {}),
     });
   } catch (err) {
@@ -184,6 +185,7 @@ export async function startReviewerBody(
     prompt,
     clone: true,
     headSha: pr.headSha,
+    expectedExecutionMode: ctx.executionMode,
   });
   if (!started.ok) return { role, runId: null, reason: started.reason };
   await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
