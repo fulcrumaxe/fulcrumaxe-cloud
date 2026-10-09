@@ -7,6 +7,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { probeErrors, type Probe } from "./probes.js";
 
 export const TIERS = ["smoke", "standard", "full"] as const;
 export type Tier = (typeof TIERS)[number];
@@ -58,8 +59,8 @@ export interface Pack {
   model_spend: boolean;
   projects: Project[];
   needs: string[];
-  /** Declared refusal probes. Their shape is tightened by T1c; here they only have to be a list. */
-  probes: unknown[];
+  /** Declared refusal probes (`{ method, path, expect }`); the schema is in probes.ts. */
+  probes: Probe[];
   cost: { class: CostClass; est_usd: number; est_sandbox_min: number };
   retry: number;
   runs_last: boolean;
@@ -152,7 +153,7 @@ export function validatePack(raw: unknown, dirName: string): Pack {
       if (!isKnownNeed(need)) bad(`unknown need "${need}"`);
     }
   }
-  if (!Array.isArray(raw.probes)) bad(`"probes" must be a list`);
+  if ("probes" in raw) errors.push(...probeErrors(raw.probes, dirName));
   if (!isObject(raw.cost)) {
     bad(`"cost" must be an object`);
   } else {

@@ -19,7 +19,7 @@ import { BYPASS_HEADER, bypassHeadersFor, createClient, SET_COOKIE_HEADER, type 
 import { packageRoot, TARGET_ENV_NAME } from "../src/limits.js";
 import { BYPASS_ENV } from "../src/needs.js";
 import { fenceConfigFor, loadTarget, type Target } from "../src/targets.js";
-import { installBrowserFence } from "./fence.js";
+import { installBrowserFence, installFetchGuard } from "./fence.js";
 
 /** The slice of Playwright's Route (and of the response its `fetch` returns) that the handler touches. */
 export interface RouteLike<R = unknown> {
@@ -80,13 +80,35 @@ interface Fixtures {
   packProbes: { list: ProbeSend[] };
 }
 
-export const test = base.extend<Fixtures>({
+/** The target this worker process runs against, from the environment `live-e2e run` sets. */
+function currentTarget(): Target {
+  const name = process.env[TARGET_ENV_NAME];
+  if (name === undefined || name === "") throw new Error(`${TARGET_ENV_NAME} is not set`);
+  return loadTarget(join(packageRoot(), "targets"), name, process.env);
+}
+
+interface WorkerFixtures {
+  /** Backstop: `globalThis.fetch` refuses the production host (see `installFetchGuard`) for the life of the worker. */
+  fetchGuard: undefined;
+}
+
+export const test = base.extend<Fixtures, WorkerFixtures>({
   // eslint-disable-next-line no-empty-pattern
   target: async ({}, use) => {
-    const name = process.env[TARGET_ENV_NAME];
-    if (name === undefined || name === "") throw new Error(`${TARGET_ENV_NAME} is not set`);
-    await use(loadTarget(join(packageRoot(), "targets"), name, process.env));
+    await use(currentTarget());
   },
+  fetchGuard: [
+    // eslint-disable-next-line no-empty-pattern
+    async ({}, use) => {
+      const restore = installFetchGuard(fenceConfigFor(currentTarget(), join(packageRoot(), "targets"), process.env));
+      try {
+        await use(undefined);
+      } finally {
+        restore();
+      }
+    },
+    { scope: "worker", auto: true },
+  ],
   packProbes: [{ list: [] }, { option: true }],
   api: async ({ target, packProbes }, use) => {
     const fence = fenceConfigFor(target, join(packageRoot(), "targets"), process.env);

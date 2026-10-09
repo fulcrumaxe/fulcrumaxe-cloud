@@ -21,6 +21,13 @@
  * A client built without a fence config is fenced as production, so forgetting to configure it fails closed.
  */
 
+/**
+ * The platform `fetch` as it was when this module loaded. The client sends through this, never through whatever
+ * `globalThis.fetch` is later: the pack fixtures wrap the global one as a backstop against a careless direct call
+ * (`installFetchGuard`), and the client's declared refusal probes must not be stopped by that wrapper.
+ */
+const nativeFetch: typeof fetch = globalThis.fetch;
+
 export const BYPASS_HEADER = "x-vercel-protection-bypass";
 /** Asks Vercel to answer with a bypass cookie, scoped to the deployment host, that carries later requests (redirect hops). */
 export const SET_COOKIE_HEADER = "x-vercel-set-bypass-cookie";
@@ -191,7 +198,7 @@ export interface ClientOptions {
 
 export function createClient(options: ClientOptions): ApiClient {
   const origin = new URL(options.origin).origin;
-  const doFetch = options.fetchImpl ?? fetch;
+  const doFetch = options.fetchImpl ?? nativeFetch;
 
   const fence: FenceConfig = options.fence ?? { target: "production", targetOrigin: origin };
 

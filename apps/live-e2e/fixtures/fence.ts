@@ -21,12 +21,18 @@
  *
  * The match is on the host, never a prefix or suffix test.
  *
+ * Node side: `installFetchGuard` wraps `globalThis.fetch` in the pack's test process, so a direct `fetch` that the
+ * pack lint missed still cannot write to the production host on a production run, or reach it at all on a staging
+ * run. A non-read is sent with `redirect: "manual"` and a 3xx answer throws, so a write redirect is never followed
+ * here either. The shared client keeps the platform fetch it captured at load, so its declared probes are not
+ * affected by the host check (it applies the same no-redirect rule itself).
+ *
  * Residual, accepted: on staging a GET that a redirect leads to the production host is a hop the browser follows
  * without the handler seeing it. It is a read only. A write cannot get there: every non-read on staging is fetched
  * by the fence and a 3xx answer aborts it.
  */
 import type { Browser, BrowserContext, Route } from "@playwright/test";
-import { canonicalHost, fenceVerdict, isReadMethod, isSameHost, type FenceConfig } from "../src/client.js";
+import { canonicalHost, ClientError, fenceVerdict, isReadMethod, isSameHost, type FenceConfig } from "../src/client.js";
 
 /** What Playwright reports for a request the test itself refused. */
 export const BLOCKED_CODE = "blockedbyclient";
@@ -110,4 +116,41 @@ export async function newFencedContext(browser: Browser, config: FenceConfig, op
   const context = await browser.newContext({ serviceWorkers: "block" });
   await installBrowserFence(context, config, options);
   return context;
+}
+
+/** The method and URL of a `fetch(input, init)` call. */
+function fetchTarget(input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]): { method: string; url: string } {
+  const isRequest = typeof input === "object" && "url" in input;
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : isRequest ? input.url : String(input);
+  const method = init?.method ?? (isRequest ? input.method : "GET");
+  return { method, url };
+}
+
+/**
+ * `base` with the write fence in front: a request the fence refuses throws a ClientError before `base` runs. A
+ * non-read is sent with `redirect: "manual"` whatever the caller asked for, and a 3xx answer throws: a redirect on a
+ * write is never followed, on any host.
+ */
+export function guardFetch(config: FenceConfig, base: typeof fetch): typeof fetch {
+  return (async (input, init) => {
+    const { method, url } = fetchTarget(input, init);
+    const refusal = fenceVerdict({ method, url }, config);
+    if (refusal !== null) throw new ClientError(`fetch: ${method.toUpperCase()} to the production host is refused (${refusal})`);
+    if (isReadMethod(method)) return base(input, init);
+    const response = await base(input, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new ClientError(`fetch: ${method.toUpperCase()} was answered with a ${response.status} redirect; a redirect on a write is never followed`);
+    }
+    return response;
+  }) as typeof fetch;
+}
+
+/** Replaces `globalThis.fetch` with the guarded one. Returns the function that puts the previous one back. */
+export function installFetchGuard(config: FenceConfig): () => void {
+  const previous = globalThis.fetch;
+  globalThis.fetch = guardFetch(config, previous);
+  return () => {
+    globalThis.fetch = previous;
+  };
 }
