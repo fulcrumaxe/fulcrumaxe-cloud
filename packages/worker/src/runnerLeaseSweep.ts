@@ -191,6 +191,8 @@ export function createRunnerLeaseSweeper(pool: Pool, deps: RunnerLeaseSweepDeps 
       const { rows } = await pool.query<Listed>("SELECT * FROM agent_run_list_running_runner_runs($1, $2)", [RUNNER_LEASE_SWEEP_BATCH, RUNNER_MAX_RUN_WALL_CLOCK_MS]);
       result.leasesListed = rows.length;
       let earliest: number | null = null;
+      let reapWaitDue: number | null = null;
+      let reapWaits = 0;
       for (const row of rows) {
         try {
           const wallClockMs = limits(row.account_id).maxRunWallClockMs;
@@ -234,6 +236,15 @@ export function createRunnerLeaseSweeper(pool: Pool, deps: RunnerLeaseSweepDeps 
           else if (outcome.kind === "timed_out") result.wallClockTimedOut++;
           else result.leasesSkipped++;
         } catch (error) {
+          // The follow-up child is made through agent_run_create, which refuses with FXR01 while the reaper holds a fresh claim on the
+          // sandbox name (0761). That is a wait, not a failure: the transaction rolled back, so the parent is still running with its
+          // lease expired and the next tick makes the follow-up. Nothing is reported, and the tick is due again after the retry delay.
+          if ((error as { code?: unknown } | null)?.code === "FXR01") {
+            result.leasesSkipped++;
+            reapWaits++;
+            reapWaitDue = now() + (deps.retryDelayMs ?? 5 * 60_000);
+            continue;
+          }
           // fx-swallow-ok: counted as failed and handed to onError (the worker logs a fixed code and the run id); the next tick looks again
           result.leasesFailed++;
           deps.onError?.(row.run_id, error);
@@ -241,11 +252,12 @@ export function createRunnerLeaseSweeper(pool: Pool, deps: RunnerLeaseSweepDeps 
       }
       const jobless = await sweepJoblessRuns(result, earliest, at);
       earliest = jobless.due;
-      const moved = result.lost + result.revoked + result.wallClockTimedOut + result.leasesSkipped + result.joblessFailed;
+      const moved = result.lost + result.revoked + result.wallClockTimedOut + result.leasesSkipped - reapWaits + result.joblessFailed;
       if (result.leasesFailed > 0 || result.joblessErrors > 0) result.nextDueAt = now() + (deps.retryDelayMs ?? 5 * 60_000);
       // A full list means more may be hidden behind it; come back at once when this tick made room (moved runs off the lease list, or failed runs off the jobless one).
       else if ((rows.length >= RUNNER_LEASE_SWEEP_BATCH && moved > 0) || (jobless.full && result.joblessFailed > 0)) result.nextDueAt = now();
       else result.nextDueAt = earliest;
+      if (reapWaitDue !== null) result.nextDueAt = result.nextDueAt === null ? reapWaitDue : Math.min(result.nextDueAt, reapWaitDue);
       return result;
     },
   };

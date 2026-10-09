@@ -7,7 +7,8 @@ import { RECONCILE_ROUTE, type JobContext, type JobResult, type ReconcileJob, ty
  * plain data in and gives plain data back (a grep test keeps it that way). The lease only stops two ticks running the same job at
  * once; the row-level idempotency (the claim, in the database) is the worker side's, and neither stands in for the other.
  *
- * The kill switch is `FX_SANDBOX_REAP_MODE`, read by the cron handler and handed in as `mode`: `off` makes every job here return at
+ * The kill switch is `FX_SANDBOX_REAP_MODE` (a ceiling) together with the database setting `sandbox_reap_settings.mode` (C85); the handler hands in
+ * the environment's `mode` and, per pass, the stricter of the two (`effectiveMode`). For the environment's part: `off` makes every job here return at
  * once with the result `disabled` and never call the worker; `dry_run` (the default when unset) and `on` go to the worker.
  * Any other value means `off`, and each pass reports `sandbox_reap_mode_invalid`. `FX_RECONCILE_ENABLED=0` still stops everything,
  * before a job is reached.
@@ -19,6 +20,26 @@ export interface SandboxReapModeSetting {
   mode: SandboxReapMode;
   /** False when the setting held a value that is none of the three (the mode is then `off`). */
   valid: boolean;
+  /** True when the database setting could not be read (the mode is then `off`, C85 section 2). */
+  unreadable?: boolean;
+}
+
+/** What the database setting `sandbox_reap_settings.mode` held, as the handler read it: NULL is "no override"; `unreadable` is a failed or malformed read. */
+export type SandboxReapDbSetting = SandboxReapMode | null | 'unreadable';
+
+const MODE_RANK: Record<SandboxReapMode, number> = { off: 0, dry_run: 1, on: 2 };
+
+/**
+ * D#2 SANDBOX-REAPER-2b (C85 section 2): the mode in force is the STRICTER of the environment's (`FX_SANDBOX_REAP_MODE`, parsed as above)
+ * and the database's, where off < dry_run < on. A database NULL is no override, so the environment alone decides. Deleting therefore
+ * needs both to allow it, and either one alone can stop it. A setting that could not be read is `off` and `unreadable` (fail closed);
+ * a bad environment value stays `off` and not valid whatever the database says.
+ */
+export function effectiveSandboxReapMode(envRaw: string | undefined, db: SandboxReapDbSetting): SandboxReapModeSetting {
+  const env = parseSandboxReapMode(envRaw);
+  if (db === 'unreadable') return { mode: 'off', valid: env.valid, unreadable: true };
+  if (db === null) return env;
+  return { mode: MODE_RANK[db] < MODE_RANK[env.mode] ? db : env.mode, valid: env.valid };
 }
 
 /**
@@ -70,7 +91,13 @@ export interface SandboxReapWorker {
 }
 
 export interface SandboxReapJobDeps {
+  /** The environment's mode, as parsed. The inventory job goes by this alone; the reap passes use `effectiveMode` when it is given. */
   mode: SandboxReapModeSetting;
+  /**
+   * The mode in force for ONE pass (C85): called at the start of every reap pass and never cached, so a change of the database setting
+   * reaches the next pass. A pass already running finishes under the mode it read. A call that throws is read as unreadable (off).
+   */
+  effectiveMode?: () => Promise<SandboxReapModeSetting>;
   reportError: ReportError;
   /** Epoch milliseconds clock; tests pass a fake. */
   now?: () => number;
@@ -92,6 +119,7 @@ export const SANDBOX_INVENTORY_JOB = 'sandbox_inventory';
  */
 export function sandboxJobGate(job: string, ctx: JobContext, worker: SandboxReapWorker | null, deps: SandboxReapJobDeps): JobResult | null {
   const stage = `reconcile.${job}`;
+  if (deps.mode.unreadable) deps.reportError(new Error('the sandbox reaper setting in the database could not be read; the sandbox jobs are off'), { stage, route: RECONCILE_ROUTE, code: 'sandbox_reap_mode_unreadable' });
   if (!deps.mode.valid) deps.reportError(new Error('FX_SANDBOX_REAP_MODE is not off, dry_run or on; the sandbox jobs are off'), { stage, route: RECONCILE_ROUTE, code: 'sandbox_reap_mode_invalid' });
   if (deps.mode.mode === 'off') return { cursor: ctx.cursor, wrapped: false, code: 'disabled' };
   if (worker === null) {
@@ -107,9 +135,11 @@ function reapPassJob(name: string, pass: 'terminal' | 'ephemeral' | 'idle', work
     name,
     maxCalls: SANDBOX_REAP_CALLS_PER_RUN,
     async run(ctx) {
-      const gate = sandboxJobGate(name, ctx, worker, deps);
+      // C85: the mode in force is worked out afresh at the start of every pass.
+      const setting = deps.effectiveMode ? await deps.effectiveMode().catch((): SandboxReapModeSetting => ({ mode: 'off', valid: true, unreadable: true })) : deps.mode;
+      const gate = sandboxJobGate(name, ctx, worker, { ...deps, mode: setting });
       if (gate !== null || worker === null) return gate ?? { cursor: ctx.cursor, wrapped: false, code: 'not_configured' };
-      const mode = deps.mode.mode === 'on' ? 'on' : 'dry_run';
+      const mode = setting.mode === 'on' ? 'on' : 'dry_run';
       const result = await worker.sweepSandboxReap({
         pass,
         mode,

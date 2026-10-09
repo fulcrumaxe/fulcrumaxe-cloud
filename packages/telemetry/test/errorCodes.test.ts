@@ -35,7 +35,7 @@ describe("the error-code allowlist", () => {
   });
 
   it("keeps the sandbox reaper's alert codes (D#2 SANDBOX-REAPER-1b) instead of folding them into other", () => {
-    for (const code of ["sandbox_cap_exceeded", "sandbox_total_high", "sandbox_orphan_found", "sandbox_unsettled_stale", "sandbox_name_mismatch", "sandbox_reap_mode_invalid", "sandbox_reap_unconfigured"]) {
+    for (const code of ["sandbox_cap_exceeded", "sandbox_total_high", "sandbox_orphan_found", "sandbox_unsettled_stale", "sandbox_name_mismatch", "sandbox_reap_mode_invalid", "sandbox_reap_unconfigured", "sandbox_reap_mode_unreadable"]) {
       expect(errorCodeOrOther(code), code).toBe(code);
     }
   });
