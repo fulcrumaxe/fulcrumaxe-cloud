@@ -79,7 +79,12 @@ It only calls out (no listening socket).
 - `fx-runner doctor`: one PASS, WARN or FAIL line per check, and a non-zero exit if any FAIL. It checks the registration and its
   key, that the cloud answers, that the Claude Code CLI is found (the same lookup `run` makes), that its version is at least the
   minimum the runner supports and that its `--help` lists every flag the runner passes, and whether a login of the right kind
-  exists (yes, no or unknown, with the method label). In subscription mode it warns when `ANTHROPIC_API_KEY` or
+  exists (yes, no or unknown, with the method label). It also runs a sandbox probe: one fixed test command inside the sandbox rules
+  a job gets (bubblewrap on Linux and WSL2, Seatbelt on macOS; no network, no model request). A failure carries one of five reason
+  codes (`bwrap_missing`, `socat_missing`, `userns_disabled`, `apparmor_userns_restricted`, `probe_failed_other`) and the exact fix
+  for your distro: Debian and Ubuntu, Fedora, Arch, NixOS (the configuration line, never `nix-env`), or a generic line. On Ubuntu
+  with the AppArmor restriction on user namespaces it prints a profile that allows them for `bwrap` only, and the weaker
+  machine-wide setting second. There is no unsandboxed fallback. In subscription mode it warns when `ANTHROPIC_API_KEY` or
   `ANTHROPIC_AUTH_TOKEN` is set in your shell, because it would outrank your Claude login; the runner removes it from jobs. It
   makes no model request and prints no secret: the shell variables are shown by name only, and of the CLI's answers only the
   version, the flag names and a short method label are kept.

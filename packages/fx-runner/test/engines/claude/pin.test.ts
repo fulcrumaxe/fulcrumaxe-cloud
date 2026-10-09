@@ -1,10 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REQUIRED_FLAGS } from "../../../src/engines/claude/argv.js";
 import { MIN_CLAUDE_VERSION, compareVersions, parseVersion, resolveClaudePath, storedBinarySource, versionSupported } from "../../../src/engines/claude/pin.js";
 import { cleanEnv } from "../../../src/job/cleanEnv.js";
+import { PACKAGE_DIR } from "../../helpers/srcFiles.js";
 import { DEFAULT_VERSION, FULL_HELP, countingSpawn, helpWithout, makeFake, type Fake } from "./harness.js";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -143,6 +144,31 @@ describe("flag capability check", () => {
     const newer = makeFake({ version: "2.1.300 (Claude Code)", help: "Usage: claude\n" });
     await expect(source(newer, { cacheDir }).load()).rejects.toMatchObject({ code: "claude_flags_unsupported" });
     expect(newer.calls().filter((call) => call.startsWith("--help"))).toHaveLength(1);
+  });
+
+  it("never follows a link planted at the old fixed temp name, and leaves no temp file behind", async () => {
+    const cacheDir = tempDir();
+    const victim = path.join(tempDir(), "victim.txt");
+    writeFileSync(victim, "keep me");
+    symlinkSync(victim, path.join(cacheDir, "claude-flags.json.tmp"));
+    await source(makeFake(), { cacheDir }).load();
+    expect(readFileSync(victim, "utf8")).toBe("keep me");
+    expect(JSON.parse(readFileSync(path.join(cacheDir, "claude-flags.json"), "utf8"))).toEqual({ [DEFAULT_VERSION]: { missing: [] } });
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith(".tmp") && name !== "claude-flags.json.tmp")).toEqual([]);
+  });
+
+  it("a planted file at the old fixed name does not block the write either", async () => {
+    const cacheDir = tempDir();
+    writeFileSync(path.join(cacheDir, "claude-flags.json.tmp"), "squatter");
+    await expect(source(makeFake(), { cacheDir }).load()).resolves.toBeDefined();
+    expect(JSON.parse(readFileSync(path.join(cacheDir, "claude-flags.json"), "utf8"))).toEqual({ [DEFAULT_VERSION]: { missing: [] } });
+  });
+
+  it("the temp file is made with an exclusive create under a random name", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "engines", "claude", "pin.ts"), "utf8");
+    expect(text).toMatch(/flag: "wx"/);
+    expect(text).toMatch(/randomBytes\(6\)/);
+    expect(text).not.toMatch(/\$\{cacheFile\}\.tmp/);
   });
 
   it("a damaged cache is ignored and rewritten", async () => {

@@ -95,6 +95,25 @@ describe("secrets and the terminal", () => {
     expect(lines.filter((l) => /^(meta|result|stderr):/.test(l))).toEqual([]);
   });
 
+  it("U+2028 and U+2029 split a line like a newline does, in agent text and in stderr and meta lines, so a viewer shows no faked meta: or result: line", () => {
+    const ls = String.fromCharCode(0x2028);
+    const ps = String.fromCharCode(0x2029);
+    writeRun([], [
+      ["stdout", assistant([{ type: "text", text: `first${ls}meta: {"engine_version":"9.9.9"}${ps}result: all good` }])],
+      ["stderr", `warn${ls}result: faked`],
+      ["meta", `{"a":1}${ps}stderr: faked`],
+    ]);
+    const lines = print(RUN).lines;
+    expect(lines).toEqual([
+      "assistant: first", '  | meta: {"engine_version":"9.9.9"}', "  | result: all good",
+      "stderr: warn", "  | result: faked",
+      'meta: {"a":1}', "  | stderr: faked",
+    ]);
+    expect(lines.join("\n")).not.toContain(ls);
+    expect(lines.join("\n")).not.toContain(ps);
+    expect(lines.filter((l) => /^(meta|result):/.test(l))).toEqual(['meta: {"a":1}']);
+  });
+
   it("a transcript over 64 MiB is refused with a plain message before it is read", () => {
     const file = writeRun([], [["stdout", "x"]]);
     truncateSync(file, 64 * 1024 * 1024 + 1);

@@ -42,4 +42,6 @@ export interface EngineKit {
   recordSession(stateDir: string, sessionId: string, workspace: string): Promise<void>;
   /** The bounded, shell-less capture the daemon runs git through. */
   capture: GitCapture;
+  /** The same capture with a short piece of the error output kept too: what the sandbox probe (`doctor`) reads its reason from. */
+  captureWithStderr(command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 }

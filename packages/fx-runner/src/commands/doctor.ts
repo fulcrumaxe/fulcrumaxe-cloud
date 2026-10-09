@@ -2,7 +2,8 @@
  * `fx-runner doctor` (D#6 R4a-4): one PASS, WARN or FAIL line per check, so a machine that cannot run jobs says why. It checks the
  * registration and its key, that the cloud answers, the installed agent CLI (found on the search path, version against the
  * minimum, every flag the engine passes), whether a login of the right kind exists, and the shell variables that would outrank
- * a subscription login. Exit code 0 unless a check FAILs.
+ * a subscription login. It also runs the sandbox probe (D#6 R4a-5, C16): a test command in the sandbox a job gets, and on a failure the
+ * exact fix for this machine's distro. Exit code 0 unless a check FAILs.
  *
  * It makes no model request (the CLI is only asked `--version`, `--help` and `auth status`, through the engine kit) and prints
  * no secret: the shell variables arrive as names only, the CLI's answers are cut down to a version, a flag list and a short
@@ -15,7 +16,11 @@ import type { EngineKit } from "../daemon/engineKit.js";
 import { cleanEnv } from "../job/cleanEnv.js";
 import { loadRunnerKey } from "../keys.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
+import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
+import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 
+const OS_RELEASE = "/etc/os-release";
+const NIXOS_MARKER = "/etc/NIXOS";
 const DAY_MS = 86_400_000;
 const CLOUD_TIMEOUT_MS = 10_000;
 
@@ -25,9 +30,33 @@ export interface DoctorHost {
   /** The names among `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` that are set in the shell. Names only: the values never enter the command. */
   shellVars: readonly string[];
   engine: Pick<EngineKit, "locate" | "inspect">;
+  /** The user's home directory, looked up by name by the caller. Without it the sandbox probe cannot be set up and says so. */
+  home: string | undefined;
+  xdgCacheHome?: string | undefined;
+  /** The machine behind the sandbox probe: the process start and the file reads. */
+  sandbox: SandboxHost;
 }
 
 type Level = "PASS" | "WARN" | "FAIL" | "INFO";
+
+/** The sandbox line, and under a failure the fix for this machine. A probe that cannot be set up is a failure too: there is no unsandboxed way to run. */
+async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  let result;
+  try {
+    result = await probeMachine({ platform: host.platform, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome }, host.sandbox);
+  } catch {
+    // fx-swallow-ok: a probe that cannot even be set up is reported as the failed check it is; the error text is not shown
+    line("FAIL", "Sandbox", "probe_failed_other: the sandbox test could not be set up on this machine");
+    return;
+  }
+  if (result.ok) {
+    line("PASS", "Sandbox", `a test command ran inside the job's sandbox rules (${result.tool})`);
+    return;
+  }
+  line("FAIL", "Sandbox", `${result.reason}: ${result.detail}`);
+  const distro = detectDistro({ platform: host.platform, osRelease: host.sandbox.readText(OS_RELEASE), nixosMarker: host.sandbox.isFile(NIXOS_MARKER) });
+  for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
+}
 
 export async function doctorCommand(ctx: CommandContext, host: DoctorHost): Promise<number> {
   let failed = 0;
@@ -106,6 +135,8 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost): Prom
     else if (mode !== "subscription") line("WARN", "Claude login", "unknown: api_key mode has no local key file yet, so there is nothing to check");
     else line("WARN", "Claude login", "unknown: the CLI did not answer `auth status`");
   }
+
+  await sandboxCheck(ctx, host, binaryPath, line);
 
   if (mode === "subscription") {
     if (host.shellVars.length === 0) line("PASS", "Shell variables", "no Anthropic key or token is set");

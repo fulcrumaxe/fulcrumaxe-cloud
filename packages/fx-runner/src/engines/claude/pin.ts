@@ -1,4 +1,5 @@
-import { accessSync, constants, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { accessSync, constants, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { REQUIRED_FLAGS } from "./argv.js";
 import { runCapture, type SpawnFn } from "./capture.js";
@@ -110,9 +111,15 @@ export async function inspectBinary(opts: { storedPath: string; cacheDir: string
     if (help.code !== 0) return { version, missingFlags: undefined };
     entry = { missing: missingFlags(help.stdout) };
     mkdirSync(opts.cacheDir, { recursive: true, mode: 0o700 });
-    const temp = `${cacheFile}.tmp`;
-    writeFileSync(temp, `${JSON.stringify({ ...cache, [version]: entry })}\n`, { mode: 0o600 });
-    renameSync(temp, cacheFile);
+    // A new, unpredictable name made with an exclusive create, so a link planted in the cache directory is never followed.
+    const temp = `${cacheFile}.${randomBytes(6).toString("hex")}.tmp`;
+    try {
+      writeFileSync(temp, `${JSON.stringify({ ...cache, [version]: entry })}\n`, { mode: 0o600, flag: "wx" });
+      renameSync(temp, cacheFile);
+    } catch (error) {
+      rmSync(temp, { force: true });
+      throw error;
+    }
   }
   return { version, missingFlags: entry.missing.filter((flag) => REQUIRED_FLAGS.includes(flag)) };
 }

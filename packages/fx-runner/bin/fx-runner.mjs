@@ -8,6 +8,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
+import { createSandboxHost } from "../src/sandbox/probeHost.js";
 
 const engine = createClaudeKit(spawn);
 const shellVars = [];
@@ -29,7 +30,7 @@ const code = await runCli({
     kill: (pid, signal) => process.kill(pid, signal),
     engine,
   },
-  doctorHost: { platform: process.platform, shellVars, engine },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr) },
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,
