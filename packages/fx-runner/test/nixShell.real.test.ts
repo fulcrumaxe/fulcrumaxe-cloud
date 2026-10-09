@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { createNixShell, findTool, identityVia } from "../src/daemon/nixShell.js";
 import { createGitPath } from "../src/daemon/gitPath.js";
+import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
 /**
  * D#6 R7c with the real `nix` (2.4 or newer with flakes), a real git mirror and the real git path's default-branch check. Skips, naming why, when nix or git
@@ -31,7 +32,8 @@ const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap
 const GIT = findTool("git", process.env["PATH"] ?? "");
 const usable = ((): boolean => {
   if (NIX === undefined || BWRAP === undefined || process.platform !== "linux" || process.arch !== "x64") return false;
-  return spawnSync(NIX, ["--version"], { stdio: "ignore" }).status === 0 && spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  if (spawnSync(NIX, ["--version"], { stdio: "ignore" }).status !== 0 || spawnSync("git", ["--version"], { stdio: "ignore" }).status !== 0) return false;
+  return bwrapCanCreateNamespaces(BWRAP);
 })();
 
 // A flake with no inputs, so it needs no network. `nix develop` wants a bash builder and a `$stdenv/setup`, which a repo gets from nixpkgs; here a shim stands in.

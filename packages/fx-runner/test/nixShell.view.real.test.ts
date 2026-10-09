@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { createNixShell, findTool, identityVia, NIX_FIXED_ARGS } from "../src/daemon/nixShell.js";
 import { buildNixView, viewedArgv, type NixViewFs } from "../src/sandbox/nixView.js";
+import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
 /**
  * D#6 R7c fix round 2 (CWE-552 / CWE-200), with the real `nix`, the real `bwrap` and the real daemon. The Nix client reads files as the runner user, so a
@@ -32,7 +33,7 @@ const usable = ((): boolean => {
   if (NIX === undefined || BWRAP === undefined || process.platform !== "linux" || process.arch !== "x64") return false;
   if (!existsSync("/nix/var/nix/daemon-socket/socket")) return false;
   if (spawnSync(NIX, ["--version"], { stdio: "ignore" }).status !== 0 || spawnSync("git", ["--version"], { stdio: "ignore" }).status !== 0) return false;
-  return spawnSync(BWRAP, ["--ro-bind", "/nix/store", "/nix/store", "--proc", "/proc", "--", "/proc/self/exe", "--version"], { stdio: "ignore" }).status !== null;
+  return bwrapCanCreateNamespaces(BWRAP);
 })();
 
 const LOCK = JSON.stringify({ nodes: { root: {} }, root: "root", version: 7 });
