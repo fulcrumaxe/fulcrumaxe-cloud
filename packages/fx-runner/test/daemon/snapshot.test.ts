@@ -5,7 +5,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertGitVersion, createGit, gitVersionAllowed, GitPathError, type GitCapture, type GitCaptured } from "../../src/daemon/git.js";
 import { createGitPath, type GitJob } from "../../src/daemon/gitPath.js";
 import { pushPlan } from "../../src/daemon/push.js";
-import { SNAPSHOT_MAX_BYTES, SNAPSHOT_MAX_ENTRIES, snapshotConfig, sweepSnapshots, takeSnapshot } from "../../src/daemon/snapshot.js";
+import { SNAPSHOT_MAX_BYTES, SNAPSHOT_MAX_ENTRIES, snapshotConfig, sweepSnapshots, takeSnapshot, type Race } from "../../src/daemon/snapshot.js";
 import { assertGitDirShape, assertWorkspaceGit } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
 
@@ -406,5 +406,139 @@ describe("the git version gate", () => {
     await expect(old.prepare(job, lease, workspace)).rejects.toMatchObject({ code: "git_version_unsupported" });
     expect(calls).toEqual([["--version"]]);
     expect(existsSync(path.join(root, "cache"))).toBe(false);
+  });
+});
+
+describe("the copy checks where each file really is, after it is opened (hardening)", () => {
+  const input = (r: Rig) => ({ workspace: r.workspace, mirrorObjects: path.join(r.mirror, "objects"), root: snapshotsRoot() });
+  const branchFile = (r: Rig): string => path.join(r.gitDir, "refs", "heads", pushPlan(lease).branch);
+  const branchDir = (r: Rig): string => path.dirname(branchFile(r));
+  /** A directory with the same entries as `dir`, every file holding the other repository's marker. */
+  const foreignCopy = (dir: string): string => {
+    const copy = path.join(root, `foreign-${randomUUID()}`);
+    cpSync(dir, copy, { recursive: true });
+    for (const name of readdirSync(copy)) writeFileSync(path.join(copy, name), "FOREIGN\n");
+    return copy;
+  };
+  const snapshotHolds = (dir: string, marker: string): boolean => readdirSync(dir, { recursive: true, withFileTypes: true }).some((e) => e.isFile() && readFileSync(path.join(e.parentPath, e.name), "utf8").includes(marker));
+
+  it("a file swapped for another regular file between the lstat and the open is refused (dev/ino)", async () => {
+    const r = await rig();
+    const other = path.join(root, "other-ref");
+    writeFileSync(other, "0000000000000000000000000000000000000000\n");
+    const race: Race = (stage, file) => {
+      if (stage === "open" && file === branchFile(r)) renameSync(other, file);
+    };
+    await expect(takeSnapshot({ ...input(r), race })).rejects.toMatchObject({ code: "snapshot_refused", message: "snapshot_refused" });
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("a directory swapped for a link while its file is looked at and opened, then put back, is refused (descriptor location)", async () => {
+    const r = await rig();
+    const dir = branchDir(r);
+    const foreign = foreignCopy(dir);
+    let swapped = false;
+    const race: Race = (stage, file) => {
+      if (stage === "lstat" && file === branchFile(r) && !swapped) {
+        swapped = true;
+        renameSync(dir, `${dir}.bak`);
+        symlinkSync(foreign, dir);
+      } else if (stage === "opened" && swapped) {
+        rmSync(dir);
+        renameSync(`${dir}.bak`, dir);
+        swapped = false;
+      }
+    };
+    await expect(takeSnapshot({ ...input(r), race })).rejects.toMatchObject({ code: "snapshot_refused" });
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("the check for platforms without the descriptor link refuses a directory that is still swapped right after the open", async () => {
+    const r = await rig();
+    const dir = branchDir(r);
+    const foreign = foreignCopy(dir);
+    let done = false;
+    const race: Race = (stage, file) => {
+      if (stage === "opened" && file === branchFile(r) && !done) {
+        done = true;
+        renameSync(dir, `${dir}.bak`);
+        symlinkSync(foreign, dir);
+      }
+    };
+    await expect(takeSnapshot({ ...input(r), race, useDescriptorLink: false })).rejects.toMatchObject({ code: "snapshot_refused" });
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("the check for platforms without the descriptor link catches a directory swapped for one entry and put back before the next", async () => {
+    const r = await rig();
+    const dir = branchDir(r);
+    // A second entry, so the swap can be undone at its lstat: the end-of-directory look then finds the directory as it was.
+    writeFileSync(path.join(dir, "second"), readFileSync(branchFile(r)));
+    const foreign = foreignCopy(dir);
+    let seen = 0;
+    const race: Race = (stage, file) => {
+      if (stage !== "lstat" || path.dirname(file) !== dir) return;
+      seen++;
+      if (seen === 1) {
+        renameSync(dir, `${dir}.bak`);
+        symlinkSync(foreign, dir);
+      } else if (seen === 2) {
+        rmSync(dir);
+        renameSync(`${dir}.bak`, dir);
+      }
+    };
+    await expect(takeSnapshot({ ...input(r), race, useDescriptorLink: false })).rejects.toMatchObject({ code: "snapshot_refused" });
+    expect(seen).toBeGreaterThanOrEqual(1);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("control: the hooks alone change nothing, on either check", async () => {
+    const r = await rig();
+    const stages: string[] = [];
+    for (const useDescriptorLink of [true, false]) {
+      const snap = await takeSnapshot({ ...input(r), race: (stage) => stages.push(stage), useDescriptorLink });
+      expect(sh("-C", snap.gitDir, "rev-parse", "--verify", "HEAD^{commit}").trim()).toBe(r.tip);
+      snap.remove();
+    }
+    expect(new Set(stages)).toEqual(new Set(["lstat", "open", "opened"]));
+  });
+
+  it("a racing swap-and-restore of a directory never lets the other repository's files into the snapshot", async () => {
+    const r = await rig();
+    const dir = branchDir(r);
+    const foreign = foreignCopy(dir);
+    // A second process, so the swap really runs beside the copy: dir -> link to the foreign copy -> dir, as fast as it can.
+    const flipper = `const fs=require("fs");const [d,f]=process.argv.slice(1);const nap=()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,0.2);for(;;){fs.renameSync(d,d+".bak");fs.symlinkSync(f,d);nap();fs.unlinkSync(d);fs.renameSync(d+".bak",d);nap();}`;
+    const child = spawn(process.execPath, ["-e", flipper, dir, foreign], { stdio: "ignore" });
+    let hits = 0;
+    let refused = 0;
+    try {
+      for (let i = 0; i < 400; i++) {
+        try {
+          const snap = await takeSnapshot(input(r));
+          if (snapshotHolds(path.dirname(snap.gitDir), "FOREIGN")) hits++;
+          snap.remove();
+        } catch (error) {
+          expect(error).toMatchObject({ code: "snapshot_refused" });
+          refused++;
+        }
+      }
+    } finally {
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+    expect(hits).toBe(0);
+    expect(refused).toBeGreaterThan(0);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("the sweep does not follow a snapshots root that is a link", () => {
+    const elsewhere = path.join(root, "elsewhere");
+    mkdirSync(path.join(elsewhere, "snap-precious"), { recursive: true });
+    writeFileSync(path.join(elsewhere, "snap-precious", "keep"), "x");
+    mkdirSync(stateDir(), { recursive: true });
+    symlinkSync(elsewhere, snapshotsRoot());
+    sweepSnapshots(snapshotsRoot());
+    expect(readFileSync(path.join(elsewhere, "snap-precious", "keep"), "utf8")).toBe("x");
   });
 });
