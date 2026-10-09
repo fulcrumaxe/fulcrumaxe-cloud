@@ -103,6 +103,7 @@
 .pl-runlist { margin: 0 0 8px; padding: 0; list-style: none; }
 .pl-run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; overflow-wrap: anywhere; }
 .pl-run-main { flex: 1 1 140px; }
+.pl-run-usage { flex: 1 1 100%; }
 .pl-run:focus-visible,
 .pl-act:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .pl-act {

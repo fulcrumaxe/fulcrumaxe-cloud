@@ -143,6 +143,29 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     expect(seen.errors).toEqual([]);
   });
 
+  test("D#6 R2b-5b: the own-plan API-equivalent is a separate line, shown only when there is one, and the budgets are unchanged", async ({ page }) => {
+    const usage = {
+      period_start: "2026-09-01T00:00:00.000Z",
+      model: { spent_usd: 7.1, reserved_usd: 2.2, limit_usd: 9.9 },
+      foreground_compute: { spent_usd: 3.25, reserved_usd: 0.5, limit_usd: 41 },
+      background_compute: { spent_usd: 1, reserved_usd: 0, limit_usd: 5 },
+    };
+    await boot(page, { usage: { ...usage, own_plan_api_equivalent_usd: 12.5 } });
+    await expect(tid(page, "bb-own-plan")).toHaveText("On your own plan (API-equivalent): $12.50");
+    await expect(tid(page, "bb-spent").first()).toHaveText("$7.10");
+  });
+
+  test("D#6 R2b-5b: no own-plan line when it is zero or the server does not send it", async ({ page }) => {
+    const usage = {
+      period_start: "2026-09-01T00:00:00.000Z",
+      model: { spent_usd: 7.1, reserved_usd: 2.2, limit_usd: 9.9 },
+      foreground_compute: { spent_usd: 3.25, reserved_usd: 0.5, limit_usd: 41 },
+      background_compute: { spent_usd: 1, reserved_usd: 0, limit_usd: 5 },
+    };
+    await boot(page, { usage: { ...usage, own_plan_api_equivalent_usd: 0 } });
+    await expect(tid(page, "bb-own-plan")).toHaveCount(0);
+  });
+
   test("criterion 1: every number is the API's, unchanged, and none is computed", async ({ page }) => {
     const usage = {
       period_start: "2026-09-01T00:00:00.000Z",

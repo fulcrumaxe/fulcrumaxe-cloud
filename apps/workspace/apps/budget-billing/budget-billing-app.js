@@ -497,7 +497,11 @@ export function mountBudgetBilling(host) {
       h("h2", { class: "bb-heading", id: uid + "-usage" }, "This month"),
       h("p", { class: "bb-muted" }, "Month starting " + String(state.usage.period_start).slice(0, 10) + "."),
       h("p", { class: "bb-muted", "data-testid": "bb-reserved-note" }, RESERVED_WORDS),
-      h("div", { class: "bb-grid" }, BUDGET_VIEWS.map(budgetCard))
+      h("div", { class: "bb-grid" }, BUDGET_VIEWS.map(budgetCard)),
+      // D#6 R2b-5b: what this month's runs on the person's own machine would have cost at API prices. Information, apart from the budgets.
+      Number.isFinite(state.usage.own_plan_api_equivalent_usd) && state.usage.own_plan_api_equivalent_usd > 0
+        ? h("p", { class: "bb-muted", "data-testid": "bb-own-plan" }, "On your own plan (API-equivalent): " + money(state.usage.own_plan_api_equivalent_usd))
+        : null
     );
   }
 
