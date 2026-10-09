@@ -106,6 +106,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "deleted_but_listed",
   // Local runner (D#6): a sandbox grant the settings file refuses.
   "sandbox_grant_refused",
+  // Local runner (D#6 R7b): the runner's own floor check refused a signed job's sandbox allowances, or a launch met an allowance past the floor.
+  "sandbox_allowance_forbidden",
   // Local runner (D#6): a job segment name that is not a plain word.
   "bad_segment",
   // Local runner (D#6): the daemon ledger is held by another process.

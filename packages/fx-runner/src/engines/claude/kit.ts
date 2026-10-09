@@ -31,7 +31,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
       createClaudeEngine({
         binary: storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }),
         credentials: input.credentials,
-        envOptions: input.envOptions,
+        envOptions: input.jobEnv === undefined ? input.envOptions : { ...input.envOptions, jobEnv: input.jobEnv },
         sandboxSettings: input.sandboxSettings,
         protectedPaths: input.protectedPaths,
         jobsDir: path.join(input.stateDir, "jobs"),

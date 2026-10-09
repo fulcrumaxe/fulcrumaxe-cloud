@@ -34,7 +34,7 @@ describe("sandboxSettings: the shell sandbox a job runs under", () => {
 
   it("denies reads of the home directory, and re-allows only the workspace and temp directory", () => {
     const s = block();
-    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN]);
+    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot]);
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir]);
   });
 
@@ -157,7 +157,7 @@ describe("the mirrors root (git path B, correction C25 section 2)", () => {
     expect(s.filesystem.allowRead).toEqual([base.workspace, base.tempDir, OBJECTS]);
     expect(s.filesystem.allowWrite).toEqual([base.workspace, base.tempDir]);
     expect(s.filesystem.denyWrite).toEqual([STATE, BIN, MIRRORS]);
-    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, MIRRORS]);
+    expect(s.filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot, MIRRORS]);
   });
 
   it("changes nothing when no mirrors root is given", () => {

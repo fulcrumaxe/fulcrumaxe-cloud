@@ -80,6 +80,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/select.ts": ["fs", "path"],
   "src/sandbox/probe.ts": ["path"], // the sandbox probe (`doctor`): paths for the probe's rules; the machine itself is reached only through its host argument
   "src/sandbox/probeHost.ts": ["fs"], // the real machine behind the probe: stat and a bounded read of a few small files; the process start is the engine kit's
+  "src/sandbox/allowances.ts": ["fs", "path"], // D#6 R7b: realpath of an allowed path, and the target of a dangling link (lstat, readlink), before the floor is checked on where it really lands
+  "src/sandbox/writeScratch.ts": ["fs", "path"], // D#6 R7b: the job-scoped write directories: lstat, a fresh 0700 mkdir, and a removal that follows no link
   "src/sandbox/sandboxSettings.ts": ["fs", "path"],
   "src/sandbox/toolchain.ts": ["fs", "path"], // the toolchain found at setup (D#6 R4d-3): stat, executable check and realpath of the tools; no process is started
 

@@ -16,6 +16,7 @@
  */
 import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
+import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
@@ -85,6 +86,15 @@ function withReadGrants(port: SandboxPort, paths: readonly string[]): SandboxPor
     ...port,
     startDetached: (handle, opts) => port.startDetached(handle, grant(opts)),
     resume: (handle, sessionId, prompt, opts) => port.resume(handle, sessionId, prompt, grant(opts)),
+  };
+}
+
+/** A port whose every start carries this job's signed sandbox allowances (D#6 R7b). The host sandbox checks the floor again and applies them. */
+export function withAllowances(port: SandboxPort, grant: JobAllowanceGrant): SandboxPort {
+  return {
+    ...port,
+    startDetached: (handle, opts) => port.startDetached(handle, { ...opts, allowances: grant }),
+    resume: (handle, sessionId, prompt, opts) => port.resume(handle, sessionId, prompt, { ...opts, allowances: grant }),
   };
 }
 
@@ -210,7 +220,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const fill = async (workspace: string): Promise<void> => {
             started.base = (await git.prepare(job, claimed, workspace)).base;
           };
-          result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun, held), ledger: deps.ledger });
+          const granted = withReadGrants(deps.sandbox, git.readGrants(job));
+          const allowed = job.sandbox_allowances === undefined ? granted : withAllowances(granted, { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) });
+          result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
