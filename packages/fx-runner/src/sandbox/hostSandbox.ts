@@ -5,6 +5,7 @@ import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/clea
 import { checkedAllowances, grantsOf, jobEnvFor, type AllowanceGrants } from "./allowances.js";
 import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } from "./writeScratch.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
+import { applyNixView } from "./nixView.js";
 import {
   SandboxNotFoundError,
   type CreateSandboxOptions,
@@ -189,6 +190,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       ...(config.packageStoreRoot === undefined ? {} : { packageStoreRoot: config.packageStoreRoot }),
       ...(storeDir === undefined || config.packageStoreRoot === undefined ? {} : { packageStore: { root: config.packageStoreRoot, dir: storeDir } }),
     });
+    applyNixView(sandbox, allowances?.nixEnv !== undefined);
     assertEnabledSandbox(sandbox);
     // Only after the builder accepted every grant are the runner's own per-job directories made: the repo's package store and the job's cache directory.
     // The job's write entries are job-scoped: each is a directory made fresh for this job, right before launch, and removed with the sandbox.
@@ -197,7 +199,8 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     try {
       if (allowances !== undefined && grants !== undefined) {
         claimScratch(entry.scratch, grants.writePaths);
-        jobEnv = jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS });
+        // The dev shell's variables (D#6 R7c) come first, so the job's own per-job names can never be replaced by them.
+        jobEnv = { ...(allowances.nixEnv ?? {}), ...jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS }) };
         mkdirSync(jobEnv.XDG_CACHE_HOME!, { recursive: true, mode: 0o700 });
         if (storeDir !== undefined && config.packageStoreRoot !== undefined) {
           mkdirSync(config.packageStoreRoot, { recursive: true, mode: 0o700 });

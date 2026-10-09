@@ -50,6 +50,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id
+  "src/daemon/nixShell.ts": ["crypto", "fs", "path"], // D#6 R7c: the dev shell step's own 0700 data directory and its cache files, a SHA-256 of the lock file, and the search for the nix binary; nix itself runs through the injected capture
   "src/daemon/gitPathA.ts": ["fs", "os", "path"], // cloud-verified path: realpath and statfs of the mirrors directory (must not be a temp directory or memory-backed), and the temp directory's location
   "src/daemon/gitPath.ts": ["path"], // the snapshots directory under the runner's state directory
   "src/daemon/snapshot.ts": ["fs", "fs/promises", "path"], // the daemon-owned copy of the workspace's git files: no-follow reads, one 0700 directory per push
@@ -90,10 +91,11 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
 
 /**
  * Files that may hold the exact string token `/proc` and nothing longer: the sandbox probe hands it to bubblewrap as the mount point of a
- * fresh process table, as the installed agent CLI does, so the probe fails where a job would on a host that masks it. A path below it
+ * fresh process table, as the installed agent CLI does, so the probe fails where a job would on a host that masks it; the Nix client view (D#6 R7c) does the
+ * same for the same reason. A path below it
  * (`/proc/`), the process table's environment files and a `proc` segment anywhere else stay banned in every file.
  */
-export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts"];
+export const EXACT_PROC_TOKEN_FILES: readonly string[] = ["src/sandbox/probe.ts", "src/sandbox/nixView.ts"];
 
 const BUILTINS = new Set(builtinModules.flatMap((name) => [name, name.replace(/^node:/, "")]));
 const BANNED_EXEC_NAMES = new Set(["exec", "execSync", "execFile", "execFileSync", "fork", "spawnSync"]);

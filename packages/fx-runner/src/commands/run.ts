@@ -28,6 +28,7 @@ import type { EngineKit } from "../daemon/engineKit.js";
 import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
+import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
@@ -209,7 +210,13 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       tmuxBinary === undefined || host.selfCommand === undefined
         ? undefined
         : createJobWatch({ clock, tmux: { binary: tmuxBinary, stateDir, capture: host.engine.capture, env: tmuxEnv({ home, path: searchPath, stateDir, term: host.term }), selfCommand: host.selfCommand } });
+    // D#6 R7c: the dev shell step. Wired only where the engine offers the large capture; it still skips each job without a `nix` on the search path.
+    const nix =
+      host.engine.captureLarge === undefined
+        ? undefined
+        : createNixShell({ nixBin: findNix(searchPath), bwrapBin: findTool("bwrap", searchPath), ...(findTool("git", searchPath) === undefined ? {} : { gitBin: findTool("git", searchPath) }), capture: host.engine.captureLarge, dataDir: path.join(path.dirname(mirrorsRoot), "nix-shell"), identity: identityVia(host.engine.capture) });
     const handle = createJobHandler({
+      ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`) }),
       ...(watch === undefined ? {} : { watch, interrupt: (job) => sandbox.interrupt(job) }),
       client,
       keyring,
