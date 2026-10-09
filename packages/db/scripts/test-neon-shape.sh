@@ -27,7 +27,9 @@ CATALOG_SQL="$(pwd)/scripts/neon-shape-catalog.sql"
 
 PG_TMP_DIR="$(mktemp -d)"
 PGDATA_DIR="$PG_TMP_DIR/data"
-PG_PORT=$(( (RANDOM % 5000) + 15432 ))
+# An OS-assigned free port (bind 0, read it back, release it), not a guessed range. The window before
+# Postgres binds it is the same one packages/db/test/support/ephemeral-pg.ts retries around.
+PG_PORT="$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
 
 cleanup() {
   pg_ctl -D "$PGDATA_DIR" -m fast stop >/dev/null 2>&1 || true
@@ -41,20 +43,19 @@ trap cleanup EXIT
 initdb -D "$PGDATA_DIR" -U postgres --auth=trust --no-locale >"$PG_TMP_DIR/initdb.log" 2>&1
 
 {
-  # D#81 fix round (security review, informational): socket only, no TCP
-  # listener at all -- every connection below already goes through the
-  # unix socket directory (`-h "$PG_TMP_DIR"` for psql,
-  # `?host=${PG_TMP_DIR}` for the node-postgres URLs), so a TCP listener on
-  # 127.0.0.1 served no purpose here except letting any other local user
-  # connect as superuser (trust auth) for as long as this script runs.
-  echo "listen_addresses = ''"
+  # Loopback TCP only, no Unix socket. D#81 chose socket-only here so no other local user could
+  # connect as superuser over trust auth; that is reversed for this TEST cluster because the
+  # runner's sandbox refuses socket(AF_UNIX) (D#6 R7e), and a job's network is private to it.
+  # Still isolated: 127.0.0.1 only (never a wildcard address), a fresh OS-assigned port, a
+  # throwaway data dir that the EXIT trap stops and removes. Production Postgres is unchanged.
+  echo "listen_addresses = '127.0.0.1'"
   echo "port = $PG_PORT"
-  echo "unix_socket_directories = '$PG_TMP_DIR'"
+  echo "unix_socket_directories = ''"
 } >> "$PGDATA_DIR/postgresql.conf"
 
 pg_ctl -D "$PGDATA_DIR" -l "$PG_TMP_DIR/postgres.log" -w start
 
-PSQL=(psql -h "$PG_TMP_DIR" -p "$PG_PORT" -X -q -v ON_ERROR_STOP=1)
+PSQL=(psql -h 127.0.0.1 -p "$PG_PORT" -X -q -v ON_ERROR_STOP=1)
 MIGRATE_RUNNER=(node --experimental-strip-types "$MIGRATE_RUNNER_TS")
 
 EXPECTED_FILES="$(ls "$MIGRATIONS_DIR"/*.sql | xargs -n1 basename | sort)"
@@ -78,8 +79,8 @@ if [ "$MEMBERSHIPS" != "neon_superuser" ]; then
   exit 1
 fi
 
-FX_NEON_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon?host=${PG_TMP_DIR}"
-FX_SUPER_URL="postgres://postgres@127.0.0.1:${PG_PORT}/fx_super?host=${PG_TMP_DIR}"
+FX_NEON_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon"
+FX_SUPER_URL="postgres://postgres@127.0.0.1:${PG_PORT}/fx_super"
 
 # 3. Whole chain, as fx_migrator, non-superuser.
 echo "==> migrating fx_neon as fx_migrator (Neon-shaped, non-superuser)"
@@ -114,7 +115,7 @@ fi
 #    already exist" branch without superuser (pg_roles is cluster-wide;
 #    schema_migrations is per-database).
 "${PSQL[@]}" -U postgres -d postgres -c "CREATE DATABASE fx_neon2 OWNER fx_migrator;"
-FX_NEON2_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon2?host=${PG_TMP_DIR}"
+FX_NEON2_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon2"
 echo "==> migrating fx_neon2 as fx_migrator (roles already exist cluster-wide)"
 RESULT3="$("${MIGRATE_RUNNER[@]}" "$FX_NEON2_URL" "$MIGRATIONS_DIR")"
 APPLIED3_SORTED="$(echo "$RESULT3" | jq -r '.applied | sort | .[]')"
@@ -2529,7 +2530,7 @@ fi
 echo "==> criterion 5a: a drifted app_user (CREATEDB) must abort the migration"
 "${PSQL[@]}" -U postgres -d postgres -c "ALTER ROLE app_user CREATEDB;"
 "${PSQL[@]}" -U postgres -d postgres -c "CREATE DATABASE fx_neon_bad_role OWNER fx_migrator;"
-BAD_ROLE_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon_bad_role?host=${PG_TMP_DIR}"
+BAD_ROLE_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_neon_bad_role"
 BAD_ROLE_OUT="$("${MIGRATE_RUNNER[@]}" "$BAD_ROLE_URL" "$MIGRATIONS_DIR" 2>&1)" && {
   echo "neon-shape: expected the drifted-app_user migration to fail -- it succeeded" >&2
   exit 1
@@ -2558,7 +2559,7 @@ fi
 echo "==> criterion 5b: a migration role that doesn't own the database must be rejected"
 "${PSQL[@]}" -U postgres -d postgres -c "CREATE DATABASE fx_neon_notowned;"
 "${PSQL[@]}" -U postgres -d postgres -c "GRANT CONNECT ON DATABASE fx_neon_notowned TO fx_migrator;"
-NOTOWNED_OUT="$(psql -h "$PG_TMP_DIR" -p "$PG_PORT" -U fx_migrator -d fx_neon_notowned -v ON_ERROR_STOP=1 -f "$MIGRATIONS_DIR/0001_core.sql" 2>&1)" && {
+NOTOWNED_OUT="$(psql -h 127.0.0.1 -p "$PG_PORT" -U fx_migrator -d fx_neon_notowned -v ON_ERROR_STOP=1 -f "$MIGRATIONS_DIR/0001_core.sql" 2>&1)" && {
   echo "neon-shape: expected the non-owner migration to fail -- it succeeded" >&2
   exit 1
 }
@@ -2733,7 +2734,7 @@ done
 MAIN_CHAIN_FILES="$(ls "$UPGRADE_MIGRATIONS_DIR"/*.sql | xargs -n1 basename | sort)"
 
 "${PSQL[@]}" -U postgres -d postgres -c "CREATE DATABASE fx_upgrade OWNER fx_migrator;"
-FX_UPGRADE_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_upgrade?host=${PG_TMP_DIR}"
+FX_UPGRADE_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_upgrade"
 
 echo "==> upgrade path: migrating fx_upgrade on everything except ${LATE_MIGRATIONS[*]}"
 UPGRADE_RESULT1="$("${MIGRATE_RUNNER[@]}" "$FX_UPGRADE_URL" "$UPGRADE_MIGRATIONS_DIR")"
@@ -2822,7 +2823,7 @@ for f in $D94_BASE_FILES; do
 done
 
 "${PSQL[@]}" -U postgres -d postgres -c "CREATE DATABASE fx_d94_parity OWNER fx_migrator;"
-FX_D94_PARITY_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_d94_parity?host=${PG_TMP_DIR}"
+FX_D94_PARITY_URL="postgres://fx_migrator@127.0.0.1:${PG_PORT}/fx_d94_parity"
 
 echo "==> D94 parity: migrating fx_d94_parity on the base's own chain"
 "${MIGRATE_RUNNER[@]}" "$FX_D94_PARITY_URL" "$D94_BASE_DIR" >/dev/null

@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import cardMap from "../src/cardMap.json" with { type: "json" };
 import { loadRoleCard } from "../src/cards.js";
@@ -52,9 +53,12 @@ describe("the generated card map (D#2 H14c-3-3a)", () => {
     try {
       cpSync(path.join(ROOT, "src"), path.join(dir, "src"), { recursive: true });
       writeFileSync(path.join(dir, "probe.ts"), 'import { loadRoleCard } from "./src/cards.js";\nconst t = loadRoleCard("project-manager");\nconsole.log(typeof t === "string" ? t.length : -1);\n');
-      const out = execFileSync(path.join(ROOT, "node_modules", ".bin", "tsx"), [path.join(dir, "probe.ts")], {
+      // `node --import tsx`, not the `tsx` CLI: the CLI opens a Unix-socket IPC pipe, which the runner's sandbox refuses (B1).
+      // The loader is named by absolute URL because the probe runs in a directory with no node_modules.
+      const tsxLoader = pathToFileURL(createRequire(path.join(ROOT, "package.json")).resolve("tsx")).href;
+      const out = execFileSync(process.execPath, ["--import", tsxLoader, path.join(dir, "probe.ts")], {
         cwd: dir,
-        env: { PATH: process.env.PATH ?? "", NODE_ENV: "production" },
+        env: { PATH: process.env.PATH ?? "", NODE_ENV: "production", ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
         encoding: "utf8",
       });
       expect(Number(out.trim())).toBe(CARD_MAP["project-manager"]!.length);

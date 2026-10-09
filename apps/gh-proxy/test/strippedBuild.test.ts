@@ -33,6 +33,12 @@ function listFiles(dir: string): string[] {
   return out.sort();
 }
 
+/**
+ * What pnpm and node need from the host, by name. The standard proxy variables are among them: inside the runner's sandbox the only way
+ * out to the package registry is its proxy, so `pnpm exec` with them scrubbed has no route (and no setting of ours is among them).
+ */
+const HOST_ENV_NAMES = ["PATH", "HOME", "TMPDIR", "USER", "LANG", "PNPM_HOME", "NODE_PATH", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
+
 describe("source tree: nothing but the proxy route", () => {
   it("has the proxy route and the empty-404 fallback under app/, no pages/, no public/", () => {
     expect(listFiles(join(APP_DIR, "app"))).toEqual(["app/[[...rest]]/route.ts", "app/api/gh-proxy/[...path]/route.ts"]);
@@ -53,7 +59,7 @@ describe("next build output", () => {
   beforeAll(() => {
     // Only what pnpm and node need: no FX_* or VERCEL_* setting reaches the build.
     const buildEnv = { NODE_ENV: "production" } as NodeJS.ProcessEnv;
-    for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LANG", "PNPM_HOME", "NODE_PATH", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
+    for (const key of [...HOST_ENV_NAMES, "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
       const value = process.env[key];
       if (value !== undefined) buildEnv[key] = value;
     }
@@ -179,7 +185,7 @@ describe("next start: raw request lines", () => {
       VERCEL_TEAM_ID: "team_1",
       FX_GH_PROXY_SANDBOX_PROJECT_ID: "prj_1",
     } as Record<string, string>;
-    for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LANG", "PNPM_HOME", "NODE_PATH"]) {
+    for (const key of HOST_ENV_NAMES) {
       const value = process.env[key];
       if (value !== undefined) env[key] = value;
     }

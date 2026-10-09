@@ -793,6 +793,14 @@ test("flake: the ci shell shares its packages with default and has only python3 
   assert.match(defaultShell, /pythonEnv/);
 });
 
+test("flake: PLAYWRIGHT_BROWSERS_PATH is a real mkShell attribute in both shells, so nix print-dev-env lists it, and is not exported from shellHook", () => {
+  const flake = readFileSync(path.join(repoRoot, "flake.nix"), "utf8");
+  const code = flake.replace(/^\s*#.*$/gm, "");
+  const attrs = code.match(/^\s+PLAYWRIGHT_BROWSERS_PATH = "\$\{playwrightBrowsers\}";$/gm) ?? [];
+  assert.equal(attrs.length, 2, "one attribute in the ci shell and one in the default shell");
+  assert.doesNotMatch(code, /export PLAYWRIGHT_BROWSERS_PATH/);
+});
+
 // =================================================================================================
 // D#536 P6: CI on a public repository.
 //

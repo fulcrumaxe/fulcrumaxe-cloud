@@ -154,7 +154,7 @@ describe("the Playwright specs load under the real config", () => {
   it("--list shows both packs on all three device projects (no browser is started)", () => {
     const res = spawnSync(process.execPath, [playwrightCli(), "test", "--config", join(PACKAGE_ROOT, "playwright.config.ts"), "--list"], {
       cwd: PACKAGE_ROOT,
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...TARGET_ENV, [TARGET_ENV_NAME]: "staging" },
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), ...TARGET_ENV, [TARGET_ENV_NAME]: "staging" },
       encoding: "utf8",
     });
     expect(res.status, res.stderr).toBe(0);

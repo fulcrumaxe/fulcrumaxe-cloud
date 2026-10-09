@@ -6,6 +6,7 @@ import { bwrapArgs } from "../src/sandbox/probe.js";
 import { grantsOf } from "../src/sandbox/allowances.js";
 import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
+import { tmpRoot } from "./helpers/tmpRoot.js";
 
 /**
  * D#6 R7b, with real bubblewrap. The rules come from the one builder (`sandboxSettings`) with a job's allowances applied, are translated by the
@@ -50,7 +51,7 @@ function build(allowances: Array<{ kind: "path" | "domain" | "loopback"; value: 
 
 describe.skipIf(!usable)("R7b: the allowances in a real bubblewrap sandbox", () => {
   beforeAll(() => {
-    root = mkdtempSync(path.join("/tmp", "r7b-bwrap-"));
+    root = mkdtempSync(path.join(tmpRoot(), "r7b-bwrap-"));
     home = path.join(root, "home");
     workspace = path.join(home, ".cache", "fx-runner", "workspaces", "run-1");
     tempDir = path.join(home, ".cache", "fx-runner", "tmp", "rn-1");
@@ -165,7 +166,7 @@ describe.skipIf(!usable)("R7b: the runner's roots with the cache directory outsi
   }
 
   beforeAll(() => {
-    base = mkdtempSync(path.join("/tmp", "r7b-outside-home-"));
+    base = mkdtempSync(path.join(tmpRoot(), "r7b-outside-home-"));
     cacheHome = path.join(base, "cache", "fx-runner");
     const home = path.join(base, "home");
     const storeRoot = path.join(cacheHome, "pnpm-store");

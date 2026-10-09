@@ -285,7 +285,11 @@ export async function provisionEphemeralPostgres(options: {
 
   appendFileSync(
     path.join(dataDir, 'postgresql.conf'),
-    `listen_addresses = '127.0.0.1'\nunix_socket_directories = '${tmpDir}'\n` +
+    // TCP on loopback only, no Unix socket: the runner's sandbox refuses socket(AF_UNIX), so a
+    // socket directory would stop the cluster from starting inside a job. The port is an
+    // OS-assigned free one (see startWithRetry), trust auth is reachable on 127.0.0.1 only, and
+    // this is for tests only -- production Postgres is unchanged.
+    `listen_addresses = '127.0.0.1'\nunix_socket_directories = ''\n` +
       // D#181: this cluster is thrown away at the end of the run, so nothing
       // in it needs to survive a crash. With the default fsync=on, every
       // DROP DATABASE's forced checkpoint fsyncs every dirty buffer the

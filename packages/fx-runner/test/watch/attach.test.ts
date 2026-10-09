@@ -11,6 +11,7 @@ import type { RunHost } from "../../src/commands/run.js";
 import { renderLogRecord } from "../../src/commands/logs.js";
 import { takeoverPaneCommand } from "../../src/commands/watchPane.js";
 import type { GitCapture } from "../../src/daemon/git.js";
+import { itNeedsHostSockets } from "../helpers/needsHostSockets.js";
 import { takeoverCommand } from "../../src/engines/claude/takeover.js";
 import { recordSession } from "../../src/engines/claude/session.js";
 import { ensurePrivateDir, markTakeoverReady, readEntries, socketPath, takeoverState, tmuxDir, writeEntry } from "../../src/watch/layout.js";
@@ -87,7 +88,7 @@ function rig(over: { sessions?: string[]; ask?: string; foreground?: number | nu
 const flags = (entries: Array<[string, string | true]>): Map<string, string | true> => new Map(entries);
 
 describe("fx-runner attach", () => {
-  it("with no argument lists this machine's running jobs: short id, repo, role, started", async () => {
+  itNeedsHostSockets("with no argument lists this machine's running jobs: short id, repo, role, started", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z", "executor", "acme/app");
     entry(RUN_B, "2026-10-08T11:00:00.000Z", "code-reviewer", "acme/web");
@@ -99,7 +100,7 @@ describe("fx-runner attach", () => {
     expect(r.foreground).toEqual([]);
   });
 
-  it("lists nothing for a record whose session is gone (a daemon that died), or when the socket is not private", async () => {
+  itNeedsHostSockets("lists nothing for a record whose session is gone (a daemon that died), or when the socket is not private", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     let r = rig({ sessions: [] });
@@ -111,7 +112,7 @@ describe("fx-runner attach", () => {
     expect(r.out).toEqual(["No running jobs on this machine."]);
   });
 
-  it("attaches read-only: the tmux client is started with -r, on the private socket, for the right session", async () => {
+  itNeedsHostSockets("attaches read-only: the tmux client is started with -r, on the private socket, for the right session", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     for (const target of [[["run", "3f6c1a52"]], [["run", RUN_A]], [["run", "3F6C"]], [["latest", true as const]]] as Array<Array<[string, string | true]>>) {
@@ -125,7 +126,7 @@ describe("fx-runner attach", () => {
     }
   });
 
-  it("--latest is the newest job", async () => {
+  itNeedsHostSockets("--latest is the newest job", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     entry(RUN_B, "2026-10-08T11:00:00.000Z");
@@ -134,7 +135,7 @@ describe("fx-runner attach", () => {
     expect(r.foreground[0]!.args.at(-1)).toBe("=fx-9b2e0c11");
   });
 
-  it("an unknown or finished run exits 2 with the fixed message and attaches to nothing", async () => {
+  itNeedsHostSockets("an unknown or finished run exits 2 with the fixed message and attaches to nothing", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ sessions: [] });
@@ -157,7 +158,7 @@ describe("fx-runner attach", () => {
     expect(bare).toBe(1);
   });
 
-  it("a take-over asks the person to type the run's short id, and says what will happen; a wrong answer changes nothing", async () => {
+  itNeedsHostSockets("a take-over asks the person to type the run's short id, and says what will happen; a wrong answer changes nothing", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ ask: "nope" });
@@ -172,7 +173,7 @@ describe("fx-runner attach", () => {
     expect(r.foreground).toEqual([]);
   });
 
-  it("a take-over needs a terminal: with standard input piped, nothing is asked or requested", async () => {
+  itNeedsHostSockets("a take-over needs a terminal: with standard input piped, nothing is asked or requested", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ ask: "3f6c1a52" });
@@ -182,7 +183,7 @@ describe("fx-runner attach", () => {
     expect(takeoverState(stateDir, RUN_A)).toBe("none");
   });
 
-  it("a socket owned by another user is never attached to", async () => {
+  itNeedsHostSockets("a socket owned by another user is never attached to", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig();
@@ -191,7 +192,7 @@ describe("fx-runner attach", () => {
     expect(r.out).toEqual(["No running jobs on this machine."]);
   });
 
-  it("a confirmed take-over files the request, waits for the daemon's go-ahead, then attaches read-write (no -r)", async () => {
+  itNeedsHostSockets("a confirmed take-over files the request, waits for the daemon's go-ahead, then attaches read-write (no -r)", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ ask: "3F6C1A52" });
@@ -213,7 +214,7 @@ describe("fx-runner attach", () => {
     expect(takeoverState(stateDir, RUN_A)).toBe("none");
   });
 
-  it("a daemon that never answers ends the wait with a plain message, and nothing is attached", async () => {
+  itNeedsHostSockets("a daemon that never answers ends the wait with a plain message, and nothing is attached", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ ask: "3f6c1a52" });
@@ -222,7 +223,7 @@ describe("fx-runner attach", () => {
     expect(r.foreground).toEqual([]);
   });
 
-  it("--take-over needs a target; a second request for the same job is refused", async () => {
+  itNeedsHostSockets("--take-over needs a target; a second request for the same job is refused", async () => {
     await privateSocket();
     entry(RUN_A, "2026-10-08T10:00:00.000Z");
     const r = rig({ ask: "3f6c1a52" });
@@ -231,7 +232,7 @@ describe("fx-runner attach", () => {
     await expect(attachCommand(flags([["run", "3f6c1a52"], ["take-over", true]]), r.ctx, r.host, r.hooks)).rejects.toThrow(/already under way/);
   });
 
-  it("a job already handed over is not listed or attached as a running job", async () => {
+  itNeedsHostSockets("a job already handed over is not listed or attached as a running job", async () => {
     await privateSocket();
     writeEntry(stateDir, { run_id: RUN_A, role: "executor", repo: "acme/app", started: "2026-10-08T10:00:00.000Z", taken_over: true });
     const r = rig();

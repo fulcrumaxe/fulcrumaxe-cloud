@@ -117,10 +117,12 @@
         pkgs.zlib
       ];
 
-      # Pure env-var exports, no network, no mutation: points
-      # @playwright/test at the nix-provided browsers.
+      # Pure env-var export, no network, no mutation: tells @playwright/test
+      # not to download browsers. PLAYWRIGHT_BROWSERS_PATH is NOT set here but as
+      # a real mkShell attribute (below), so `nix print-dev-env --json` lists it:
+      # a variable exported only from shellHook never appears there, and the
+      # runner's job environment is built from that listing (D#6 R7e).
       sharedShellHook = ''
-        export PLAYWRIGHT_BROWSERS_PATH=${playwrightBrowsers}
         export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
       '';
     in {
@@ -136,6 +138,8 @@
         # pkgs.actionlint: ci-workflow.test.mjs validates every workflow file with it.
         packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint ];
         LD_LIBRARY_PATH = sharedLdLibraryPath;
+        # The nix-provided browsers, as a derivation attribute (see sharedShellHook).
+        PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
         shellHook = sharedShellHook;
       };
 
@@ -171,6 +175,8 @@
         # Runtime libs for compiled Python wheels (duckdb, pydantic-core, ...)
         # and the Playwright env exports, shared with the ci shell.
         LD_LIBRARY_PATH = sharedLdLibraryPath;
+        # The nix-provided browsers, as a derivation attribute (see sharedShellHook).
+        PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
         shellHook = sharedShellHook;
 
         # No venv shellHook here, unlike the engine's flake. The engine's

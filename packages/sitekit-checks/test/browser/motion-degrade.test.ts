@@ -71,7 +71,8 @@ describe("the K03 fixture build output", () => {
   const build = async (): Promise<string> => {
     if (!out) {
       out = await fs.mkdtemp(path.join(os.tmpdir(), "fx-k03-"));
-      execFileSync("pnpm", ["exec", "tsx", "scripts/build-fixture.ts", "test/fixtures/site.json", out], { cwd: TEMPLATE, stdio: "pipe" });
+      // `node --import tsx`, not the `tsx` CLI: the CLI opens a Unix-socket IPC pipe, which the runner's sandbox refuses.
+      execFileSync(process.execPath, ["--import", "tsx", "scripts/build-fixture.ts", "test/fixtures/site.json", out], { cwd: TEMPLATE, stdio: "pipe" });
     }
     return out;
   };
