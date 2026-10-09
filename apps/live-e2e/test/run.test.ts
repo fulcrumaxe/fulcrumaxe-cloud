@@ -33,6 +33,8 @@ describe("the child's environment is a named list", () => {
       PLAYWRIGHT_BROWSERS_PATH: "/b",
       LIVE_E2E_STAGING_ORIGIN: TARGET_ENV.LIVE_E2E_STAGING_ORIGIN,
       LIVE_E2E_STAGING_PROJECT_ID: TARGET_ENV.LIVE_E2E_STAGING_PROJECT_ID,
+      // A staging run keeps out of the production origin, so it is told which one that is (the fence).
+      LIVE_E2E_PRODUCTION_ORIGIN: TARGET_ENV.LIVE_E2E_PRODUCTION_ORIGIN,
       [BYPASS_ENV]: SECRET,
     });
     expect(Object.values(env)).not.toContain(UNRELATED);
