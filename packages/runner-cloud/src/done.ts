@@ -162,17 +162,46 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   if (ctx.runtime !== "runner" || ctx.executionMode !== "runner_local" || !ctx.repo || !ctx.job) return failed("internal_error");
   const port = deps.pullRequests;
   if (!port) throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub access configured");
-  return judgeRun(port, ctx, ctx.repo, ctx.job, i);
+  return judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)));
 }
 
 /** The `fx/<run>-g<generation>` branch a fresh run pushes, or a continuation's own branch (C25 section 1.2). */
 export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }): string => (job.continues ? job.continues.branch : `${job.branch_prefix}${i.runId}-g${i.leaseGeneration}`);
 
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
-async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }): Promise<Decision> {
-  const decision = await judgeCommit(port, ctx, repo, job, i);
+async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void): Promise<Decision> {
+  const decision = await judgeCommit(port, ctx, repo, job, i, write);
   if (decision.kind !== "verdict" || decision.verdict.prNumber === null) return decision;
   return verdictOf({ ...decision.verdict, branch: branchOf(job, i) });
+}
+
+/** The one line a permanent pull request failure leaves in the logs (stdout, one JSON object). */
+export const PR_FAILURE_EVENT = "runner.done.pr_failure";
+const LOG_LABEL = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+
+/**
+ * Says WHY `done` ended a run `internal_error` or `pr_rejected` because of GitHub: the run, the stage, the call, the HTTP status and the
+ * GraphQL error type codes. Nothing GitHub wrote is in it (no message, no body, no path), and no token or name: the run id comes from our
+ * own row and every other value is a number or a label we chose, or an error type code held to `^[A-Z][A-Z_]{0,39}$`.
+ */
+export function logPullRequestFailure(write: (line: string) => void, input: { runId: string; stage: string; error: RunPullRequestError }): void {
+  try {
+    const { error } = input;
+    const op = error.op !== undefined && LOG_LABEL.test(error.op) ? error.op : "unknown";
+    write(
+      JSON.stringify({
+        event: PR_FAILURE_EVENT,
+        run_id: UUID.test(input.runId) ? input.runId.toLowerCase() : null,
+        stage: input.stage,
+        op,
+        reason: error.reason,
+        status: typeof error.status === "number" ? error.status : null,
+        graphql_types: error.graphqlTypes,
+      }),
+    );
+  } catch {
+    // fx-swallow-ok: diagnostics never change the verdict
+  }
 }
 
 async function judgeCommit(
@@ -181,6 +210,7 @@ async function judgeCommit(
   repo: PullRequestRepo,
   job: Job,
   i: { runId: string; leaseGeneration: number },
+  write: (line: string) => void,
 ): Promise<Decision> {
   // A fresh run's branch is `<prefix><run>-g<generation>`: a stale generation's branch is never looked at. A continuation works on exactly
   // the branch our issuer put in its signed job (the one recorded for the pull request it fixes).
@@ -242,6 +272,7 @@ async function judgeCommit(
   } catch (error) {
     if (!(error instanceof RunPullRequestError)) throw error;
     if (error.retryable) return { kind: "retry" };
+    logPullRequestFailure(write, { runId: i.runId, stage, error });
     // GitHub refused to open the pull request for good (or our App did not open the one on the branch): `pr_rejected`. A permanent failure at
     // any other step has no reason of its own in the Spec, so it is `internal_error`. If the pull request exists by then (its files could not be
     // read, or it could not be marked ready) its paths were never checked, so it is closed, a draft or a ready fallback alike (C25 section 4 b).
