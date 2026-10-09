@@ -52,6 +52,7 @@ export type Validation =
   | { type: "oidc-issuer" }
   | { type: "oidc-jwks-url" }
   | { type: "uuid-list" }
+  | { type: "repo-id-list" }
   | { type: "subscription-token" }
   | { type: "iso-timestamp" };
 
@@ -183,6 +184,7 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "RUN_ACTION_KICK_SECRET", scope: "web", requiredIn: NONE, secret: true, feature: "Run actions", validation: any, whenMissing: "default_used", note: "The run-action kick route refuses (fail closed) and no run-action kick is sent; the next 5-minute sweep tick starts the action instead" },
   { name: "FX_ONBOARDING_PREVIEW", scope: "web", requiredIn: NONE, secret: false, feature: "Onboarding preview", validation: { type: "enum", values: ["on"] }, whenMissing: "feature_disabled", note: "The onboarding preview answers 503" },
   { name: "FX_OPERATOR_SUBSCRIPTION", scope: "web", requiredIn: NONE, secret: false, feature: "Operator subscription", validation: { type: "enum", values: ["on"] }, whenMissing: "feature_disabled", note: "The operator's own Claude subscription is never used; every run follows the ordinary model-key rules. This is also the kill switch: remove it or set anything else to turn the feature off" },
+  { name: "FX_HUMAN_MERGE_ONLY_REPO_IDS", scope: "web", requiredIn: NONE, secret: false, feature: "Human-merge-only repositories", validation: { type: "repo-id-list" }, whenMissing: "none", note: "No repository is locked, so auto-merge and the local-review opt-in work as before. Staging must list the dogfood repository's GitHub id. A malformed value locks EVERY repository to human merges (fail closed) and /api/health reports human_merge_only_config_invalid" },
   { name: "FX_OPERATOR_ACCOUNT_IDS", scope: "web", requiredIn: NONE, secret: false, feature: "Operator subscription", validation: { type: "uuid-list" }, whenMissing: "feature_disabled", note: "No account is an operator, so none uses the operator subscription. One bad entry turns the whole list off" },
   { name: "FX_OPERATOR_CLAUDE_OAUTH_TOKEN", scope: "web", requiredIn: NONE, secret: true, feature: "Operator subscription", validation: { type: "subscription-token" }, whenMissing: "feature_disabled", note: "The operator subscription is off; runs follow the ordinary model-key rules. Read only by the worker when it builds a run's firewall policy; never put it in a sandbox" },
   { name: "FX_RUNNER_JOB_SIGNING_KEY_PEM", scope: "web", requiredIn: NONE, secret: true, feature: "Local runner jobs", validation: { type: "ed25519-private-key" }, whenMissing: "feature_disabled", note: "A run for a runner_local repository cannot be dispatched (it fails before anything is queued). Set together with FX_RUNNER_JOB_SIGNER_ID: one without the other stops the worker at start. Read only by the worker's composition root; an Ed25519 private key in PKCS#8 PEM form" },

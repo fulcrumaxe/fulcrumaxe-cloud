@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { AccountNotActiveError, ForbiddenError, NotFoundError } from "@fx/core/src/tenancy/errors.js";
-import { InvalidRoleSettingsInputError } from "@fx/core/src/role-settings/errors.js";
+import { HumanMergeOnlyError, InvalidRoleSettingsInputError } from "@fx/core/src/role-settings/errors.js";
 import { DiscussionsError, RepoNotFoundError } from "@fx/discussions";
 import { InvalidRunLimitsError } from "@fx/core/src/run-limits/set.js";
 import { InvalidWebhookUrlError as WebhookUrlSyntaxError } from "@fx/webhooks";
@@ -438,6 +438,13 @@ export function mapError(
         error: { code: "invalid_webhook_url", message: err.message, request_id: requestId },
         details: [{ path: "url", code: err.reasonClass }],
       },
+    };
+  }
+  if (err instanceof HumanMergeOnlyError) {
+    // D#6 M1G-a: the operator locked this repository to human merges; auto-merge cannot be turned on. Nothing was written.
+    return {
+      status: 409,
+      body: { error: { code: "human_merge_only", message: "a person merges every pull request in this repository", request_id: requestId } },
     };
   }
   if (err instanceof InvalidRoleSettingsInputError) {

@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { createGitHubMergeGatePort, type GitHubHttp } from "../build/githubMergePort.js";
 import { loadRunsOnSha, reviewerReasons, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
@@ -135,7 +136,9 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,
     },
-    { accountId, workItemId, pr, tier: ctx.tier, securityDiffTriggerFired: gateSecurityTrigger, debaterEnabled, reviewMode },
+    // D#6 M1G-a: read from the environment now, on this request. A malformed setting locks every repo; an unknown repo id
+    // counts as locked while any id is listed.
+    { accountId, workItemId, pr, tier: ctx.tier, securityDiffTriggerFired: gateSecurityTrigger, debaterEnabled, reviewMode, humanMergeOnly: humanMergeOnly(ctx.ghRepoId) },
   );
 
   // 5. The outcome, as facts.

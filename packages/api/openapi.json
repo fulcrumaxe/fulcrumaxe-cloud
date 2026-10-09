@@ -7392,6 +7392,10 @@
                     },
                     "block_external_auto_merge": {
                       "type": "boolean"
+                    },
+                    "human_merge_only": {
+                      "type": "boolean",
+                      "const": true
                     }
                   },
                   "required": [
@@ -7529,6 +7533,10 @@
                     },
                     "block_external_auto_merge": {
                       "type": "boolean"
+                    },
+                    "human_merge_only": {
+                      "type": "boolean",
+                      "const": true
                     }
                   },
                   "required": [

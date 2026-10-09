@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { COPY } from "@fulcrumaxe/runner-protocol";
+import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { recordRunStatusMove, type FailureReason } from "@fx/runner";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -48,11 +49,12 @@ interface RepoRow {
   gh_owner: string | null;
   gh_name: string | null;
   auto_merge: boolean;
+  gh_repo_id: string | null;
 }
 
 async function loadRepo(client: PoolClient, repoId: string): Promise<RepoRow> {
   const { rows } = await client.query<RepoRow>(
-    `SELECT r.execution_mode, r.gh_owner, r.gh_name,
+    `SELECT r.execution_mode, r.gh_owner, r.gh_name, r.gh_repo_id,
             EXISTS (SELECT 1 FROM repo_local_review_optins o WHERE o.account_id = r.account_id AND o.repo_id = r.id) AS auto_merge
        FROM repos r WHERE r.id = $1 FOR UPDATE OF r`,
     [repoId],
@@ -120,6 +122,10 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
     }
 
     if (parsed.kind === "auto_merge_on") {
+      // D#6 M1G-a: the operator's lock. Checked first, before the wording and the typed name, and nothing is written.
+      await run(async (client) => {
+        if (humanMergeOnly((await loadRepo(client, repoId)).gh_repo_id)) throw new RunnerHttpError(409, "human_merge_only", "a person merges every pull request in this repository");
+      });
       if (typeof parsed.copySha256 !== "string" || !SHA256.test(parsed.copySha256) || parsed.copySha256 !== LOCAL_AUTO_MERGE_COPY_SHA256) {
         // Checked after the name, so a wrong name is always the first thing reported.
         await run(async (client) => confirmed(await loadRepo(client, repoId), parsed.confirmRepo));

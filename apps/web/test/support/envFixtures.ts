@@ -54,6 +54,8 @@ export function validValue(validation: Validation): string {
       return "https://oidc.vercel.com/team_abc123/.well-known/jwks";
     case "uuid-list":
       return "11111111-1111-4111-8111-111111111111, 22222222-2222-4222-8222-222222222222";
+    case "repo-id-list":
+      return "123456,789012";
     case "subscription-token":
       return "sk-ant-oat01-FAKE-FIXTURE-VALUE-NOT-A-CREDENTIAL";
     case "iso-timestamp":
