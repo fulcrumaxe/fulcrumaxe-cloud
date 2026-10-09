@@ -135,6 +135,9 @@ export async function startRelay(input: { projectRoot: string; ticket: string; o
         },
         stdio: ["pipe", "pipe", "ignore"],
       });
+      // http-backend may exit without reading the whole body (a GET, a refusal); the write to its closed stdin then fails with EPIPE.
+      // The reply is built from what it printed, so a lost write is not an error here.
+      cgi.stdin.on("error", () => {});
       cgi.stdin.end(body);
       const out: Buffer[] = [];
       cgi.stdout.on("data", (c: Buffer) => out.push(c));

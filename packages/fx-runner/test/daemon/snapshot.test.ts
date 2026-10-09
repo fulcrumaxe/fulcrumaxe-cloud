@@ -530,7 +530,11 @@ describe("the copy checks where each file really is, after it is opened (hardeni
     expect(hits).toBe(0);
     expect(refused).toBeGreaterThan(0);
     expect(leftovers()).toEqual([]);
-  });
+    // The work is bounded by the 400 attempts above, not by a clock: each is a real copy (git processes plus a recursive read),
+    // about 3-9 ms on an idle machine, so the run is 1-4 s and several times that when Gate 1 shares the host. The default
+    // 5 s budget sat at the edge of that, so this one test gets a budget a loaded machine cannot reach. The attempt count and
+    // the assertions are unchanged.
+  }, 120_000);
 
   it("the sweep does not follow a snapshots root that is a link", () => {
     const elsewhere = path.join(root, "elsewhere");
