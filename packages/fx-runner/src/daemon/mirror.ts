@@ -58,6 +58,14 @@ export function mirrorKeepClear(input: { home: string; stateDir: string; binaryD
   return [input.stateDir, input.binaryDir, input.workspaceRoot, input.tempRoot, ...CREDENTIAL_FLOOR.map((entry) => path.join(input.home, entry))];
 }
 
+/** The part of a review job the workspace is made from: the one commit to review. */
+export interface ReviewTarget {
+  head_sha: string;
+}
+
+/** A commit id as the job schema accepts it (SHA-1 or SHA-256, lowercase). Checked again here before the value reaches a git argument. */
+const REVIEW_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 export interface MirrorDeps {
   git: Git;
   /** The directory the mirrors live in (absolute): see `mirrorsRootFor`. Created 0700. */
@@ -82,8 +90,10 @@ export interface Mirrors {
   /**
    * Makes `workspace` (an empty directory) a clone of the mirror and returns the commit it starts at. A fresh run is on a new branch
    * for this lease; a fix round is on the existing `continues.branch` at its tip, and nothing is made if the mirror has no such branch.
+   * A review job (`review`, D#6 R4d-4) is on a detached HEAD at exactly `review.head_sha`, with no local branch, and nothing is made
+   * unless the mirror holds that commit on at least one of its branches (`review_sha_not_in_mirror`).
    */
-  prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string, continues?: PushContinues | null): Promise<{ base: string }>;
+  prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string, continues?: PushContinues | null, review?: ReviewTarget | null): Promise<{ base: string }>;
   /** Brings the mirror up to date and returns the tip of `continues.branch`, or throws `continuation_branch_missing`. */
   continuationTip(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }>;
 }
@@ -186,7 +196,20 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     objects: (repo) => path.join(dir(repo), "objects"),
     sync,
     continuationTip,
-    async prepareWorkspace(repo, lease, workspace, continues = null) {
+    async prepareWorkspace(repo, lease, workspace, continues = null, review = null) {
+      if (review !== null) {
+        // D#6 R4d-4 (C33 section 1.3): review exactly this commit and no other. The sync has just fetched, so there is no second fetch and no wait.
+        if (!REVIEW_SHA.test(review.head_sha)) throw new GitPathError("review_sha_not_in_mirror");
+        const { dir: mirror } = await sync(repo);
+        const sha = review.head_sha;
+        await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "cat-file", "-e", `${sha}^{commit}`]);
+        // A commit that is in the mirror's objects but on no branch (a superseded head after a force-push, or a fork's pull ref) is not reviewed.
+        const holders = await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads/"]);
+        if (holders.trim() === "") throw new GitPathError("review_sha_not_in_mirror");
+        await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
+        await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "--detach", sha]);
+        return { base: sha };
+      }
       const plan = pushPlan(lease, continues);
       if (continues !== null) {
         const { dir: mirror, tip } = await continuationTip(repo, continues);
