@@ -65,6 +65,7 @@ import {
   substituteDockOrder,
   validateThemeNames,
 } from "./profile.mjs";
+import { stripShippedComments } from "./strip-comments.mjs";
 import { loadFirstPartyApps, createFirstPartyOutput, renderTags, tagPaths } from "./first-party.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -283,6 +284,9 @@ export function build({
   // test).
   allowlistPath = DEFAULT_ALLOWLIST_PATH,
   buildInfoPath = DEFAULT_BUILD_INFO_PATH,
+  // D#37 WS-D4: comments are stripped from the shipped JS and CSS (dist only).
+  // `false` is for the byte report's "before" build and nothing else.
+  stripComments = true,
 } = {}) {
   const checksOpts = { allowlistPath, buildInfoPath };
 
@@ -434,6 +438,20 @@ export function build({
   mkdirSync(outDir, { recursive: true });
 
   const copied = [];
+  const stripReport = [];
+  // Writes one shipped file. The stripper sees the final text of every
+  // .js/.mjs/.css (after the profile substitutions below, which match their
+  // marker lines on the original text); source files on disk are never touched.
+  const writeShipped = (destAbs, relPath, content) => {
+    if (stripComments && /\.(?:m?js|css)$/.test(relPath)) {
+      const text = Buffer.isBuffer(content) ? content.toString("utf8") : content;
+      const stripped = stripShippedComments(relPath, text);
+      stripReport.push({ relPath, before: Buffer.byteLength(text), after: Buffer.byteLength(stripped) });
+      writeFileSync(destAbs, stripped);
+    } else {
+      writeFileSync(destAbs, content);
+    }
+  };
   for (const relPath of reachable) {
     if (relPath === "index.html") continue;
     const isFirstParty = fp.owns(relPath);
@@ -451,22 +469,23 @@ export function build({
       // Compiled (TS/TSX) or verbatim (.js/.css) first-party output; the
       // source tree is never copied. `has()` only answers true for .js/.css
       // outputs, so no .ts/.tsx can reach this branch.
-      writeFileSync(destAbs, fp.read(relPath));
+      writeShipped(destAbs, relPath, fp.read(relPath));
     } else if (relPath === "core/theme-manager.js") {
       // D#37 WS-D criterion 7 (OPEN OWNER DECISION 1): substitute the
       // profile's own default_theme into the copy that ships -- the
       // source tree (and any OTHER profile's build) keeps the literal's
       // own fallback untouched.
       const defaultTheme = typeof profile.default_theme === "string" ? profile.default_theme : "classic-crt";
-      writeFileSync(destAbs, substituteDefaultTheme(readFileSync(srcAbs, "utf8"), defaultTheme));
+      writeShipped(destAbs, relPath, substituteDefaultTheme(readFileSync(srcAbs, "utf8"), defaultTheme));
     } else if (relPath === "core/taskbar.js") {
       // D#37 WS-E criterion 6: substitute the profile's own dock_order into
       // the copy that ships, the same way theme-manager.js's default theme
       // is substituted just above. The source tree (and any profile build
       // that omits dock_order) keeps the literal's own empty-array fallback.
-      writeFileSync(destAbs, substituteDockOrder(readFileSync(srcAbs, "utf8"), profile.dock_order));
+      writeShipped(destAbs, relPath, substituteDockOrder(readFileSync(srcAbs, "utf8"), profile.dock_order));
     } else {
-      copyFileSync(srcAbs, destAbs);
+      if (stripComments && /\.(?:m?js|css)$/.test(relPath)) writeShipped(destAbs, relPath, readFileSync(srcAbs, "utf8"));
+      else copyFileSync(srcAbs, destAbs);
     }
     copied.push(relPath);
   }
@@ -548,6 +567,7 @@ export function build({
     modulePreloadPaths,
     hash,
     outDir,
+    stripReport,
   };
 }
 
@@ -568,13 +588,19 @@ function main(argv) {
   const shellDir = typeof args.shell === "string" ? args.shell : DEFAULT_SHELL_DIR;
   const appsDir = typeof args.apps === "string" ? args.apps : DEFAULT_APPS_DIR;
   const outDir = typeof args.out === "string" ? args.out : DEFAULT_OUT_DIR;
+  const stripComments = args["keep-comments"] !== true;
 
   try {
-    const result = build({ profilePath, shellDir, appsDir, outDir });
+    const result = build({ profilePath, shellDir, appsDir, outDir, stripComments });
     console.log(
       `build.mjs: wrote ${result.copiedFiles.length + 1} file(s) to ${result.outDir} ` +
         `(profile "${result.profile.name}", dropped ${result.droppedPaths.length} tag(s))`
     );
+    if (result.stripReport.length > 0) {
+      const before = result.stripReport.reduce((a, r) => a + r.before, 0);
+      const after = result.stripReport.reduce((a, r) => a + r.after, 0);
+      console.log(`build.mjs: stripped comments from ${result.stripReport.length} JS/CSS file(s): ${before} -> ${after} raw bytes`);
+    }
     return 0;
   } catch (err) {
     console.error(err.message || String(err));
