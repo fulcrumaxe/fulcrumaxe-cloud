@@ -1,6 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack) and
- * `scrub` (the upload gate).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -12,13 +11,16 @@
  * Exit codes: 0 plan written; 1 the plan was written (or could not be) because of a refusal of a pack the
  * caller named, or EMPTY-SELECTION; 2 usage, manifest or target errors.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPacks, ManifestError, TIERS, type Pack, type Tier } from "./manifest.js";
+import { GithubError, syncIssues } from "./issues.js";
+import { LAST_TESTED_OUTCOMES, LastTestedError, readLastTested, recordLastTested, type LastTestedOutcome } from "./last-tested.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV, readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
+import type { Results } from "./report.js";
 import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
 import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
@@ -100,6 +102,8 @@ export interface Io {
   cli?: string;
   /** Test seam: the fetch layer 2 reads `/api/health` with. */
   fetch?: typeof fetch;
+  /** Test seam: the extra trust root for the GitHub API address (a local TLS fake). */
+  githubCa?: string;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
@@ -194,8 +198,89 @@ function scrubCommand(argv: string[], io: Io): number {
   return result.findings.length > 0 ? 1 : 0;
 }
 
+/** `--flag value` pairs only; a flag outside `allowed`, a repeat or a missing value is a usage error (null). */
+function flagMap(argv: string[], allowed: readonly string[]): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const flag = argv[i] as string;
+    const value = argv[i + 1];
+    if (!allowed.includes(flag) || value === undefined || value.startsWith("--") || flag in out) return null;
+    out[flag] = value;
+  }
+  return out;
+}
+
+/**
+ * `live-e2e issues --results <results.json> --repo <owner/name> [--run-url <url>]`: opens, comments on or closes
+ * the one issue per failing pack (see issues.ts). The token is read from GITHUB_TOKEN; the API address from
+ * GITHUB_API_URL (set by Actions), default https://api.github.com. Exit 0 done, 1 GitHub refused or was
+ * unreachable, 2 usage.
+ */
+async function issuesCommand(argv: string[], io: Io): Promise<number> {
+  const flags = flagMap(argv, ["--results", "--repo", "--run-url"]);
+  const token = io.env["GITHUB_TOKEN"];
+  if (flags === null || flags["--results"] === undefined || flags["--repo"] === undefined || token === undefined || token === "") {
+    io.stderr("usage: live-e2e issues --results <file> --repo <owner/name> [--run-url <url>]   (GITHUB_TOKEN in the environment)");
+    return 2;
+  }
+  try {
+    const results = JSON.parse(readFileSync(resolve(io.cwd, flags["--results"]), "utf8")) as Results;
+    if (results.version !== 1 || !Array.isArray(results.packs) || typeof results.target !== "string") throw new Error("not a results.json");
+    const maskFile = io.env[MASK_FILE_ENV];
+    const registry = new MaskRegistry({ emit: () => undefined, ...(maskFile ? { file: maskFile } : {}) });
+    const api = io.env["GITHUB_API_URL"];
+    const actions = await syncIssues(results, {
+      repo: flags["--repo"],
+      token,
+      ...(api !== undefined && api !== "" ? { apiBase: api } : {}),
+      ...(io.githubCa !== undefined ? { ca: io.githubCa } : {}),
+      ...(flags["--run-url"] !== undefined ? { runUrl: flags["--run-url"] } : {}),
+      scrub: { registry, env: io.env },
+    });
+    for (const a of actions) io.stdout(`issues: ${a.pack} ${a.action}${a.number !== undefined ? ` #${a.number}` : ""}`);
+    return 0;
+  } catch (err) {
+    // Only our own messages: they carry a status and a route, never a response body or the token.
+    io.stderr(err instanceof GithubError ? err.message : "issues: could not read the results or reach GitHub");
+    return err instanceof GithubError ? 1 : 2;
+  }
+}
+
+/**
+ * `live-e2e last-tested record --target t --commit sha --tier t --outcome pass|fail` or `... show --target t`.
+ * The store is under $HOME (see last-tested.ts). `show` prints the target's entry as JSON, or `{}`.
+ */
+function lastTestedCommand(argv: string[], io: Io): number {
+  const [sub, ...rest] = argv;
+  const flags = flagMap(rest, ["--target", "--commit", "--tier", "--outcome"]);
+  const home = io.env["HOME"];
+  const warn = (l: string) => io.stderr(l);
+  try {
+    if (flags === null || home === undefined || flags["--target"] === undefined) throw new LastTestedError("usage: live-e2e last-tested record|show --target <name> [--commit sha --tier t --outcome pass|fail]");
+    if (sub === "show") {
+      io.stdout(JSON.stringify(readLastTested(home, warn).targets[flags["--target"]] ?? {}));
+      return 0;
+    }
+    if (sub === "record") {
+      const { "--commit": commit, "--tier": tier, "--outcome": outcome } = flags;
+      if (commit === undefined || tier === undefined || outcome === undefined || !(LAST_TESTED_OUTCOMES as readonly string[]).includes(outcome)) throw new LastTestedError("record needs --commit, --tier and --outcome pass|fail");
+      recordLastTested(home, flags["--target"], { commit, tier: tier as Tier, outcome: outcome as LastTestedOutcome, at: new Date().toISOString() }, warn);
+      return 0;
+    }
+    throw new LastTestedError("usage: live-e2e last-tested record|show --target <name>");
+  } catch (err) {
+    if (err instanceof LastTestedError) {
+      io.stderr(err.message);
+      return 2;
+    }
+    throw err;
+  }
+}
+
 export async function main(argv: string[], io: Io): Promise<number> {
   if (argv[0] === "scrub") return scrubCommand(argv.slice(1), io);
+  if (argv[0] === "issues") return issuesCommand(argv.slice(1), io);
+  if (argv[0] === "last-tested") return lastTestedCommand(argv.slice(1), io);
   let args: Args;
   try {
     args = parseArgs(argv);
