@@ -17,6 +17,9 @@ import { SNAPSHOT_MAX_BYTES, SNAPSHOT_MAX_ENTRIES, snapshotConfig, sweepSnapshot
 import { assertGitDirShape, assertWorkspaceGit } from "../../src/daemon/workspaceGit.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
 
+// Cases here run real git several times; under a loaded host (Gate 1 beside other jobs) the 5 s default has been overrun by cases that take well under 1 s alone.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 let root: string;
 let home: string;
 let remote: string;
@@ -28,6 +31,13 @@ const SETUP_ENV = (): Record<string, string> => ({
   HOME: home,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
+  // `git commit` starts `git maintenance run --auto --detach`, which outlives the command and can create `.git/objects/maintenance.lock` while a test is
+  // replacing parts of that `.git`. Nothing in a fixture wants a gc, so both automatic triggers are off (as in workspaceRedirect.test.ts).
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "gc.auto",
+  GIT_CONFIG_VALUE_0: "0",
+  GIT_CONFIG_KEY_1: "maintenance.auto",
+  GIT_CONFIG_VALUE_1: "false",
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@example.test",
   GIT_COMMITTER_NAME: "t",

@@ -14,6 +14,9 @@ import { originHash, gitProxyPinned, gitProxyHashFor, PINNED_GIT_PROXIES } from 
 import { runCapture } from "../../src/engines/claude/capture.js";
 import { startRelay, type Relay } from "../helpers/relayFixture.js";
 
+// Cases here run real git several times; under a loaded host (Gate 1 beside other jobs) the 5 s default has been overrun by cases that take well under 1 s alone.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const CLOUD = "https://cloud.example.test";
 /** A JWS-shaped string, built from parts at runtime: three base64url segments. */
 const makeTicket = (): string => ["hdr", "claims", "sig"].map((part) => Buffer.from(`${part}-${randomBytes(24).toString("hex")}`).toString("base64url")).join(".");
@@ -30,6 +33,13 @@ const SETUP_ENV = (): Record<string, string> => ({
   HOME: home,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
+  // `git commit` starts `git maintenance run --auto --detach`, which outlives the command and can create `.git/objects/maintenance.lock` while a test is
+  // replacing parts of that `.git`. Nothing in a fixture wants a gc, so both automatic triggers are off (as in workspaceRedirect.test.ts).
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "gc.auto",
+  GIT_CONFIG_VALUE_0: "0",
+  GIT_CONFIG_KEY_1: "maintenance.auto",
+  GIT_CONFIG_VALUE_1: "false",
   GIT_AUTHOR_NAME: "t",
   GIT_AUTHOR_EMAIL: "t@example.test",
   GIT_COMMITTER_NAME: "t",
