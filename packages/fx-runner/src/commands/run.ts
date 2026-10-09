@@ -65,6 +65,8 @@ export interface RunHost {
   engine: EngineKit;
   /** The machine behind the sandbox probe (the same host `doctor` uses): the process start and the file reads. */
   sandbox: SandboxHost;
+  /** The kernel release string; the machine's own when left out. Tests set it. */
+  osrelease?: string | undefined;
   /** How this program starts itself again (runtime, its flags, script), for a watch pane. Absent: no watch. */
   selfCommand?: readonly string[] | undefined;
   /** `TERM`, looked up by name by the caller: the terminal type the tmux client attaches with. */
@@ -116,13 +118,13 @@ function sandboxDirs(host: RunHost, searchPath: string): string[] {
 }
 
 /**
- * The agent CLI and the sandbox tools' directories, or the refusal for a platform that has no sandbox at all (Windows, WSL1, anything
+ * The agent CLI and the sandbox tools' directories, or the refusal for a platform that has no sandbox at all (Windows, WSL1, WSL2, anything
  * else). A machine that only lacks bubblewrap or socat gets no refusal here: it starts, reports the reason and claims nothing.
  */
 export function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
   try {
     try {
-      selectTier({ platform: host.platform, hasCommand: (name) => commandOnPath(name, searchPath) });
+      selectTier({ platform: host.platform, osrelease: host.osrelease, hasCommand: (name) => commandOnPath(name, searchPath) });
     } catch (error) {
       if (!(error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing"))) throw error;
     }

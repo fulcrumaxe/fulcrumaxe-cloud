@@ -134,7 +134,7 @@ function targetFor(host: ServiceHost, home: string): Target {
     const file = path.join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
     return { file, render: renderLaunchdPlist, start: [`launchctl bootstrap gui/$(id -u) "${file}"`], stop: [`launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL}`] };
   }
-  throw new CliError("service_unsupported: a service can be installed on Linux (systemd) and macOS (launchd) only; on Windows use WSL2 and the Linux install");
+  throw new CliError("service_unsupported: a service can be installed on Linux (systemd) and macOS (launchd) only; Windows, including WSL2, is not supported yet");
 }
 
 type Existing = { kind: "none" } | { kind: "ours"; text: string } | { kind: "foreign" };

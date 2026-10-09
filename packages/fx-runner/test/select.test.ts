@@ -19,9 +19,8 @@ function code(run: () => unknown): string {
 }
 
 describe("tier selection: host_sandbox or a refusal, never an unsandboxed run", () => {
-  it("Linux and WSL2 with bubblewrap and socat get host_sandbox", () => {
+  it("Linux with bubblewrap and socat gets host_sandbox", () => {
     expect(selectTier({ ...linux, hasCommand: has("bwrap", "socat") })).toBe("host_sandbox");
-    expect(selectTier({ platform: "linux", osrelease: "5.15.167.4-microsoft-standard-WSL2", hasCommand: has("bwrap", "socat") })).toBe("host_sandbox");
   });
 
   it("macOS needs no extra tool", () => {
@@ -33,9 +32,11 @@ describe("tier selection: host_sandbox or a refusal, never an unsandboxed run", 
     expect(code(() => selectTier({ ...linux, hasCommand: has("bwrap") }))).toBe("socat_missing");
   });
 
-  it("Windows and WSL1 are refused whatever is installed", () => {
+  it("Windows, WSL1 and WSL2 are refused whatever is installed", () => {
     expect(code(() => selectTier({ platform: "win32", hasCommand: has("bwrap", "socat") }))).toBe("windows_unsupported");
     expect(code(() => selectTier({ platform: "linux", osrelease: "4.4.0-19041-Microsoft", hasCommand: has("bwrap", "socat") }))).toBe("wsl1_unsupported");
+    expect(code(() => selectTier({ platform: "linux", osrelease: "5.15.167.4-microsoft-standard-WSL2", hasCommand: has("bwrap", "socat") }))).toBe("wsl2_unsupported");
+    expect(code(() => resolveSandboxTools("", { platform: "linux", osrelease: "5.15.167.4-microsoft-standard-WSL2" }))).toBe("wsl2_unsupported");
   });
 
   describe("the sandbox tools are found at setup as absolute paths", () => {

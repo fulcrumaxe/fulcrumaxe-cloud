@@ -53,7 +53,7 @@ function isAbsoluteEntry(entry: string): boolean {
 
 /** `pathValue` with each of `dirs` added at the end unless it is already an entry. */
 function withDirs(pathValue: string | undefined, dirs: readonly string[]): string | undefined {
-  // POSIX only: the runner supports macOS, Linux and WSL2, where PATH entries are `:`-separated and absolute paths start with `/`.
+  // POSIX only: the runner supports macOS and Linux, where PATH entries are `:`-separated and absolute paths start with `/`.
   // Only absolute host entries are kept. An empty or relative entry (`::`, `.`, `bin`) resolves against the working
   // directory, which is the workspace, so a tool the agent wrote there (a `bwrap`, say) would run outside the sandbox.
   const entries = pathValue === undefined || pathValue === "" ? [] : pathValue.split(":").filter(isAbsoluteEntry);

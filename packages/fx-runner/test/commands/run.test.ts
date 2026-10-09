@@ -449,6 +449,17 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     expect((await stop(run)).code).toBe(0);
   });
 
+  it.each(["5.15.167.4-microsoft-standard-WSL2", "4.4.0-19041-Microsoft"])("a %s kernel refuses to start run by name: no claim, no probe, no stall", async (release) => {
+    const sandbox = fakeSandboxHost();
+    cloud.enqueue(queuedJob());
+    const result = await start({ host: { sandbox, osrelease: release } }).done;
+    expect(result.code).not.toBe(0);
+    expect(result.message).toMatch(/^wsl[12]_unsupported: fx-runner does not support Windows yet, including WSL2\. Linux and macOS are supported\.; fx-runner cannot run jobs here$/);
+    expect(claims()).toBe(0);
+    expect(sandbox.calls).toEqual([]);
+    expect(cloud.runs.size).toBe(0);
+  });
+
   it("a machine without bubblewrap starts, reports bwrap_missing, and does not exit (it used to refuse to start)", async () => {
     unlinkSync(path.join(toolbin, "bwrap"));
     const sandbox = fakeSandboxHost();

@@ -18,6 +18,7 @@ import { isProtectedDeployment, readCapped } from "../cloud.js";
 import { loadRunnerKey } from "../keys.js";
 import { BYPASS_ENV_NAME, bypassHeaders, bypassSecret, bypassRefusalText } from "../protectionBypass.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
+import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
@@ -38,12 +39,21 @@ export interface DoctorHost {
   xdgCacheHome?: string | undefined;
   /** The machine behind the sandbox probe: the process start and the file reads. */
   sandbox: SandboxHost;
+  /** The kernel release string; the machine's own when left out. Tests set it. */
+  osrelease?: string | undefined;
 }
 
 type Level = "PASS" | "WARN" | "FAIL" | "INFO";
 
 /** The sandbox line, and under a failure the fix for this machine. A probe that cannot be set up is a failure too: there is no unsandboxed way to run. */
 async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  try {
+    detectPlatform({ platform: host.platform, osrelease: host.osrelease });
+  } catch (error) {
+    if (!(error instanceof SandboxRefused)) throw error;
+    line("FAIL", "Sandbox", `${error.code}: ${error.message.slice(error.code.length + 2)}`);
+    return;
+  }
   let result;
   try {
     result = await probeMachine({ platform: host.platform, home: host.home, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome }, host.sandbox);
