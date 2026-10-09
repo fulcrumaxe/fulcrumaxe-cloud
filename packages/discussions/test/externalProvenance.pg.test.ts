@@ -70,7 +70,7 @@ describe("external provenance gate [pg]", () => {
     it("(a) system publishSpec on an internal child of an external grandparent is external_requires_human", async () => {
       const t = await seedTenant(db.admin);
       const { c } = await chain(t.accountId, "discussing");
-      await refused(t.accountId, c, () => publishSpec(ctx(t.system), { workItemId: c, body: "s" }), hasCode("external_requires_human"));
+      await refused(t.accountId, c, () => publishSpec(ctx(t.system), { workItemId: c, acceptanceFiles: ["src/**"], body: "s" }), hasCode("external_requires_human"));
     });
 
     it("(b) system discussing -> spec_ready on C (with a Spec row present) is forbidden", async () => {
@@ -89,14 +89,14 @@ describe("external provenance gate [pg]", () => {
     it("(d) system addCorrection on C is external_requires_human", async () => {
       const t = await seedTenant(db.admin);
       const { c } = await chain(t.accountId, "spec_ready");
-      await publishSpec(ctx(t.owner), { workItemId: c, body: "owner-published" });
+      await publishSpec(ctx(t.owner), { workItemId: c, acceptanceFiles: ["src/**"], body: "owner-published" });
       await refused(t.accountId, c, () => addCorrection(ctx(t.system), { workItemId: c, body: "x" }), hasCode("external_requires_human"));
     });
 
     it("(e) with A internal, the same four calls succeed for system", async () => {
       const t = await seedTenant(db.admin);
       const pub = await chain(t.accountId, "discussing", "internal");
-      await expect(publishSpec(ctx(t.system), { workItemId: pub.c, body: "s" })).resolves.toMatchObject({ version: 1 });
+      await expect(publishSpec(ctx(t.system), { workItemId: pub.c, acceptanceFiles: ["src/**"], body: "s" })).resolves.toMatchObject({ version: 1 });
 
       const promote = await chain(t.accountId, "discussing", "internal");
       await seedSpecVersion(db.admin, t.accountId, promote.c);
@@ -106,7 +106,7 @@ describe("external provenance gate [pg]", () => {
       await expect(setStage(ctx(t.system), { workItemId: fast.c, toStage: "in_progress" })).resolves.toMatchObject({ recorded: true });
 
       const corr = await chain(t.accountId, "spec_ready", "internal");
-      await publishSpec(ctx(t.owner), { workItemId: corr.c, body: "s" });
+      await publishSpec(ctx(t.owner), { workItemId: corr.c, acceptanceFiles: ["src/**"], body: "s" });
       await expect(addCorrection(ctx(t.system), { workItemId: corr.c, body: "x" })).resolves.toMatchObject({ code: "C1" });
     });
 
@@ -118,7 +118,7 @@ describe("external provenance gate [pg]", () => {
       await db.admin.query(`UPDATE work_items SET parent_id = $2 WHERE id = $1`, [x, z]); // x -> z -> y -> x
       await seedSpecVersion(db.admin, t.accountId, x);
       const started = Date.now();
-      await refused(t.accountId, x, () => publishSpec(ctx(t.system), { workItemId: x, body: "s" }), hasCode("external_requires_human"));
+      await refused(t.accountId, x, () => publishSpec(ctx(t.system), { workItemId: x, acceptanceFiles: ["src/**"], body: "s" }), hasCode("external_requires_human"));
       await refused(t.accountId, x, () => setStage(ctx(t.system), { workItemId: x, toStage: "spec_ready" }), isForbidden);
       await refused(t.accountId, x, () => addCorrection(ctx(t.system), { workItemId: x, body: "c" }), hasCode("external_requires_human"));
       expect(Date.now() - started).toBeLessThan(1000);
@@ -132,7 +132,7 @@ describe("external provenance gate [pg]", () => {
       await forceParentId(db.admin, orphan, randomUUID());
       await refused(t.accountId, orphan, () => setStage(ctx(t.system), { workItemId: orphan, toStage: "in_progress" }), isForbidden);
       const child = await seedWorkItemAt(db.admin, t.accountId, "discussing", { provenance: "internal", parentId: orphan });
-      await refused(t.accountId, child, () => publishSpec(ctx(t.system), { workItemId: child, body: "s" }), hasCode("external_requires_human"));
+      await refused(t.accountId, child, () => publishSpec(ctx(t.system), { workItemId: child, acceptanceFiles: ["src/**"], body: "s" }), hasCode("external_requires_human"));
 
       const read = (id: string) => withTenant(db.appUserPool, t.accountId, (client) => effectiveProvenance(client, id));
       const root = await seedWorkItemAt(db.admin, t.accountId, "triaged", { provenance: "internal" });
@@ -153,20 +153,20 @@ describe("external provenance gate [pg]", () => {
       const foreign = await seedWorkItemAt(db.admin, other.accountId, "triaged", { provenance: "external" });
       const mine = await seedWorkItemAt(db.admin, t.accountId, "discussing", { provenance: "internal" });
       await expect(db.admin.query(`UPDATE work_items SET parent_id = $2 WHERE id = $1`, [mine, foreign])).rejects.toThrow();
-      await expect(publishSpec(ctx(t.system), { workItemId: mine, body: "s" })).resolves.toMatchObject({ version: 1 });
+      await expect(publishSpec(ctx(t.system), { workItemId: mine, acceptanceFiles: ["src/**"], body: "s" })).resolves.toMatchObject({ version: 1 });
     });
   });
 
   it("criterion 4 (R3): system addCorrection on an external item is external_requires_human and writes nothing; owner/admin succeed; system on internal gets the next C<n>", async () => {
     const t = await seedTenant(db.admin);
     const ext = await seedWorkItemAt(db.admin, t.accountId, "triaged", { provenance: "external" });
-    await publishSpec(ctx(t.owner), { workItemId: ext, body: "owner Spec" });
+    await publishSpec(ctx(t.owner), { workItemId: ext, acceptanceFiles: ["src/**"], body: "owner Spec" });
     await refused(t.accountId, ext, () => addCorrection(ctx(t.system), { workItemId: ext, body: "injected" }), hasCode("external_requires_human"));
     await expect(addCorrection(ctx(t.owner), { workItemId: ext, body: "by owner" })).resolves.toMatchObject({ code: "C1" });
     await expect(addCorrection(ctx(t.admin), { workItemId: ext, body: "by admin" })).resolves.toMatchObject({ code: "C2" });
 
     const internal = await seedWorkItemAt(db.admin, t.accountId, "triaged", { provenance: "internal" });
-    await publishSpec(ctx(t.owner), { workItemId: internal, body: "s" });
+    await publishSpec(ctx(t.owner), { workItemId: internal, acceptanceFiles: ["src/**"], body: "s" });
     await addCorrection(ctx(t.owner), { workItemId: internal, body: "one" });
     await expect(addCorrection(ctx(t.system), { workItemId: internal, body: "two" })).resolves.toMatchObject({ code: "C2" });
   });
@@ -185,7 +185,7 @@ describe("external provenance gate [pg]", () => {
 
     // Reached through publishSpec -> in_progress -> needs_human -> discussing: a Spec exists, so system may promote.
     const wi = await seedWorkItemAt(db.admin, t.accountId, "discussing", { provenance: "internal" });
-    await publishSpec(ctx(t.system), { workItemId: wi, body: "s" });
+    await publishSpec(ctx(t.system), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s" });
     await setStage(ctx(t.system), { workItemId: wi, toStage: "in_progress" });
     await setStage(ctx(t.system), { workItemId: wi, toStage: "needs_human" });
     await setStage(ctx(t.owner), { workItemId: wi, toStage: "discussing" });

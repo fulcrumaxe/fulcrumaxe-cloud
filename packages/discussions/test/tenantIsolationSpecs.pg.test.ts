@@ -30,14 +30,14 @@ describe("cross-tenant isolation: Specs, corrections, stages, deps [pg]", () => 
 
     const wiA = await seedWorkItemAt(db.admin, a.accountId, "triaged");
     const wiA2 = await seedWorkItemAt(db.admin, a.accountId, "in_progress");
-    const specA = await publishSpec(ctx(a.owner), { workItemId: wiA, body: "A's Spec" });
+    const specA = await publishSpec(ctx(a.owner), { workItemId: wiA, acceptanceFiles: ["src/**"], body: "A's Spec" });
     await addCorrection(ctx(a.owner), { workItemId: wiA, body: "A's correction" });
     await addDependency(ctx(a.owner), { workItemId: wiA, dependsOnId: wiA2 });
     const runA = await seedRunOn(db.admin, a.accountId, wiA, { specVersionId: specA.id });
 
     const before = await snapshotOf(a.accountId);
     for (const p of [b.owner, b.system]) {
-      await expect(publishSpec(ctx(p), { workItemId: wiA, body: "hijack" })).rejects.toBeInstanceOf(NotFoundError);
+      await expect(publishSpec(ctx(p), { workItemId: wiA, acceptanceFiles: ["src/**"], body: "hijack" })).rejects.toBeInstanceOf(NotFoundError);
       await expect(addCorrection(ctx(p), { workItemId: wiA, body: "hijack" })).rejects.toBeInstanceOf(NotFoundError);
       await expect(specAsOf(ctx(p), { runId: runA.runId })).rejects.toBeInstanceOf(NotFoundError);
       await expect(correctionsSince(ctx(p), { runId: runA.runId })).rejects.toBeInstanceOf(NotFoundError);
@@ -53,7 +53,7 @@ describe("cross-tenant isolation: Specs, corrections, stages, deps [pg]", () => 
     const b = await seedTenant(db.admin);
     const wiA = await seedWorkItemAt(db.admin, a.accountId, "triaged");
     const wiB = await seedWorkItemAt(db.admin, b.accountId, "triaged");
-    await publishSpec(ctx(b.owner), { workItemId: wiB, body: "B's Spec" });
+    await publishSpec(ctx(b.owner), { workItemId: wiB, acceptanceFiles: ["src/**"], body: "B's Spec" });
 
     await expect(addCorrection(ctx(b.owner), { workItemId: wiB, body: "c", appliesTo: [wiA] })).rejects.toMatchObject({ code: "invalid_input" });
     await expect(addDependency(ctx(b.owner), { workItemId: wiB, dependsOnId: wiA })).rejects.toBeInstanceOf(NotFoundError);
@@ -66,7 +66,7 @@ describe("cross-tenant isolation: Specs, corrections, stages, deps [pg]", () => 
     const b = await seedTenant(db.admin);
     const wiA = await seedWorkItemAt(db.admin, a.accountId, "triaged");
     const wiB = await seedWorkItemAt(db.admin, b.accountId, "triaged");
-    const specB = await publishSpec(ctx(b.owner), { workItemId: wiB, body: "B's Spec" });
+    const specB = await publishSpec(ctx(b.owner), { workItemId: wiB, acceptanceFiles: ["src/**"], body: "B's Spec" });
     const runA = await seedRunOn(db.admin, a.accountId, wiA);
     const runB = await seedRunOn(db.admin, b.accountId, wiB, { specVersionId: specB.id });
 
@@ -81,9 +81,9 @@ describe("cross-tenant isolation: Specs, corrections, stages, deps [pg]", () => 
     const b = await seedTenant(db.admin);
     const wiA = await seedWorkItemAt(db.admin, a.accountId, "triaged");
     const wiB = await seedWorkItemAt(db.admin, b.accountId, "triaged");
-    await publishSpec(ctx(a.owner), { workItemId: wiA, body: "a1" });
-    await publishSpec(ctx(a.owner), { workItemId: wiA, body: "a2" });
-    const vB = await publishSpec(ctx(b.owner), { workItemId: wiB, body: "b1" });
+    await publishSpec(ctx(a.owner), { workItemId: wiA, acceptanceFiles: ["src/**"], body: "a1" });
+    await publishSpec(ctx(a.owner), { workItemId: wiA, acceptanceFiles: ["src/**"], body: "a2" });
+    const vB = await publishSpec(ctx(b.owner), { workItemId: wiB, acceptanceFiles: ["src/**"], body: "b1" });
     const cA = await addCorrection(ctx(a.owner), { workItemId: wiA, body: "ca" });
     const cB = await addCorrection(ctx(b.owner), { workItemId: wiB, body: "cb" });
     expect(vB.version).toBe(1);

@@ -218,7 +218,8 @@ async function judgeCommit(
       return state.exists && state.aheadBy === null ? failed("internal_error") : verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
     }
 
-    if (ctx.scope.kind === "unknown") return failed("scope_unknown");
+    // C34 section 2.2: a Spec with no list (absent or empty) says so; an unreadable one keeps today's detail-less answer.
+    if (ctx.scope.kind === "unknown") return failed("scope_unknown", ctx.scope.reason === "absent" ? { detail: "no_file_list" } : {});
     // The pull request's text is made from the run's work item. A run with none cannot be given a pull request at all.
     if (ctx.text === null) return failed("internal_error");
 

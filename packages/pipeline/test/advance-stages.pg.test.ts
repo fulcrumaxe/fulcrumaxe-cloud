@@ -67,7 +67,7 @@ class World implements AdvanceRunPorts {
   }
   private defaultEnvelope(req: AdvanceRunRequest): Record<string, unknown> {
     return req.role === "project-manager"
-      ? { summary: "**technical-architect**: agrees.\n**security-expert**: agrees.\n**cost-analyst**: agrees.", spec: "1. The thing works.\n2. The thing is tested." }
+      ? { summary: "**technical-architect**: agrees.\n**security-expert**: agrees.\n**cost-analyst**: agrees.", spec: "1. The thing works.\n2. The thing is tested.", acceptance_files: ["src/a.ts"] }
       : { comment: `${req.role}: fine.`, stance: "agree", challenge: false };
   }
   async outcome(runId: string): Promise<AdvanceRunOutcome> {
@@ -174,6 +174,12 @@ describe("the panel and the Spec over real runs", () => {
     ["ends failed", () => ({ status: "failed", envelope: null }), "pm_failed"],
     ["answers with no Spec", () => ({ envelope: { summary: "s" } }), "invalid_spec_output"],
     ["answers with an empty Spec", () => ({ envelope: { summary: "s", spec: "   " } }), "invalid_spec_output"],
+    // D#6 R4d-5a (C34 section 1.2, F5): no readable file list, no Spec.
+    ["answers with no file list", () => ({ envelope: { summary: "s", spec: "1. x" } }), "invalid_file_scope"],
+    ["answers with an empty file list", () => ({ envelope: { summary: "s", spec: "1. x", acceptance_files: [] } }), "invalid_file_scope"],
+    ["answers with a file list the matcher cannot read", () => ({ envelope: { summary: "s", spec: "1. x", acceptance_files: ["src/a.ts", "a/{b}"] } }), "invalid_file_scope"],
+    ["answers with a lone **", () => ({ envelope: { summary: "s", spec: "1. x", acceptance_files: ["**"] } }), "invalid_file_scope"],
+    ["answers with a file list that is not a list", () => ({ envelope: { summary: "s", spec: "1. x", acceptance_files: "src/a.ts" } }), "invalid_file_scope"],
   ] as const)("a PM that %s ends the Spec step with the pipeline's own %s and writes nothing", async (_n, script, reason) => {
     const t = await discussing();
     t.world.script = (req) => (req.role === "project-manager" ? script() : {});
@@ -311,7 +317,7 @@ describe("the panel and the Spec over real runs", () => {
 
   it("a Spec too large to store is needs_owner_action, not a retry loop", async () => {
     const t = await discussing();
-    t.world.script = (req) => (req.role === "project-manager" ? { envelope: { summary: "s", spec: "x".repeat(70_000) } } : {});
+    t.world.script = (req) => (req.role === "project-manager" ? { envelope: { summary: "s", spec: "x".repeat(70_000), acceptance_files: ["src/a.ts"] } } : {});
     await runPanelForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, FAST);
     expect(await runSpecForItem(h.runWriterPool, t.accountId, t.workItemId, t.world, FAST)).toEqual({ status: "needs_owner_action", reason: "spec_too_large" });
     expect(await specBody(t.workItemId)).toBeUndefined();
@@ -421,6 +427,52 @@ describe("the build", () => {
   it("an unknown item is not_found", async () => {
     const t = await discussing(true);
     expect(await startBuildForItem(h.runWriterPool, t.accountId, randomUUID(), randomUUID(), t.world)).toEqual({ status: "refused", reason: "not_found" });
+  });
+
+  // D#6 R4d-5a (C34 section 2.1, F6): a runner build is refused BEFORE any run exists when the Spec it would pin has no readable file list.
+  describe("a Spec with no file list", () => {
+    const runs = async (id: string) => (await h.admin.query("SELECT 1 FROM agent_runs WHERE work_item_id = $1 AND role = 'executor'", [id])).rowCount;
+    const setMode = (id: string, mode: string) => h.admin.query("UPDATE repos SET execution_mode = $2 WHERE id = (SELECT repo_id FROM work_items WHERE id = $1)", [id, mode]);
+
+    it.each([
+      ["{} (a Spec published before the list existed)", "{}"],
+      ["an empty list", '{"acceptance_files":[]}'],
+      ["a list the matcher cannot read", '{"acceptance_files":["a/{b}"]}'],
+      ["a list that is not a list", '{"acceptance_files":"src/**"}'],
+    ])("is refused spec_has_no_file_list on a runner_local repo with %s: no run, no row, the item stays at spec_ready", async (_n, frontmatter) => {
+      const t = await atSpecReady();
+      await setMode(t.workItemId, "runner_local");
+      await h.admin.query("UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1", [t.workItemId, frontmatter]);
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toEqual({ status: "refused", reason: "spec_has_no_file_list" });
+      expect(t.world.requests).toEqual([]);
+      expect(await runs(t.workItemId)).toBe(0);
+      expect(await stageOf(t.workItemId)).toBe("spec_ready");
+      expect((await h.admin.query("SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'in_progress'", [t.workItemId])).rowCount).toBe(0);
+    });
+
+    it("still starts on a sandbox repo: hosted builds are not checked against a list", async () => {
+      const t = await atSpecReady();
+      await setMode(t.workItemId, "sandbox");
+      await h.admin.query("UPDATE spec_versions SET frontmatter = '{}'::jsonb WHERE work_item_id = $1", [t.workItemId]);
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
+    });
+
+    it("starts on a runner_local repo whose Spec has a list, and pins the version it read on the run", async () => {
+      const t = await atSpecReady();
+      await setMode(t.workItemId, "runner_local");
+      const id = (await h.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1", [t.workItemId])).rows[0]!.id;
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
+      expect(t.world.requests[0]!.specVersionId).toBe(id);
+    });
+
+    it("the Spec the pipeline itself published (a real runSpecForItem write) stores the PM's list, which the build start accepts", async () => {
+      const t = await atSpecReady();
+      const row = await h.admin.query<{ frontmatter: unknown; body: string }>("SELECT frontmatter, body FROM spec_versions WHERE work_item_id = $1", [t.workItemId]);
+      expect(row.rows[0]!.frontmatter).toEqual({ acceptance_files: ["src/a.ts"] });
+      expect(row.rows[0]!.body).toContain("### Files this Spec allows");
+      await setMode(t.workItemId, "runner_local");
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
+    });
   });
 });
 

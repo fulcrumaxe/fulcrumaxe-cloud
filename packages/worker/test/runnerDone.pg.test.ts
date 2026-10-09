@@ -204,6 +204,7 @@ describe("runner done [pg]", () => {
         { outcome: "failed", failureReason: "scope_unknown", prNumber: null },
         { outcome: "failed", failureReason: "scope_unknown", prNumber: 3, detail: "renamed" },
         { outcome: "failed", failureReason: "scope_unknown", prNumber: 3, detail: "unknown_change_type" },
+        { outcome: "failed", failureReason: "scope_unknown", prNumber: null, detail: "no_file_list" },
         { outcome: "failed", failureReason: "scope_violation", prNumber: 4 },
         { outcome: "failed", failureReason: "pr_rejected", prNumber: null, prHttpStatus: 422 },
         { outcome: "failed", failureReason: "pr_rejected", prNumber: null },
@@ -297,6 +298,9 @@ describe("runner done [pg]", () => {
         { verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null, branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" } as never },
         { verdict: { outcome: "failed", failureReason: "pr_rejected", prNumber: null, prHttpStatus: 99 } },
         { verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null, detail: "renamed" } },
+        // The cloud-only detail is for scope_unknown alone (D#6 R4d-5a, C34 section 2.2).
+        { verdict: { outcome: "failed", failureReason: "scope_violation", prNumber: 4, detail: "no_file_list" } },
+        { verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null, detail: "no_file_list" } },
         { verdict: ok, sessionId: "bad session" },
         { verdict: null as never },
         { ...lease(id, -1), verdict: ok },

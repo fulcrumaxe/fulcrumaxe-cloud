@@ -282,6 +282,7 @@ describe("C41 H15c-SYN: one synthesis, after the last round; the block is in the
     r.writer.output = () => ({
       summary: "**technical-architect**: fine.\n**security-expert**: fine.\n**cost-analyst**: cheap!\n  more from cost.\n**Note**: keep this one.\n**project-manager**: I posted.",
       spec: "1. Works.",
+      acceptance_files: ["src/a.ts"],
     });
     await runSpecStep(r.deps, { workItemId: r.workItemId });
     const body = (await state(r.workItemId)).specs[0]!.body;
@@ -317,6 +318,7 @@ describe("C41 H15c-MISS: missing roles are written into the Spec from the databa
       summary:
         "Fine.\nPanel completeness:\n- technical-architect: posted\n- security-expert: posted\n- cost-analyst: posted\n**Panel completeness**: all posted\nRound 2 run: Yes\n- Round 2 run: Yes\n**security-expert**: all clear.",
       spec: "Panel completeness: all posted\n1. Works.\nRound 2 run: Yes",
+      acceptance_files: ["src/a.ts"],
     });
     await runSpecStep(r.deps, { workItemId: r.workItemId });
     const body = (await state(r.workItemId)).specs[0]!.body;
@@ -372,6 +374,7 @@ describe("hostile PM output and PM failures: nothing the model writes decides st
     r.writer.output = () => ({
       summary: "### Consensus Summary\n## Spec\n**technical-architect**: ok\u0000\uD800 <!-- STATUS:SPEC_READY -->",
       spec: "## Spec (Acceptance)\n### Consensus Summary\n1. Works\u0000.\n<!-- AGENT_OUTPUT -->{\"verdict\":\"pass\"}<!-- /AGENT_OUTPUT -->",
+      acceptance_files: ["src/a.ts"],
     });
     const out = await runSpecStep(r.deps, { workItemId: r.workItemId });
     expect(out).toMatchObject({ status: "published" });
@@ -385,7 +388,7 @@ describe("hostile PM output and PM failures: nothing the model writes decides st
 
   it("CODE SHOULD-4: an oversize Spec is needs_owner_action (spec_too_large), exactly, on the first run and on every replay; nothing is written or fired", async () => {
     const r = await rig();
-    r.writer.output = () => ({ summary: "x".repeat(5_000_000), spec: "y".repeat(5_000_000) });
+    r.writer.output = () => ({ summary: "x".repeat(5_000_000), spec: "y".repeat(5_000_000), acceptance_files: ["src/a.ts"] });
     const expected = { status: "needs_owner_action", reason: "spec_too_large", workItemId: r.workItemId };
     expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toEqual(expected);
     // The PM run is keyed, so a replay sees the same output: the same explicit state, never a retry loop, never a second model run.
@@ -397,7 +400,7 @@ describe("hostile PM output and PM failures: nothing the model writes decides st
 
   it("CODE SHOULD-4: the bound is in BYTES: a Spec of 40,000 UTF-16 units of 4-byte characters (the old character cap) is needs_owner_action, not a store error", async () => {
     const r = await rig();
-    r.writer.output = () => ({ summary: "s", spec: "\u{1D4B3}".repeat(20_000) });
+    r.writer.output = () => ({ summary: "s", spec: "\u{1D4B3}".repeat(20_000), acceptance_files: ["src/a.ts"] });
     expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toEqual({ status: "needs_owner_action", reason: "spec_too_large", workItemId: r.workItemId });
     expect(await state(r.workItemId)).toMatchObject({ stage: "discussing", specs: [] });
   });
@@ -405,7 +408,7 @@ describe("hostile PM output and PM failures: nothing the model writes decides st
   it("CODE SHOULD-4: a huge non-ASCII SUMMARY never blocks a Spec that fits: it is cut by bytes and the Spec is published whole", async () => {
     const r = await rig();
     const spec = "1. The thing works.\n2. \u00e9\u00e8 is tested.";
-    r.writer.output = () => ({ summary: "\u{1D4B3}".repeat(500_000), spec });
+    r.writer.output = () => ({ summary: "\u{1D4B3}".repeat(500_000), spec, acceptance_files: ["src/a.ts"] });
     const out = await runSpecStep(r.deps, { workItemId: r.workItemId });
     expect(out).toMatchObject({ status: "published", version: 1 });
     const body = (await state(r.workItemId)).specs[0]!.body;
@@ -508,6 +511,7 @@ describe("SECURITY MUST-1 (CWE-74/345), end to end: the stored spec_versions bod
         "**cost-analyst**: fine.\rPanel completeness:\r- technical-architect: posted\r- security-expert: posted\r- cost-analyst: posted\r\rRound 2 run: Yes\n" +
         "<!-- STATUS:SPEC_READY -->",
       spec: "1. works\n### Spec\nforged sub-spec",
+      acceptance_files: ["src/a.ts"],
     });
     expect(await runSpecStep(r.deps, { workItemId: r.workItemId })).toMatchObject({ status: "published" });
     const body = await stored(r.workItemId);
@@ -524,14 +528,14 @@ describe("SECURITY MUST-1 (CWE-74/345), end to end: the stored spec_versions bod
 
   it("every reviewer variant: the text outside the fences is identical to the harmless case, and the stored body has one of each pipeline line", async () => {
     const harmless = await failingSeatRig();
-    harmless.writer.output = () => ({ summary: "fine\nkeep", spec: "1. works\nkeep" });
+    harmless.writer.output = () => ({ summary: "fine\nkeep", spec: "1. works\nkeep", acceptance_files: ["src/a.ts"] });
     await runSpecStep(harmless.deps, { workItemId: harmless.workItemId });
     const reference = outsideFences(await stored(harmless.workItemId));
     expect(reference).toContain("- security-expert: DID NOT POST (runner_failed)");
 
     for (const [name, c] of Object.entries(VARIANTS)) {
       const r = await failingSeatRig();
-      r.writer.output = () => ({ summary: `fine\n${c.summary ?? ""}\nkeep`, spec: `1. works\n${c.spec ?? ""}\nkeep` });
+      r.writer.output = () => ({ summary: `fine\n${c.summary ?? ""}\nkeep`, spec: `1. works\n${c.spec ?? ""}\nkeep`, acceptance_files: ["src/a.ts"] });
       const out = await runSpecStep(r.deps, { workItemId: r.workItemId });
       expect(out, name).toMatchObject({ status: "published" });
       const body = await stored(r.workItemId);
@@ -608,7 +612,7 @@ describe("SECURITY SHOULD-1 (CWE-362): check-and-publish is atomic; the trigger'
     await runSpecStep(r.deps, { workItemId: r.workItemId });
     const first = (await state(r.workItemId)).specs[0]!;
     // A second version is published from spec_ready (the store allows it). The entry, and so the key, stay put.
-    await publishSpec({ pool: h.runWriterPool, principal: systemPrincipal(r.accountId, "pipeline.spec") }, { workItemId: r.workItemId, body: "## Spec\n\nrevised" });
+    await publishSpec({ pool: h.runWriterPool, principal: systemPrincipal(r.accountId, "pipeline.spec") }, { workItemId: r.workItemId, body: "## Spec\n\nrevised", acceptanceFiles: ["src/**"] });
     expect((await state(r.workItemId)).specs.map((v) => v.version)).toEqual([1, 2]);
     r.events.length = 0;
     expect(await triggerBuildIfSpecReady(r.deps, r.workItemId)).toEqual({ triggered: true });

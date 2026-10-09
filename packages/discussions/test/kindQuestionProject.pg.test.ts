@@ -36,7 +36,7 @@ describe("question and project kinds [pg] (D#2 H27a)", () => {
     for (const stage of ["triaged", "discussing"]) {
       await db.admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [q.rootWorkItemId, stage]);
       for (const p of [t.owner, t.admin, t.system]) {
-        await expect(publishSpec(ctx(p), { workItemId: q.rootWorkItemId, body: "Spec" })).rejects.toMatchObject({ code: "kind_not_buildable" });
+        await expect(publishSpec(ctx(p), { workItemId: q.rootWorkItemId, acceptanceFiles: ["src/**"], body: "Spec" })).rejects.toMatchObject({ code: "kind_not_buildable" });
       }
       expect(await count(db.admin, `SELECT 1 FROM spec_versions WHERE work_item_id = $1`, [q.rootWorkItemId])).toBe(0);
       const { rows } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [q.rootWorkItemId]);
@@ -48,7 +48,7 @@ describe("question and project kinds [pg] (D#2 H27a)", () => {
     const t = await seedTenant(db.admin);
     for (const kind of ["project", "feature"] as const) {
       const d = await createDiscussion(ctx(t.owner), { title: `a ${kind}`, kind, body: "b" });
-      await expect(publishSpec(ctx(t.owner), { workItemId: d.rootWorkItemId, body: "Plan" })).resolves.toMatchObject({ version: 1 });
+      await expect(publishSpec(ctx(t.owner), { workItemId: d.rootWorkItemId, acceptanceFiles: ["src/**"], body: "Plan" })).resolves.toMatchObject({ version: 1 });
       const { rows } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [d.rootWorkItemId]);
       expect(rows[0].stage).toBe("spec_ready");
     }

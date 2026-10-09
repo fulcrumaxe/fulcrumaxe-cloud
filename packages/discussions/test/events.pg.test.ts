@@ -54,7 +54,7 @@ describe("domain events roll back with their transaction [pg]", () => {
   it("publishSpec rolls back the Spec row, the stage change and its transition row along with the event", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    await failing(() => publishSpec(ctx(t.owner), { workItemId: wi, body: "spec" }));
+    await failing(() => publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "spec" }));
     expect(await events(t.accountId)).toBe(0);
     expect(await count(db.admin, `SELECT 1 FROM spec_versions WHERE work_item_id = $1`, [wi])).toBe(0);
     expect(await count(db.admin, `SELECT 1 FROM work_item_transitions WHERE work_item_id = $1`, [wi])).toBe(0);
@@ -67,7 +67,7 @@ describe("domain events roll back with their transaction [pg]", () => {
   it("addCorrection rolls back the correction row along with the event", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "spec" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "spec" });
     const before = await events(t.accountId);
     await failing(() => addCorrection(ctx(t.owner), { workItemId: wi, body: "fix" }));
     expect(await events(t.accountId)).toBe(before);

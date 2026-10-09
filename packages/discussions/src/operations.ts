@@ -130,6 +130,7 @@ export type DiscussionsErrorCode =
   | "external_requires_human" // 403 (DS-2 PR-b)
   | "no_spec_version" // 404-ish, DS-2 PR-b
   | "dependency_cycle" // 409 (DS-2 PR-b)
+  | "invalid_file_scope" // 422 (D#6 R4d-5a, C34): a Spec was offered without a readable list of the files it allows
   | "kind_not_buildable" // 409 (D#2 H27a): a question or project never starts a build
   | "illegal_transition"; // 409 (DS-2 PR-b): not one of D#45 S1's legal stage edges
 

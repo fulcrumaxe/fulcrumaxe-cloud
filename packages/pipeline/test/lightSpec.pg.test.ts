@@ -25,7 +25,7 @@ async function triagedItem(category: "small" | "bug" | "doc" = "bug") {
 }
 const stageOf = async (id: string) => (await h.admin.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1", [id])).rows[0]!.stage;
 const specs = async (id: string) => (await h.admin.query<{ version: number; body: string }>("SELECT version, body FROM spec_versions WHERE work_item_id = $1 ORDER BY version", [id])).rows;
-const GOOD = { feasible: true, reason: "", summary: "Fix the year in the footer.", spec: "1. The footer shows the current year.\n2. A test pins it." };
+const GOOD = { feasible: true, reason: "", summary: "Fix the year in the footer.", spec: "1. The footer shows the current year.\n2. A test pins it.", acceptance_files: ["src/a.ts"] };
 
 describe("categories", () => {
   it("the light categories are exactly the kinds the stage table sends to the short Spec, and none of them runs a panel", () => {
@@ -91,6 +91,47 @@ describe("publishLightSpec", () => {
     expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, output)).toEqual({ status: "refused", reason: "invalid_spec_output" });
     expect(await stageOf(t.workItemId)).toBe("triaged");
     expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  // D#6 R4d-5a (C34, F4 second case and F5): the short Spec stores the PM's list, and refuses a Spec without a readable one.
+  it("stores the PM's file list as frontmatter and renders it into the body after the quoted Spec", async () => {
+    const t = await triagedItem("bug");
+    const files = ["src/a.ts", "src/{b,c}.test.ts"];
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, { ...GOOD, acceptance_files: files })).toEqual({ status: "published", version: 1 });
+    const { rows } = await h.admin.query<{ frontmatter: unknown; body: string }>("SELECT frontmatter, body FROM spec_versions WHERE work_item_id = $1", [t.workItemId]);
+    expect(rows[0]!.frontmatter).toEqual({ acceptance_files: files });
+    expect(rows[0]!.body).toContain("### Files this Spec allows\n");
+    expect(rows[0]!.body.endsWith("```text\nsrc/a.ts\nsrc/{b,c}.test.ts\n```\n")).toBe(true);
+    expect(rows[0]!.body.indexOf("## Spec")).toBeLessThan(rows[0]!.body.indexOf("### Files this Spec allows"));
+  });
+
+  it("feasible: false needs no list (the key is ignored)", async () => {
+    const t = await triagedItem();
+    expect((await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, { feasible: false, reason: "no", summary: "s", spec: "" })).status).toBe("not_feasible");
+  });
+
+  it.each([
+    ["no list", undefined],
+    ["an empty list", []],
+    ["a list that is not a list", "src/a.ts"],
+    ["a lone **", ["**"]],
+    ["a parent path", ["../x"]],
+    ["a one-alternative brace group", ["a/{b}"]],
+    ["a non-string entry", ["src/a.ts", 3]],
+  ])("%s is refused invalid_file_scope: nothing published, the stage unchanged", async (_n, list) => {
+    const t = await triagedItem();
+    const out = { ...GOOD, ...(list === undefined ? {} : { acceptance_files: list }) };
+    if (list === undefined) delete (out as { acceptance_files?: unknown }).acceptance_files;
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "invalid_file_scope" });
+    expect(await stageOf(t.workItemId)).toBe("triaged");
+    expect(await specs(t.workItemId)).toEqual([]);
+  });
+
+  it("an inherited acceptance_files is not read", async () => {
+    const t = await triagedItem();
+    const { acceptance_files, ...rest } = GOOD;
+    const out = Object.assign(Object.create({ acceptance_files }), rest);
+    expect(await publishLightSpec(h.runWriterPool, t.accountId, t.workItemId, out)).toEqual({ status: "refused", reason: "invalid_file_scope" });
   });
 
   it("an item the store refuses (an external one, a missing one) is a refusal with a plain code, never an error text", async () => {

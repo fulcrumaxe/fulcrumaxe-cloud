@@ -162,6 +162,7 @@ export class FixtureWriter implements SpecWriter {
   output: (req: SpecWriteRequest) => unknown = () => ({
     summary: "**technical-architect**: agrees.\n**security-expert**: agrees.\n**cost-analyst**: agrees.",
     spec: "1. The thing works.\n2. The thing is tested.",
+    acceptance_files: ["src/a.ts"],
   });
   failWith: Error | null = null;
   hang = false;

@@ -72,6 +72,8 @@ export interface StartAgentRunInput {
   repoId: string;
   workItemId?: string | null;
   parentRunId?: string | null;
+  /** D#6 R4d-5a (C34): the `spec_versions.id` the run is built from; written to `agent_runs.spec_version_id` at insert and never changed. Absent: no pin. */
+  specVersionId?: string | null;
   /** D#6 R3a: the member who started the run, written to `agent_runs.initiated_by` at insert and never changed. The
    * definer refuses a user who is not a member of `accountId`. Absent for a run no member started. */
   initiatedBy?: string | null;
@@ -346,6 +348,7 @@ export async function startAgentRun(
     accountId: input.accountId,
     workItemId: input.workItemId,
     parentRunId: input.parentRunId,
+    specVersionId: input.specVersionId ?? null,
     role: input.role,
     // D#6 C12 A1: the target says what its runs are (a sandbox writes `production`, a runner writes `runner`).
     runtime: target.runtime,

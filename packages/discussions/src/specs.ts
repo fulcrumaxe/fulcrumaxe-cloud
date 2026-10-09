@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
+import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import type { DiscussionsContext } from "./principals.js";
@@ -57,6 +58,12 @@ async function lockWorkItem(client: PoolClient, workItemId: string): Promise<Wor
 export interface PublishSpecInput {
   workItemId: string;
   body: string;
+  /**
+   * D#6 R4d-5a (C34 section 1.3): the files this Spec allows, in the entry forms `parseAcceptanceScope` reads. REQUIRED: a Spec without a
+   * list the done check can read is refused `invalid_file_scope` before anything is written, so no caller can publish one. Stored as
+   * `frontmatter = {"acceptance_files": <the list as given>}` and nothing else.
+   */
+  acceptanceFiles: readonly string[];
 }
 
 /** `spec.publish`. Inserts the next `spec_versions` row (previous
@@ -73,6 +80,11 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
   const workItemId = assertUuidOrNotFound(input.workItemId, "work item");
   const body = redactIfNeeded(ctx.principal, requireBodyWithinLimit(input.body));
   const actor = actorForWrite(ctx.principal);
+  // The same parser the done check uses (one copy, in core). An absent key, a non-array, an empty list or any entry it cannot read is refused here.
+  const acceptanceFiles: unknown = Object.hasOwn(input, "acceptanceFiles") ? input.acceptanceFiles : undefined;
+  if (parseAcceptanceScope(acceptanceFiles).kind !== "known") {
+    throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
+  }
 
   return withTenant(ctx.pool, accountIdOf(ctx.principal), async (client) => {
     const workItem = await lockWorkItem(client, workItemId);
@@ -112,10 +124,10 @@ export async function publishSpec(ctx: DiscussionsContext, input: PublishSpecInp
 
     const { rows } = await client.query<{ id: string; created_at: Date }>(
       `INSERT INTO spec_versions
-         (account_id, work_item_id, version, body, body_sha256, created_by_kind, created_by_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (account_id, work_item_id, version, body, body_sha256, created_by_kind, created_by_user_id, frontmatter)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
        RETURNING id, created_at`,
-      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId],
+      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId, JSON.stringify({ acceptance_files: acceptanceFiles })],
     );
     const specVersionId = rows[0]!.id;
 
