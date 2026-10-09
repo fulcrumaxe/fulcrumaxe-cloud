@@ -9,6 +9,7 @@ import {
 } from '@fx/trust';
 import { classifyAuthor } from '@fx/trust';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
+import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
@@ -143,6 +144,19 @@ export interface TransitionPrEvent {
   isFork: boolean;
 }
 
+/**
+ * pull_request.synchronize (D#6 R5b-2a): the pull request's head moved to `headSha`. Recorded as a fact of the linked work item, which is
+ * what restarts the quiet period of a cloud-verified review. Guarded exactly as `transition_pr` is.
+ */
+export interface RecordPrPushEvent {
+  kind: 'record_pr_push';
+  prNumber: number;
+  headSha: string;
+  linkedIssueNumber: number | null;
+  trust: AuthorTrust;
+  isFork: boolean;
+}
+
 /** push touching .mcp.json on the default branch: routes to the C25 hook point. */
 export interface RouteMcpConfigEvent {
   kind: 'route_mcp_config';
@@ -178,6 +192,7 @@ export interface IgnoredEvent {
 export type MappedEvent =
   | CreateWorkItemEvent
   | TransitionPrEvent
+  | RecordPrPushEvent
   | RouteMcpConfigEvent
   | WriteRepoNamesEvent
   | InstallationReposEvent
@@ -218,7 +233,7 @@ export interface GithubPullRequestPayload {
     user: Actor;
     author_association: string | null;
     /** CWE-863: null/differing id vs base.repo.id means a fork. */
-    head: { repo: { id: number } | null };
+    head: { repo: { id: number } | null; sha?: string };
     base: { repo: { id: number } };
   };
 }
@@ -358,7 +373,14 @@ export function mapEvent(
         const toStage = p.pull_request.merged ? 'merged' : 'closed_unmerged';
         return { kind: 'transition_pr', toStage, at: new Date(closedAt), prNumber, linkedIssueNumber, trust, isFork };
       }
-      return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed, no stage change` };
+      if (p.action === 'synchronize') {
+        const headSha = p.pull_request.head.sha;
+        if (typeof headSha !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(headSha)) {
+          return { kind: 'ignored', reason: 'pull_request.synchronize: no head commit id' };
+        }
+        return { kind: 'record_pr_push', prNumber, headSha, linkedIssueNumber, trust, isFork };
+      }
+      return { kind: 'ignored', reason: `pull_request.${p.action}: not opened/closed/synchronize, no stage change` };
     }
 
     case 'pull_request_review': {
@@ -482,6 +504,7 @@ export interface ApplyEventCtx {
 export type ApplyResult =
   | { applied: 'created'; workItemId: string }
   | { applied: 'transitioned'; workItemId: string; recorded: boolean }
+  | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
   | { applied: 'repos_detached'; count: number; installationId: string; syncRequested: boolean }
@@ -598,6 +621,23 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       }
 
       return { applied: 'transitioned', workItemId, recorded: result.recorded };
+    }
+
+    case 'record_pr_push': {
+      if (mapped.isFork && mapped.trust !== 'trusted') {
+        return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no push recorded' };
+      }
+      if (mapped.linkedIssueNumber == null) {
+        return { applied: 'skipped', reason: 'pull_request: no Closes/Fixes/Resolves #N reference in body' };
+      }
+      const workItemId = await findLinkedWorkItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      if (!workItemId) {
+        return { applied: 'skipped', reason: `pull_request: no work item linked to issue #${mapped.linkedIssueNumber}` };
+      }
+      // One row per delivery (GitHub keeps the delivery id on a redelivery, so that stays a no-op). Keyed on the delivery, not the head: a push back
+      // to a head seen before (A, B, A) is a new push and restarts the quiet period.
+      const { recorded } = await recordDriverEvent(client, ctx.accountId, { workItemId, kind: 'pr_head_pushed', dedupeKey: `push:${ctx.deliveryId}`, code: 'synchronize', headSha: mapped.headSha, prNumber: mapped.prNumber });
+      return { applied: 'pr_push_recorded', workItemId, recorded };
     }
 
     case 'route_mcp_config': {

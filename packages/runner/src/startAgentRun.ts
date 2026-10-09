@@ -6,6 +6,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import {
   resolveExecutionTarget,
+  runtimeFor,
   AgentStartError,
   DispatchAbortedError,
   DispatchFailedError,
@@ -351,7 +352,7 @@ export async function startAgentRun(
     specVersionId: input.specVersionId ?? null,
     role: input.role,
     // D#6 C12 A1: the target says what its runs are (a sandbox writes `production`, a runner writes `runner`).
-    runtime: target.runtime,
+    runtime: runtimeFor(target, input.role),
     initiatedBy: input.initiatedBy,
     ...(env?.kind === "ready" ? { envVersionId: env.envVersionId, imageDigest: env.imageDigest } : {}),
     headSha: input.headSha,

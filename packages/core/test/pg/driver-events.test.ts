@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -29,7 +29,10 @@ describe('work item driver events', () => {
   });
 
   it('the kinds in code are exactly the kinds the table accepts', () => {
-    const sql = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'db', 'migrations', '0709_work_item_driver_events.sql'), 'utf8');
+    // The newest migration that states the list wins (0709 made it; each later one that adds a kind restates it whole).
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'db', 'migrations');
+    const latest = readdirSync(dir).filter((f) => f.endsWith('.sql') && /work_item_driver_events_kind_check/.test(readFileSync(path.join(dir, f), 'utf8'))).sort().pop()!;
+    const sql = readFileSync(path.join(dir, latest), 'utf8');
     const list = /CHECK \(kind IN \(([^)]*)\)\)/.exec(sql)![1]!;
     expect([...list.matchAll(/'([a-z_]+)'/g)].map((m) => m[1])).toEqual([...DRIVER_EVENT_KINDS]);
   });

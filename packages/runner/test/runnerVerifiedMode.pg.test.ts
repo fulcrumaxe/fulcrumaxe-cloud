@@ -4,6 +4,9 @@ import { EXECUTION_TARGETS, isAdmitDenyReason, resolveExecutionTarget, type Exec
 import { RUNNER_MODES, RUNNER_MODES_SQL, isRunnerMode } from "../src/runnerModes.js";
 import { startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { RunnerTarget } from "../src/targets/runnerTarget.js";
+import { SandboxTarget } from "../src/targets/sandboxTarget.js";
+import { VerifiedTarget } from "../src/targets/verifiedTarget.js";
+import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { seedAccount, seedRepo } from "./helpers/seed.js";
 import { createFakeJobIssuer, createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -17,7 +20,7 @@ describe("runner_verified mode [pg]", () => {
     const deps = { limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer, visibility: createFakeVisibility("private") };
     const reg: ExecutionTargetRegistry = {
       runner_local: EXECUTION_TARGETS.runner_local(deps),
-      runner_verified: EXECUTION_TARGETS.runner_verified(deps),
+      runner_verified: EXECUTION_TARGETS.runner_verified({ runner: deps, sandbox: new SandboxTarget(createSandboxTargetHarness(db.runWriterPool).deps) }),
     };
     return { issuer, reg };
   }
@@ -67,12 +70,14 @@ describe("runner_verified mode [pg]", () => {
     expect(issuer.calls[1]!.jobMode).toBeUndefined();
   });
 
+  // R5b-2a replaces R5b-1's refusal: the registry routes a verified repo's reviewers to the sandbox (verifiedReviews.pg.test.ts). The runner target alone keeps the closed refusal as a backstop.
   it.each(["code-reviewer", "security-reviewer", "acceptance-tester", "debater"] as const)(
-    "%s in a verified repo is refused verified_review_not_wired: no job is issued, none is stored, and the run is refused (not queued)",
+    "%s reaching the verified RUNNER target on its own is still refused verified_review_not_wired: no job is issued and nothing is written",
     async (role) => {
-      const { issuer, reg } = registry();
+      const issuer = createFakeJobIssuer();
+      const alone = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer, visibility: createFakeVisibility("private") }, "runner_verified");
       const w = await verifiedRepo();
-      const result = await startAgentRun(db.runWriterPool, reg, input(w, role));
+      const result = await startAgentRun(db.runWriterPool, { runner_verified: alone }, input(w, role));
       expect(result).toMatchObject({ status: "refused_spend", reason: "verified_review_not_wired" });
       expect(issuer.calls).toEqual([]);
       expect(await runRow(result.id)).toMatchObject({ status: "refused_spend", failure_reason: "verified_review_not_wired", job_signed: null });
@@ -93,6 +98,6 @@ describe("runner_verified mode [pg]", () => {
     const { runner_verified: _dropped, ...withoutVerified } = reg;
     void _dropped;
     expect(() => resolveExecutionTarget("runner_verified", withoutVerified)).toThrow();
-    expect(resolveExecutionTarget("runner_verified", reg)).toBeInstanceOf(RunnerTarget);
+    expect(resolveExecutionTarget("runner_verified", reg)).toBeInstanceOf(VerifiedTarget);
   });
 });

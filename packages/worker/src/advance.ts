@@ -8,6 +8,7 @@ import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } 
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
+import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
@@ -152,6 +153,8 @@ export interface AdvanceModuleDeps {
   registry?: ExecutionTargetRegistry | null;
   /** D#483 P3, injected from apps/web the same way: the review stage's pipeline pieces. Absent, the review steps answer `review_unavailable`. */
   review?: AdvanceReviewDeps | null;
+  /** D#6 R5b-2a: accounts that run on our own subscription (they need no model connection for a cloud-verified review). Absent: none. */
+  isOperatorAccount?: (accountId: string) => boolean;
 }
 
 /** What the review stage needs from @fx/pipeline and the web app (this package can import neither). */
@@ -382,6 +385,12 @@ export interface AdvanceFacade {
   advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
+  /**
+   * D#6 R5b-2a: whether the reviewers of a pull request may start now. Only a `runner_verified` repository waits: its reviews start ten minutes after the
+   * later of the executor's end and the newest push (answer `wait`), and not without a usable model key (`key_missing`). Any other mode answers
+   * `not_verified` with the mode it is in now. `seenHead` is the head the previous check read (null on the first): a different one is a push the webhook has not told us.
+   */
+  advanceVerifiedReviewGate(who: AdvanceStepWho, input: { prNumber: number; headSha: string; seenHead: string | null }): Promise<VerifiedReviewGate | { state: "refused"; reason: string }>;
   /** D#483 P3: one recorded driver event (fixed vocabulary). A repeat of the same key writes nothing. */
   advanceRecordEvent(who: AdvanceStepWho, event: Omit<DriverEventInput, "workItemId">): Promise<{ recorded: boolean }>;
   /** D#483 P3: stops a live run of this item through the runner's own cancel, as the approver. */
@@ -1006,6 +1015,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
+  async function advanceVerifiedReviewGate(who: AdvanceStepWho, input: { prNumber: number; headSha: string; seenHead: string | null }): Promise<VerifiedReviewGate | { state: "refused"; reason: string }> {
+    if (!Number.isSafeInteger(input.prNumber) || input.prNumber <= 0 || !SHA_RE.test(input.headSha) || (input.seenHead !== null && !SHA_RE.test(input.seenHead))) return { state: "refused", reason: "invalid_input" };
+    const bad = await guardStep(who);
+    if (bad) return { state: "refused", reason: bad.reason ?? "refused" };
+    const out = await readVerifiedReviewGate(runnerPool, { accountId: who.accountId, workItemId: who.workItemId, ...input, now: new Date(), ...(deps.isOperatorAccount ? { isOperatorAccount: deps.isOperatorAccount } : {}) });
+    console.info(JSON.stringify({ event: "advance.verified_review_gate", work_item_id: who.workItemId, pr: input.prNumber, state: out.state }));
+    return out;
+  }
+
   async function advanceRecordEvent(who: AdvanceStepWho, event: Omit<DriverEventInput, "workItemId">): Promise<{ recorded: boolean }> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId)) return { recorded: false };
     return writeEvent(who, event);
@@ -1034,6 +1052,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceRecordRound,
     advanceStartFix,
     advanceMergeGate,
+    advanceVerifiedReviewGate,
     advanceRecordEvent,
     advanceCancel,
   };

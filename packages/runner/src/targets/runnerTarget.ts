@@ -159,8 +159,8 @@ export class RunnerTarget implements ExecutionTarget {
     void client;
     if (!isRunnerBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
     if (!RUNNER_TARGET_ROLES.has(run.role)) return { admitted: false, reason: "role_not_runner_eligible" };
-    // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. That path is R5b-2a's, so until then they are refused here,
-    // before anything is counted or written.
+    // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. `VerifiedTarget` (R5b-2a) routes them there, so none
+    // reaches this target through the registry; a caller that built this target alone still gets the closed refusal, before anything is counted or written.
     if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return { admitted: false, reason: "verified_review_not_wired" };
 
     // The limit is read first: when the plan data is unavailable the door stays shut and nothing is counted.

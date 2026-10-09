@@ -62,8 +62,10 @@ interface World {
   pinned: number;
   loadReview: { ok: boolean; reason?: string; specVersion?: number };
   /** `runner_local`: the repository's agents run on a runner; `recorded` is what its run's `done` recorded (null: nothing). */
-  mode?: "runner_local";
+  mode?: "runner_local" | "runner_verified" | "sandbox";
   recorded?: { number: number; branch: string } | null;
+  /** D#6 R5b-2a: the worker's answer to "may the reviewers start?", per call (1-based). It may change the world (a push, a mode change) as the real check's wait would. */
+  verifiedGate?: (call: number, input: { prNumber: number; headSha: string; seenHead: string | null }) => { state: string; waitMs?: number; executionMode?: string; reason?: string };
 }
 
 function fresh(over: Partial<World> = {}): World {
@@ -91,6 +93,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
   const rounds = [...w.rounds];
   const gates = [...w.gates];
   let n = 0;
+  let gateCalls = 0;
   const worker = {
     advanceLoadItem: vi.fn(async () => item),
     advanceLoadReview: vi.fn(async () =>
@@ -125,6 +128,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceMergeGate: vi.fn(async () => (gates.length > 1 ? gates.shift()! : gates[0]!)),
     advanceRecordEvent: vi.fn(async (_who: unknown, _e: { kind: string; code?: string; reasons?: string[]; headSha?: string; prNumber?: number; runId?: string }) => ({ recorded: true })),
     advanceCancel: vi.fn(async () => undefined),
+    advanceVerifiedReviewGate: vi.fn(async (_who: unknown, input: { prNumber: number; headSha: string; seenHead: string | null }) => (w.verifiedGate ? w.verifiedGate(++gateCalls, input) : { state: "dispatch" })),
     advanceBuild: vi.fn(),
     advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
     advancePrFound: vi.fn(async () => ({ status: "recorded", stage: "pr_opened" })),
@@ -243,6 +247,96 @@ describe("reviews on the pull request's exact head", () => {
     expect(input.verdicts.find((v) => v.role === "code-reviewer")!.verdict).toBe("fail");
     expect(out).toEqual({ status: "needs_human", detail: "reviewer_fail" });
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+});
+
+describe("D#6 R5b-2a: a cloud-verified pull request is reviewed after its quiet period, on the customer's key", () => {
+  const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+  const recorded = { number: 41, branch: RUN_BRANCH };
+  const verified = (over: Partial<World> = {}) => fresh({ mode: "runner_verified", recorded, ...over });
+
+  it("waits out the quiet period, reads the head again, and reviews the head it finds then, in the sandbox's prompt (not the runner's)", async () => {
+    const asked: Array<{ headSha: string; seenHead: string | null }> = [];
+    const w = verified({
+      verifiedGate: (call, input) => {
+        asked.push({ headSha: input.headSha, seenHead: input.seenHead });
+        if (call === 1) return { state: "wait", waitMs: 600_000 };
+        if (call === 2) {
+          // A person pushed while the driver slept: the next read finds a new head, and the period starts over.
+          w.head = H2;
+          return { state: "wait", waitMs: 600_000 };
+        }
+        return { state: "dispatch" };
+      },
+    });
+    const t = setup(w);
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "merged", detail: undefined });
+    expect(world.sleeps).toBe(2);
+    // The check sees the head it read and the one it saw before; the third check is for the new head, and the reviewers start on it.
+    expect(asked).toEqual([{ headSha: H1, seenHead: null }, { headSha: H1, seenHead: H1 }, { headSha: H2, seenHead: H1 }]);
+    expect(t.started.length).toBeGreaterThan(0);
+    for (const req of t.started) {
+      expect(req.headSha).toBe(H2);
+      expect(req.step).toBe(`review:${H2}:${req.role}`);
+      expect(req.expectedExecutionMode).toBe("runner_verified");
+      expect(req.prompt).not.toContain("detached HEAD");
+    }
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
+  });
+
+  it("no usable key: nothing is started, the gate records review_key_missing against the head, and the merge gate is never asked", async () => {
+    const t = setup(verified({ verifiedGate: () => ({ state: "key_missing" }) }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "needs_human", detail: "review_key_missing" });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "review_key_missing", headSha: H1, prNumber: 41 }));
+  });
+
+  it("a repository that left the mode during the wait is reviewed the way its new mode is: the context is loaded again and the runner's reviewers are started", async () => {
+    const w = verified({
+      verifiedGate: (call) => {
+        if (call === 1) return { state: "wait", waitMs: 60_000 };
+        w.mode = "runner_local";
+        return { state: "not_verified", executionMode: "runner_local" };
+      },
+    });
+    const t = setup(w);
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceLoadReview).toHaveBeenCalledTimes(2);
+    expect(t.worker.advanceVerifiedReviewGate).toHaveBeenCalledTimes(2);
+    expect(t.started.length).toBeGreaterThan(0);
+    for (const req of t.started) {
+      expect(req.expectedExecutionMode).toBe("runner_local");
+      expect(req.prompt).toContain("detached HEAD");
+    }
+  });
+
+  it.each(["sandbox", "runner_local"] as const)("a %s repository is never asked: it is reviewed at once, as before", async (mode) => {
+    const t = setup(fresh({ mode, recorded: mode === "runner_local" ? recorded : null, verifiedGate: () => ({ state: "wait", waitMs: 600_000 }) }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceVerifiedReviewGate).not.toHaveBeenCalled();
+    expect(world.sleeps).toBe(0);
+    expect(t.started.length).toBeGreaterThan(0);
+  });
+
+  it("pushes that never stop end the wait after a bound, with one recorded stop and no review", async () => {
+    const t = setup(verified({ verifiedGate: () => ({ state: "wait", waitMs: 600_000 }) }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "needs_human", detail: "review_quiet_period_unsettled" });
+    expect(world.sleeps).toBe(36);
+    expect(t.started).toEqual([]);
+  });
+
+  it("a halt during the wait ends the workflow with the one halted stop; any other refusal is recorded with its fixed reason", async () => {
+    const halted = setup(verified({ verifiedGate: () => ({ state: "refused", reason: "item_halted" }) }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(halted.started).toEqual([]);
+
+    const other = setup(verified({ verifiedGate: () => ({ state: "refused", reason: "target_not_found" }) }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "target_not_found" });
+    expect(other.started).toEqual([]);
   });
 });
 

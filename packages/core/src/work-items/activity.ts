@@ -134,6 +134,9 @@ const CHECK_FAILED_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
   // Build again, at Needs a person: the same sentence family, shown on that stage instead (see below).
   rebuild_pr_open: 'A pull request is still open for this issue\'s branch, so the build was not started again. Close that pull request on GitHub, then press Build again.',
   rebuild_check_unavailable: 'Couldn\'t check for an open pull request just now, so the build was not started again. Try again in a moment.',
+  // A cloud-verified pull request's review (D#6 R5b-2a), shown while the item sits at a pull-request stage.
+  review_key_missing: 'A review is waiting for your model key to be connected.',
+  review_quiet_period_unsettled: 'Reviews are waiting for pushes to settle.',
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -384,21 +387,22 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
             kind: 'needs_human',
             reason: summary ?? (ex ? `The executor run ${ex.status.replace(/_/g, ' ')} without a pull request.` : 'The pipeline stopped and needs a person.'),
           };
-    } else if (item.stage === 'in_progress') {
+    } else if (item.stage === 'in_progress' || item.stage === 'pr_opened' || item.stage === 'changes_requested') {
       // "Check the build" could not decide: its newest recorded stop names why, by a fixed code.
       const stop = (
         await client.query<{ code: string | null }>(
-          // Only a stop recorded after the item's latest move into In progress counts (an old failed check must not show
+          // Only a stop recorded after the item's latest move into this stage (In progress, PR opened or Changes requested) counts (an old failed check must not show
           // during a later build), and none while any run of the item is live (a build or a review is going on now).
           `SELECT e.code FROM work_item_driver_events e
             WHERE e.work_item_id = $1::uuid AND e.kind = 'stopped'
-              AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = 'in_progress'), '-infinity'::timestamptz)
+              AND e.created_at > COALESCE((SELECT max(t.created_at) FROM work_item_transitions t WHERE t.work_item_id = $1::uuid AND t.to_stage = $2::text), '-infinity'::timestamptz)
               AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
             ORDER BY e.seq DESC LIMIT 1`,
-          [workItemId],
+          [workItemId, item.stage],
         )
       ).rows[0];
-      const sentence = stop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
+      // At a pull-request stage only the review stops speak: a stale "Check the build" stop must not show there.
+      const sentence = stop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) && (item.stage === 'in_progress' || stop.code.startsWith('review_')) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
     }
 

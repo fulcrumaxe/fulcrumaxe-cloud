@@ -194,9 +194,19 @@ describe('mapEvent (D#2 H13a body criterion 2)', () => {
 
     it('an action other than opened/closed is ignored', () => {
       const payload = loadFixture<GithubPullRequestPayload>('pull_request.opened.json');
-      const synchronize: GithubPullRequestPayload = { ...payload, action: 'synchronize' };
-      const mapped = mapEvent('pull_request', synchronize, NO_ALLOWLIST);
+      const edited: GithubPullRequestPayload = { ...payload, action: 'edited' };
+      const mapped = mapEvent('pull_request', edited, NO_ALLOWLIST);
       expect(mapped.kind).toBe('ignored');
+    });
+
+    it('a real synchronize delivery maps to the push of its head commit (D#6 R5b-2a); one without a head commit id is ignored', () => {
+      const payload = loadFixture<GithubPullRequestPayload & { after: string }>('pull_request.synchronize.json');
+      const mapped = mapEvent('pull_request', payload, NO_ALLOWLIST);
+      expect(mapped).toMatchObject({ kind: 'record_pr_push', prNumber: 139, headSha: payload.after, linkedIssueNumber: null, isFork: false });
+      const noSha = { ...payload, pull_request: { ...payload.pull_request, head: { repo: payload.pull_request.head.repo } } };
+      expect(mapEvent('pull_request', noSha, NO_ALLOWLIST)).toMatchObject({ kind: 'ignored' });
+      const badSha = { ...payload, pull_request: { ...payload.pull_request, head: { ...payload.pull_request.head, sha: 'HEAD' } } };
+      expect(mapEvent('pull_request', badSha, NO_ALLOWLIST)).toMatchObject({ kind: 'ignored' });
     });
   });
 

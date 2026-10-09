@@ -70,6 +70,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "advanceStartFix",
       "advanceStartRun",
       "advanceTriage",
+      "advanceVerifiedReviewGate",
       "beginRunnerDone",
       "cancelRun",
       "claimRunAction",

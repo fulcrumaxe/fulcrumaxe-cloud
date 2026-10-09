@@ -452,12 +452,12 @@ describe('migration 0765 gives platform_ops nothing', () => {
     pool = createPool(pg.url);
     guard = guardPoolTeardown(pool, 'platformOpsDiffPool');
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0765-diff-migrations-'));
-    for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION)) {
+    for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name < MIGRATION)) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }
     await runMigrations(pool, beforeDir);
     before = await snapshot();
-    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies exactly 0765: everything else is already recorded
+    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0765 and every later migration (the earlier ones are already recorded; a later one may depend on 0765, so it cannot be in the before set)
     after = await snapshot();
   }, 120_000);
 

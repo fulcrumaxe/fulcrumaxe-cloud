@@ -4,7 +4,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
-import { isRunnerMode } from "@fx/runner";
+import { isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { sanitize } from "@fx/trust";
 import { agentOutputBlock } from "../plan/envelope.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -37,7 +37,7 @@ export const branchFor = (number: number): string => `fx/issue-${number}`;
  * person's own machine, where the platform publishes the commit and opens the pull request. Every other mode is the sandbox.
  */
 export type PromptRuntime = "sandbox" | "runner";
-export const promptRuntimeOf = (executionMode: string | null | undefined): PromptRuntime => (isRunnerMode(executionMode) ? "runner" : "sandbox");
+export const promptRuntimeOf = (executionMode: string | null | undefined, role?: string): PromptRuntime => (role !== undefined ? (runsInOurSandbox(executionMode, role) ? "sandbox" : "runner") : isRunnerMode(executionMode) ? "runner" : "sandbox");
 
 export interface ExecutorPromptInput {
   owner: string;
