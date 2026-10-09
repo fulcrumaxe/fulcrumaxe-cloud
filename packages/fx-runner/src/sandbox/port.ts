@@ -1,4 +1,5 @@
 import type { AgentHandle, NormalizedEvent, StartOptions } from "@fulcrumaxe/runner-protocol";
+import type { JobAllowanceGrant } from "./allowances.js";
 
 /**
  * A structural copy of the cloud's `SandboxPort` (the private `@fx/runner` package), kept here because this public
@@ -37,6 +38,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   extension?: unknown;
   /** Read-only grants for this job, each checked again by the host sandbox's builder (git path B: one repo mirror's `objects` directory). */
   extraReadPaths?: readonly string[];
+  /** D#6 R7b: the signed allowances of this job's repo. The host sandbox floor-checks them again and applies them; absent for a job without any. */
+  allowances?: JobAllowanceGrant;
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

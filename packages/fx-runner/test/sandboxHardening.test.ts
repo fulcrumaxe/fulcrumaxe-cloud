@@ -19,7 +19,7 @@ describe("R4b1-4: the sandbox hardening the security review asked for", () => {
   });
 
   it("names the state directory and the binary directory in denyRead, not only the home directory", () => {
-    expect(block().filesystem.denyRead).toEqual([HOME, STATE, BIN]);
+    expect(block().filesystem.denyRead).toEqual([HOME, STATE, BIN, base.workspaceRoot, base.tempRoot]);
   });
 
   it("is an allowlist: a workspace, temp directory or extra path outside every runner-owned root is refused", () => {

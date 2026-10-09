@@ -44,7 +44,16 @@ export interface CleanEnvOptions {
    * entry is refused.
    */
   extraPathDirs?: readonly string[];
+  /**
+   * D#6 R7b: the per-job additions of a job that carries sandbox allowances, only by the names in `JOB_ENV_NAMES` (the per-job cache directory,
+   * the repo's package store, the Bash tool's timeouts). Any other name, or a value with a control character, is refused, so this can never
+   * carry a credential or a path to one. Looked up by name like the rest.
+   */
+  jobEnv?: Readonly<Record<string, string>>;
 }
+
+/** The only names a job's own environment may set. */
+export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["XDG_CACHE_HOME", "npm_config_store_dir", "npm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
 
 /** True for a PATH entry that is an absolute directory with no NUL byte. */
 function isAbsoluteEntry(entry: string): boolean {
@@ -76,6 +85,16 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
   if (widened !== undefined) env.PATH = widened;
   else delete env.PATH;
   Object.assign(env, FIXED_ENV);
+  if (options.jobEnv !== undefined) {
+    const given = options.jobEnv;
+    for (const name of Object.getOwnPropertyNames(given)) if (!JOB_ENV_NAMES.includes(name)) throw new TypeError("cleanEnv: not an allowed per-job variable");
+    for (const name of JOB_ENV_NAMES) {
+      const value = given[name];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || value === "" || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError("cleanEnv: bad per-job variable value");
+      env[name] = value;
+    }
+  }
   if (credentials.mode === "subscription") {
     const token = process.env[SUBSCRIPTION_TOKEN_VAR];
     if (typeof token === "string" && token !== "") env[SUBSCRIPTION_TOKEN_VAR] = token;

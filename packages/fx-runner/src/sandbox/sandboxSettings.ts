@@ -83,6 +83,26 @@ export interface SandboxInput {
   toolchainReadPaths?: readonly string[];
   extraDomains?: readonly string[];
   /**
+   * D#6 R7b: the paths of a job's signed allowances, already floor-checked by the caller and checked again here. Each is a root of its own,
+   * and is refused when it is or contains or sits in the home directory, the protected list, the mirrors root or the workspace, temp or
+   * package-store roots (so a read of `/tmp` cannot reveal another job, and a parent of the home directory cannot reveal it). A write
+   * grant is also a read grant.
+   */
+  allowanceReadPaths?: readonly string[];
+  allowanceWritePaths?: readonly string[];
+  /** The loopback bind of a `loopback` allowance. Off by default. */
+  allowLoopbackBind?: boolean;
+  /**
+   * The runner's package store for the job's repo (`dir`, one directory per repo directly under `root`). Read and write for this job, and
+   * kept clear of every other root the way an allowance path is. It is the declared per-repo store C15's floor leaves out of the home rule.
+   */
+  packageStore?: { root: string; dir: string };
+  /**
+   * The directory the per-repo package stores live in. Denied for reading whether or not this job has a store of its own, so no job reads another
+   * repo's store; the job's own store (`packageStore.dir`) is the one child re-allowed.
+   */
+  packageStoreRoot?: string;
+  /**
    * The directory the repo mirrors live in (D#6 R4a-3, C25 section 2), absolute. It is a runner-owned root that no write may
    * reach (it is in `denyWrite`, and unreadable like the home directory), and the only grant under it is ONE read-only
    * `<mirrors root>/<id>.git/objects` in `extraReadPaths`: what a workspace made with `--reference` needs, and nothing else of any mirror.
@@ -222,6 +242,13 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded, roots));
   if (mirrorsRoot !== undefined) assertMirrorGrants(mirrorsRoot, extraRead, extraWrite);
   if (mirrorsRoot !== undefined && toolchainRead.some((value) => pathsOverlap(mirrorsRoot, value))) throw new SandboxGrantRefused("sandboxSettings: a toolchain read path overlaps the mirrors root");
+  // Allowance grants (R7b): each path its own root, kept clear of the home directory and of every runner-owned area. The package store is the one
+  // grant that sits in the runner's own cache directory (in the home directory), strictly under its root and clear of the other runner areas.
+  const store = input.packageStore === undefined ? undefined : assertGrantable("package store", input.packageStore.dir, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])], [path.normalize(input.packageStore.root)]);
+  const keepClear = [...guarded, home, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(store === undefined ? [] : [store])];
+  const allowRead = (input.allowanceReadPaths ?? []).map((value) => assertGrantable("allowance read path", value, home, keepClear, [value], true));
+  const allowWrite = (input.allowanceWritePaths ?? []).map((value) => assertGrantable("allowance write path", value, home, keepClear, [value], true));
+  const storeRoot = input.packageStoreRoot !== undefined ? path.normalize(input.packageStoreRoot) : input.packageStore === undefined ? undefined : path.normalize(input.packageStore.root);
   const toolchainDeny = [...new Set(toolchainRead.flatMap(toolchainCredentialFiles))];
   const domains = [...new Set([MODEL_HOST, ...(input.registries ?? []), ...(input.extraDomains ?? [])].map(assertPlainHost))];
   const unique = (values: string[]): string[] => [...new Set(values)];
@@ -235,13 +262,15 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
     enableWeakerNetworkIsolation: false,
     filesystem: {
       disabled: false,
-      allowWrite: unique([workspace, tempDir, ...extraWrite]),
+      allowWrite: unique([workspace, tempDir, ...extraWrite, ...allowWrite, ...(store === undefined ? [] : [store])]),
       denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...toolchainDeny]),
-      allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead]),
+      // The workspace, temp and package-store roots are denied like the mirrors root and the home directory: a cache directory outside the home
+      // directory would leave them readable. This job's own workspace, temp directory and store are re-allowed below (a narrower allow wins).
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...toolchainDeny]),
+      allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead, ...allowRead, ...allowWrite, ...(store === undefined ? [] : [store])]),
     },
     credentials: { files: [...floor, ...toolchainDeny].map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },
-    network: { allowedDomains: domains, strictAllowlist: true, allowLocalBinding: false },
+    network: { allowedDomains: domains, strictAllowlist: true, allowLocalBinding: input.allowLoopbackBind === true },
   };
 }
 

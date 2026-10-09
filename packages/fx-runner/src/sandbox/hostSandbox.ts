@@ -2,6 +2,8 @@ import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
+import { checkedAllowances, grantsOf, jobEnvFor, type AllowanceGrants } from "./allowances.js";
+import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } from "./writeScratch.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import {
   SandboxNotFoundError,
@@ -25,7 +27,7 @@ export interface HostSandboxConfig {
    * Builds the agent runtime for one job from the `sandbox` block this tier computed for it. The runtime writes the
    * block into the settings file it starts the agent with; nothing else decides what the shell sandbox allows.
    */
-  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths): InterruptibleRuntime;
+  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths, jobEnv?: Readonly<Record<string, string>>): InterruptibleRuntime;
   /** The user's home directory (absolute). Its reads are denied to the job. */
   home: string;
   /** Per-job temp directories are made under here (0700) and removed with the sandbox. */
@@ -46,11 +48,16 @@ export interface HostSandboxConfig {
   toolchainReadPaths?: readonly string[];
   /** Where the repo mirrors live (git path B, C25 section 2): never writable, and open to a job only for one mirror's `objects` directory, passed as the job's `extraReadPaths`. */
   mirrorsRoot?: string;
+  /**
+   * D#6 R7b: the directory the per-repo package stores live in, one directory per repo directly under it (read and write for a job of that repo
+   * that carries allowances, hidden from every other job). Without it a job with allowances gets no store.
+   */
+  packageStoreRoot?: string;
 }
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -75,6 +82,8 @@ function failureOf(outcome: unknown): string | undefined {
 
 interface Entry {
   tempDir: string;
+  /** The write directories of this job's allowances that the runner made (removed with the sandbox). */
+  scratch: ScratchDirs;
   timeoutMs: number;
   runtime?: InterruptibleRuntime;
   agent?: AgentHandle;
@@ -144,6 +153,24 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     if (entry.running) throw new HostSandboxRefused("sandbox_busy");
 
     const toolchain = config.toolchainReadPaths ?? [];
+    // The runner checks the floor itself, again, whatever the daemon already did: nothing below runs for a set that crosses it.
+    // The entries are resolved once, floor-checked, and the very same resolved list is what gets bound (no second resolve, no swap window).
+    const allowances = opts.allowances;
+    let grants: AllowanceGrants | undefined;
+    if (allowances !== undefined) {
+      const checked = checkedAllowances(allowances);
+      if (!checked.ok) throw new HostSandboxRefused("sandbox_allowance_forbidden");
+      grants = grantsOf(checked.entries);
+    }
+    let storeDir: string | undefined;
+    if (allowances !== undefined && config.packageStoreRoot !== undefined) {
+      try {
+        storeDir = segmentUnder(config.packageStoreRoot, allowances.storeKey);
+      } catch (error) {
+        if (error instanceof NotAPlainSegment) throw new HostSandboxRefused("sandbox_allowance_forbidden");
+        throw error;
+      }
+    }
     const sandbox = sandboxSettings({
       workspace: workdir,
       tempDir: entry.tempDir,
@@ -157,10 +184,36 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       ...(config.registries === undefined ? {} : { registries: config.registries }),
       ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
       ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
-      extraDomains: opts.networkPolicy.map((rule) => rule.host),
+      extraDomains: [...opts.networkPolicy.map((rule) => rule.host), ...(grants?.domains ?? [])],
+      ...(grants === undefined ? {} : { allowanceReadPaths: grants.readPaths, allowanceWritePaths: grants.writePaths, allowLoopbackBind: grants.loopback }),
+      ...(config.packageStoreRoot === undefined ? {} : { packageStoreRoot: config.packageStoreRoot }),
+      ...(storeDir === undefined || config.packageStoreRoot === undefined ? {} : { packageStore: { root: config.packageStoreRoot, dir: storeDir } }),
     });
     assertEnabledSandbox(sandbox);
-    const runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }));
+    // Only after the builder accepted every grant are the runner's own per-job directories made: the repo's package store and the job's cache directory.
+    // The job's write entries are job-scoped: each is a directory made fresh for this job, right before launch, and removed with the sandbox.
+    let jobEnv: Record<string, string> | undefined;
+    let runtime: InterruptibleRuntime;
+    try {
+      if (allowances !== undefined && grants !== undefined) {
+        claimScratch(entry.scratch, grants.writePaths);
+        jobEnv = jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS });
+        mkdirSync(jobEnv.XDG_CACHE_HOME!, { recursive: true, mode: 0o700 });
+        if (storeDir !== undefined && config.packageStoreRoot !== undefined) {
+          mkdirSync(config.packageStoreRoot, { recursive: true, mode: 0o700 });
+          mkdirSync(storeDir, { mode: 0o700, recursive: true });
+        }
+      }
+      runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }), jobEnv);
+    } catch (error) {
+      try {
+        releaseScratch(entry.scratch);
+      } catch {
+        // fx-swallow-ok: the launch failure is what the caller reports; the sandbox's delete removes what is left
+      }
+      if (error instanceof WriteScratchRefused) throw new HostSandboxRefused("sandbox_allowance_forbidden", error.detail);
+      throw error;
+    }
     let last: NormalizedEvent | undefined;
     const agentUp = (async () => {
       await opts.onSession?.(handle.sessionId ?? handle.sandboxName);
@@ -226,7 +279,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       // A live sandbox of that name keeps its entry: a second create would orphan its timer and agent, and share its temp directory.
       if (sandboxes.has(opts.sandboxName)) throw new HostSandboxRefused("sandbox_exists");
       mkdirSync(tempDir, { recursive: true, mode: 0o700 });
-      sandboxes.set(opts.sandboxName, { tempDir, timeoutMs: opts.timeoutMs, expired: false, running: false });
+      sandboxes.set(opts.sandboxName, { tempDir, scratch: new Map(), timeoutMs: opts.timeoutMs, expired: false, running: false });
       return { runId: "", sandboxName: opts.sandboxName, sessionId: `host-${opts.sandboxName}` };
     },
     startDetached: (handle, opts) => launch(handle, opts, undefined),
@@ -247,7 +300,12 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       await stopEntry(entry);
       clearTimeout(entry.timer);
       sandboxes.delete(handle.sandboxName);
-      rmSync(entry.tempDir, { recursive: true, force: true });
+      try {
+        rmSync(entry.tempDir, { recursive: true, force: true });
+      } finally {
+        // The job's write directories go with it, whether the job ended well or not (this runs in the job runner's finally).
+        releaseScratch(entry.scratch);
+      }
     },
     async measure() {
       return [];

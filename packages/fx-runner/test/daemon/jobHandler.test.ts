@@ -775,6 +775,27 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "job_refused", detail: "continues_wrong_role" });
   });
 
+  it("R7b: a validly signed job whose allowances cross the floor is refused as sandbox_allowance_forbidden: one run_ended, no workspace, no sandbox", async () => {
+    const entries = [{ kind: "path", value: "/home/jane/.ssh", access: "read", reason: "keys" }];
+    const rig = makeRig();
+    const claimed = await rig.claim(signRaw(jobFor({ sandbox_allowances: { entries, command_timeout_s: 600 } as never })) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "refused", reason: "sandbox_allowance_forbidden" });
+    expect(rig.runJobCalls()).toBe(0);
+    expect(existsSync(rig.workspaces)).toBe(false);
+    expect(rig.port.calls).toEqual([]);
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "job_refused", detail: "sandbox_allowance_forbidden" });
+  });
+
+  it("R7b: two jobs on one runner: the repo with allowances starts with them, the repo without starts with none", async () => {
+    const entries = [{ kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "install" }];
+    const rig = makeRig();
+    const withSet = await rig.claim(signRaw(jobFor({ repo: { id: "11111111-1111-4111-8111-111111111111", owner: "acme", name: "widgets", private: true }, sandbox_allowances: { entries, command_timeout_s: 900 } as never })) as never);
+    expect((await rig.handle(withSet)).status).toBe("completed");
+    const without = await rig.claim(signRaw(jobFor({ repo: { id: "22222222-2222-4222-8222-222222222222", owner: "acme", name: "gadgets", private: true } })) as never);
+    expect((await rig.handle(without)).status).toBe("completed");
+    expect(rig.port.starts.map((s) => s.allowances)).toEqual([{ entries, commandTimeoutS: 900, storeKey: "11111111-1111-4111-8111-111111111111" }, undefined]);
+  });
+
   it("a job the path will not push is refused before runJob: no workspace, no sandbox", async () => {
     const rig = makeRig({ handler: { git: fakeGitPath({ check: () => { throw new GitPathError("push_ref_refused"); } }) } });
     const claimed = await rig.claim();

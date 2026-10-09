@@ -198,7 +198,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       binaryDir: path.dirname(binaryPath),
       mirrorsRoot,
       toolchainReadPaths: toolchainReadPaths(toolchain),
-      makeRuntime: (sandboxSettings, protectedPaths) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit }),
+      packageStoreRoot: path.join(path.dirname(mirrorsRoot), "pnpm-store"),
+      makeRuntime: (sandboxSettings, protectedPaths, jobEnv) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit, ...(jobEnv === undefined ? {} : { jobEnv }) }),
     });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
     const tmuxBinary = host.selfCommand === undefined || socketTooLong ? undefined : findTmux(searchPath);

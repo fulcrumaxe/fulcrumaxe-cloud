@@ -37,6 +37,8 @@ export interface EngineKit {
     protectedPaths: ProtectedPaths;
     stateDir: string;
     onLocalEvent: (event: LocalOnlyEvent) => void;
+    /** D#6 R7b: the per-job variables of a job that carries sandbox allowances (see `CleanEnvOptions.jobEnv`); absent for a job without any. */
+    jobEnv?: Readonly<Record<string, string>>;
   }): InterruptibleRuntime;
   /** Resume or fresh, from the local session index in the state directory. */
   planSession(stateDir: string, continues: { session_id: string; branch: string } | null): SessionPlan;
