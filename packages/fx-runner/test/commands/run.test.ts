@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +16,7 @@ import { runCli } from "../../src/cli.js";
 import { pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { until } from "../helpers/manualClock.js";
+import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { KEY_ID, KEYRING, OTHER_KEYRING, signedJob } from "../helpers/signedJob.js";
 import { PACKAGE_DIR } from "../helpers/srcFiles.js";
@@ -75,7 +76,7 @@ type Signals = EventEmitter & RunHost["signals"];
 const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
-const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn) });
+const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() });
 
 const claims = (): number => cloud.seen.filter((s) => s.path === "/api/runner/claim").length;
 
@@ -357,6 +358,86 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
     expect(readdirSync(stateDir).filter((n) => /mirror/i.test(n))).toEqual([]);
     expect(process.listenerCount("SIGTERM")).toBe(0);
   }, 60_000);
+});
+
+describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)", () => {
+  const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
+  const queuedJob = () => signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+
+  it("a failing probe: the poll carries the reason, a queued job is not leased, nothing runs, the machine is told, and a stop is clean", async () => {
+    const sandbox = fakeSandboxHost({ outcome: { code: 1, stdout: "", stderr: "bwrap: setting up uid map: Permission denied", timedOut: false }, sysctls: { "kernel.apparmor_restrict_unprivileged_userns": "1" } });
+    const job = queuedJob();
+    cloud.enqueue(job);
+    const run = start({ host: { sandbox } });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "apparmor_userns_restricted" });
+    expect(cloud.runs.size).toBe(0);
+    expect(fake.spawnCount()).toBe(0);
+    expect(sandbox.calls).toHaveLength(1);
+    const result = await stop(run);
+    expect(result).toMatchObject({ code: 0 });
+    expect(cloud.runs.size).toBe(0);
+    expect(cloud.seen.filter((s) => !s.path.endsWith("/claim"))).toEqual([]);
+    const said = (await run.done).out.join("\n");
+    expect(said).toContain("the sandbox does not work on this machine (apparmor_userns_restricted)");
+    expect(said).toContain("fx-runner doctor");
+    expect(said).not.toContain(`claimed ${job.job.run_id}`);
+  });
+
+  it("a probe that cannot run at all fails closed: the reason is probe_failed_other and no job is taken", async () => {
+    const sandbox = fakeSandboxHost();
+    sandbox.run = async () => {
+      throw new Error("spawn exploded at /secret/path");
+    };
+    cloud.enqueue(queuedJob());
+    const run = start({ host: { sandbox } });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "probe_failed_other" });
+    expect(cloud.runs.size).toBe(0);
+    expect(JSON.stringify(cloud.seen)).not.toContain("/secret/path");
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("a machine without bubblewrap starts, reports bwrap_missing, and does not exit (it used to refuse to start)", async () => {
+    unlinkSync(path.join(toolbin, "bwrap"));
+    const sandbox = fakeSandboxHost();
+    cloud.enqueue(queuedJob());
+    const run = start({ host: { sandbox } });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "bwrap_missing" });
+    expect(sandbox.calls).toEqual([]);
+    expect(cloud.runs.size).toBe(0);
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("socat missing reports socat_missing the same way", async () => {
+    unlinkSync(path.join(toolbin, "socat"));
+    const run = start({ host: { sandbox: fakeSandboxHost() } });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toEqual({ sandbox_unavailable: "socat_missing" });
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("a passing probe: the first poll is an ordinary claim with an empty body, and the queued job is leased", async () => {
+    const sandbox = fakeSandboxHost();
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    const run = start({ host: { sandbox } });
+    await until(() => cloud.runs.has(job.job.run_id), 20_000);
+    expect(claimBodies()[0]).toEqual({});
+    expect(sandbox.calls).toHaveLength(1);
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("the daemon passes a gate to the poll loop and builds the probe from the one shared function (no loop without a gate)", () => {
+    const text = readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8");
+    expect(text).toMatch(/pollLoop\(\{[^}]*\bgate\b/s);
+    expect(text).toContain("probeMachine(");
+    const loop = readFileSync(path.join(PACKAGE_DIR, "src", "daemon", "pollLoop.ts"), "utf8");
+    expect(loop).toMatch(/gate: SandboxGate;/);
+    expect(loop).not.toMatch(/gate\?:/);
+  });
 });
 
 describe("the command line wiring", () => {

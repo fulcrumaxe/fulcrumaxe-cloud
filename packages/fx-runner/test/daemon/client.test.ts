@@ -75,6 +75,19 @@ describe("claim", () => {
     expect(await client.claim()).toEqual({ kind: "rate_limited", retryAfter: 3 });
   });
 
+  it("a status poll (C16 section 1.3) sends only the reason, takes no job, and refuses a reply that carries one", async () => {
+    cloud.enqueue(signedJob());
+    expect(await client.claim("socat_missing")).toEqual({ kind: "idle", retryAfter: 60 });
+    expect(cloud.seen.at(-1)!.body).toEqual({ sandbox_unavailable: "socat_missing" });
+    // A cloud that handed out a job to a status poll is not believed: it is an error, so no caller can run it.
+    const signed = signedJob();
+    cloud.force.claim.push({ status: 200, body: ClaimReply.parse({ signed_job: signed, run_id: signed.job.run_id, lease_generation: 1 }) });
+    expect(await client.claim("socat_missing")).toEqual({ kind: "error", status: 200, code: "invalid_reply" });
+    // The queued job is still there for the next ordinary claim, whose body is empty.
+    expect(await client.claim()).toMatchObject({ kind: "claimed" });
+    expect(cloud.seen.at(-1)!.body).toEqual({});
+  });
+
   it("refuses a claim whose run_id is not the signed job's, with nothing to run", async () => {
     const signed = signedJob();
     const reply = { signed_job: signed, run_id: "11111111-1111-4111-8111-111111111111", lease_generation: 1 };

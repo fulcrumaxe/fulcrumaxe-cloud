@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { JobSchema, SignedJobSchema } from "../src/job.js";
-import { CREDENTIAL_MODES, DETAILS_OF_RUN_ENDED, INT4_MAX, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, type RunnerMessageName } from "../src/messages.js";
+import { CREDENTIAL_MODES, DETAILS_OF_RUN_ENDED, INT4_MAX, ISOLATION_TIERS, LOCAL_ONLY_EVENT_TYPES, LocalOnlyEvent, MAX_AGENT_OUTPUT_DEPTH, MAX_EVENTS_PER_BATCH, RUNNER_MESSAGES, SANDBOX_UNAVAILABLE_REASONS, type RunnerMessageName } from "../src/messages.js";
 import { CREDENTIAL_NAME, G1_ALLOWLIST, fieldPaths, g1Violations, nonStrictObjects } from "./helpers/schemaWalk.js";
 
 const UUID = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
@@ -226,8 +226,11 @@ describe("the other messages", () => {
     }
   });
 
-  it("claim is empty and revoke's reason is short, printable text", () => {
+  it("claim is empty, or names one closed sandbox reason (C16 section 1.3), and revoke's reason is short, printable text", () => {
     expect(RUNNER_MESSAGES.claim.safeParse({}).success).toBe(true);
+    for (const reason of SANDBOX_UNAVAILABLE_REASONS) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: reason }).success, reason).toBe(true);
+    for (const bad of ["", "sandbox_unavailable", "bwrap missing", "bwrap_missing\nx", 1, null, true]) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: bad }).success, String(bad)).toBe(false);
+    expect(SANDBOX_UNAVAILABLE_REASONS).toEqual(["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other"]);
     expect(RUNNER_MESSAGES.revoke.safeParse({}).success).toBe(true);
     expect(RUNNER_MESSAGES.revoke.safeParse({ reason: "x".repeat(201) }).success).toBe(false);
     expect(RUNNER_MESSAGES.revoke.safeParse({ reason: "a\nb" }).success).toBe(false);

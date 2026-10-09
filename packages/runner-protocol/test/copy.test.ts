@@ -24,6 +24,7 @@ describe("the runner copy (D#6 R2b)", () => {
       executionModeChanged: "Cancelled because this repository was moved off your runner. Retry to run it under the new setting.",
       paused: "Paused: Claude usage limit reached.",
       jobRefused: "Your runner refused this job ({detail}). Update the runner, then retry.",
+      sandboxUnavailable: "Sandbox not working on this machine ({reason}). Run `fx-runner doctor` there to see the fix.",
       agentFailed: "The agent stopped without finishing. Retry, or open the run for details.",
       runnerSetupFailed: "Your runner could not start the agent ({detail}). Check the runner's setup, then retry.",
       pushRejected: "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
@@ -66,6 +67,6 @@ describe("the runner copy (D#6 R2b)", () => {
       expect(text.length, key).toBeGreaterThan(0);
       for (const match of text.matchAll(/\{([a-z]+)\}/g)) placeholders.add(match[1]!);
     }
-    expect([...placeholders].sort()).toEqual(["detail", "item", "machine", "n", "person", "repo", "run", "size", "status", "time"]);
+    expect([...placeholders].sort()).toEqual(["detail", "item", "machine", "n", "person", "reason", "repo", "run", "size", "status", "time"]);
   });
 });

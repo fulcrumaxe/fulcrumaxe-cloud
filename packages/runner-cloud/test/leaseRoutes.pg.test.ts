@@ -183,6 +183,59 @@ describe("lease routes [pg]", () => {
       expect(calls).toHaveLength(1);
     });
 
+    describe("a status poll from a runner whose sandbox does not work (R4a-6, C16 section 1.3)", () => {
+      const stored = async (): Promise<string | null> => (await h.admin.query<{ s: string | null }>("SELECT reason AS s FROM runner_sandbox_status WHERE runner_id = $1", [runnerId])).rows[0]?.s ?? null;
+      const reset = async (): Promise<void> => {
+        await h.admin.query("DELETE FROM runner_claim_stamps WHERE runner_id = $1", [runnerId]);
+      };
+      beforeEach(async () => {
+        await h.admin.query("DELETE FROM runner_sandbox_status WHERE runner_id = $1", [runnerId]);
+        await h.admin.query("UPDATE runners SET last_seen_at = NULL WHERE id = $1", [runnerId]);
+      });
+
+      it("stores the reason, refreshes last_seen_at, hands out no job even when one is queued, and answers retry_after only", async () => {
+        claimResult = { kind: "claimed", signedJob: signJob(job, generateKeyPairSync("ed25519").privateKey), runId: RUN, leaseGeneration: 1 };
+        const res = await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "apparmor_userns_restricted" })));
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ retry_after: 60 });
+        expect(ClaimReply.safeParse(res.body).success).toBe(true);
+        expect(calls).toEqual([]);
+        expect(await stored()).toBe("apparmor_userns_restricted");
+        expect((await h.admin.query("SELECT last_seen_at FROM runners WHERE id = $1", [runnerId])).rows[0].last_seen_at).not.toBeNull();
+      });
+
+      it("is cleared by the runner's next ordinary claim, which does reach the worker", async () => {
+        await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "bwrap_missing" })));
+        expect(await stored()).toBe("bwrap_missing");
+        await reset();
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).status).toBe(200);
+        expect(await stored()).toBeNull();
+        expect(calls).toHaveLength(1);
+      });
+
+      it("refuses a reason outside the closed set (400) and stores nothing", async () => {
+        for (const bad of ["other", "bwrap missing", "", "x".repeat(300)]) {
+          await reset();
+          expect((await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: bad })))).status, bad).toBe(400);
+        }
+        expect(await stored()).toBeNull();
+        expect(calls).toEqual([]);
+      });
+
+      it("is throttled like any claim: a second poll inside 4 seconds is 429 and changes nothing", async () => {
+        await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "socat_missing" })));
+        const second = await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "userns_disabled" })));
+        expect(second.status).toBe(429);
+        expect(await stored()).toBe("socat_missing");
+      });
+
+      it("a revoked runner is 401 and its row is not touched", async () => {
+        await h.admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [runnerId]);
+        expect((await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "bwrap_missing" })))).status).toBe(401);
+        expect(await stored()).toBeNull();
+      });
+    });
+
     it("takes no body: a field is 400", async () => {
       expect((await run(() => claimRun(deps(), req(CLAIM, { account_id: A.accountId })))).status).toBe(400);
       expect(calls).toEqual([]);

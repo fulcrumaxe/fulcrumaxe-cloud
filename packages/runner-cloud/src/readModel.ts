@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { COPY } from "@fulcrumaxe/runner-protocol";
+import { COPY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -51,6 +51,8 @@ export interface RunnerRow {
   binary_version: string | null;
   last_seen_at: string | null;
   state: RunnerState;
+  /** D#6 R4a-6 (C16 section 1.3): why the runner's sandbox does not work, from its last poll; null while it works. A closed code, never text from the machine. */
+  sandbox_unavailable: SandboxUnavailableReason | null;
 }
 
 interface RawRunner {
@@ -62,6 +64,7 @@ interface RawRunner {
   protocol_version: number | null;
   last_seen_at: Date | null;
   revoked_at: Date | null;
+  sandbox_unavailable: SandboxUnavailableReason | null;
   busy: boolean;
 }
 
@@ -75,10 +78,11 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     (
       await client.query<RawRunner>(
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
-                r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at,
+                r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, s.reason AS sandbox_unavailable,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy
            FROM runners r LEFT JOIN users u ON u.id = r.registered_by
+                LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
           WHERE r.account_id = $1
           ORDER BY r.created_at, r.id`,
         [accountId, now, UNNAMED_MEMBER],
@@ -100,6 +104,8 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     registered_by: { id: r.registered_by, name: r.registered_by_name },
     binary_version: r.binary_version,
     last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
+    // A revoked runner polls no more, so a stale reason is not shown for it.
+    sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
     state: classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current),
   }));
 }
@@ -181,7 +187,7 @@ export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrinc
   const runners = await readRunners(deps, principal.accountId, principal.userId);
   return {
     status: 200,
-    body: { runners, copy: { usageLimits: COPY.usageLimits, approval: COPY.approval, runner: COPY.runner, localOnly: COPY.localOnly } },
+    body: { runners, copy: { usageLimits: COPY.usageLimits, approval: COPY.approval, runner: COPY.runner, localOnly: COPY.localOnly, sandboxUnavailable: COPY.sandboxUnavailable } },
     headers: { "cache-control": "no-store" },
   };
 }

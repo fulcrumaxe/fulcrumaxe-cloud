@@ -7,7 +7,10 @@
  * Before the first claim, in this order, each failure stops the command with a non-zero exit and a fixed message:
  *  - this machine is registered and its key matches (as `status` checks);
  *  - the build pins job-signing keys for the registration's cloud address (`job_keyring_missing`);
- *  - the machine can sandbox a job and the agent CLI is found (looked up once, here: a job never consults the search path);
+ *  - the platform has a sandbox tier and the agent CLI is found (looked up once, here: a job never consults the search path). A machine whose
+ *    sandbox does not start is NOT a stop (D#6 R4a-6, C16 section 1.3): the sandbox probe runs here and again before each claim while it
+ *    fails (at most every 5 minutes), the daemon claims nothing while it fails and tells the cloud the reason code on each poll, and it
+ *    recovers without a restart when the machine is fixed. There is no unsandboxed path;
  *  - the mirrors directory overlaps none of the runner's own directories, also through a link (`mirrors_root_overlap`);
  *  - stale leftovers next to the ledger are removed, then the ledger is taken (another `run` holds it: exit non-zero);
  *  - the ledger is not closed by damage (`ledger_closed`): nothing that is not on the ledger runs, so no claim is made.
@@ -18,6 +21,7 @@ import { CliError } from "../cliError.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { createRunnerClient } from "../daemon/client.js";
+import { createSandboxGate } from "../daemon/sandboxGate.js";
 import type { EngineKit } from "../daemon/engineKit.js";
 import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
@@ -33,6 +37,7 @@ import { loadRunnerKey } from "../keys.js";
 import { gitProxyHashFor, keyringFor, type PinnedGitProxies, type PinnedKeyrings } from "../keyring.js";
 import { createHostSandbox } from "../sandbox/hostSandbox.js";
 import { SandboxRefused } from "../sandbox/platform.js";
+import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { commandOnPath, resolveSandboxTools, sandboxToolDirs, selectTier } from "../sandbox/select.js";
 
@@ -52,6 +57,8 @@ export interface RunHost {
   /** `kill(pid, 0)`: throws `ESRCH` for a program that is gone, `EPERM` for one that belongs to another user. */
   kill: (pid: number, signal: 0) => unknown;
   engine: EngineKit;
+  /** The machine behind the sandbox probe (the same host `doctor` uses): the process start and the file reads. */
+  sandbox: SandboxHost;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -82,12 +89,28 @@ function credentialsOf(registration: Registration): CredentialMode {
   throw new CliError("api_key_not_configured: this runner is registered for api_key mode, and no local API key file is supported yet");
 }
 
-/** The sandbox tier, bubblewrap and socat (Linux), and the agent CLI, or the refusal that says which is missing. */
+/** Where bubblewrap and socat are, as the directories to put on the agent's PATH. Empty when a tool is missing: the probe says so, and the gate holds. */
+function sandboxDirs(host: RunHost, searchPath: string): string[] {
+  try {
+    return sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform }));
+  } catch (error) {
+    if (error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing")) return [];
+    throw error;
+  }
+}
+
+/**
+ * The agent CLI and the sandbox tools' directories, or the refusal for a platform that has no sandbox at all (Windows, WSL1, anything
+ * else). A machine that only lacks bubblewrap or socat gets no refusal here: it starts, reports the reason and claims nothing.
+ */
 function localTools(host: RunHost, searchPath: string): { binaryPath: string; toolDirs: string[] } {
   try {
-    selectTier({ platform: host.platform, hasCommand: (name) => commandOnPath(name, searchPath) });
-    const toolDirs = sandboxToolDirs(resolveSandboxTools(searchPath, { platform: host.platform }));
-    return { binaryPath: host.engine.locate(searchPath), toolDirs };
+    try {
+      selectTier({ platform: host.platform, hasCommand: (name) => commandOnPath(name, searchPath) });
+    } catch (error) {
+      if (!(error instanceof SandboxRefused && (error.code === "bubblewrap_missing" || error.code === "socat_missing"))) throw error;
+    }
+    return { binaryPath: host.engine.locate(searchPath), toolDirs: sandboxDirs(host, searchPath) };
   } catch (error) {
     if (error instanceof SandboxRefused || (error instanceof Error && error.name === "EngineRefusal")) throw new CliError(`${error.message}; fx-runner cannot run jobs here`);
     throw error;
@@ -96,6 +119,7 @@ function localTools(host: RunHost, searchPath: string): { binaryPath: string; to
 
 function describePoll(event: PollEvent): string | undefined {
   if (event.event === "idle" || event.event === "rate_limited") return undefined;
+  if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
   return event.event === "claimed" || event.event === "discarded" ? `${event.event} ${event.runId}` : event.event;
 }
@@ -111,7 +135,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const home = host.home;
   if (home === undefined || !path.isAbsolute(home)) throw new CliError("cannot find your home directory");
 
-  const { binaryPath, toolDirs } = localTools(host, hooks.searchPath ?? cleanEnv(credentials).PATH ?? "");
+  const searchPath = hooks.searchPath ?? cleanEnv(credentials).PATH ?? "";
+  const { binaryPath, toolDirs } = localTools(host, searchPath);
   const envOptions = { extraPathDirs: toolDirs };
 
   // The runner's own directories. The state directory is private; the workspaces, temp directories and mirrors sit beside each other in the cache directory.
@@ -168,15 +193,34 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       recordSession: (sessionId, workspace) => host.engine.recordSession(stateDir, sessionId, workspace),
     });
 
+    // The claim gate (C16 section 1.3). Each probe first looks for bubblewrap and socat again, so a tool installed while the daemon runs is found
+    // (the directories are updated in place: every user of `envOptions` reads them when it builds an environment).
+    const gate = createSandboxGate({
+      now: ctx.now,
+      probe: () => {
+        const found = sandboxDirs(host, searchPath);
+        toolDirs.splice(0, toolDirs.length, ...found);
+        return probeMachine({ platform: host.platform, home, stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome, searchPath }, host.sandbox);
+      },
+    });
+    let lastReason: string | undefined;
     const detach = abortOnSignals(stopped, host.signals);
     try {
       ctx.out(`fx-runner: running as runner ${registration.runner_id}; stop with Ctrl-C`);
+      const first = await gate.check();
+      if (!first.open) ctx.out(`fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
+      lastReason = first.open ? undefined : first.reason;
       const end = await pollLoop({
         client,
         clock,
+        gate,
         signal: stopped.signal,
         onClaimed: handle,
         log: (event) => {
+          // Said when the answer changes, not on every poll.
+          const reason = event.event === "sandbox_unavailable" ? event.reason : event.event === "idle" || event.event === "rate_limited" ? undefined : lastReason;
+          if (reason !== lastReason) ctx.out(reason === undefined ? "fx-runner: the sandbox works again; claiming jobs" : `fx-runner: the sandbox does not work on this machine (${reason}); no job will be claimed. Run: fx-runner doctor`);
+          lastReason = reason;
           const line = describePoll(event);
           if (line !== undefined) ctx.out(`fx-runner: ${line}`);
         },

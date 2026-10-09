@@ -29,6 +29,7 @@ const code = await runCli({
     pid: process.pid,
     kill: (pid, signal) => process.kill(pid, signal),
     engine,
+    sandbox: createSandboxHost(engine.captureWithStderr),
   },
   doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr) },
   serviceHost: {

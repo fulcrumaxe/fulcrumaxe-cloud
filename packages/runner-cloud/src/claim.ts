@@ -1,4 +1,4 @@
-import { CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
+import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -12,24 +12,36 @@ export const CLAIM_PATH = "/api/runner/claim";
  *     before the worker is asked anything, so no claim query runs;
  *  3. the worker claims in one transaction (`claimRunnerRun`) and the answer is the signed job with its run id and lease
  *     generation, or `{retry_after}`.
+ * A poll that names `sandbox_unavailable` (C16 section 1.3) is a status poll, not a claim: the runner cannot sandbox a job and takes none.
+ * An idle runner has no heartbeat, and only a claim or a heartbeat refreshes `last_seen_at`, so the poll is how such a runner stays visible.
+ * It passes steps 1 and 2 like any claim, the reason is stored (step 3 is skipped, so no run is leased and no job can leave), and the answer
+ * is `retry_after` only. Every ordinary claim clears the stored reason, so a fixed machine needs nothing more than its next poll.
  * The reply is parsed against the protocol's schema before it is sent, so a field that should not be there is a 500, not a leak.
  */
 export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
   const runner = await verifyRunnerRequest(deps, CLAIM_PATH, req, { replay: "once" });
-  parseMessage(ClaimMessage, parseJsonBody(req));
+  const message = parseMessage(ClaimMessage, parseJsonBody(req));
   const leases = requireLeases(deps);
 
   const wait = await asRunner(() =>
     withRunnerSession(deps.appUserPool, runner, async (client) => {
       // A runner revoked between the verification and here, or whose account is suspended, gets 42501: `asRunner` makes it a 401.
       const { rows } = await client.query<{ wait: number }>("SELECT runner_claim_throttle($1) AS wait", [CLAIM_MIN_INTERVAL_SECONDS * 1000]);
-      return rows[0]!.wait;
+      const waited = rows[0]!.wait;
+      // The sandbox status (C16 section 1.3) is recorded in the same session, only for a poll that passed the throttle: a named reason is
+      // stored, and an ordinary claim clears it. One checkout and one transaction serve both.
+      if (waited <= 0) await client.query("SELECT runner_sandbox_status_record($1)", [message.sandbox_unavailable ?? null]);
+      return waited;
     }),
   );
   if (wait > 0) {
     const retryAfter = Math.min(CLAIM_MIN_INTERVAL_SECONDS, Math.max(1, Math.ceil(wait / 1000)));
     const body = ClaimRateLimitedReply.parse({ retry_after: retryAfter });
     return { status: 429, body, headers: { "retry-after": String(retryAfter) } };
+  }
+
+  if (message.sandbox_unavailable !== undefined) {
+    return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
   }
 
   const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId }));

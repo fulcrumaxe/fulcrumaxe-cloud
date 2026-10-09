@@ -132,8 +132,20 @@ export const HelloMessage = z
   })
   .strict();
 
-/** A claim carries nothing: the signature identifies the runner and the cloud reads its scope from its own row. */
-export const ClaimMessage = z.object({}).strict();
+/**
+ * D#6 R4a-6 (correction C16 section 1.3): why a runner's sandbox cannot start, a closed set and the only detail about it that leaves the
+ * machine. The runner's probe (`fx-runner doctor` runs it too) answers with one of these.
+ */
+export const SANDBOX_UNAVAILABLE_REASONS = ["bwrap_missing", "socat_missing", "userns_disabled", "apparmor_userns_restricted", "probe_failed_other"] as const;
+export const SandboxUnavailableReason = z.enum(SANDBOX_UNAVAILABLE_REASONS);
+export type SandboxUnavailableReason = z.infer<typeof SandboxUnavailableReason>;
+
+/**
+ * A claim carries nothing: the signature identifies the runner and the cloud reads its scope from its own row. The one exception is the
+ * status poll of a runner whose sandbox does not work (C16 section 1.3): it names the reason, takes no job, and the cloud answers it with
+ * `retry_after` only. Absent means the sandbox works.
+ */
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional() }).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
 

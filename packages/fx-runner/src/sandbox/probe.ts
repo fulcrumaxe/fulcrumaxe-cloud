@@ -44,6 +44,8 @@ export interface SandboxProbeInput {
   /** The directory holding the agent binary; the state directory's `engine` subdirectory stands in when there is no binary. */
   binaryDir: string;
   xdgCacheHome?: string | undefined;
+  /** Where bubblewrap and socat are looked for. Default: the search path of the clean environment (what `run` uses too, unless a test sets one). */
+  searchPath?: string | undefined;
 }
 
 /** What the test command prints. */
@@ -152,7 +154,7 @@ async function classify(host: SandboxHost, stderr: string, bwrapPath: string): P
 export async function probeSandbox(input: SandboxProbeInput, host: SandboxHost): Promise<SandboxProbeResult> {
   const settings = probeSettings(input);
   // Only the search path goes into the test: no credential, no token, nothing else of this shell.
-  const env: Record<string, string> = { PATH: cleanEnv({ mode: "subscription" }).PATH ?? "", LC_ALL: "C" };
+  const env: Record<string, string> = { PATH: input.searchPath ?? cleanEnv({ mode: "subscription" }).PATH ?? "", LC_ALL: "C" };
   const command = ["/bin/sh", "-c", `printf %s ${PROBE_MARKER}`];
   let tool: string;
   let args: string[];
@@ -193,11 +195,12 @@ export interface MachineFacts {
   /** The agent binary's absolute path, when one was found. */
   binaryPath: string | undefined;
   xdgCacheHome?: string | undefined;
+  searchPath?: string | undefined;
 }
 
 /** `probeSandbox` for the facts `doctor` has. A home directory that is not known or not absolute is a failure with a reason, never a skipped check. */
 export async function probeMachine(facts: MachineFacts, host: SandboxHost): Promise<SandboxProbeResult> {
   if (facts.home === undefined || !path.isAbsolute(facts.home)) return failure("probe_failed_other", "the home directory is not known (HOME is not set)");
   const binaryDir = facts.binaryPath === undefined ? path.join(facts.stateDir, "engine") : path.dirname(facts.binaryPath);
-  return probeSandbox({ platform: facts.platform, home: facts.home, stateDir: facts.stateDir, binaryDir, xdgCacheHome: facts.xdgCacheHome }, host);
+  return probeSandbox({ platform: facts.platform, home: facts.home, stateDir: facts.stateDir, binaryDir, xdgCacheHome: facts.xdgCacheHome, searchPath: facts.searchPath }, host);
 }
