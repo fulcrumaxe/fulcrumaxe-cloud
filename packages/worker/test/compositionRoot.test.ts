@@ -70,13 +70,13 @@ function options(over: Partial<BuildWorkerOptions> = {}): BuildWorkerOptions {
 const RUN = { id: "r1", accountId: "a1", role: "executor", product: "team" } as unknown as ExecutionRun;
 
 describe("buildWorker (C15 / C26 / C59 §5)", () => {
-  it("builds the production registry: the 'sandbox' and 'runner_local' targets, resolvable, nothing else", async () => {
+  it("builds the production registry: the 'sandbox', 'runner_local' and 'runner_verified' targets, resolvable, nothing else", async () => {
     const worker = await buildWorker(options());
-    expect(Object.keys(worker.registry)).toEqual(["sandbox", "runner_local"]);
+    expect(Object.keys(worker.registry)).toEqual(["sandbox", "runner_local", "runner_verified"]);
     expect(resolveExecutionTarget("sandbox", worker.registry).runtime).toBe("production");
     expect(resolveExecutionTarget("runner_local", worker.registry).runtime).toBe("runner");
     expect(() => resolveExecutionTarget("runner", worker.registry)).toThrow(UnknownExecutionModeError);
-    expect(() => resolveExecutionTarget("runner_verified", worker.registry)).toThrow(UnknownExecutionModeError);
+    expect(resolveExecutionTarget("runner_verified", worker.registry).runtime).toBe("runner");
     expect(Object.isFrozen(worker.registry)).toBe(true);
   });
 

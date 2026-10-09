@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { SignedJobSchema } from "@fulcrumaxe/runner-protocol";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { JobIssueError, resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
+import { JobIssueError, isRunnerMode, resolveExecutionTarget, writeRunStatus, type ExecutionRun, type ExecutionTargetRegistry } from "@fx/runner";
 
 /**
  * D#6 R2b-3 (C21 section 4): the run that follows a runner run which ended `runner_lost` or `usage_limit`.
@@ -94,6 +94,8 @@ interface ChildRow {
   work_item_id: string | null;
   parent_run_id: string | null;
   initiated_by: string | null;
+  /** The child inherits its parent's own mode; the follow-up goes through that mode's target. */
+  execution_mode: string | null;
   status: string;
   has_job: boolean;
   parent_job: unknown;
@@ -126,7 +128,7 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
     async dispatchChild({ accountId, runId }) {
       const child = await withTenant(deps.pool, accountId, async (client) => {
         const { rows } = await client.query<ChildRow>(
-          `SELECT c.id, c.role, c.dispatch_repo_id, c.dispatch_pr_number, c.head_sha, c.work_item_id, c.parent_run_id, c.initiated_by, c.status, (c.job_signed IS NOT NULL) AS has_job, p.job_signed AS parent_job
+          `SELECT c.id, c.role, c.dispatch_repo_id, c.dispatch_pr_number, c.head_sha, c.work_item_id, c.parent_run_id, c.initiated_by, c.execution_mode, c.status, (c.job_signed IS NOT NULL) AS has_job, p.job_signed AS parent_job
              FROM agent_runs c LEFT JOIN agent_runs p ON p.account_id = c.account_id AND p.id = c.parent_run_id
             WHERE c.account_id = $1 AND c.id = $2 AND c.runtime = 'runner'`,
           [accountId, runId],
@@ -159,7 +161,7 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           // The branch the lost round was on, carried unchanged (the issuer checks it is a run branch).
           ...(job.continues ? { continuesBranch: job.continues.branch } : {}),
         };
-        const target = resolveExecutionTarget("runner_local", deps.registry);
+        const target = resolveExecutionTarget(isRunnerMode(child.execution_mode) ? child.execution_mode : "runner_local", deps.registry);
         if (job.continues) await target.resume(run, job.continues.session_id);
         else await target.dispatch(run);
       } catch (error) {

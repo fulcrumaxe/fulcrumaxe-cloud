@@ -245,11 +245,11 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
   describe("leaving runner_local cancels the repo's queued runner runs (C24 section 2)", () => {
     const HOUR = 3_600_000;
     /** A runner run of the repo. `claimableAfter` makes it a follow-up waiting for its time; `job: false` is a run whose job was never written. */
-    async function run(f: F2Fixture, repoId: string, o: { status?: string; job?: boolean; claimableAfter?: number } = {}): Promise<string> {
+    async function run(f: F2Fixture, repoId: string, o: { status?: string; job?: boolean; claimableAfter?: number; mode?: string } = {}): Promise<string> {
       const id = randomUUID();
       await h.admin.query(
         `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, claimable_after)
-         VALUES ($1, $2, 'code-reviewer', 'runner', $3, 'runner_local', $4, $5::jsonb, $6)`,
+         VALUES ($1, $2, 'code-reviewer', 'runner', $3, $7, $4, $5::jsonb, $6)`,
         [
           id,
           f.accountId,
@@ -257,6 +257,7 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
           repoId,
           o.job === false ? null : JSON.stringify({ job: { expires_at: new Date(Date.now() + 72 * HOUR).toISOString() }, signature: "x" }),
           o.claimableAfter ? new Date(o.claimableAfter) : null,
+          o.mode ?? "runner_local",
         ],
       );
       return id;
@@ -301,6 +302,34 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       const log = (await audits(f)).filter((r) => r.action === "repo.execution_mode.changed");
       expect(log.map((r) => r.payload.cancelled_runs).sort()).toEqual([0, 2]);
       expect(log.find((r) => r.payload.repo_id === id)?.payload).toEqual({ repo_id: id, from: "runner_local", to: "sandbox", auto_merge_turned_off: false, cancelled_runs: 2 });
+    });
+
+    // D#6 R5b-1 (C26 section 3, C38): the repo is put in runner_verified directly (the route cannot set it yet); the route then moves it.
+    it("a repo on runner_verified moving to runner_local cancels nothing: the verified run stays pending, and the audit row says 0", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_verified");
+      const queued = await run(f, id, { mode: "runner_verified" });
+      expect(await call(f, f.o1, id, { mode: "runner_local", confirm_repo: NAME })).toMatchObject({ status: 200, body: { execution_mode: "runner_local", changed: true, cancelled_runs: 0 } });
+      expect(await status(queued)).toBe("pending");
+      expect(await moves(queued)).toEqual([]);
+      const log = (await audits(f)).filter((r) => r.action === "repo.execution_mode.changed");
+      expect(log.map((r) => r.payload)).toEqual([{ repo_id: id, from: "runner_verified", to: "runner_local", auto_merge_turned_off: false, cancelled_runs: 0 }]);
+    });
+
+    it("a repo on runner_verified moving to sandbox cancels its pending verified runs with execution_mode_changed, and the audit row records the old mode", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_verified");
+      const verified = await run(f, id, { mode: "runner_verified" });
+      const local = await run(f, id);
+      const running = await run(f, id, { status: "running", mode: "runner_verified" });
+      expect(await leave(f, id)).toMatchObject({ status: 200, body: { execution_mode: "sandbox", changed: true, cancelled_runs: 2 } });
+      for (const r of [verified, local]) {
+        expect(await status(r)).toBe("cancelled");
+        expect(await moves(r)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+      }
+      expect(await status(running)).toBe("running");
+      const log = (await audits(f)).filter((r) => r.action === "repo.execution_mode.changed");
+      expect(log.map((r) => r.payload)).toEqual([{ repo_id: id, from: "runner_verified", to: "sandbox", auto_merge_turned_off: false, cancelled_runs: 2 }]);
     });
 
     it("a refused switch (wrong name, a member, runner_verified) cancels nothing", async () => {

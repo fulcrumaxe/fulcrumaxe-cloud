@@ -1,6 +1,7 @@
 import { REVIEW_STATUS_CONTEXT_NAME } from "../build/mergeGate.js";
 import type { GitHubHttp, LocalGitHubHttp } from "../build/githubMergePort.js";
 import { SHA_PATTERN } from "../build/mergeGate.js";
+import { isRunnerMode } from "@fx/runner";
 import { branchFor } from "../advance/build.js";
 import { isSafeRef } from "./reviewPrompts.js";
 import type { ChangedFile } from "./securityTrigger.js";
@@ -106,9 +107,9 @@ export interface PullRequestSource {
  * by the issue's branch. Every other repo is a sandbox build and keeps the lookup by `fx/issue-<n>`.
  */
 export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: string; name: string; issue: number } & PullRequestSource): Promise<FindPullRequestResult> {
-  if (repo.executionMode === "runner_local") {
+  if (isRunnerMode(repo.executionMode)) {
     // D#6 R3c: a runner repo's lookup uses only the allowlist's list call (A3); the composition root hands it the fenced client.
-    return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr, { local: true });
+    return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr, { local: repo.executionMode === "runner_local" });
   }
   return findOpenPullRequest(http, repo);
 }

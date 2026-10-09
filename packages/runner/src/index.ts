@@ -12,6 +12,7 @@ export * from "./modelFailure.js";
 export * from "./funding.js";
 export * from "./hookChannel.js";
 export * from "./executionTarget.js";
+export * from "./runnerModes.js";
 export * from "./runLimitDecision.js";
 export * from "./sandboxRuntime.js";
 export { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";

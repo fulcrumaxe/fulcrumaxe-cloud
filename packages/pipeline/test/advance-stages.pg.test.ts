@@ -451,6 +451,14 @@ describe("the build", () => {
       expect((await h.admin.query("SELECT 1 FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'in_progress'", [t.workItemId])).rowCount).toBe(0);
     });
 
+    it("is refused spec_has_no_file_list on a runner_verified repo too (D#6 R5b-1): a build on a runner is checked against the Spec's list in either runner mode", async () => {
+      const t = await atSpecReady();
+      await setMode(t.workItemId, "runner_verified");
+      await h.admin.query("UPDATE spec_versions SET frontmatter = '{}'::jsonb WHERE work_item_id = $1", [t.workItemId]);
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toEqual({ status: "refused", reason: "spec_has_no_file_list" });
+      expect(await runs(t.workItemId)).toBe(0);
+    });
+
     it("still starts on a sandbox repo: hosted builds are not checked against a list", async () => {
       const t = await atSpecReady();
       await setMode(t.workItemId, "sandbox");

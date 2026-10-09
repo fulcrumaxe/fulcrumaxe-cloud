@@ -36,7 +36,7 @@ describe(`migration 0757: ${ROLE} and the notice lister`, () => {
     B = await seedAccount(admin, randomUUID());
   });
   beforeEach(async () => {
-    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode = 'runner_local' AND status = 'pending'`);
+    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode IN ('runner_local', 'runner_verified') AND status = 'pending'`);
   });
   afterAll(async () => {
     admin.release();
@@ -142,6 +142,12 @@ describe(`migration 0757: ${ROLE} and the notice lister`, () => {
       const rows = (await writerPool.query<Record<string, unknown>>('SELECT * FROM agent_run_list_runner_runs_owing_notice(1, $1, $2)', [WAITING_MS, REMINDER_MS])).rows;
       expect(Object.keys(rows[0]!).sort()).toEqual(['account_id', 'created_at', 'run_id']);
       expect(rows[0]).toMatchObject({ account_id: A.accountId, run_id: none });
+    });
+
+    it('lists a pending runner_verified runner run as well (0771), through the role\'s row policy and the function', async () => {
+      const local = await run(A.accountId);
+      const verified = await run(B.accountId, { mode: 'runner_verified' });
+      expect(await listed()).toEqual([local, verified]);
     });
 
     it('does not list a run that is not pending, or that is not a runner_local runner run', async () => {

@@ -1,8 +1,9 @@
 import type { Pool, PoolClient } from "pg";
-import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import type { RunnerMode } from "../runnerModes.js";
 import type {
   AdmitResult,
   CancelResult,
@@ -46,6 +47,9 @@ export const RUNNER_TTL_REMINDER_MS = 48 * 3_600_000;
 /** Every role `admit` accepts: runner-protocol's list, which the owner ruling (C12 section 1) widened to the four reviewers. */
 export const RUNNER_TARGET_ROLES: ReadonlySet<string> = new Set<string>(RUNNER_ELIGIBLE_ROLES);
 
+/** The four reviewer roles. A `runner_verified` repo runs them in our sandbox (D#6 C38), so the runner target refuses them. */
+export const VERIFIED_SANDBOX_REVIEW_ROLES: ReadonlySet<string> = new Set<string>(REVIEW_JOB_ROLES);
+
 /** What a `RepoVisibilityPort` could read. Anything it cannot read is `unknown`, never a guess. */
 export type RepoVisibility = "private" | "public" | "unknown";
 
@@ -74,8 +78,12 @@ export interface RunContinues {
  * is the only holder of the private key. The issuer writes the signed job through `agent_run_set_runner_job`. `dispatch`
  * calls it once per dispatch and never looks inside what it wrote.
  */
+/** The signed job's `mode`: path B (`local`) or the cloud-verified push through our proxy (`verified`). */
+export type JobMode = "local" | "verified";
+
 export interface JobIssuer {
-  issue(input: { run: ExecutionRun; continues?: RunContinues }): Promise<void>;
+  /** `jobMode` is the job's `mode` (D#6 R5b-1): `"verified"` exactly when the run's own mode is `runner_verified`, otherwise `"local"`. */
+  issue(input: { run: ExecutionRun; continues?: RunContinues; jobMode?: JobMode }): Promise<void>;
 }
 
 /**
@@ -135,13 +143,25 @@ export class RunnerTarget implements ExecutionTarget {
   /** See `RUNNER_QUEUE_TTL_MS`. */
   readonly queueTtlMs = RUNNER_QUEUE_TTL_MS;
 
-  constructor(private readonly deps: RunnerTargetDeps) {}
+  /** `mode` is the run mode this instance serves: the registry holds one instance per runner mode. */
+  constructor(
+    private readonly deps: RunnerTargetDeps,
+    private readonly mode: RunnerMode = "runner_local",
+  ) {}
+
+  /** What the issuer is told besides the run: nothing for a local run (the issuer's default), `verified` for a cloud-verified one. */
+  private get modeInput(): { jobMode?: JobMode } {
+    return this.mode === "runner_verified" ? { jobMode: "verified" } : {};
+  }
 
   /** `client` is accepted for the interface; `startAgentRun` has already released it, so nothing here uses it. */
   async admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult> {
     void client;
     if (!isRunnerBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
     if (!RUNNER_TARGET_ROLES.has(run.role)) return { admitted: false, reason: "role_not_runner_eligible" };
+    // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. That path is R5b-2a's, so until then they are refused here,
+    // before anything is counted or written.
+    if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return { admitted: false, reason: "verified_review_not_wired" };
 
     // The limit is read first: when the plan data is unavailable the door stays shut and nothing is counted.
     let perDay: number;
@@ -164,14 +184,14 @@ export class RunnerTarget implements ExecutionTarget {
 
   async dispatch(run: ExecutionRun): Promise<DispatchResult> {
     assertRunnerBackend(run.backend);
-    await this.deps.issuer.issue({ run });
+    await this.deps.issuer.issue({ run, ...this.modeInput });
     this.markQueued();
     return { queued: true };
   }
 
   async resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
     assertRunnerBackend(run.backend);
-    await this.deps.issuer.issue({ run, continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }) } });
+    await this.deps.issuer.issue({ run, ...this.modeInput, continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }) } });
     this.markQueued();
     return { queued: true };
   }

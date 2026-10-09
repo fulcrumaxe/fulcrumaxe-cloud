@@ -45,7 +45,7 @@ describe("JobIssuer [pg]", () => {
    * A review role's run carries the pull request head it reviews (stored on the row, as `advanceStartRun` stores it) and a prompt that names it.
    * `over.headSha` / `over.prompt` replace either; `over.headSha: null` is a run with no stored head.
    */
-  async function runnerRun(w: { accountId: string; userId: string; repoId: string; workItemId: string }, role = "code-reviewer", parentRunId: string | null = null, over: { headSha?: string | null; prompt?: string } = {}): Promise<ExecutionRun> {
+  async function runnerRun(w: { accountId: string; userId: string; repoId: string; workItemId: string }, role = "code-reviewer", parentRunId: string | null = null, over: { headSha?: string | null; prompt?: string; executionMode?: string } = {}): Promise<ExecutionRun> {
     const id = randomUUID();
     const reviews = (REVIEW_JOB_ROLES as readonly string[]).includes(role);
     const headSha = over.headSha !== undefined ? over.headSha : reviews ? freshHead() : null;
@@ -53,7 +53,7 @@ describe("JobIssuer [pg]", () => {
     // D#6 R4d-5c (C36): a run built after the pin carries the Spec version it was built against; a child of it inherits that version, and a runner_local
     // executor child of an unpinned run is refused. The fixture's root runs are pinned the way a new build is.
     const pin = parentRunId ? undefined : (await db.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 ORDER BY version DESC LIMIT 1", [w.workItemId])).rows[0]?.id;
-    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, ...(pin ? { specVersionId: pin } : {}), role: role as never, runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
+    await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, ...(pin ? { specVersionId: pin } : {}), role: role as never, runtime: "runner", executionMode: over.executionMode ?? "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
     return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
@@ -478,6 +478,22 @@ describe("JobIssuer [pg]", () => {
       const target2 = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: issuer({ visibility: "public" }).issuer, visibility: i.visibility });
       await expect(target2.dispatch(run2)).rejects.toBeInstanceOf(JobIssueError);
       expect(await stored(run2.id)).toBeNull();
+    });
+  });
+
+  describe("the job's mode (D#6 R5b-1, C38)", () => {
+    const modeOf = async (id: string) => verifyJob(await stored(id), { "job-key-1": publicKey }, { now: NOW }).mode;
+
+    it("a runner_verified run's signed job says verified, through the verified target; a runner_local run's says local", async () => {
+      const w = await world();
+      const i = issuer();
+      const deps = { limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: i.issuer, visibility: i.visibility };
+      const verifiedRun = await runnerRun(w, "executor", null, { executionMode: "runner_verified" });
+      expect(await new RunnerTarget(deps, "runner_verified").dispatch(verifiedRun)).toEqual({ queued: true });
+      expect(await modeOf(verifiedRun.id)).toBe("verified");
+      const localRun = await runnerRun(w, "executor");
+      await new RunnerTarget(deps, "runner_local").dispatch(localRun);
+      expect(await modeOf(localRun.id)).toBe("local");
     });
   });
 

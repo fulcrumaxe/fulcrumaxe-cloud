@@ -126,13 +126,14 @@ describe('runner schema (0711)', () => {
     await rejects(`UPDATE agent_runs SET lease_generation = -1 WHERE id = $1`, [id], '23514');
   });
 
-  it("repos.execution_mode allows 'sandbox' and 'runner_local' only", async () => {
+  it("repos.execution_mode allows 'sandbox', 'runner_local' and (since 0771) 'runner_verified' only", async () => {
     await admin.query(`UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1`, [refs.repoId]);
+    await admin.query(`UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1`, [refs.repoId]);
     await admin.query(`UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1`, [refs.repoId]);
-    for (const bad of ['runner_verified', 'local', '']) await rejects(`UPDATE repos SET execution_mode = $2 WHERE id = $1`, [refs.repoId, bad], '23514');
+    for (const bad of ['runner_other', 'local', '']) await rejects(`UPDATE repos SET execution_mode = $2 WHERE id = $1`, [refs.repoId, bad], '23514');
   });
 
-  it("agent_runs_execution_mode_check allows 'runner_local' since 0714 (C8 section 5 moved the widening to R3) and 'runner_verified' since 0765 (repos stays closed to it); accounts.plan stays unconstrained", async () => {
+  it("agent_runs_execution_mode_check allows 'runner_local' since 0714 (C8 section 5 moved the widening to R3) and 'runner_verified' since 0765; accounts.plan stays unconstrained", async () => {
     const { rows } = await admin.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'agent_runs_execution_mode_check'`);
     expect(rows[0]!.def).toContain("'sandbox'");
     expect(rows[0]!.def).toContain("'runner_local'");

@@ -228,7 +228,7 @@ describe('migration 0757 gives platform_ops nothing', () => {
     pool = createPool(pg.url);
     guard = guardPoolTeardown(pool, 'platformOpsDiff0757Pool');
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0757-diff-migrations-'));
-    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION)) {
+    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && name !== '0771_runner_verified_repo_mode.sql' /* replaces 0757's notice lister */)) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), path.join(beforeDir, file));
     }
     await runMigrations(pool, beforeDir);

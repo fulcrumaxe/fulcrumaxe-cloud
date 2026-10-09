@@ -26,8 +26,8 @@ import { RunnerTarget, type RunnerTargetDeps } from "./targets/runnerTarget.js";
 
 /** C10: the `repos.execution_mode` column is `text NOT NULL DEFAULT 'sandbox'` with a named CHECK. D#6 R1b widened
  * that CHECK to `runner_local`; R3a (migration 0714) widens `agent_runs_execution_mode_check` and registers the
- * target. `runner_verified` (D#6 R5b) is not a value yet: the resolver throws `UnknownExecutionModeError` for it. */
-export type ExecutionMode = "sandbox" | "runner_local";
+ * target. D#6 R5b-1 (C38) adds `runner_verified` to both CHECKs and to the registry; the route still refuses it until R5b-2b. */
+export type ExecutionMode = "sandbox" | "runner_local" | "runner_verified";
 
 /** What `agent_runs.runtime` a target's runs are stamped with (D#6 C12 A1). It comes from the target, never a literal at
  * the call site: the sandbox writes `production`, a runner writes `runner`. */
@@ -161,7 +161,8 @@ export type AdmitDenyReason =
   | "runner_daily_limit"
   | "public_repo"
   | "repo_visibility_unknown"
-  | "role_not_runner_eligible";
+  | "role_not_runner_eligible"
+  | "verified_review_not_wired";
 /** The same set at run time, for the one write site. A record, so a new reason fails tsc here until it is listed. */
 const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   unknown_model: true,
@@ -176,6 +177,7 @@ const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   public_repo: true,
   repo_visibility_unknown: true,
   role_not_runner_eligible: true,
+  verified_review_not_wired: true,
 };
 export const isAdmitDenyReason = (reason: unknown): reason is AdmitDenyReason =>
   typeof reason === "string" && Object.hasOwn(ADMIT_DENY_REASON_SET, reason);
@@ -394,11 +396,12 @@ export type ExecutionTargetFactory<Deps> = (deps: Deps) => ExecutionTarget;
 export interface ExecutionTargetDeps {
   sandbox: SandboxTargetDeps;
   runner_local: RunnerTargetDeps;
+  runner_verified: RunnerTargetDeps;
 }
 
 /**
- * Pass/fail 10, as D#6 R3a amends it: `Object.keys(EXECUTION_TARGETS)` deep-equals `['sandbox', 'runner_local']`. The
- * literal object that test asserts against. `runner_verified` is deliberately absent (R5b).
+ * Pass/fail 10, as D#6 R3a amends it: `Object.keys(EXECUTION_TARGETS)` deep-equals `['sandbox', 'runner_local']`, and
+ * D#6 R5b-1 (C38) makes it `['sandbox', 'runner_local', 'runner_verified']`.
  *
  * A map of FACTORIES, not built instances -- this is the ONLY place that
  * needs each mode's deps shape. `resolveExecutionTarget` below (what
@@ -409,7 +412,8 @@ export interface ExecutionTargetDeps {
 export const EXECUTION_TARGETS: Readonly<{ [M in ExecutionMode]: ExecutionTargetFactory<ExecutionTargetDeps[M]> }> =
   Object.freeze({
     sandbox: (deps: SandboxTargetDeps) => new SandboxTarget(deps),
-    runner_local: (deps: RunnerTargetDeps) => new RunnerTarget(deps),
+    runner_local: (deps: RunnerTargetDeps) => new RunnerTarget(deps, "runner_local"),
+    runner_verified: (deps: RunnerTargetDeps) => new RunnerTarget(deps, "runner_verified"),
   });
 
 /** An already-built registry of target INSTANCES, keyed by mode -- what

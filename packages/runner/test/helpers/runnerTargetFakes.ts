@@ -1,13 +1,13 @@
 import type { ExecutionRun } from "../../src/executionTarget.js";
-import type { JobIssuer, RepoVisibility, RepoVisibilityPort, RunContinues, RunnerLimitsPort } from "../../src/targets/runnerTarget.js";
+import type { JobIssuer, JobMode, RepoVisibility, RepoVisibilityPort, RunContinues, RunnerLimitsPort } from "../../src/targets/runnerTarget.js";
 
 /** The R3a fake issuer: records what it was asked to issue, builds nothing and signs nothing. R3b supplies the real one. */
 export interface RecordedJobIssuer extends JobIssuer {
-  readonly calls: readonly { run: ExecutionRun; continues?: RunContinues }[];
+  readonly calls: readonly { run: ExecutionRun; continues?: RunContinues; jobMode?: JobMode }[];
 }
 
 export function createFakeJobIssuer(): RecordedJobIssuer {
-  const calls: { run: ExecutionRun; continues?: RunContinues }[] = [];
+  const calls: { run: ExecutionRun; continues?: RunContinues; jobMode?: JobMode }[] = [];
   return {
     calls,
     async issue(input) {

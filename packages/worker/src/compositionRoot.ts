@@ -274,8 +274,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const jobSigner = loadJobSigner(env);
     const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}) }) : unwiredJobIssuer);
     const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor().runsPerDay };
-    const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits });
-    const registry: ExecutionTargetRegistry = Object.freeze({ sandbox: guardWorkdir(sandboxTarget), runner_local: guardWorkdir(runnerTarget) });
+    const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_local");
+    const runnerVerifiedTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_verified");
+    const registry: ExecutionTargetRegistry = Object.freeze({ sandbox: guardWorkdir(sandboxTarget), runner_local: guardWorkdir(runnerTarget), runner_verified: guardWorkdir(runnerVerifiedTarget) });
     // The runner's workflow steps and the follower's bodies reach the pool and the registry through this, never through arguments.
     configureAgentRunWiring({ pool: pools.runnerPool, registry });
     const runActions = createRunActionFacade(pools.runnerPool, registry);

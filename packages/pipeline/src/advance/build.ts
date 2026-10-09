@@ -4,6 +4,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
+import { isRunnerMode } from "@fx/runner";
 import { sanitize } from "@fx/trust";
 import { agentOutputBlock } from "../plan/envelope.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -32,11 +33,11 @@ export const BOT_EMAIL = "bot@fulcrumaxe.dev";
 export const branchFor = (number: number): string => `fx/issue-${number}`;
 
 /**
- * D#6 R4d-1 (C32): where the run executes, chosen from `repos.execution_mode`. `runner` is exactly `runner_local`: a run on the
+ * D#6 R4d-1 (C32): where the run executes, chosen from `repos.execution_mode`. `runner` is either runner mode: a run on the
  * person's own machine, where the platform publishes the commit and opens the pull request. Every other mode is the sandbox.
  */
 export type PromptRuntime = "sandbox" | "runner";
-export const promptRuntimeOf = (executionMode: string | null | undefined): PromptRuntime => (executionMode === "runner_local" ? "runner" : "sandbox");
+export const promptRuntimeOf = (executionMode: string | null | undefined): PromptRuntime => (isRunnerMode(executionMode) ? "runner" : "sandbox");
 
 export interface ExecutorPromptInput {
   owner: string;
@@ -194,7 +195,7 @@ export async function startBuildForItem(
   // D#6 R4d-5a (C34 section 2.1): a runner build is checked against the Spec's own file list at done, so a Spec with no readable list is refused HERE, before any
   // run exists: nothing is recorded, no job is issued, the item stays where it is, and the customer's machine spends nothing. It is the row `readFacts` just read
   // (the latest unerased version, the one the run will pin), through the same parser the done check uses. Hosted (sandbox) builds are not checked and still start.
-  if (executionMode === "runner_local" && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
+  if (isRunnerMode(executionMode) && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
   const prompt = buildExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode) });
   const started = await ports.startRun({ step: `build:v${facts.version}:${approvalId}`, role: "executor", prompt, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
   // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.

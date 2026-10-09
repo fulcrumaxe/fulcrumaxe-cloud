@@ -6,7 +6,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -476,7 +476,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return withTenant(runnerPool, accountId, async (client) => {
       const r = await client.query<{ execution_mode: string | null }>("SELECT r.execution_mode FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2", [workItemId, accountId]);
       const executionMode = r.rows[0]?.execution_mode ?? "sandbox";
-      return { executionMode, recordedPr: executionMode === "runner_local" ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
+      return { executionMode, recordedPr: isRunnerMode(executionMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
     });
   }
 

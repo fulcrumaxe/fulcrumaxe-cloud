@@ -15,10 +15,10 @@ import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
 /** D#2 H09b, correction C10, pass/fail 10, as D#6 R3a amends it: the sandbox and the local runner are the two targets
- * wired. `runner_verified` (R5b) is not. */
+ * wired, and D#6 R5b-1 (C38) adds `runner_verified` as the third key. */
 describe("execution target registry", () => {
-  it("Object.keys(EXECUTION_TARGETS) deep-equals ['sandbox', 'runner_local']", () => {
-    expect(Object.keys(EXECUTION_TARGETS)).toEqual(["sandbox", "runner_local"]);
+  it("Object.keys(EXECUTION_TARGETS) deep-equals ['sandbox', 'runner_local', 'runner_verified']", () => {
+    expect(Object.keys(EXECUTION_TARGETS)).toEqual(["sandbox", "runner_local", "runner_verified"]);
   });
 
   it("the factories build the two targets, each from its own deps", () => {
@@ -51,7 +51,7 @@ describe("execution target registry", () => {
     }
   });
 
-  it("'runner_verified' still throws UnknownExecutionModeError, even from a registry that has both targets", () => {
+  it("a registry that does not hold 'runner_verified' still throws UnknownExecutionModeError for it", () => {
     const pool = {} as Pool;
     const registry: ExecutionTargetRegistry = {
       sandbox: new SandboxTarget(createSandboxTargetHarness(pool).deps),

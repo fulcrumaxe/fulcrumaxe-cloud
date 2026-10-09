@@ -18,7 +18,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toolsForRole } from "../agentConfig.js";
 import { RUNNER_RUN_BRANCH, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
 import type { ExecutionRun } from "../executionTarget.js";
-import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type RepoVisibilityPort, type RunContinues } from "./runnerTarget.js";
+import { RUNNER_QUEUE_TTL_MS, type JobIssuer, type JobMode, type RepoVisibilityPort, type RunContinues } from "./runnerTarget.js";
 
 /**
  * D#6 R3b (correction C12 sections 2.3, 2.4, 2.8): the real `JobIssuer`. It builds the job for a runner run, has a
@@ -212,7 +212,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
   const newId = deps.newId ?? randomUUID;
 
   return {
-    async issue(input: { run: ExecutionRun; continues?: RunContinues }): Promise<void> {
+    async issue(input: { run: ExecutionRun; continues?: RunContinues; jobMode?: JobMode }): Promise<void> {
       const { run } = input;
       const role = run.role;
       if (!(RUNNER_ELIGIBLE_ROLES as readonly string[]).includes(role)) throw new JobIssueError("role_not_runner_eligible");
@@ -278,7 +278,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         run_id: run.id,
         repo: { id: run.repoId, owner: context.repo.owner, name: context.repo.name, private: true },
         role: role as Job["role"],
-        mode: "local",
+        mode: input.jobMode === "verified" ? "verified" : "local",
         spec: context.spec,
         task: { kind: taskKind(role, continues !== null), prompt: run.prompt, prompt_sha256: sha256Text(run.prompt) },
         role_card: { text: run.roleCard, sha256: sha256Text(run.roleCard) },
@@ -304,7 +304,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       // Recorded before the job, so a continuation's job never exists without its base; a base recorded for a job that then fails to write is harmless.
       if (continuationHead) await recordRunnerDispatchBase(deps.pool, { accountId: run.accountId, runId: run.id, headOid: continuationHead.oid });
 
-      // The definer writes once, to a pending runner_local runner run; `false` means nothing was written.
+      // The definer writes once, to a pending runner run (either runner mode); `false` means nothing was written.
       const recorded = await writeRunnerJob(deps.pool, { accountId: run.accountId, runId: run.id, job: signed as unknown as Record<string, unknown> });
       if (!recorded) throw new JobIssueError("job_not_recorded");
     },

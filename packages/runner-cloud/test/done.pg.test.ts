@@ -626,6 +626,24 @@ describe("done route [pg]", () => {
       expect(labels(s.fake)).toEqual(["A2", "A1 RunBranchState", "A3", "A4", "A1 PullRequestFiles", "A1 MarkReady"]);
     });
 
+    // D#6 R5b-1 (C38): `done` takes both runner modes. The run keeps its own mode through the verdict (C24 section 2).
+    it("a runner_verified executor run that pushed through path A is recorded exactly as a runner_local one is, even after its repository moved to runner_local", async () => {
+      for (const repoMode of ["runner_verified", "runner_local"]) {
+        const s = await scene({ runMode: "runner_verified", repoMode, files: [file("src/app.ts")] });
+        const res = await s.call();
+        expect(parsedDone(res), repoMode).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+        expect(s.fake.denied).toBe(0);
+        expect(finished.at(-1)!.verdict).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch });
+      }
+    });
+
+    it("a runner_verified run is held to the Spec's file list as a runner_local run is: no readable list is scope_unknown, a path outside it a violation", async () => {
+      const unknown = await scene({ runMode: "runner_verified", repoMode: "runner_verified", scope: false });
+      expect(parsedDone(await unknown.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_unknown" });
+      const outside = await scene({ runMode: "runner_verified", repoMode: "runner_verified", files: [file("docs/readme.md")] });
+      expect(parsedDone(await outside.call())).toMatchObject({ outcome: "failed", failure_reason: "scope_violation" });
+    });
+
     it("a run that is not a runner_local runner run is failed internal_error with no GitHub call, whatever its repository says", async () => {
       const s = await scene({ runtime: "production", runMode: "sandbox", repoMode: "runner_local" });
       expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: null });
