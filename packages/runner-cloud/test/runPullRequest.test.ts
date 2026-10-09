@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { LocalOnlyGithubError } from "../src/localOnlyGithub.js";
-import { MAX_FILE_PAGES, READY_FALLBACK_LINE, RunPullRequestError, TITLE_MAX, createRunPullRequestPort, pullRequestBody, pullRequestTitle, type PullRequestRepo } from "../src/runPullRequest.js";
+import { PR_FAILURE_EVENT, logPullRequestFailure } from "../src/done.js";
+import { MAX_FILE_PAGES, READY_FALLBACK_LINE, RunPullRequestError, VISIBILITY_WAITS_MS, TITLE_MAX, createRunPullRequestPort, pullRequestBody, pullRequestTitle, type PullRequestRepo } from "../src/runPullRequest.js";
 import { pathsOutsideScope, parseAcceptanceScope } from "../src/acceptanceScope.js";
 import { FAKE_APP_LOGIN, FakeGithub, StrictFakeError, type FakeChangeType, type FakeRepo } from "./helpers/githubFake.js";
 
@@ -19,7 +20,7 @@ function setup(over: { drafts?: boolean; branchFiles?: Array<{ path: string; cha
   const repo: FakeRepo = fake.addRepo("acme", "widgets", { supportsDrafts: over.drafts ?? true });
   if (over.branch !== false) fake.pushBranch(repo, BRANCH, { files: over.branchFiles ?? files(2), aheadBy: over.aheadBy ?? 1 });
   const opened: PullRequestRepo[] = [];
-  const port = createRunPullRequestPort({ open: async (r) => (opened.push(r), fake), appLogin: async () => FAKE_APP_LOGIN });
+  const port = createRunPullRequestPort({ open: async (r) => (opened.push(r), fake), appLogin: async () => FAKE_APP_LOGIN, sleep: async () => undefined });
   return { fake, repo, port, opened };
 }
 const labels = (f: FakeGithub) => f.calls.map((c) => c.label);
@@ -455,9 +456,9 @@ describe("changedFiles (A1 PullRequestFiles)", () => {
     expect(labels(fake).filter((l) => l === "A1 PullRequestFiles")).toHaveLength(MAX_FILE_PAGES);
   });
 
-  it("a pull request GitHub does not know is rejected", async () => {
+  it("a pull request GitHub does not know stays NOT_FOUND after the waits, so it is unavailable (retried later), not a permanent failure", async () => {
     const { port } = await opened(1);
-    expect(await reasonOf(port.changedFiles({ repo: REPO, number: 999 }))).toBe("rejected");
+    expect(await reasonOf(port.changedFiles({ repo: REPO, number: 999 }))).toBe("unavailable");
   });
 
   it("passes changeType through exactly as GitHub gave it: an unknown value is kept, never classified, and an empty one is malformed", async () => {
@@ -517,7 +518,8 @@ describe("markReady and close", () => {
     expect(repo.pulls[0]!.draft).toBe(false);
     // The caller thinks it is still a draft, GitHub says it is not: an error, never a silent success.
     expect(await reasonOf(port.markReady({ repo: REPO, pullRequest: pr }))).toBe("rejected");
-    expect(await reasonOf(port.markReady({ repo: REPO, pullRequest: { ...pr, nodeId: "PR_unknown" } }))).toBe("rejected");
+    // An id GitHub cannot resolve is NOT_FOUND, which for a pull request we just made is GitHub's lag: unavailable, never a permanent failure.
+    expect(await reasonOf(port.markReady({ repo: REPO, pullRequest: { ...pr, nodeId: "PR_unknown" } }))).toBe("unavailable");
     fake.inject = { label: /MarkReady/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: { pullRequest: { number: 9, isDraft: false } } } } } };
     expect(await reasonOf(port.markReady({ repo: REPO, pullRequest: pr }))).toBe("malformed");
     fake.inject = { label: /MarkReady/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: { pullRequest: { number: 1, isDraft: true } } } } } };
@@ -668,5 +670,113 @@ describe("the allowlist is applied by the port itself", () => {
     expect(fake.denied).toBe(11);
     // A boolean draft of either value is inside A4, and the fake answers it.
     await expect(fake.request({ method: "POST", path: "/repos/acme/widgets/pulls", body: { title: "t", head: "h", base: "main", body: "b", draft: false }, headers: accept })).resolves.toMatchObject({ status: 422 });
+  });
+});
+
+/**
+ * The live failure (a `runner_local` run on a private repository): the pull request was opened a second earlier and GraphQL, which reads
+ * from a replica, answered NOT_FOUND for it. These replies have the shape GitHub gives: status 200, `data` with the null field, and an
+ * `errors` entry with `type`, `path`, `locations` and a message that names the repository.
+ */
+describe("a pull request GraphQL cannot show yet (read after write)", () => {
+  const notFound = (path: string[]) => ({
+    status: 200,
+    body: { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", path, locations: [{ line: 3, column: 5 }], message: "Could not resolve to a PullRequest with the number of 66." }] },
+  });
+  /** Answers `lag` GraphQL reads of the new pull request with NOT_FOUND, then the real fake. */
+  function lagging(lag: number) {
+    const t = setup();
+    const waits: number[] = [];
+    const port = createRunPullRequestPort({ open: async () => t.fake, appLogin: async () => FAKE_APP_LOGIN, sleep: async (ms) => void waits.push(ms) });
+    const real = t.fake.request.bind(t.fake);
+    let seen = 0;
+    t.fake.request = async (req) => (req.path === "/graphql" && ++seen <= lag ? notFound(["repository", "pullRequest"]) : real(req));
+    return { ...t, port, waits };
+  }
+  const failure = async (p: Promise<unknown>) => (await p.then(() => null, (e: unknown) => e)) as RunPullRequestError;
+
+  it("changedFiles looks again after a short wait and then reads the files", async () => {
+    const t = lagging(2);
+    const pr = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
+    const changed = await t.port.changedFiles({ repo: REPO, number: pr.number });
+    expect(changed).toEqual({ files: files(2), totalCount: 2, complete: true });
+    expect(t.waits).toEqual(VISIBILITY_WAITS_MS.slice(0, 2));
+  });
+
+  it("markReady looks again after a short wait and then marks it ready", async () => {
+    const t = lagging(0);
+    const pr = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
+    const real = t.fake.request.bind(t.fake);
+    let seen = 0;
+    t.fake.request = async (req) =>
+      req.path === "/graphql" && ++seen <= 1
+        ? { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "NOT_FOUND", path: ["markPullRequestReadyForReview"], message: "Could not resolve to a node with the global id of 'PR_x'." }] } }
+        : real(req);
+    await t.port.markReady({ repo: REPO, pullRequest: pr });
+    expect(t.repo.pulls[0]!.draft).toBe(false);
+    expect(t.waits).toEqual([VISIBILITY_WAITS_MS[0]]);
+  });
+
+  it("a pull request that stays invisible is unavailable (retry later, nothing closed), with the type and the call on the error", async () => {
+    const t = lagging(1000);
+    const pr = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
+    const error = await failure(t.port.changedFiles({ repo: REPO, number: pr.number }));
+    expect(error.reason).toBe("unavailable");
+    expect(error.retryable).toBe(true);
+    expect(error.op).toBe("PullRequestFiles");
+    expect(error.graphqlTypes).toEqual(["NOT_FOUND"]);
+    expect(t.waits).toEqual([...VISIBILITY_WAITS_MS]);
+    expect(t.repo.pulls[0]!.state).toBe("open");
+  });
+
+  it("a null pull request with no errors entry is the same wait", async () => {
+    const t = lagging(0);
+    const pr = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
+    const real = t.fake.request.bind(t.fake);
+    let seen = 0;
+    t.fake.request = async (req) => (req.path === "/graphql" && ++seen <= 1 ? { status: 200, body: { data: { repository: { pullRequest: null } } } } : real(req));
+    expect((await t.port.changedFiles({ repo: REPO, number: pr.number })).complete).toBe(true);
+    expect(t.waits).toHaveLength(1);
+  });
+
+  it("a token without the permission (200 with a FORBIDDEN error) is NOT waited for: rejected at once, naming the call and the type", async () => {
+    const t = lagging(0);
+    const pr = await t.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
+    t.fake.inject = { label: /PullRequestFiles/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", path: ["repository", "pullRequest"], message: "Resource not accessible by integration" }] } } };
+    const error = await failure(t.port.changedFiles({ repo: REPO, number: pr.number }));
+    expect(error.reason).toBe("rejected");
+    expect(error.op).toBe("PullRequestFiles");
+    expect(error.status).toBe(200);
+    expect(error.graphqlTypes).toEqual(["FORBIDDEN"]);
+    expect(t.waits).toEqual([]);
+  });
+
+  it("a REST failure names its port call and its HTTP status", async () => {
+    const t = lagging(0);
+    t.fake.inject = { label: /^A5$/, reply: { status: 403, body: { message: "Resource not accessible by integration" } } };
+    const error = await failure(t.port.close({ repo: REPO, number: 1 }));
+    expect([error.op, error.status, error.graphqlTypes]).toEqual(["close", 403, []]);
+  });
+});
+
+describe("logPullRequestFailure", () => {
+  const RUN_ID = "33333333-3333-4333-8333-333333333333";
+  it("writes the run, stage, call, status and GraphQL types, and nothing GitHub said", () => {
+    const lines: string[] = [];
+    const error = new RunPullRequestError("rejected", 200, { op: "MarkReady", graphqlTypes: ["FORBIDDEN", "not a type acme/widgets ghs_secret"] });
+    logPullRequestFailure((l) => lines.push(l), { runId: RUN_ID, stage: "ready", error });
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toEqual({ event: PR_FAILURE_EVENT, run_id: RUN_ID, stage: "ready", op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] });
+    expect(lines[0]).not.toMatch(/acme|widgets|ghs_|secret/);
+  });
+
+  it("a failure with no call or status says unknown and null, and a writer that throws changes nothing", () => {
+    const lines: string[] = [];
+    logPullRequestFailure((l) => lines.push(l), { runId: RUN_ID, stage: "files", error: new RunPullRequestError("malformed") });
+    expect(JSON.parse(lines[0]!)).toMatchObject({ op: "unknown", status: null, graphql_types: [] });
+    const boom = () => {
+      throw new Error("sink down");
+    };
+    expect(() => logPullRequestFailure(boom, { runId: RUN_ID, stage: "files", error: new RunPullRequestError("malformed") })).not.toThrow();
   });
 });

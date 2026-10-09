@@ -40,14 +40,31 @@ export interface PullRequestRepo {
 }
 
 export type RunPullRequestFailure = "unavailable" | "rejected" | "malformed";
+/** What a failure may say about itself for the logs: names we chose and error type codes, never a GitHub message, a path or a body. */
+export interface RunPullRequestErrorDetail {
+  /** The GraphQL document (`PullRequestFiles`) or the port method (`close`) that failed. */
+  op?: string;
+  /** The `type` of each GraphQL error, each already held to `^[A-Z][A-Z_]{0,39}$`, at most 5. */
+  graphqlTypes?: readonly string[];
+  /** The pull request was asked for before GitHub could show it (a GraphQL NOT_FOUND, or a null `pullRequest`): worth a short wait, see `settle`. */
+  notYetVisible?: boolean;
+}
+const GRAPHQL_TYPE = /^[A-Z][A-Z_]{0,39}$/;
 export class RunPullRequestError extends Error {
+  op: string | undefined;
+  readonly graphqlTypes: readonly string[];
+  readonly notYetVisible: boolean;
   /** `status` is the HTTP status GitHub answered, when the failure came from a response. A number only: never a GitHub message (C23 section 4). */
   constructor(
     readonly reason: RunPullRequestFailure,
     readonly status?: number,
+    detail: RunPullRequestErrorDetail = {},
   ) {
     super(`run pull request: ${reason}`);
     this.name = "RunPullRequestError";
+    this.op = detail.op;
+    this.graphqlTypes = (detail.graphqlTypes ?? []).filter((t) => GRAPHQL_TYPE.test(t)).slice(0, 5);
+    this.notYetVisible = detail.notYetVisible === true;
   }
   get retryable(): boolean {
     return this.reason === "unavailable";
@@ -114,6 +131,8 @@ export async function loadRunPullRequestText(client: TenantQueryable, run: { acc
 
 export const TITLE_MAX = 256;
 export const MAX_FILE_PAGES = 30;
+/** Pauses between looks at a pull request GitHub cannot show yet (about 2 s in all), then it is `unavailable`. */
+export const VISIBILITY_WAITS_MS: readonly number[] = [300, 600, 1200];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -185,10 +204,14 @@ async function guarded(call: () => Promise<GithubResponse>): Promise<GithubRespo
 async function query(gh: LocalOnlyGithub, op: GithubGraphqlOperation, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await guarded(() => gh.graphql(op, variables));
   checkStatus(res, [200]);
-  if (!isObject(res.body)) return malformed();
+  if (!isObject(res.body)) throw new RunPullRequestError("malformed", res.status, { op });
   if (Array.isArray(res.body.errors) && res.body.errors.length > 0) {
-    const limited = res.body.errors.some((e) => isObject(e) && (e.type === "RATE_LIMITED" || e.type === "SERVICE_UNAVAILABLE"));
-    throw new RunPullRequestError(limited ? "unavailable" : "rejected");
+    const types = res.body.errors.map((e) => (isObject(e) && typeof e.type === "string" ? e.type : "UNTYPED"));
+    const limited = types.some((t) => t === "RATE_LIMITED" || t === "SERVICE_UNAVAILABLE");
+    // GraphQL reads a pull request from a replica that can be behind the REST call that created it: for a moment the number or the node id
+    // is "not found". That is not a refusal. Only the type is looked at; the message (which names the repository) never is.
+    const notYetVisible = !limited && types.includes("NOT_FOUND");
+    throw new RunPullRequestError(limited ? "unavailable" : "rejected", res.status, { op, graphqlTypes: types, notYetVisible });
   }
   return isObject(res.body.data) ? res.body.data : malformed();
 }
@@ -213,6 +236,8 @@ function pullRequestRef(raw: unknown, branch: string, repo: PullRequestRepo, reu
 /** Builds the port over `open`, which answers a client for one repository (the App's installation token for it; for the app, see apps/web). */
 export function createRunPullRequestPort(deps: {
   open(repo: PullRequestRepo): Promise<GithubClient>;
+  /** Waits between looks at a pull request GitHub cannot show yet. Tests inject an instant one. */
+  sleep?: (ms: number) => Promise<void>;
   /**
    * The login GitHub gives pull requests opened by OUR App for this repository (`<app slug>[bot]`). An open pull request on the run's
    * branch is reused only if its author is this login and its type is `Bot`; any other author is `rejected` (fail closed: the branch is
@@ -260,7 +285,27 @@ export function createRunPullRequestPort(deps: {
     return mine.map((item) => pullRequestRef(item, branch, repo, true)).sort((a, b) => a.number - b.number)[0]!;
   }
 
-  return {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  /**
+   * `changedFiles` and `markReady` ask GraphQL about a pull request the REST call created a moment ago. GraphQL can answer NOT_FOUND (or a
+   * null `pullRequest`) for that moment, so the look is repeated a few times, shortly apart. A pull request still not visible after that is
+   * `unavailable` (the `done` route answers 503 and writes nothing, the runner sends `done` again, and the open pull request is reused), not
+   * a permanent failure: the pull request exists, so closing it and failing the run would throw away a good result.
+   */
+  async function settle<T>(look: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await look();
+      } catch (error) {
+        if (!(error instanceof RunPullRequestError) || !error.notYetVisible) throw error;
+        const wait = VISIBILITY_WAITS_MS[attempt];
+        if (wait === undefined) throw new RunPullRequestError("unavailable", error.status, { ...(error.op === undefined ? {} : { op: error.op }), graphqlTypes: error.graphqlTypes, notYetVisible: true });
+        await sleep(wait);
+      }
+    }
+  }
+
+  const port: RunPullRequestPort = {
     async defaultBranch(repo) {
       const gh = await client(repo);
       const res = await guarded(() => gh.request({ method: "GET", path: repoPath(repo) }));
@@ -309,38 +354,8 @@ export function createRunPullRequestPort(deps: {
       return pullRequestRef(res.body, branch, repo, false);
     },
 
-    async changedFiles({ repo, number }) {
-      const gh = await client(repo);
-      const files: ChangedFiles["files"] = [];
-      let totalCount = 0;
-      let cursor: string | null = null;
-      for (let page = 0; page < MAX_FILE_PAGES; page++) {
-        const data = await query(gh, "PullRequestFiles", { owner: repo.owner, name: repo.name, number, ...(cursor === null ? {} : { cursor }) });
-        const pr = need(isObject(data.repository) && isObject(data.repository.pullRequest) && data.repository.pullRequest);
-        const list = need(isObject(pr.files) && pr.files);
-        const info = need(isObject(list.pageInfo) && list.pageInfo);
-        if (!isCount(list.totalCount) || !Array.isArray(list.nodes) || list.nodes.length > 100 || typeof info.hasNextPage !== "boolean") return malformed();
-        totalCount = list.totalCount;
-        for (const node of list.nodes as unknown[]) {
-          if (!isObject(node) || typeof node.path !== "string" || node.path.length === 0 || typeof node.changeType !== "string" || node.changeType.length === 0) return malformed();
-          files.push({ path: node.path, changeType: node.changeType });
-        }
-        if (!info.hasNextPage) return { files, totalCount, complete: files.length === totalCount };
-        if (typeof info.endCursor !== "string" || info.endCursor === cursor) return malformed();
-        cursor = info.endCursor;
-      }
-      // More pages than GitHub lists for one pull request: what was read is not all of it.
-      return { files, totalCount, complete: false };
-    },
-
-    async markReady({ repo, pullRequest }) {
-      if (!pullRequest.draft) return;
-      const gh = await client(repo);
-      const data = await query(gh, "MarkReady", { id: pullRequest.nodeId });
-      const result = need(isObject(data.markPullRequestReadyForReview) && data.markPullRequestReadyForReview);
-      const pr = need(isObject(result.pullRequest) && result.pullRequest);
-      if (pr.number !== pullRequest.number || pr.isDraft !== false) malformed();
-    },
+    changedFiles: ({ repo, number }) => settle(() => readChangedFiles(repo, number)),
+    markReady: ({ repo, pullRequest }) => (pullRequest.draft ? settle(() => markReadyOnce(repo, pullRequest)) : Promise.resolve()),
 
     async close({ repo, number }) {
       const gh = await client(repo);
@@ -349,4 +364,53 @@ export function createRunPullRequestPort(deps: {
       if (!isObject(res.body) || res.body.number !== number || res.body.state !== "closed") malformed();
     },
   };
+
+  async function readChangedFiles(repo: PullRequestRepo, number: number): Promise<ChangedFiles> {
+    const gh = await client(repo);
+    const files: ChangedFiles["files"] = [];
+    let totalCount = 0;
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_FILE_PAGES; page++) {
+      const data = await query(gh, "PullRequestFiles", { owner: repo.owner, name: repo.name, number, ...(cursor === null ? {} : { cursor }) });
+      // A null pull request (with or without an `errors` entry) is GitHub not showing the new pull request yet.
+      if (isObject(data.repository) && data.repository.pullRequest === null) throw new RunPullRequestError("rejected", 200, { op: "PullRequestFiles", notYetVisible: true });
+      const pr = need(isObject(data.repository) && isObject(data.repository.pullRequest) && data.repository.pullRequest);
+      const list = need(isObject(pr.files) && pr.files);
+      const info = need(isObject(list.pageInfo) && list.pageInfo);
+      if (!isCount(list.totalCount) || !Array.isArray(list.nodes) || list.nodes.length > 100 || typeof info.hasNextPage !== "boolean") return malformed();
+      totalCount = list.totalCount;
+      for (const node of list.nodes as unknown[]) {
+        if (!isObject(node) || typeof node.path !== "string" || node.path.length === 0 || typeof node.changeType !== "string" || node.changeType.length === 0) return malformed();
+        files.push({ path: node.path, changeType: node.changeType });
+      }
+      if (!info.hasNextPage) return { files, totalCount, complete: files.length === totalCount };
+      if (typeof info.endCursor !== "string" || info.endCursor === cursor) return malformed();
+      cursor = info.endCursor;
+    }
+    // More pages than GitHub lists for one pull request: what was read is not all of it.
+    return { files, totalCount, complete: false };
+  }
+
+  async function markReadyOnce(repo: PullRequestRepo, pullRequest: PullRequestRef): Promise<void> {
+    const gh = await client(repo);
+    const data = await query(gh, "MarkReady", { id: pullRequest.nodeId });
+    const result = need(isObject(data.markPullRequestReadyForReview) && data.markPullRequestReadyForReview);
+    const pr = need(isObject(result.pullRequest) && result.pullRequest);
+    if (pr.number !== pullRequest.number || pr.isDraft !== false) malformed();
+  }
+
+  // Every failure says which port call it came from, unless a GraphQL document already named itself.
+  return Object.fromEntries(
+    (Object.keys(port) as Array<keyof RunPullRequestPort>).map((name) => [
+      name,
+      async (...args: unknown[]) => {
+        try {
+          return await (port[name] as (...a: unknown[]) => Promise<unknown>)(...args);
+        } catch (error) {
+          if (error instanceof RunPullRequestError && error.op === undefined) error.op = name;
+          throw error;
+        }
+      },
+    ]),
+  ) as unknown as RunPullRequestPort;
 }

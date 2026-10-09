@@ -86,6 +86,8 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /** Where `done` writes its one-line JSON diagnostics for a pull request failure (default: `console.warn`). Tests inject a collector. */
+  log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */
   now?: () => Date;
   /** The protocol version `hello` is judged against. Defaults to the constant. */

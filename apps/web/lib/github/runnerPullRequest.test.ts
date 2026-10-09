@@ -27,7 +27,7 @@ describe("createAppRunPullRequestPort", () => {
   });
 
   it("sends a draft pull request, and a graphql document, through the same client", async () => {
-    const t = setup((req) => (req.path === "/graphql" ? { status: 200, body: { errors: [{ type: "NOT_FOUND" }] } } : { status: 200, body: [] }));
+    const t = setup((req) => (req.path === "/graphql" ? { status: 200, body: { errors: [{ type: "FORBIDDEN" }] } } : { status: 200, body: [] }));
     await t.port.changedFiles({ repo: REPO, number: 4 }).catch(() => undefined);
     expect(t.sent.map((r) => [r.method, r.path])).toEqual([["POST", "/graphql"]]);
     expect((t.sent[0]!.body as { variables: unknown }).variables).toEqual({ owner: "acme", name: "widgets", number: 4 });

@@ -140,7 +140,7 @@ describe("done route [pg]", () => {
     if (o.dispatchBase !== undefined && o.dispatchBase !== "unrecorded") {
       await h.admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, $3, $4::jsonb)", [A.accountId, runId, DISPATCH_BASE_KIND, JSON.stringify({ head_oid: o.dispatchBase })]);
     }
-    const port = createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN });
+    const port = createRunPullRequestPort({ open: async () => fake, appLogin: async () => FAKE_APP_LOGIN, sleep: async () => undefined });
     return {
       runId,
       gen,
@@ -475,7 +475,7 @@ describe("done route [pg]", () => {
 
     it("a permanent refusal reading the changed files closes the draft and ends internal_error with its number", async () => {
       const s = await scene();
-      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "gone" }] } } };
+      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
       expect(parsedDone(await s.call())).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: 1 });
       expect(s.repo.pulls[0]!.state).toBe("closed");
       expect(labels(s.fake)).not.toContain("A1 MarkReady");
@@ -483,20 +483,67 @@ describe("done route [pg]", () => {
 
     it("a permanent refusal after the READY fallback closes that ready pull request too", async () => {
       const s = await scene({ drafts: false });
-      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "gone" }] } } };
+      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
       expect(parsedDone(await s.call())).toMatchObject({ failure_reason: "internal_error", pr_number: 1 });
       expect(s.repo.pulls[0]).toMatchObject({ draft: false, state: "closed" });
     });
 
     it("if closing the unchecked pull request cannot reach GitHub, the answer is 503 with no write (the retry finds it again)", async () => {
       const s = await scene();
-      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "gone" }] } } };
+      s.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "gone" }] } } };
       s.fake.before = (req) => {
         if (req.method === "PATCH") s.fake.inject = { label: /^A5$/, reply: { status: 502, body: {} } };
       };
       const res = await s.call();
       expect(res.status).toBe(503);
       expect(finished).toEqual([]);
+    });
+
+    // The live failure: the pull request was opened a second before, and GraphQL answered NOT_FOUND for it.
+    const notFound = { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", path: ["repository", "pullRequest"], message: "Could not resolve to a PullRequest with the number of 1." }] } };
+    const lagFor = (s: Scene, reads: number) => {
+      const real = s.fake.request.bind(s.fake);
+      let seen = 0;
+      s.fake.request = async (req) => (req.path === "/graphql" && (req.body as { query: string }).query.includes("PullRequestFiles") && ++seen <= reads ? notFound : real(req));
+    };
+
+    it("a new pull request GraphQL cannot show for a moment is waited for: the run succeeds, no log line", async () => {
+      const s = await scene();
+      const lines: string[] = [];
+      lagFor(s, 2);
+      expect(parsedDone(await s.call({ deps: { log: (l) => void lines.push(l) } }))).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+      expect(s.repo.pulls[0]).toMatchObject({ draft: false, state: "open" });
+      expect(lines).toEqual([]);
+    });
+
+    it("one that stays invisible is 503 with no write and the pull request left open (the runner's next done finds it again)", async () => {
+      const s = await scene();
+      lagFor(s, 1000);
+      const res = await s.call();
+      expect(res.status).toBe(503);
+      expect(finished).toEqual([]);
+      expect(s.repo.pulls[0]!.state).toBe("open");
+    });
+
+    it("every permanent failure after the pull request exists logs one structured line: run, stage, call, status, GraphQL types, nothing GitHub wrote", async () => {
+      const files = await scene();
+      const lines: string[] = [];
+      files.fake.inject = { label: /^A1 PullRequestFiles$/, reply: { status: 200, body: { data: { repository: { pullRequest: null } }, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration acme/widgets" }] } } };
+      expect(parsedDone(await files.call({ deps: { log: (l) => void lines.push(l) } }))).toMatchObject({ failure_reason: "internal_error", pr_number: 1 });
+      expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.done.pr_failure", run_id: files.runId, stage: "files", op: "PullRequestFiles", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] }]);
+      expect(lines.join("")).not.toMatch(/acme|widgets|accessible/);
+
+      const ready = await scene();
+      const readyLines: string[] = [];
+      ready.fake.inject = { label: /^A1 MarkReady$/, reply: { status: 200, body: { data: { markPullRequestReadyForReview: null }, errors: [{ type: "UNPROCESSABLE", message: "nope" }] } } };
+      await ready.call({ deps: { log: (l) => void readyLines.push(l) } });
+      expect(readyLines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.done.pr_failure", run_id: ready.runId, stage: "ready", op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["UNPROCESSABLE"] }]);
+
+      const rest = await scene();
+      const restLines: string[] = [];
+      rest.fake.inject = { label: /^A2$/, reply: { status: 404, body: { message: "Not Found" } } };
+      await rest.call({ deps: { log: (l) => void restLines.push(l) } });
+      expect(restLines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.done.pr_failure", run_id: rest.runId, stage: "read", op: "defaultBranch", reason: "rejected", status: 404, graphql_types: [] }]);
     });
   });
 
