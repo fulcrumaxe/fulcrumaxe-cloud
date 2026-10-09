@@ -129,7 +129,8 @@ export type StartAgentRunResult =
   | { id: string; status: "timed_out" }
   | { id: string; status: "running"; hookToken: string }
   /** D#6 C12 section 2.1: the target queued the run (a runner will claim it). It stays `pending`; there is no hook to
-   * wait on. A caller that cannot wait for a run to be claimed must fail closed on this, never treat it as started. */
+   * wait on. A caller that waits on a hook must fail closed on this (`failClosedOnQueued`); one whose wait is a status poll
+   * that credits queued time accepts it by name (`acceptQueuedRunnerRun`). */
   | { id: string; status: "pending"; queued: true }
   /** PR #85 fix round item 2 (CWE-362): the final `pending -> running`
    * write is a compare-and-set like every other write in this file --
@@ -440,11 +441,14 @@ export class QueuedRunNotSupportedError extends Error {
 }
 
 /**
- * The library callers of `startAgentRun` and `resumeAgentRun` wait on a Workflow hook, a status that ends, or a person's
- * next step. A queued runner run has no hook and may sit `pending` for up to the runner queue TTL, so none of them can
- * treat it as started. This is their one way to fail closed: a `pending` result is cancelled (compare-and-set from
- * `pending`, so a run a runner already claimed is left alone) and `QueuedRunNotSupportedError` is thrown; every other
- * result passes through unchanged, with the queued variant removed from its type.
+ * The default for a library caller of `startAgentRun` or `resumeAgentRun`: a queued runner run is not a start it can use. A
+ * runner run has no Workflow hook and may sit `pending` for up to the runner queue TTL, so a caller that waits on a hook
+ * would wait for ever. A `pending` result is cancelled (compare-and-set from `pending`, so a run a runner already claimed is
+ * left alone) and `QueuedRunNotSupportedError` is thrown; every other result passes through unchanged, with the queued
+ * variant removed from its type.
+ *
+ * A caller whose wait is a status poll that credits queued time (or that waits on nothing) opts in by name instead, with
+ * `acceptQueuedRunnerRun`. A new caller has to choose one of the two; a source test pins the set that fails closed.
  */
 export async function failClosedOnQueued<R extends { id: string; status: string }>(
   pool: Pool,
@@ -460,4 +464,35 @@ export async function failClosedOnQueued<R extends { id: string; status: string 
     console.warn(JSON.stringify({ event: "run.queued_cancel_failed", run_id: result.id }));
   }
   throw new QueuedRunNotSupportedError(result.id);
+}
+
+/**
+ * For a caller that can show its wait is a status poll that credits queued time, or that waits on nothing: a run the runner
+ * target queued is accepted as started. It stays `pending` for a runner to claim, no follower is started (there is no hook,
+ * and the `done` route and the queue sweeper end the run), one `run.queued` line with the run id and account id is logged,
+ * and the result is returned as it came.
+ *
+ * Only a result with `queued: true` whose run belongs to the runner target is accepted. Anything else that is `pending`
+ * (including a run whose runtime cannot be read) goes to `failClosedOnQueued`, exactly as before; every other status passes
+ * through unchanged.
+ */
+export async function acceptQueuedRunnerRun<R extends { id: string; status: string }>(pool: Pool, accountId: string, result: R): Promise<R> {
+  if (result.status !== "pending") return result;
+  if ((result as { queued?: unknown }).queued === true && (await isRunnerRun(pool, accountId, result.id))) {
+    console.info(JSON.stringify({ event: "run.queued", run_id: result.id, account_id: accountId }));
+    return result;
+  }
+  return failClosedOnQueued(pool, accountId, result) as Promise<R>;
+}
+
+async function isRunnerRun(pool: Pool, accountId: string, runId: string): Promise<boolean> {
+  try {
+    return await withTenant(pool, accountId, async (client) => {
+      const { rows } = await client.query<{ runtime: string }>("SELECT runtime FROM agent_runs WHERE id = $1 AND account_id = $2", [runId, accountId]);
+      return rows[0]?.runtime === "runner";
+    });
+  } catch {
+    // fx-swallow-ok: an unreadable runtime is not proof of a runner run, so the caller fails closed (the run is cancelled and a fixed code is thrown)
+    return false;
+  }
 }

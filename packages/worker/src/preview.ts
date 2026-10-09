@@ -73,7 +73,7 @@ export const PREVIEW_SEAT_REFUSALS = [
  * code shape, so this closed list is the real set; a test pins it. A seat reason outside
  * PREVIEW_SEAT_REFUSALS is recorded as `seat_refused`.
  */
-export const PREVIEW_VOID_REASONS = ["preview_unavailable", "preview_capacity", "seat_over_cap", "seat_refused", "start_failed", "precheck_failed", "spend_refused", ...PREVIEW_SEAT_REFUSALS] as const;
+export const PREVIEW_VOID_REASONS = ["preview_unavailable", "preview_capacity", "seat_over_cap", "seat_refused", "start_failed", "precheck_failed", "spend_refused", "preview_runner_local", ...PREVIEW_SEAT_REFUSALS] as const;
 export type PreviewVoidReason = (typeof PREVIEW_VOID_REASONS)[number];
 
 const SEAT_REFUSALS: readonly string[] = PREVIEW_SEAT_REFUSALS;
@@ -293,6 +293,11 @@ export function createPreviewModule(runnerPool: Pool, deps: PreviewModuleDeps): 
         };
 
         if (!ready()) return voidAndRefuse("preview_unavailable");
+
+        // Previews are sandbox-only: a repo that runs on the customer's own machine must not have its code sent to our sandbox.
+        // Refused before any run, reservation or cap read exists, and the preview is voided like the other pre-start refusals.
+        const mode = await client.query<{ execution_mode: string }>("SELECT execution_mode FROM repos WHERE id = $1 AND account_id = $2", [preview.repo_id, accountId]);
+        if (mode.rows[0]?.execution_mode === "runner_local") return voidAndRefuse("preview_runner_local");
 
         // The platform-wide day cap is read here and spent by the start below; the lock above is held until this
         // commits (the run, and so its compute reservation, exists by then), so two starts cannot both pass.

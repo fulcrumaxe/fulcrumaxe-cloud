@@ -237,6 +237,10 @@ describe("triageBody and the small readers", () => {
     const sandbox = worker({ advanceRunOutcome: async () => ({ status: "pending", done: false, envelope: null, runtime: "production" }) });
     expect((await runOutcomeBody(sandbox, ACCOUNT, "r1")).queuedOnRunner).toBe(false);
   });
+  it("D#6 C29: a classify run a runner finished through done (status succeeded, the runner's runtime, a category word in the stored envelope) reads as done with that word", async () => {
+    const w = worker({ advanceRunOutcome: async () => ({ status: "succeeded", done: true, envelope: { category: "bug", summary: "a bug" }, runtime: "runner" }) });
+    expect(await runOutcomeBody(w, ACCOUNT, "r1")).toEqual({ status: "succeeded", done: true, category: "bug", queuedOnRunner: false });
+  });
   it("categoryOf reads a string and refuses everything else", () => {
     expect(categoryOf({ category: "bug" })).toBe("bug");
     for (const e of [null, {}, { category: 3 }, { category: "" }, { category: "x".repeat(201) }, { category: ["bug"] }]) expect(categoryOf(e as never)).toBeNull();

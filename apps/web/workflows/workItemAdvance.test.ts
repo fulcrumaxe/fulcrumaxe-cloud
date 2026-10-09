@@ -177,6 +177,13 @@ describe("workItemAdvanceWorkflow: classify then triage", () => {
       expect(w.advanceTriage).toHaveBeenCalledTimes(1);
     });
 
+    it("C29: pending for more polls than the classify budget allows (CLASSIFY_WAIT_MS / POLL_MS = 45), then succeeded: the item is triaged and the pending polls cost the budget nothing", async () => {
+      const w = setup({ outcomes: [...Array.from({ length: 46 }, () => pending), { status: "succeeded", done: true, envelope: { category: "bug" } }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "triaged", detail: undefined });
+      expect(world.sleeps).toBe(46);
+      expect(w.advanceTriage).toHaveBeenCalledWith(ACCOUNT, expect.objectContaining({ category: "bug" }));
+    });
+
     it("the budget starts counting when the run does: pending polls, then the full 45 polls of running", async () => {
       setup({ outcomes: [...Array.from({ length: 100 }, () => pending), running] });
       expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "classify_wait_timeout" });
