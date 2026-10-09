@@ -6,7 +6,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -936,6 +936,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
       if (err instanceof WorkItemHaltedError) return refuse("item_halted");
       if (err instanceof ExecutionModeChangedError) return refuse("execution_mode_changed");
+      // D#6 R4d-5c (C36): the build this fix round continues has no Spec version to inherit (built before the pin): nothing was written, no job issued.
+      if (err instanceof NoSpecVersionError) return refuse("no_spec_version");
       return refuse("resume_failed");
     }
     if (out.status === "refused_spend") return refuse("refused_spend");

@@ -54,6 +54,8 @@ describe("the runner copy (D#6 R2b)", () => {
       specHasNoFileList:
         "This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.",
       respecListUnreadable: "The project manager's file list for this Spec could not be read, so nothing was changed. Re-spec to try again.",
+      noSpecVersion:
+        "This work was built before the platform recorded which Spec it was built against, so it cannot be continued on your runner. Re-spec if the Spec needs a change, then Build again.",
       scopeUnknownRenamed:
         "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",
       prRejected: "GitHub refused to open the pull request (HTTP {status}). The branch is kept so you can open the PR yourself.",

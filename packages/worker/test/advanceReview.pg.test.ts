@@ -138,7 +138,9 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
   const who = (a: SeedRefs, workItemId: string) => ({ accountId: a.accountId, userId: a.userId, workItemId, haltEpoch: 0 });
   /** The executor run the build left behind, with its session. */
   async function buildRun(a: SeedRefs, workItemId: string, status: "succeeded" | "running" = "succeeded"): Promise<string> {
-    const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: a.repoId, dispatchPrNumber: await numberOf(workItemId) });
+    // D#6 R4d-5c (C36): a build made after the pin carries the item's Spec version, which a fix round inherits (a runner fix round of an unpinned build is refused).
+    const spec = (await admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 ORDER BY version DESC LIMIT 1", [workItemId])).rows[0]?.id;
+    const { id } = await insertAgentRun(writerPool, { id: randomUUID(), accountId: a.accountId, workItemId, ...(spec ? { specVersionId: spec } : {}), role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: a.repoId, dispatchPrNumber: await numberOf(workItemId) });
     await writeRunStatus(writerPool, { accountId: a.accountId, runId: id, from: "pending", to: "running" });
     if (status === "succeeded") await writeRunStatus(writerPool, { accountId: a.accountId, runId: id, from: "running", to: "succeeded", result: { sessionId: "cc-session-1", envelope: { verdict: "done" } } });
     else await admin.query("UPDATE agent_runs SET cc_session_id = 'cc-session-1' WHERE id = $1", [id]);

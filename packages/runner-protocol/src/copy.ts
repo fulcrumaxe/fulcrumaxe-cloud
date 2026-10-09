@@ -69,6 +69,9 @@ export const COPY = {
     "This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.",
   /** D#6 R4d-5b (C34 section 2.4): shown after a Re-spec whose project-manager file list could not be read (nothing was changed). Exact text; the one place it is written. */
   respecListUnreadable: "The project manager's file list for this Spec could not be read, so nothing was changed. Re-spec to try again.",
+  /** D#6 R4d-5c (C36 section 3): a retry, fix round or continuation refused `no_spec_version` because the run it follows was built before runs were tied to a Spec version. Exact text; the one place it is written. */
+  noSpecVersion:
+    "This work was built before the platform recorded which Spec it was built against, so it cannot be continued on your runner. Re-spec if the Spec needs a change, then Build again.",
   /** D#6 R2b-3f (C23 section 3): the one `scope_unknown` variant for a renamed file. It names no path. */
   scopeUnknownRenamed:
     "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",

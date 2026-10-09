@@ -113,7 +113,7 @@ export async function resumeAgentRun(
   // BEFORE anything is written or any target method is called -- a
   // foreign/absent session throws ForeignSessionError here and nothing
   // downstream ever runs.
-  const { sessionId, backend: storedBackend } = await withTenant(pool, input.accountId, (client) =>
+  const { sessionId, backend: storedBackend, runId: sessionRunId } = await withTenant(pool, input.accountId, (client) =>
     lookupOwnedExecutorSession(client, { accountId: input.accountId, workItemId }),
   );
 
@@ -130,6 +130,9 @@ export async function resumeAgentRun(
     accountId: input.accountId,
     workItemId,
     parentRunId: input.parentRunId,
+    // D#6 R4d-5c (C36): the round is held to the Spec version of the run whose session it continues. The create reads it; an explicit one that differs is refused.
+    specParentRunId: sessionRunId,
+    specVersionId: input.specVersionId ?? null,
     role: input.role,
     runtime: target.runtime,
     initiatedBy: input.initiatedBy,

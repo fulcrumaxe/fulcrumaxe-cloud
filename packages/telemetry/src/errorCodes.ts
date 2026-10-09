@@ -131,6 +131,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "respec_list_unreadable",
   "spec_has_file_list",
   "spec_changed",
+  // Spec version pin on follow-on runs (D#6 R4d-5c): a follow-on run of a runner repo whose parent has no Spec version, and an explicit version that is not the parent's.
+  "no_spec_version",
+  "spec_version_mismatch",
   // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
   "continuation_branch_missing",
   "push_rejected",
