@@ -222,9 +222,12 @@ describe('X-user-id amendment', () => {
     const offenders: string[] = [];
     for (const row of rows) {
       const expr = `${row.qual ?? ''} ${row.withcheck ?? ''}`;
-      // Two policies are exempt, by table and name: runner_approval_definer_select (0757) and runner_mode_switch_definer_select (0759) on
-      // account_members. Their row is the membership itself, so it cannot join the table to itself. Any other policy on that table is still checked.
-      const isMembershipRowPolicy = row.tablename === 'account_members' && (row.policyname === 'runner_approval_definer_select' || row.policyname === 'runner_mode_switch_definer_select');
+      // Three policies are exempt, by table and name: runner_approval_definer_select (0757), runner_mode_switch_definer_select (0759) and
+      // runner_consent_definer_select (0767) on account_members. Their row is the membership itself, so it cannot join the table to itself.
+      // Any other policy on that table is still checked.
+      const isMembershipRowPolicy =
+        row.tablename === 'account_members' &&
+        (row.policyname === 'runner_approval_definer_select' || row.policyname === 'runner_mode_switch_definer_select' || row.policyname === 'runner_consent_definer_select');
       if (!isMembershipRowPolicy && expr.includes('app.user_id') && !expr.includes('account_members') && !expr.includes('partner_members')) {
         offenders.push(`${row.tablename}.${row.policyname}`);
       }

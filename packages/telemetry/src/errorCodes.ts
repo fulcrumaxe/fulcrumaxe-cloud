@@ -173,6 +173,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "runner_mint_failed",
   "runner_upstream_unavailable",
   "runner_upstream_timeout",
+  // Cloud runner approval (D#6 R2b-4a): a run approved by someone whose runner cannot take its repo, and a runner-run dial saved over a newer version.
+  "runner_not_for_repo",
+  "dial_changed",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

@@ -19,6 +19,21 @@ export const COPY = {
   runner: "Runs the Claude Code you have already signed in to.",
   waiting: "Waiting for a runner: none has been online for {repo} since {time}. Start `fx-runner run` on {machine}.",
   approval: "Waiting for {person} to approve (it runs on their Claude plan).",
+  /** D#6 R2b-4a (C30 section 2 item 4, C31 section 3): the approval words the runner screens and the Pipeline row show. The UI retypes none of them. */
+  approvalMine: "This run needs your approval. It runs on your Claude plan.",
+  approvalButton: "Approve run",
+  approvalDone: "Approved. Waiting for your runner.",
+  approvalRefused: "This run can no longer be approved.",
+  /** A run the claim approved by itself (the dial said announce, and its plan holder's consent is on). `{person}` is that plan holder. */
+  approvalAuto: "Approved automatically. It runs on {person}'s Claude plan.",
+  /** The sentence a plan holder agrees to when they turn "Run work without asking each time" on for one runner. */
+  planConsentText:
+    "Let work on this runner's repos run on my Claude plan without asking each time. This includes work anyone in this account starts on those repos. You can turn this off at any time.",
+  /** The repo-settings control for the runner-run dial: its title, then its three values (ask, announce, act). */
+  dialRunnerRuns: "Runner runs on a member's plan",
+  dialRunnerRunsAsk: "Ask each run",
+  dialRunnerRunsAnnounce: "Approve and tell me",
+  dialRunnerRunsAct: "Approve without asking",
   lost: "Runner lost contact at {time}. Retrying from the last pushed commit (attempt {n} of 2).",
   timedOut: "Timed out waiting for a runner.",
   /** The reason on a queued runner run that was cancelled because its repo left `runner_local` (failure reason `execution_mode_changed`). */

@@ -321,12 +321,14 @@ describe('migration 0754 gives platform_ops nothing', () => {
     guard = guardPoolTeardown(pool, 'platformOpsDiffPool');
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0754-diff-migrations-'));
     // 0762 re-creates runner_follow_up_run (it adds one clause), so it cannot be applied before the 0754 that creates the function; it joins the second run.
-    for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && name !== '0762_sandbox_reap_settings.sql')) {
+    // 0767 grants a role SELECT on agent_runs.claimable_after, a column 0754 adds, so it joins the second run too (it gives platform_ops nothing).
+    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql'];
+    for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !NEEDS_0754.includes(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }
     await runMigrations(pool, beforeDir);
     before = await snapshot();
-    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0754 and 0762: everything else is already recorded
+    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0754, 0762 and 0767: everything else is already recorded
     after = await snapshot();
   }, 120_000);
 

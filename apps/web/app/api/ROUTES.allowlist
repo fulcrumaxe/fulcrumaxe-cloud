@@ -29,9 +29,12 @@ runner/revoke/route.ts
 runner/rotate/route.ts
 runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
+runners/[id]/plan-consent/route.ts
 runners/[id]/revoke/route.ts
+runners/approvals/route.ts
 runners/registration-codes/route.ts
 runners/repos/[id]/execution-mode/route.ts
+runners/repos/[id]/plan-approval-dial/route.ts
 runners/revoke-all/route.ts
 runners/route.ts
 runners/runs/[id]/approve/route.ts

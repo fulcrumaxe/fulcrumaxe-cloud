@@ -26,7 +26,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 1;
+export const CATALOGUE_VERSION = 2;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -67,6 +67,20 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     id: "test_strategy_choice",
     class: "human_over_the_loop",
     defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    // D#6 R2b-4a (C31): a runner run uses the Claude plan of the member whose subscription runner takes it. Cautious asks for each
+    // run, Balanced approves at claim and says so, Autonomous approves at claim. The default when a repo has no dial row is
+    // `announce`: the plan holder's own per-runner consent is the deliberate act, and an admin who wants per-run asking sets the
+    // repo (or just this decision) to `ask`. Class 2 and not class 3, because class 3 asks at every level, which is the very thing
+    // the owner ruled against; spending another member's plan without that member's consent stays impossible at every level.
+    id: "runner_run_on_member_plan",
+    class: "human_over_the_loop",
+    defaultDisposition: "announce",
     allowedDispositions: ["act", "announce", "ask"],
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",

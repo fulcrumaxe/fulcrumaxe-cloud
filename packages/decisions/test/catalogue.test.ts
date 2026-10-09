@@ -31,6 +31,7 @@ const EXPECTED_V1_IDS = [
   "publish_deprecation_notice",
   "publish_release_artifact",
   "retry_transient_step_failure",
+  "runner_run_on_member_plan",
   "test_strategy_choice",
 ].sort();
 
