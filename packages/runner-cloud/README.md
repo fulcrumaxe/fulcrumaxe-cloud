@@ -103,6 +103,19 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   pending run (`agent_run_approve`, 0757). Anyone else gets 403. `approved_by` is write-once. The approve definer and the
   execution-mode audit definer are owned by the NOLOGIN role `runner_approval_definer` (column grants and row policies of its
   own, EXECUTE for `app_user` alone); migration 0757 gives `platform_ops` nothing, and a test diffs its privileges.
+  A first approval also needs the approver's own live subscription runner to list the run's repo (409 `runner_not_for_repo`
+  otherwise, nothing written), because `approved_by` is write-once and an approval by someone whose runner can never take the
+  run would strand it.
+- **Following the autonomy dial (D#6 R2b-4a).** A run no longer needs a click for each step. The decision `runner_run_on_member_plan`
+  (D#7, class 2) is set per repo: `ask` keeps the click, `announce` and `act` let the claim approve the run for the runner's
+  registrant at claim time, and with no dial row the default is `announce`. That needs the registrant's own standing consent on
+  that runner (`POST /api/runners/:id/plan-consent`, `{ granted }`, only the registrant, an append-only record,
+  `runner_plan_consents`, off for every new or re-registered runner). `GET`/`PUT /api/runners/repos/:id/plan-approval-dial` read
+  and write the dial (the write is owner or admin, a new attributed version). `GET /api/runners/approvals` lists the runs that
+  read `waiting_for_approval`, with who can approve them. The claim and the read model both ask `runner_plan_auto_approvable`
+  (0767), so they cannot disagree; the claim's write is `agent_run_runner_auto_approve`, in its own transaction, with an audit row
+  and a decision receipt. The two roles that own these definers, `runner_consent_definer` and `runner_auto_approve_definer`, hold
+  column grants only; `platform_ops` gains nothing.
 
 ## Execution mode, auto-merge and the waiting notices (R2b)
 

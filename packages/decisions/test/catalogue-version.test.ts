@@ -27,8 +27,8 @@ function fingerprint(catalogue: readonly CatalogueEntry[], presets: readonly Pre
  * "we shipped a new dial" is never indistinguishable from "nothing happened".
  */
 const PINNED = {
-  version: 1,
-  sha256: "b3544b4e8d8636958367915ed76f855ad1d985820b3a593c6adf17449efffd69",
+  version: 2,
+  sha256: "35d35d3ffa7a3bd9ee6b441cf3d56596497221013ce6c9d725c08a6452f2c0d1",
 };
 
 describe("DP3b-7: CATALOGUE_VERSION is pinned to the catalogue and presets", () => {

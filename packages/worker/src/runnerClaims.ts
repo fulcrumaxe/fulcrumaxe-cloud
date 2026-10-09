@@ -14,6 +14,7 @@ import {
   type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { RUNNER_RUN_CATALOGUE_VERSION } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { insertRunnerEvent, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
@@ -222,15 +223,41 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
     return { kind: "idle", retryAfter: queued ? between(CLAIM_QUEUED_RETRY_AFTER_SECONDS.min, CLAIM_QUEUED_RETRY_AFTER_SECONDS.max) : CLAIM_IDLE_RETRY_AFTER_SECONDS };
   };
 
+  /**
+   * The repos of this runner's list on which the claim would approve a run for it by itself (D#6 R2b-4a, C31 section 2.2 conditions 1 to
+   * 4): the runner is a live subscription runner, its registrant is still a member, its consent is on and the repo's dial is not `ask`.
+   * The database decides (`runner_plan_auto_approvable`, 0767), the same function the read model calls. Empty for an api_key runner. This
+   * only chooses which runs to try; the approval itself is re-checked, with the run locked, inside the claim's transaction.
+   */
+  async function autoApprovableRepos(accountId: string, runnerId: string, runner: { credential_mode: string; allowed_repo_ids: string[] }): Promise<string[]> {
+    if (runner.credential_mode !== "subscription" || runner.allowed_repo_ids.length === 0) return [];
+    return withTenant(runnerPool, accountId, async (client) => {
+      const { rows } = await client.query<{ repo_id: string }>("SELECT r.repo_id FROM unnest($1::uuid[]) AS r(repo_id) WHERE runner_plan_auto_approvable($2::uuid, r.repo_id)", [runner.allowed_repo_ids, runnerId]);
+      return rows.map((row) => row.repo_id);
+    });
+  }
+
   /** The claim of one candidate, in one transaction. */
-  async function claimOne(accountId: string, runnerId: string, runId: string): Promise<{ generation: number } | "at_limit" | "taken"> {
+  async function claimOne(accountId: string, runnerId: string, runId: string, runner: { credential_mode: string; registered_by: string }): Promise<{ generation: number } | "at_limit" | "taken"> {
     return withTenant(runnerPool, accountId, async (client) => {
       // One claimer per account at a time, so the concurrency count below cannot be raced past its limit.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`runner_claim:${accountId}`]);
       const running = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running'", [accountId]);
       if (Number(running.rows[0]!.n) >= limits(accountId).maxConcurrentRunnerJobs) return "at_limit" as const;
-      const locked = await client.query("SELECT id FROM agent_runs WHERE account_id = $1 AND id = $2 AND status = 'pending' AND runner_id IS NULL FOR UPDATE SKIP LOCKED", [accountId, runId]);
+      const locked = await client.query<{ initiated_by: string | null; approved_by: string | null }>(
+        "SELECT initiated_by, approved_by FROM agent_runs WHERE account_id = $1 AND id = $2 AND status = 'pending' AND runner_id IS NULL FOR UPDATE SKIP LOCKED",
+        [accountId, runId],
+      );
       if (locked.rows.length === 0) return "taken" as const;
+      // A subscription runner takes, as it stands, only a run its registrant started or approved. Any other run is taken only if the claim
+      // approves it for the registrant here (C31 section 2.2): the database re-checks the runner, its registrant's membership and consent,
+      // the repo's dial and the run itself with the run locked, and writes approved_by, the audit row and the receipt in this transaction.
+      // approved_by is written only now, so a pending run never carries an approval that a later dial or consent change could contradict.
+      const own = locked.rows[0]!.initiated_by === runner.registered_by || locked.rows[0]!.approved_by === runner.registered_by;
+      if (runner.credential_mode === "subscription" && !own) {
+        const approved = await client.query<{ ok: boolean }>("SELECT agent_run_runner_auto_approve($1::uuid, $2::uuid, $3::timestamptz, $4::int) AS ok", [runId, runnerId, new Date(now()), RUNNER_RUN_CATALOGUE_VERSION]);
+        if (approved.rows[0]?.ok !== true) return "taken" as const;
+      }
       const moved = await writeRunStatusOn(client, { accountId, runId, from: "pending", to: "running" });
       if (!moved.updated) return "taken" as const;
       const { rows } = await client.query<{ generation: number | null }>("SELECT agent_run_runner_claim($1::uuid, $2::uuid, $3::uuid, $4::timestamptz, $5::int) AS generation", [
@@ -259,6 +286,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         const roles = runner.allowed_roles.length === 0 ? [...eligible] : runner.allowed_roles.filter((role) => eligible.includes(role));
         if (runner.allowed_repo_ids.length === 0 || roles.length === 0) return idle(accountId);
 
+        const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);
         const tried: string[] = [];
         const seen = new Map<string, "private" | "public" | "unknown">();
         for (let attempt = 0; attempt < CLAIM_CANDIDATES; attempt++) {
@@ -271,12 +299,12 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                 WHERE a.account_id = $1 AND a.status = 'pending' AND a.runtime = 'runner' AND a.execution_mode = 'runner_local'
                   AND a.runner_id IS NULL AND a.job_signed IS NOT NULL AND r.execution_mode = 'runner_local'
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
-                  AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5)
+                  AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
                   AND a.id <> ALL($6::uuid[])
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
-                ORDER BY (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
+                ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now())],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos],
             );
             return rows;
           });
@@ -300,7 +328,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
             continue;
           }
 
-          const claimed = await claimOne(accountId, runnerId, candidate.id);
+          const claimed = await claimOne(accountId, runnerId, candidate.id, runner);
           if (claimed === "taken") continue;
           if (claimed === "at_limit") return idle(accountId);
           // Tells the runner sweeper when this lease ends, so its cron tick does not open the database before then (D#454 H3c's

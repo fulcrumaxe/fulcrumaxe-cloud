@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { getCatalogueEntry } from "../src/catalogue.js";
+import { decide } from "../src/decide.js";
 import {
   AUTONOMOUS_PRESET,
   BALANCED_PRESET,
@@ -91,5 +93,24 @@ describe("getPreset", () => {
 
   it("throws UnknownPresetError for a name outside the three", () => {
     expect(() => getPreset("moderate" as Preset["name"])).toThrow(UnknownPresetError);
+  });
+});
+
+// D#6 R2b-4a (C31 acceptance 9): the runner-run decision is class 2, so the three presets move it, and its default is announce.
+describe("runner_run_on_member_plan resolves per preset through decide()", () => {
+  const entry = getCatalogueEntry("runner_run_on_member_plan");
+  const request = { type: "runner_run_on_member_plan", options: ["approve", "ask"], proposed: "approve", rationale: "r" };
+
+  it("is class 2 with the default announce", () => {
+    expect(entry?.class).toBe("human_over_the_loop");
+    expect(entry?.defaultDisposition).toBe("announce");
+  });
+
+  it.each([
+    ["cautious", "ask"],
+    ["balanced", "announce"],
+    ["autonomous", "act"],
+  ] as const)("%s resolves to %s", (preset, disposition) => {
+    expect(decide(entry, { preset }, request)).toEqual({ class: "human_over_the_loop", disposition });
   });
 });
