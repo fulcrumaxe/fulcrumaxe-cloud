@@ -779,15 +779,33 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
   });
 
-  it("the fix round's prompt carries the recorded branch", async () => {
+  it("D#6 R4d-1: the fix round of a runner repo is the runner variant (stay on the checked-out branch, commit, no push, no GitHub call) and names the mode it was built for; a sandbox repo's keeps the push", async () => {
+    const needsFix = (role: string, head: string) =>
+      head === H1 && role === "code-reviewer" ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" } } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
+    const rounds = [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }];
+    const t = setup(runner({ verdict: needsFix, rounds }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    const req = t.worker.advanceStartFix.mock.calls[0]![1];
+    expect(req.expectedExecutionMode).toBe("runner_local");
+    for (const banned of ["git push", "git checkout", "git reset", "git fetch", "checkout -b", "api.github.com", "/pulls", "--force"]) expect(req.prompt, banned).not.toContain(banned);
+    expect(req.prompt).toContain("Do not push");
+    expect(req.prompt).toContain("src/a.ts:3 - off by one");
+
+    const s = setup(fresh({ verdict: needsFix, rounds }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    const sandboxReq = s.worker.advanceStartFix.mock.calls[0]![1];
+    expect(sandboxReq.expectedExecutionMode).toBe("sandbox");
+    expect(sandboxReq.prompt).toContain("git push origin fx/issue-7");
+  });
+
+  it("the fix round of a runner repo never names the issue's branch (it works on the checked-out one)", async () => {
     const needsFix = (role: string, head: string) =>
       head === H1 && role === "code-reviewer" ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["src/a.ts:3 - off by one"], summary: "one problem" } } : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
     const t = setup(runner({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }] }));
     expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
     const req = t.worker.advanceStartFix.mock.calls[0]![1];
-    expect(req.prompt).toContain(`git fetch origin ${RUN_BRANCH} && git checkout ${RUN_BRANCH} && git reset --hard origin/${RUN_BRANCH}`);
-    expect(req.prompt).toContain(`git push origin ${RUN_BRANCH}`);
     expect(req.prompt).not.toContain("fx/issue-7");
+    expect(req.prompt).not.toContain(RUN_BRANCH);
   });
 
   it("no record: the review fails closed as no_open_pr, starts no reviewer and never looks up the issue's branch", async () => {

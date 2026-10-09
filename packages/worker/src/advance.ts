@@ -5,7 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -27,6 +27,8 @@ import { RunActionInputError, type PerformResult } from "./runActions.js";
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** An execution mode word (`sandbox`, `runner_local`): lower case and underscores only. */
+const MODE_RE = /^[a-z][a-z_]{0,31}$/;
 const refused = (errorCode: string): PerformResult => ({ result: "refused", errorCode });
 
 // The stages the driver advances from, what advancing does at each, and what must be true first live in ONE table:
@@ -218,6 +220,8 @@ export interface AdvanceFixRequest {
   reviewer: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. */
   failingRunId: string;
+  /** D#6 R4d-1 (C32): the repository's execution mode the fix prompt was built for. Another mode at start refuses `execution_mode_changed`. */
+  expectedExecutionMode?: string;
 }
 
 export interface AdvanceRunRequest {
@@ -237,6 +241,8 @@ export interface AdvanceRunRequest {
   headSha?: string;
   /** The halt epoch the caller's workflow was started under. A start under an older epoch is refused (`halted_since_approval`). */
   haltEpoch: number;
+  /** D#6 R4d-1 (C32): the repository's execution mode the prompt was built for. Another mode at start refuses `execution_mode_changed`, and the role card is the one for this mode. */
+  expectedExecutionMode?: string;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };
@@ -483,6 +489,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!UUID_RE.test(req.accountId) || !UUID_RE.test(req.workItemId) || !/^[a-z0-9:_.-]{1,128}$/i.test(req.step)) return { ok: false, reason: "invalid_input" };
     if (!deps.starter) return { ok: false, reason: "starter_unavailable" };
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
+    if (req.expectedExecutionMode !== undefined && !MODE_RE.test(req.expectedExecutionMode)) return { ok: false, reason: "invalid_input" };
     const key = `advance:${req.workItemId}:${req.step}`;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
       const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null; halted: boolean; halt_epoch: number }>(
@@ -512,7 +519,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (repo && repo.halt_epoch !== req.haltEpoch) return { ok: false, reason: "halted_since_approval" };
     if (!repo?.repo_id) return { ok: false, reason: "no_repo" };
     if (found.busy) return { ok: false, reason: "already_running" };
-    const seat = await deps.resolveRunSeat({ accountId: req.accountId, role: req.role, workItemId: req.workItemId });
+    const seat = await deps.resolveRunSeat({ accountId: req.accountId, role: req.role, workItemId: req.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
     if (!seat.ok) return { ok: false, reason: seat.reason };
     const cloneFrom = req.clone === true ? (repo.gh_owner && repo.gh_name ? { owner: repo.gh_owner, name: repo.gh_name } : null) : undefined;
     if (cloneFrom === null) return { ok: false, reason: "no_repo" };
@@ -524,6 +531,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       role: req.role as StartAgentRunInput["role"],
       product: "team",
       prompt: req.prompt,
+      ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.
@@ -538,6 +546,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       // build racing a fix round, lose here: the loser is told, and nothing is left behind. This is the lock.
       if (err instanceof DuplicateExecutorRunError) return { ok: false, reason: "already_running" };
       if (err instanceof WorkItemHaltedError) return { ok: false, reason: "item_halted" };
+      // The repository changed mode after the prompt was built (R4d-1): nothing was written, and no job was issued.
+      if (err instanceof ExecutionModeChangedError) return { ok: false, reason: "execution_mode_changed" };
       // The executor's sandbox is inside a reaper claim (0761): nothing was written, and the step retries after a wait.
       if (err instanceof SandboxReapingError) return { ok: false, reason: "sandbox_reaping" };
       throw err;
@@ -797,7 +807,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       SHA_RE.test(req.headSha) &&
       typeof req.prompt === "string" && req.prompt !== "" && req.prompt.length <= MAX_FIX_PROMPT_CHARS &&
       Number.isInteger(req.round) && req.round >= 1 && req.round <= 20 &&
-      (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance");
+      (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
+      (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode));
     if (!sane) return { ok: false, reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
@@ -836,7 +847,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
     const parent = await newestExecutorRun(who);
     if (parent === null) return refuse("no_session");
-    const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId });
+    const seat = await deps.resolveRunSeat({ accountId: who.accountId, role: "executor", workItemId: who.workItemId, ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}) });
     if (!seat.ok) return refuse(seat.reason);
 
     // The board says "Changes requested" the moment a fix round starts, whatever an earlier record said (a pass recorded
@@ -872,6 +883,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           pr: req.issue,
           parentRunId: parent,
           prompt: req.prompt,
+          ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           workdir: PREVIEW_WORKDIR,
           idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
         }),
@@ -888,6 +900,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof SandboxReapingError) throw err;
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
       if (err instanceof WorkItemHaltedError) return refuse("item_halted");
+      if (err instanceof ExecutionModeChangedError) return refuse("execution_mode_changed");
       return refuse("resume_failed");
     }
     if (out.status === "refused_spend") return refuse("refused_spend");

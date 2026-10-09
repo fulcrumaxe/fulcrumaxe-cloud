@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import {
+  assertExpectedExecutionMode,
   buildExecutionRun,
   readExecutionMode,
   resolveExecutionTarget,
@@ -120,6 +121,7 @@ export async function resumeAgentRun(
   if ((input.backend ?? DEFAULT_BACKEND) !== storedBackend) throw new ResumeBackendError("different");
 
   const mode = await readExecutionMode(pool, input.accountId, input.repoId);
+  assertExpectedExecutionMode(input, mode);
   const target = resolveExecutionTarget(mode, registry);
 
   const runId = randomUUID();

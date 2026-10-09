@@ -18,6 +18,12 @@ export interface AdvanceRunRequest {
   pr?: number;
   /** Start only if no OTHER run of the item is live (this step's own keyed run is always returned). Refused as `already_running`. */
   exclusive?: boolean;
+  /**
+   * D#6 R4d-1 (C32): the repository's `execution_mode` the prompt was built for. The start refuses `execution_mode_changed` when the
+   * repository's mode is different when the run is started, so a sandbox prompt never reaches a runner and a runner prompt never
+   * reaches a sandbox. Absent: no check (a prompt that does not depend on the mode).
+   */
+  expectedExecutionMode?: string;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };

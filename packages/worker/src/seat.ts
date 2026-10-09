@@ -5,7 +5,7 @@ import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { InstallationNotWritableError, assertWriteInstallation } from "@fx/github";
 import { loadLiveRoutingTable, route, type Size } from "@fx/model-router";
 import { getRoleEntry } from "@fx/roles";
-import { loadProductCard } from "@fx/roles/cards";
+import { loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
 import { EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
@@ -18,7 +18,17 @@ import { PINNED_MEMORY_MB, computeComputeUsd, isClaudeModelId, type PlanId } fro
  */
 
 export type SeatRequest =
-  | { accountId: string; role: string; workItemId: string }
+  | {
+      accountId: string;
+      role: string;
+      workItemId: string;
+      /**
+       * D#6 R4d-1 (C32): the repository's `execution_mode` the caller built the run's prompt for. The role card is the one for THAT
+       * mode (the runner's executor card for `runner_local`), so a card always matches its prompt. The start itself refuses
+       * `execution_mode_changed` when the mode is no longer that. Absent: the card follows the mode read here.
+       */
+      expectedExecutionMode?: string;
+    }
   | { accountId: string; role: string; repoId: string; purpose: "preview" };
 
 export type SeatRefusal =
@@ -91,7 +101,8 @@ export function retrySeatSourceOf(resolve: (request: SeatRequest) => Promise<Sea
 export interface SeatDeps {
   /** The runner login's pool. */
   pool: Pool;
-  loadCard?: (role: string) => string | undefined;
+  /** The role's card for a run on `options.runtime` (default: the product card; only the executor has a runner variant). */
+  loadCard?: (role: string, options?: { runtime: CardRuntime }) => string | undefined;
   tierToModelId?: Readonly<Record<string, string>>;
   maxTimeoutMs?: number;
   /** The operator decision for an account (operatorMode(env, id).active). Absent: no account is an operator. */
@@ -121,8 +132,9 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
     const { accountId, role } = request;
     const entry = getRoleEntry(role);
     if (entry === undefined) return refuse("unknown_role");
-    const roleCard = (deps.loadCard ?? loadProductCard)(role);
-    if (roleCard === undefined) return refuse("no_card");
+    const loadCard = deps.loadCard ?? loadProductCard;
+    // A role with no card is refused before anything is read. The card for the run's runtime is picked once the repository is read.
+    if (loadCard(role) === undefined) return refuse("no_card");
     if (typeof accountId !== "string" || !UUID_RE.test(accountId)) return refuse("account_not_found");
     const preview = "purpose" in request;
     const ownerId = preview ? request.repoId : request.workItemId;
@@ -141,14 +153,18 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
         kind = item.kind;
       }
       const repo = (
-        await client.query<{ product: Product; app_kind: string | null }>(
-          `SELECT r.product, i.app_kind FROM repos r
+        await client.query<{ product: Product; app_kind: string | null; execution_mode: string }>(
+          `SELECT r.product, r.execution_mode, i.app_kind FROM repos r
              LEFT JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
             WHERE r.id = $1 AND r.account_id = $2`,
           [repoId, accountId],
         )
       ).rows[0];
       if (repo === undefined) return refuse("no_repo");
+      // The card follows the mode the caller built its prompt for; a preview has no work-item prompt, so it follows the repository.
+      const cardMode = "expectedExecutionMode" in request && request.expectedExecutionMode !== undefined ? request.expectedExecutionMode : repo.execution_mode;
+      const roleCard = cardMode === "runner_local" ? loadCard(role, { runtime: "runner" }) : loadCard(role);
+      if (roleCard === undefined) return refuse("no_card");
       if (repo.app_kind === null) return refuse("no_installation");
       if (preview) {
         // A preview reads a repo through the read-only App and never writes: any other kind is not a preview seat.

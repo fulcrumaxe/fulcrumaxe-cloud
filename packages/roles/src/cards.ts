@@ -44,7 +44,17 @@ export function loadRoleCard(role: string): string | undefined {
  * product card, and any name outside the manifest, gives `undefined`, and the seat refuses the run (`no_card`).
  */
 const PRODUCT_CARD_MAP: Readonly<Record<string, string>> = productCardMap;
-export function loadProductCard(role: string): string | undefined {
+export type CardRuntime = "sandbox" | "runner";
+
+/**
+ * D#6 R4d-1 (C32): where the run executes. `runner` is a run on the person's own machine, where the platform (not the
+ * agent) publishes the commit and opens the pull request. Only the roles in RUNNER_CARD_VARIANTS have a card of their
+ * own for it; every other role gets its one card whatever the runtime.
+ */
+export const RUNNER_CARD_VARIANTS: ReadonlySet<string> = new Set(["executor"]);
+
+export function loadProductCard(role: string, options: { runtime?: CardRuntime } = {}): string | undefined {
   if (!ROLE_MANIFEST.some((entry) => entry.name === role)) return undefined;
-  return Object.hasOwn(PRODUCT_CARD_MAP, role) ? PRODUCT_CARD_MAP[role] : undefined;
+  const key = options.runtime === "runner" && RUNNER_CARD_VARIANTS.has(role) ? `${role}.runner` : role;
+  return Object.hasOwn(PRODUCT_CARD_MAP, key) ? PRODUCT_CARD_MAP[key] : undefined;
 }
