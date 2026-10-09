@@ -20,7 +20,7 @@ import { BYPASS_ENV, STRIPE_RESTRICTED_KEY_ENV } from "./needs.js";
 import type { Plan } from "./plan.js";
 import { buildResults, notRunFromPlan, scrubbedText, writeReport, type PackResult, type Results } from "./report.js";
 import { ScrubError, type ScrubContext } from "./scrub.js";
-import type { Target } from "./targets.js";
+import { fenceConfigFor, PRODUCTION_ORIGIN_ENV, type Target } from "./targets.js";
 
 /** Host basics the browser needs. Values are copied by name, only when set. */
 export const HOST_ENV_NAMES = [
@@ -57,6 +57,8 @@ export type Executor = (inv: Invocation) => Promise<ExecResult>;
 export function childEnv(pack: Pack, target: Target, source: Record<string, string | undefined>, outputDir: string): Record<string, string> {
   const out: Record<string, string> = { [TARGET_ENV_NAME]: target.name, [OUTPUT_DIR_ENV_NAME]: outputDir };
   const names = [...HOST_ENV_NAMES, target.origin_env, target.project_id_env, WORKERS_ENV_NAME];
+  // A staging run keeps out of the production origin (the fence), so it must be told which one that is.
+  if (target.name === "staging") names.push(PRODUCTION_ORIGIN_ENV);
   for (const need of pack.needs) {
     const name = NEED_ENV[need];
     if (name !== undefined && target.env.includes(name)) names.push(name);
@@ -78,6 +80,8 @@ export function buildInvocations(
   target: Target,
   opts: { root: string; env: Record<string, string | undefined>; outDir: string; cli?: string },
 ): Invocation[] {
+  // Fail closed before any child process exists: a staging run without the production origin would run unfenced.
+  fenceConfigFor(target, join(opts.root, "targets"), opts.env);
   const cli = opts.cli ?? playwrightCli();
   const out: Invocation[] = [];
   for (const sel of plan.selected) {

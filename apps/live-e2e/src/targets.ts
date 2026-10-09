@@ -16,7 +16,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createClient } from "./client.js";
+import { createClient, type FenceConfig } from "./client.js";
 import { TARGET_NAMES, type Pack, type TargetName } from "./manifest.js";
 
 export interface Target {
@@ -194,4 +194,50 @@ export async function readDeploymentIdentity(target: Target, bypassSecret: strin
   } catch {
     return null;
   }
+}
+
+/** The variable that holds the production origin (the name production.json declares as its `origin_env`). */
+export const PRODUCTION_ORIGIN_ENV = "LIVE_E2E_PRODUCTION_ORIGIN";
+
+/**
+ * The production origin as this run knows it, for the staging fence: the value of the variable named by
+ * `production.json`'s `origin_env`. Unset or empty gives undefined; a value that is not an exact https origin, or
+ * whose host ends in a dot, is an error, so a typo cannot silently switch the fence off. (The fence compares the
+ * canonical host, so a dotted value would still work, but it is refused: nothing should have to rely on that.)
+ * `fenceConfigFor` turns an unset value into a refusal on staging.
+ */
+export function productionOriginFor(targetsDir: string, env: EnvSource = process.env): string | undefined {
+  const file = join(targetsDir, "production.json");
+  let name: unknown;
+  try {
+    name = (JSON.parse(readFileSync(file, "utf8")) as { origin_env?: unknown }).origin_env;
+  } catch (err) {
+    throw new TargetError(`target production: cannot read ${file} (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (typeof name !== "string" || !ENV_NAME.test(name)) throw new TargetError(`target production: "origin_env" must be an environment variable NAME`);
+  const value = env[name];
+  if (value === undefined || value.trim() === "") return undefined;
+  let ok = false;
+  try {
+    const u = new URL(value);
+    ok = u.protocol === "https:" && u.origin === value && !u.hostname.endsWith(".");
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new TargetError(`environment variable ${name} must hold an exact https origin (scheme, host without a trailing dot, optional port; no path or trailing slash)`);
+  return value;
+}
+
+/**
+ * The fence for a run of `target`: production fences its writes, staging keeps out of the production origin.
+ * Staging fails CLOSED: with the production origin unset there would be nothing to keep out of, so it throws a
+ * TargetError naming the variable instead of running unfenced. (`plan` and `--list` never call this.)
+ */
+export function fenceConfigFor(target: Target, targetsDir: string, env: EnvSource = process.env): FenceConfig {
+  if (target.name === "production") return { target: "production", targetOrigin: target.origin };
+  const productionOrigin = productionOriginFor(targetsDir, env);
+  if (productionOrigin === undefined) {
+    throw new TargetError(`environment variable ${PRODUCTION_ORIGIN_ENV} is not set; a staging run must know the production origin to keep out of it (there is no default)`);
+  }
+  return { target: "staging", targetOrigin: target.origin, productionOrigin };
 }

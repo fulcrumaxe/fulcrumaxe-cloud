@@ -9,16 +9,17 @@
  *
  * Nothing here reads more of the environment than the target variables and the bypass secret.
  *
- * Coverage note: the rule is applied to the `context` (and so `page`) fixture only. A pack that calls
- * `browser.newContext()` or uses the built-in `request` fixture bypasses it; the lint test that forbids
- * that, and the production write fence, arrive with T1c.
+ * The write fence (fixtures/fence.ts) is installed on the same context after the bypass handler, so it sees every
+ * request first. Coverage note: both apply to the `context` (and so `page`) fixture and to the shared client
+ * only; test/pack-lint.test.ts fails any pack that builds its own context or request path.
  */
 import { join } from "node:path";
 import { test as base } from "@playwright/test";
-import { BYPASS_HEADER, bypassHeadersFor, createClient, SET_COOKIE_HEADER, type ApiClient } from "../src/client.js";
+import { BYPASS_HEADER, bypassHeadersFor, createClient, SET_COOKIE_HEADER, type ApiClient, type ProbeSend } from "../src/client.js";
 import { packageRoot, TARGET_ENV_NAME } from "../src/limits.js";
 import { BYPASS_ENV } from "../src/needs.js";
-import { loadTarget, type Target } from "../src/targets.js";
+import { fenceConfigFor, loadTarget, type Target } from "../src/targets.js";
+import { installBrowserFence } from "./fence.js";
 
 /** The slice of Playwright's Route (and of the response its `fetch` returns) that the handler touches. */
 export interface RouteLike<R = unknown> {
@@ -42,14 +43,23 @@ export interface RouteLike<R = unknown> {
 export function bypassRouteHandler<R>(origin: string, secret: string | undefined): (route: RouteLike<R>) => Promise<void> {
   return async (route) => {
     const req = route.request();
-    const extra = bypassHeadersFor(req.url(), origin, secret);
+    const extra = bypassFetchHeaders(req.url(), origin, secret);
     if (BYPASS_HEADER in extra) {
-      const response = await route.fetch({ headers: { ...req.headers(), ...extra, [SET_COOKIE_HEADER]: "true" }, maxRedirects: 0 });
+      const response = await route.fetch({ headers: { ...req.headers(), ...extra }, maxRedirects: 0 });
       await route.fulfill({ response });
     } else {
       await route.continue();
     }
   };
+}
+
+/**
+ * What a route handler adds when it fetches `url` itself: the bypass header (exact-origin rule) and the ask for a
+ * bypass cookie, or nothing. The staging fence fetches non-reads itself, so it uses this too.
+ */
+export function bypassFetchHeaders(url: string, origin: string, secret: string | undefined): Record<string, string> {
+  const extra = bypassHeadersFor(url, origin, secret);
+  return BYPASS_HEADER in extra ? { ...extra, [SET_COOKIE_HEADER]: "true" } : {};
 }
 
 /** The secret is sent only to a deployment that declares protection; an unprotected target never sees it. */
@@ -59,9 +69,15 @@ function secretFor(target: Target): string | undefined {
 
 interface Fixtures {
   target: Target;
+  fence: undefined;
   api: ApiClient;
   anon: ApiClient;
   bypass: undefined;
+  /**
+   * The refusal probes the pack declares, set per spec file with `test.use({ packProbes: { list } })`. Wrapped in an
+   * object because Playwright reads a bare array of objects as a `[value, options]` pair.
+   */
+  packProbes: { list: ProbeSend[] };
 }
 
 export const test = base.extend<Fixtures>({
@@ -71,15 +87,29 @@ export const test = base.extend<Fixtures>({
     if (name === undefined || name === "") throw new Error(`${TARGET_ENV_NAME} is not set`);
     await use(loadTarget(join(packageRoot(), "targets"), name, process.env));
   },
-  api: async ({ target }, use) => {
-    await use(createClient({ origin: target.origin, bypassSecret: secretFor(target) }));
+  packProbes: [{ list: [] }, { option: true }],
+  api: async ({ target, packProbes }, use) => {
+    const fence = fenceConfigFor(target, join(packageRoot(), "targets"), process.env);
+    await use(createClient({ origin: target.origin, bypassSecret: secretFor(target), fence, probes: packProbes.list }));
   },
   anon: async ({ target }, use) => {
-    await use(createClient({ origin: target.origin }));
+    const fence = fenceConfigFor(target, join(packageRoot(), "targets"), process.env);
+    await use(createClient({ origin: target.origin, fence }));
   },
   bypass: [
     async ({ context, target }, use) => {
       await context.route("**/*", bypassRouteHandler(target.origin, secretFor(target)));
+      await use(undefined);
+    },
+    { auto: true },
+  ],
+  fence: [
+    // Depends on `bypass` so it is registered after it: the fence then runs first and falls back to the bypass handler.
+    async ({ context, target, bypass }, use) => {
+      void bypass;
+      await installBrowserFence(context, fenceConfigFor(target, join(packageRoot(), "targets"), process.env), {
+        extraHeaders: (url) => bypassFetchHeaders(url, target.origin, secretFor(target)),
+      });
       await use(undefined);
     },
     { auto: true },
