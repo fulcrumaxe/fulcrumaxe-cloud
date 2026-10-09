@@ -1,11 +1,11 @@
-import type { AdvanceFacade, AdvanceRunStart } from "@fx/worker";
+import type { AdvanceFacade, AdvancePrSource, AdvanceRunStart } from "@fx/worker";
 import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } from "@fx/github";
 import { toCode } from "@fx/core/src/work-items/driverEvents.js";
 import {
   ReviewPromptInputError,
   buildFixPrompt,
   buildReviewPrompt,
-  findOpenPullRequest,
+  findPullRequestForItem,
   listChangedFiles,
   readVerdict,
   reviewPlanFor,
@@ -44,7 +44,7 @@ export type ReviewWorker = Pick<
 /** Opens the GitHub client for one repository (apps/web/lib/github/installationHttp.ts in production). */
 export type OpenHttp = (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>;
 
-export interface ReviewCtx {
+export interface ReviewCtx extends AdvancePrSource {
   repoId: string;
   owner: string;
   name: string;
@@ -65,7 +65,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: c.debaterEnabled };
+  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr };
 }
 
 export interface PrFound {
@@ -73,22 +73,27 @@ export interface PrFound {
   number: number;
   headSha: string;
   baseRef: string;
+  /** The pull request's head branch: the run's recorded branch for a runner run, `fx/issue-<n>` for a sandbox build. */
+  branch: string;
   /** The diff check's codes for this pull request (empty: it touches none of the security surfaces). */
   securityCodes: string[];
 }
 export type PrLookup = PrFound | { ok: false; reason: string };
 
-/** The executor's open pull request (`fx/issue-<n>`), its head commit, and the security surfaces its diff touches. */
-export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue">): Promise<PrLookup> {
+/**
+ * The executor's open pull request, its head commit, and the security surfaces its diff touches. A sandbox build's is found by
+ * `fx/issue-<n>`; a runner run's by the number and branch its `done` recorded, and none recorded is `no_open_pr` (D#6 C25 section 1.2).
+ */
+export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<PrLookup> {
   if (!open) return { ok: false, reason: "github_unavailable" };
   try {
     const http = await open("read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
-    const found = await findOpenPullRequest(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue });
+    const found = await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: ctx.executionMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
     const files = await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: found.pr.number });
     if (!files.ok) return { ok: false, reason: files.reason };
     const codes = securityTriggers({ files: files.files, truncated: files.truncated });
-    return { ok: true, number: found.pr.number, headSha: found.pr.headSha, baseRef: found.pr.baseRef, securityCodes: codes };
+    return { ok: true, number: found.pr.number, headSha: found.pr.headSha, baseRef: found.pr.baseRef, branch: found.pr.branch, securityCodes: codes };
   } catch {
     // fx-swallow-ok: a fixed code is returned and the driver stops with it; the error text can name a repository
     console.warn(JSON.stringify({ event: "advance.pr_lookup_failed", repo_id: ctx.repoId }));
@@ -135,7 +140,7 @@ export async function startReviewerBody(
   worker: ReviewWorker | null,
   who: StepWho,
   ctx: ReviewCtx,
-  pr: Pick<PrFound, "number" | "headSha" | "baseRef">,
+  pr: Pick<PrFound, "number" | "headSha" | "baseRef" | "branch">,
   role: string,
   prior: ReadonlyArray<{ role: string; runId: string }>,
 ): Promise<StartedReviewer> {
@@ -160,6 +165,7 @@ export async function startReviewerBody(
       pr: pr.number,
       headSha: pr.headSha,
       baseRef: pr.baseRef,
+      branch: pr.branch,
       version: spec.version,
       spec: spec.body,
       ...(role === "debater" ? { prior: priorSummaries } : {}),
@@ -245,7 +251,7 @@ export async function startFixBody(
   worker: ReviewWorker | null,
   who: StepWho,
   ctx: ReviewCtx,
-  pr: Pick<PrFound, "number" | "headSha">,
+  pr: Pick<PrFound, "number" | "headSha" | "branch">,
   actionId: string,
   round: number,
   failing: ReadonlyArray<{ role: string; runId: string }>,
@@ -263,7 +269,7 @@ export async function startFixBody(
   }
   let prompt: string;
   try {
-    prompt = buildFixPrompt({ owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, version: spec.version, spec: spec.body, findings });
+    prompt = buildFixPrompt({ owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings });
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;

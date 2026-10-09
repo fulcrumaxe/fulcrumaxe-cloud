@@ -11,7 +11,7 @@ const WHO = { accountId: ACCOUNT, userId: USER, workItemId: ITEM, haltEpoch: 0 }
 
 function worker(over: Partial<AdvanceWorker> = {}) {
   const base = {
-    advanceLoadItem: vi.fn(async (): Promise<AdvanceItem | null> => ({ stage: "in_progress", provenance: "internal", repoId: "r", ghNumber: 7, ghOwner: "o", ghName: "n", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 2, executorRunId: null })),
+    advanceLoadItem: vi.fn(async (): Promise<AdvanceItem | null> => ({ stage: "in_progress", provenance: "internal", repoId: "r", ghNumber: 7, ghOwner: "o", ghName: "n", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 2, executorRunId: null, executionMode: "sandbox", recordedPr: null })),
     advanceStartRun: vi.fn(),
     advanceRunOutcome: vi.fn(async () => ({ status: "running", done: false, envelope: null as Record<string, unknown> | null })),
     advanceTriage: vi.fn(),

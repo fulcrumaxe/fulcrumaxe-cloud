@@ -439,6 +439,27 @@ export async function readRecordedRunnerBranch(client: PoolClient, p: { accountI
   return typeof branch === "string" && RUNNER_RUN_BRANCH.test(branch) ? branch : null;
 }
 
+/**
+ * The pull request the newest executor run of a work item recorded at `done`, with the run branch recorded next to it (C25 section 1.2):
+ * the way the pipeline finds a runner run's pull request, never from the issue's number. Only a run whose `done` verdict was `succeeded`
+ * counts: a pull request closed for `scope_violation` (or any other failed verdict) is never the review target, even if it is reopened.
+ * Null when no succeeded executor run of the item recorded both, or when what was recorded is not a positive pull request number and a run branch. `client` must be under the run's tenant.
+ */
+export async function readRecordedRunnerPullRequest(client: PoolClient, p: { accountId: string; workItemId: string }): Promise<{ number: number; branch: string } | null> {
+  const { rows } = await client.query<{ branch: string | null; pr: string | null }>(
+    `SELECT e.payload->>'branch' AS branch, e.payload->>'prNumber' AS pr
+       FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id
+      WHERE e.account_id = $1 AND r.work_item_id = $2 AND r.role = 'executor' AND e.kind = 'run.status_changed'
+        AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'to' = 'succeeded' AND e.payload->>'branch' IS NOT NULL AND e.payload->>'prNumber' IS NOT NULL
+      ORDER BY e.created_at DESC, e.seq DESC LIMIT 1`,
+    [p.accountId, p.workItemId],
+  );
+  const row = rows[0];
+  if (!row || typeof row.branch !== "string" || !RUNNER_RUN_BRANCH.test(row.branch) || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;
+  const number = Number(row.pr);
+  return Number.isSafeInteger(number) ? { number, branch: row.branch } : null;
+}
+
 export interface WriteRunStatusParams {
   accountId: string;
   runId: string;

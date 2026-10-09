@@ -21,27 +21,18 @@ export interface OpenPullRequest {
   number: number;
   headSha: string;
   baseRef: string;
+  /** The pull request's head branch: `fx/issue-<n>` for a sandbox build, the run's recorded branch for a runner run. */
+  branch: string;
 }
 
 export type FindPullRequestResult = { ok: true; pr: OpenPullRequest } | { ok: false; reason: "no_open_pr" | "ambiguous_pr" | "github_unavailable" | "malformed" | "bad_base_ref" };
 
 const repoPath = (owner: string, name: string): string => `/repos/${owner}/${name}`;
 
-/** The open pull request whose head is the executor's branch for `issue` (`fx/issue-<n>`), in this repository. */
-export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: string; name: string; issue: number }): Promise<FindPullRequestResult> {
-  const res = await http.request({
-    method: "GET",
-    path: `${repoPath(repo.owner, repo.name)}/pulls`,
-    query: { state: "open", head: `${repo.owner}:${branchFor(repo.issue)}`, per_page: 5 },
-  });
-  if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
-  if (!Array.isArray(res.body)) return { ok: false, reason: "malformed" };
-  const here = `${repo.owner}/${repo.name}`.toLowerCase();
-  // Only a branch of this repository: the head repository must be the base repository.
-  const mine = res.body.filter((p): p is Json => isObj(p) && isObj(p.head) && isObj(p.head.repo) && typeof p.head.repo.full_name === "string" && p.head.repo.full_name.toLowerCase() === here);
-  if (mine.length === 0) return { ok: false, reason: res.body.length === 0 ? "no_open_pr" : "malformed" };
-  if (mine.length > 1) return { ok: false, reason: "ambiguous_pr" };
-  const pr = mine[0]!;
+const isHeadOf = (p: unknown, here: string): p is Json => isObj(p) && isObj(p.head) && isObj(p.head.repo) && typeof p.head.repo.full_name === "string" && p.head.repo.full_name.toLowerCase() === here;
+
+/** Number, head commit and base branch of one pull request object, each checked; `branch` is the caller's, already established. */
+function readPull(pr: Json, branch: string): FindPullRequestResult {
   const head = pr.head as Json;
   const base = pr.base;
   if (typeof pr.number !== "number" || !Number.isSafeInteger(pr.number) || pr.number <= 0) return { ok: false, reason: "malformed" };
@@ -49,7 +40,58 @@ export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: strin
   if (!isObj(base) || typeof base.ref !== "string") return { ok: false, reason: "malformed" };
   // The base branch is printed into a reviewer's shell command, so it must be a plain ref.
   if (!isSafeRef(base.ref)) return { ok: false, reason: "bad_base_ref" };
-  return { ok: true, pr: { number: pr.number, headSha: head.sha, baseRef: base.ref } };
+  return { ok: true, pr: { number: pr.number, headSha: head.sha, baseRef: base.ref, branch } };
+}
+
+/** The open pull request whose head is the executor's branch for `issue` (`fx/issue-<n>`), in this repository. The sandbox build's lookup. */
+export async function findOpenPullRequest(http: GitHubHttp, repo: { owner: string; name: string; issue: number }): Promise<FindPullRequestResult> {
+  const branch = branchFor(repo.issue);
+  const res = await http.request({
+    method: "GET",
+    path: `${repoPath(repo.owner, repo.name)}/pulls`,
+    query: { state: "open", head: `${repo.owner}:${branch}`, per_page: 5 },
+  });
+  if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
+  if (!Array.isArray(res.body)) return { ok: false, reason: "malformed" };
+  const here = `${repo.owner}/${repo.name}`.toLowerCase();
+  // Only a branch of this repository: the head repository must be the base repository.
+  const mine = res.body.filter((p): p is Json => isHeadOf(p, here));
+  if (mine.length === 0) return { ok: false, reason: res.body.length === 0 ? "no_open_pr" : "malformed" };
+  if (mine.length > 1) return { ok: false, reason: "ambiguous_pr" };
+  return readPull(mine[0]!, branch);
+}
+
+/**
+ * D#6 C25 section 1.2: a runner run's pull request, found by the number and the branch its `done` recorded and never by the issue's
+ * number (a runner run pushes `fx/<run>-g<generation>`, so `fx/issue-<n>` names nothing). Open and of this repository, and its head
+ * branch must be the recorded one: a pull request whose head is some other branch is not the run's, and is `malformed`, not found.
+ */
+export async function findRecordedPullRequest(http: GitHubHttp, repo: { owner: string; name: string }, recorded: { number: number; branch: string }): Promise<FindPullRequestResult> {
+  const res = await http.request({ method: "GET", path: `${repoPath(repo.owner, repo.name)}/pulls/${recorded.number}` });
+  if (res.status === 404) return { ok: false, reason: "no_open_pr" };
+  if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
+  const p = res.body;
+  if (!isObj(p) || !isHeadOf(p, `${repo.owner}/${repo.name}`.toLowerCase())) return { ok: false, reason: "malformed" };
+  if (p.number !== recorded.number || (p.head as Json).ref !== recorded.branch) return { ok: false, reason: "malformed" };
+  if (p.state !== "open") return { ok: false, reason: "no_open_pr" };
+  return readPull(p, recorded.branch);
+}
+
+/** Where an item's pull request comes from: `repos.execution_mode` and, for a runner repo, what its run's `done` recorded. */
+export interface PullRequestSource {
+  executionMode: string;
+  recordedPr: { number: number; branch: string } | null;
+}
+
+/**
+ * The one switch: a `runner_local` repo's pull request is the one its run recorded, and none recorded is `no_open_pr`, never a lookup
+ * by the issue's branch. Every other repo is a sandbox build and keeps the lookup by `fx/issue-<n>`.
+ */
+export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: string; name: string; issue: number } & PullRequestSource): Promise<FindPullRequestResult> {
+  if (repo.executionMode === "runner_local") {
+    return repo.recordedPr === null ? { ok: false, reason: "no_open_pr" } : findRecordedPullRequest(http, repo, repo.recordedPr);
+  }
+  return findOpenPullRequest(http, repo);
 }
 
 const FILES_PER_PAGE = 100;

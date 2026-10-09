@@ -1,4 +1,4 @@
-import type { AdvanceFacade, AdvanceRunOutcome, AdvanceRunStart, AdvanceTriageResult } from "@fx/worker";
+import type { AdvanceFacade, AdvancePrSource, AdvanceRunOutcome, AdvanceRunStart, AdvanceTriageResult } from "@fx/worker";
 import type { IssueReader } from "@fx/github";
 import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
 import { buildClassifyRunPrompt, decideFromLabels } from "@fx/pipeline";
@@ -30,7 +30,7 @@ export type LoadedAdvance =
   /** An item at `spec_ready` with a published Spec: the build follows. No issue read (the Spec is in the database). `specVersion` is the Spec the person approved: the build is pinned to it. */
   | { ok: true; mode: "build"; number: number; specVersion: number | null }
   /** An item at `needs_human` that still has its Spec ("Build again"): a fresh build, after a look for a pull request that is still open for the issue's branch (the repository facts are for that lookup). */
-  | { ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string }
+  | ({ ok: true; mode: "rebuild"; number: number; specVersion: number | null; repoId: string; owner: string; name: string } & AdvancePrSource)
   /** A small, bug or doc item the pipeline triaged (no panel) that has no Spec yet: the project manager's short Spec, from the issue as it reads NOW (an edited issue is what a re-approval wants). */
   | { ok: true; mode: "light"; category: string; title: string; body: string }
   /** An item discussed by the pipeline that has no Spec yet (a panel or Spec step that failed): the panel and the Spec run again. */
@@ -76,7 +76,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
   // The build: the Spec is in the database, so no issue is read.
   if (verdict.action === "build") return { ok: true, mode: "build", number: item.ghNumber, specVersion: item.specVersion };
-  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: item.ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName };
+  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: item.ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
   if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId };

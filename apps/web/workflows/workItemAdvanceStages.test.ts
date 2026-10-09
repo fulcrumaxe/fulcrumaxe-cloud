@@ -23,7 +23,7 @@ const ITEM = "22222222-2222-4222-8222-222222222222";
 const REPO = "33333333-3333-4333-8333-333333333333";
 const ROOT = "66666666-6666-4666-8666-666666666666";
 const ARGS: AdvanceStartArgs = { accountId: ACCOUNT, userId: "55555555-5555-4555-8555-555555555555", workItemId: ITEM, actionId: "44444444-4444-4444-8444-444444444444", haltEpoch: 0 };
-const TRIAGED: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null };
+const TRIAGED: AdvanceItem = { stage: "triaged", provenance: "internal", repoId: REPO, ghNumber: 7, ghOwner: "acme", ghName: "widgets", hasDiscussion: false, kind: null, hasSpec: false, specVersion: null, executorRunId: null, executionMode: "sandbox", recordedPr: null };
 const AT_SPEC: AdvanceItem = { ...TRIAGED, stage: "spec_ready", hasDiscussion: true, kind: "feature", hasSpec: true, specVersion: 3 };
 /** What the build tests see once the pull request is open and the review starts: the review stops at once, so these tests stay about the build (the review has its own file). */
 const REVIEW_STOPS = { status: "failed", detail: "review_no_spec" };

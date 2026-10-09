@@ -42,6 +42,8 @@ export interface ReviewPromptInput {
   headSha: string;
   /** The pull request's base branch, from GitHub. */
   baseRef: string;
+  /** The pull request's head branch: the run's recorded branch for a runner run. Omitted, it is the sandbox build's `fx/issue-<n>`. */
+  branch?: string;
   /** The published Spec version and its body. */
   version: number;
   spec: string;
@@ -67,13 +69,14 @@ function checkReviewInput(i: ReviewPromptInput): void {
   if (!Number.isSafeInteger(i.pr) || i.pr <= 0) throw new ReviewPromptInputError("pr");
   if (!SHA_RE.test(i.headSha)) throw new ReviewPromptInputError("headSha");
   if (!isSafeRef(i.baseRef)) throw new ReviewPromptInputError("baseRef");
+  if (i.branch !== undefined && !isSafeRef(i.branch)) throw new ReviewPromptInputError("branch");
   if (!Number.isSafeInteger(i.version) || i.version <= 0) throw new ReviewPromptInputError("version");
 }
 
 export function buildReviewPrompt(input: ReviewPromptInput): string {
   checkReviewInput(input);
   const { role, owner, name, issue, pr, headSha, baseRef, version } = input;
-  const branch = branchFor(issue);
+  const branch = input.branch ?? branchFor(issue);
   const example =
     role === "code-reviewer"
       ? '{"verdict":"pass","findings":["<file:line - problem - suggested fix>"],"security_review_needed":false,"summary":"<plain-text account of what you checked, what you ran and what you found>"}'
@@ -119,6 +122,8 @@ export interface FixPromptInput {
   issue: number;
   pr: number;
   headSha: string;
+  /** The pull request's head branch: the run's recorded branch for a runner run. Omitted, it is the sandbox build's `fx/issue-<n>`. */
+  branch?: string;
   version: number;
   spec: string;
   findings: readonly FixFinding[];
@@ -139,7 +144,8 @@ export function buildFixPrompt(input: FixPromptInput): string {
   if (!Number.isSafeInteger(input.issue) || input.issue <= 0) throw new ReviewPromptInputError("issue");
   if (!Number.isSafeInteger(input.pr) || input.pr <= 0) throw new ReviewPromptInputError("pr");
   if (!SHA_RE.test(input.headSha)) throw new ReviewPromptInputError("headSha");
-  const branch = branchFor(input.issue);
+  if (input.branch !== undefined && !isSafeRef(input.branch)) throw new ReviewPromptInputError("branch");
+  const branch = input.branch ?? branchFor(input.issue);
   const lines = [
     `You are the executor. The reviewers asked for changes on pull request #${input.pr} (${input.owner}/${input.name}, issue #${input.issue}).`,
     "This continues your earlier session; the repository is checked out in your working directory. Do not clone it again. Bring your checkout to the branch first:",

@@ -5,7 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -146,8 +146,8 @@ export interface AdvanceModuleDeps {
 
 /** What the review stage needs from @fx/pipeline and the web app (this package can import neither). */
 export interface AdvanceReviewDeps {
-  /** The pipeline's `loadReviewContext`, flattened to plain data. */
-  load: (pool: Pool, accountId: string, workItemId: string) => Promise<AdvanceReviewLoad>;
+  /** The pipeline's `loadReviewContext`, flattened to plain data. The facade adds where the pull request comes from (`AdvancePrSource`). */
+  load: (pool: Pool, accountId: string, workItemId: string) => Promise<{ ok: true; ctx: Omit<AdvanceReviewContext, keyof AdvancePrSource> } | { ok: false; reason: string }>;
   /** The pipeline's `recordRound`: every verdict of a head recorded (passes first), and the decision. */
   recordRound: (pool: Pool, registry: ExecutionTargetRegistry, input: AdvanceRoundInput) => Promise<AdvanceRoundResult>;
   /** The pipeline's `resumeAgentRun`: an executor fix round continues the PR's persistent sandbox and session. */
@@ -157,7 +157,7 @@ export interface AdvanceReviewDeps {
 }
 
 /** The review context the workflow keeps: small facts only. The Spec's text is read inside the step that needs it. */
-export interface AdvanceReviewContext {
+export interface AdvanceReviewContext extends AdvancePrSource {
   workItemId: string;
   stage: string;
   repoId: string;
@@ -258,8 +258,17 @@ export interface AdvanceRunOutcome {
   failureReason?: string | null;
 }
 
+/**
+ * Where the item's pull request comes from (D#6 C25 section 1.2): the repository's execution mode and, for a `runner_local` repository,
+ * the pull request number and run branch its newest executor run recorded at `done` (null when none did). A sandbox repository has no record.
+ */
+export interface AdvancePrSource {
+  executionMode: string;
+  recordedPr: { number: number; branch: string } | null;
+}
+
 /** What the workflow reads about the item before it starts: plain data, or null when the item is gone. */
-export interface AdvanceItem {
+export interface AdvanceItem extends AdvancePrSource {
   stage: string;
   provenance: string;
   repoId: string | null;
@@ -421,8 +430,22 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
   }
 
+  /** The item's repository mode and, for a runner repository, the pull request its run recorded. Read in the item's tenant. */
+  async function pullRequestSource(accountId: string, workItemId: string): Promise<AdvancePrSource> {
+    return withTenant(runnerPool, accountId, async (client) => {
+      const r = await client.query<{ execution_mode: string | null }>("SELECT r.execution_mode FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2", [workItemId, accountId]);
+      const executionMode = r.rows[0]?.execution_mode ?? "sandbox";
+      return { executionMode, recordedPr: executionMode === "runner_local" ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
+    });
+  }
+
   async function advanceLoadItem(accountId: string, workItemId: string): Promise<AdvanceItem | null> {
     if (!UUID_RE.test(accountId) || !UUID_RE.test(workItemId)) return null;
+    const item = await loadItemRow(accountId, workItemId);
+    return item === null ? null : { ...item, ...(await pullRequestSource(accountId, workItemId)) };
+  }
+
+  async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
       const r = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, r.gh_owner, r.gh_name, d.kind,
@@ -710,7 +733,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!deps.review) return { ok: false, reason: "review_unavailable" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
-    return deps.review.load(runnerPool, who.accountId, who.workItemId);
+    const loaded = await deps.review.load(runnerPool, who.accountId, who.workItemId);
+    if (!loaded.ok) return loaded;
+    // Read here, not by the pipeline's loader: it is the worker that holds the run records this comes from.
+    return { ok: true, ctx: { ...loaded.ctx, ...(await pullRequestSource(who.accountId, who.workItemId)) } };
   }
 
   async function advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string } | null> {
