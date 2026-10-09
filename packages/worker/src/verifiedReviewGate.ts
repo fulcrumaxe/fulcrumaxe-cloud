@@ -16,12 +16,19 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
  *   wait          the quiet period has not ended; `waitMs` is how long until it may (at most the whole period).
  *   key_missing   it has ended, and the account has no usable model key (no connection, or one marked broken, and no operator route).
  *                 Nothing is dispatched and nothing is reserved.
+ *   round_cap     three other heads of this pull request were already reviewed here (the head under review is a fourth): no dispatch, a person merges.
+ *   compute_cap   this month's verified-review compute reached the cap: no dispatch, a person merges. Not an error.
  *   dispatch      start the reviewers on this head.
  */
 export const QUIET_PERIOD_MS = 10 * 60_000;
 const TERMINAL = ["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"];
 
-export type VerifiedReviewGate = { state: "not_verified"; executionMode: string } | { state: "wait"; waitMs: number } | { state: "key_missing" } | { state: "dispatch" };
+export type VerifiedReviewGate = { state: "not_verified"; executionMode: string } | { state: "wait"; waitMs: number } | { state: "key_missing" } | { state: "round_cap" } | { state: "compute_cap" } | { state: "dispatch" };
+
+/** D#6 R5b-2b-i (body R5b.5): at most this many distinct heads of one pull request get a sandbox review. Derived from the review runs, never stored. */
+export const MAX_REVIEWED_HEADS = 3;
+/** D#6 R5b-2b-i (body R5b.6): the monthly cap on verified-review compute, in dollars. A mirror of the constant in `verified_review_compute_capped` (0773), pinned by a test; the database's figure is the one that decides. */
+export const VERIFIED_REVIEW_COMPUTE_CAP_USD = 5;
 
 export interface VerifiedReviewGateInput {
   accountId: string;
@@ -67,6 +74,11 @@ export async function readVerifiedReviewGate(pool: Pool, input: VerifiedReviewGa
       const key = (await client.query<{ status: string }>("SELECT status FROM model_connections WHERE account_id = $1 ORDER BY CASE status WHEN 'ok' THEN 0 WHEN 'unvalidated' THEN 1 ELSE 2 END LIMIT 1", [accountId])).rows[0];
       if (key === undefined || key.status === "broken") return { state: "key_missing" } as const;
     }
+    // The caps (R5b-2b-i). Both fail closed: an unreadable answer is a cap, and a thrown error dispatches nothing.
+    const heads = (await client.query<{ head_sha: string }>("SELECT DISTINCT head_sha FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND head_sha IS NOT NULL AND execution_mode = 'runner_verified' AND runtime = 'production' AND role IN ('code-reviewer', 'security-reviewer', 'acceptance-tester', 'debater')", [accountId, workItemId])).rows.map((r) => r.head_sha);
+    if (!heads.includes(headSha) && heads.length >= MAX_REVIEWED_HEADS) return { state: "round_cap" } as const;
+    const capped = (await client.query<{ capped: boolean | null }>("SELECT verified_review_compute_capped($1) AS capped", [accountId])).rows[0]?.capped;
+    if (capped !== false) return { state: "compute_cap" } as const;
     return { state: "dispatch" } as const;
   });
 }

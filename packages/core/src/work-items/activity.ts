@@ -134,10 +134,18 @@ const CHECK_FAILED_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
   // Build again, at Needs a person: the same sentence family, shown on that stage instead (see below).
   rebuild_pr_open: 'A pull request is still open for this issue\'s branch, so the build was not started again. Close that pull request on GitHub, then press Build again.',
   rebuild_check_unavailable: 'Couldn\'t check for an open pull request just now, so the build was not started again. Try again in a moment.',
-  // A cloud-verified pull request's review (D#6 R5b-2a), shown while the item sits at a pull-request stage.
-  review_key_missing: 'A review is waiting for your model key to be connected.',
-  review_quiet_period_unsettled: 'Reviews are waiting for pushes to settle.',
 });
+
+/**
+ * The review stops of a cloud-verified pull request (D#6 R5b-2a, R5b-2b-i), shown while the item sits at a pull-request stage. Each carries the KEY of
+ * its sentence out of @fx/core (as the file-list notices do); the words are written once, in the runner protocol's copy, and the api route fills them in.
+ */
+export const REVIEW_STOP_COPY_KEY = Object.freeze({
+  review_key_missing: 'reviewKeyMissing',
+  review_quiet_period_unsettled: 'reviewQuietUnsettled',
+  review_round_cap: 'reviewRoundCap',
+  review_compute_cap: 'reviewComputeCap',
+} as const);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -402,7 +410,10 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         )
       ).rows[0];
       // At a pull-request stage only the review stops speak: a stale "Check the build" stop must not show there.
-      const sentence = stop?.code && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) && (item.stage === 'in_progress' || stop.code.startsWith('review_')) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
+      const isReviewStop = stop?.code != null && Object.hasOwn(REVIEW_STOP_COPY_KEY, stop.code);
+      const sentence = isReviewStop
+        ? REVIEW_STOP_COPY_KEY[stop!.code as keyof typeof REVIEW_STOP_COPY_KEY]
+        : stop?.code && item.stage === 'in_progress' && Object.hasOwn(CHECK_FAILED_SENTENCES, stop.code) ? CHECK_FAILED_SENTENCES[stop.code] : undefined;
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
     }
 

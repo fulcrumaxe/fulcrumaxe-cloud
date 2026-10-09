@@ -219,9 +219,13 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       await stop('check_build_unavailable', 'old');
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
       await stop('review_key_missing', 'k');
-      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: 'A review is waiting for your model key to be connected.' });
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: COPY.reviewKeyMissing });
       await stop('review_quiet_period_unsettled', 'q');
-      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: 'Reviews are waiting for pushes to settle.' });
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: COPY.reviewQuietUnsettled });
+      await stop('review_round_cap', 'r');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: COPY.reviewRoundCap });
+      await stop('review_compute_cap', 'c');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'check_failed', reason: COPY.reviewComputeCap });
       await admin.query(`UPDATE work_items SET stage = 'changes_requested' WHERE id = $1`, [itemId]);
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('check_failed');
     });

@@ -15,6 +15,11 @@ export const COPY = {
   cloudVerified:
     "The agent runs on your machine. Its pushes pass through our GitHub proxy in transit and are not stored, and each pull request is reviewed in our sandbox on the API key you connect. Reviewed pull requests can merge automatically.",
   keyRequired: "Cloud-verified review runs on an API key you connect. With a Claude subscription alone, this repo stays local-only.",
+  /** D#6 R5b-2a / R5b-2b-i: the gate line of a cloud-verified pull request whose review did not start. Exact text; the one place each is written. */
+  reviewKeyMissing: "A review is waiting for your model key to be connected.",
+  reviewQuietUnsettled: "Reviews are waiting for pushes to settle.",
+  reviewRoundCap: "This pull request has been reviewed on three versions, so no further automatic review will run. A person reviews and merges it.",
+  reviewComputeCap: "This month's allowance for cloud review compute is used up, so this pull request is not reviewed automatically. A person reviews and merges it. The allowance resets on the 1st, UTC.",
   usageLimits: "Work runs within your own Claude plan's usage limits. When you reach them, work pauses until they reset. fulcrumaxe cannot raise them.",
   runner: "Runs the Claude Code you have already signed in to.",
   waiting: "Waiting for a runner: none has been online for {repo} since {time}. Start `fx-runner run` on {machine}.",

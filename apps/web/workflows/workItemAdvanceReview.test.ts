@@ -294,6 +294,16 @@ describe("D#6 R5b-2a: a cloud-verified pull request is reviewed after its quiet 
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "review_key_missing", headSha: H1, prNumber: 41 }));
   });
 
+  it.each([["round_cap", "review_round_cap"], ["compute_cap", "review_compute_cap"]] as const)("%s: nothing is started, the gate outcome is ready_human_merges with %s, and the merge gate is never asked", async (state, code) => {
+    const t = setup(verified({ verifiedGate: () => ({ state }) }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "ready_human_merges", detail: code });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "merge_gate", code: "ready_human_merges", reasons: [code], headSha: H1, prNumber: 41 }));
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code, headSha: H1, prNumber: 41 }));
+  });
+
   it("a repository that left the mode during the wait is reviewed the way its new mode is: the context is loaded again and the runner's reviewers are started", async () => {
     const w = verified({
       verifiedGate: (call) => {

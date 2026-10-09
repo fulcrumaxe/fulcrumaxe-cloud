@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { COPY } from "@fulcrumaxe/runner-protocol";
-import { FILE_LIST_NOTICE_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
 
@@ -66,6 +66,9 @@ export const workItemActivityRoutes: RouteEntry[] = [
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };
+      // The review stops of a cloud-verified item do the same (D#6 R5b-2b-i).
+      const key = (Object.values(REVIEW_STOP_COPY_KEY) as string[]).find((k) => n !== null && n.kind === "check_failed" && n.reason === k);
+      if (n !== null && key !== undefined) return { ...activity, notice: { kind: n.kind, reason: COPY[key as (typeof REVIEW_STOP_COPY_KEY)[keyof typeof REVIEW_STOP_COPY_KEY]] } };
       return activity;
     },
   },
