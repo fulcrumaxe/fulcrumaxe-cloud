@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import {
   IdempotencyKeyTakenError,
+  acceptQueuedRunnerRun,
   buildExecutionRun,
   failClosedOnQueued,
   readExecutionMode,
@@ -24,6 +25,10 @@ import type { RunStarter } from "./preview.js";
  *    start is not run inside any transaction of ours.
  *  - A run that is running is handed to `follow` (apps/web starts the follower workflow there). The starter
  *    awaits only `follow`'s acceptance, never the run.
+ *  - A run the runner target queued (`pending`, no hook) is the caller's choice, named in `queued`. `"accept"` is for a
+ *    caller whose wait is a status poll that credits queued time (the work-item advance): the run stays pending for a
+ *    runner to claim, no follower starts, and the id is returned. `"refuse"` is for a caller that waits on the run's end
+ *    in a way a runner run cannot satisfy (the preview): the run is cancelled and the start throws.
  */
 
 /** What the follower needs to find one run's end. The token is the target-generated one and is passed on, never logged. */
@@ -40,11 +45,15 @@ export const WATCHDOG_MARGIN_MS = 5 * 60_000;
 /** Starts whatever follows a running run to its end. Resolves once that has been accepted. */
 export type RunFollower = (args: FollowArgs) => Promise<void>;
 
+/** What a starter does with a run the runner target queued. There is no default: each composition names it. */
+export type QueuedPolicy = "accept" | "refuse";
+
 export interface RunStarterDeps {
   /** The runner login's pool. */
   pool: Pool;
   registry: ExecutionTargetRegistry;
   follow: RunFollower;
+  queued: QueuedPolicy;
 }
 
 /** One structured line for the smoke to read in the runtime logs: a fixed event code and ids, nothing else. */
@@ -68,8 +77,10 @@ export function createRunStarter(deps: RunStarterDeps): RunStarter {
       }
       let started;
       try {
-        // A queued runner run has no hook for `follow` and a preview or stage run waits on its end: cancel it and fail.
-        started = await failClosedOnQueued(deps.pool, input.accountId, await startAgentRun(deps.pool, deps.registry, input));
+        // A queued runner run has no hook for `follow`. "accept" leaves it pending for a runner and starts no follower;
+        // "refuse" cancels it and fails, for a caller that waits on the run's end.
+        const result = await startAgentRun(deps.pool, deps.registry, input);
+        started = deps.queued === "accept" ? await acceptQueuedRunnerRun(deps.pool, input.accountId, result) : await failClosedOnQueued(deps.pool, input.accountId, result);
       } catch (err) {
         // A concurrent start with the same key won the claim: that run is the answer.
         const winner = err instanceof IdempotencyKeyTakenError && key !== undefined ? await claimed(input.accountId, key) : undefined;

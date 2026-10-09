@@ -5,7 +5,7 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
-import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, failClosedOnQueued, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, IdempotencyKeyTakenError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
@@ -852,9 +852,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     try {
       // The build ran in the sandbox this PR owns, in the checkout it made; a resume continues both: same sandbox, same
       // session, same working directory, no clone. `pr` is the ISSUE's number, as the build used it (it names the sandbox).
-      // A fix round the target queued for a runner has no hook and may sit pending for days: it is cancelled and the
-      // round is recorded as refused (resume_failed) below, never logged as resumed.
-      out = await failClosedOnQueued(
+      // A fix round the target queued for a runner has no hook and may sit pending for days. That is accepted: the fix wait is
+      // a status poll that credits queued time, and the runner's `done` judges the continuation on the same PR branch.
+      out = await acceptQueuedRunnerRun(
         runnerPool,
         who.accountId,
         await review.resume(runnerPool, deps.registry, {

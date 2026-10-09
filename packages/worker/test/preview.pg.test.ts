@@ -339,11 +339,31 @@ describe("onboarding preview performer [pg]", { timeout: 60_000 }, () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("D#6 C29: a preview for a runner_local repo is refused preview_runner_local before any run, reservation or cap read; the preview is voided and no row is added", async () => {
+    const { starter, calls } = recordingStarter();
+    const { a, t, previewId, actionId } = await requested();
+    await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [t.repoId]);
+    const rows = async () => ({
+      runs: Number((await admin.query("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1", [a.accountId])).rows[0].n),
+      previews: Number((await admin.query("SELECT count(*) AS n FROM onboarding_previews WHERE account_id = $1", [a.accountId])).rows[0].n),
+      reservations: Number((await admin.query("SELECT count(*) AS n FROM spend_reservations WHERE account_id = $1", [a.accountId])).rows[0].n),
+    });
+    const before = await rows();
+    expect(await ready(starter).performStartPreview(actionId)).toEqual({ result: "refused", errorCode: "preview_runner_local" });
+    expect(calls).toHaveLength(0);
+    expect(await rows()).toEqual(before);
+    expect(await previewRow(previewId)).toMatchObject({ state: "void", run_id: null, void_reason: "preview_runner_local" });
+    // The control: the same repo on the sandbox starts, so the refusal above is the mode and nothing else.
+    await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [t.repoId]);
+    const again = await requested();
+    expect(await ready(recordingStarter().starter).performStartPreview(again.actionId)).toMatchObject({ result: "done" });
+  });
+
   it("void_reason is written only from the closed list: the list is pinned, every seat refusal is recorded as itself, anything else as seat_refused", async () => {
     expect([...PREVIEW_VOID_REASONS].sort()).toEqual(
       [
         "account_not_found", "installation_not_writable", "limits_exceed_sandbox", "model_budget_unset", "no_card", "no_installation", "no_model", "no_repo",
-        "precheck_failed", "preview_capacity", "preview_unavailable", "seat_over_cap", "seat_refused", "spend_refused", "start_failed", "unknown_role",
+        "precheck_failed", "preview_capacity", "preview_runner_local", "preview_unavailable", "seat_over_cap", "seat_refused", "spend_refused", "start_failed", "unknown_role",
       ].sort(),
     );
     // Every reason the module can write is in the list: each literal handed to voidAndRefuse/voidPreview, plus the seat enum.
@@ -775,6 +795,7 @@ describe("onboarding preview performer [pg]", { timeout: 60_000 }, () => {
     const productionStarter = createRunStarter({
       pool: writerPool,
       registry,
+      queued: "refuse",
       follow: async ({ runId, accountId, hookToken }) => {
         void channel.waitPort
           .wait(hookToken)
@@ -834,7 +855,7 @@ describe("onboarding preview performer [pg]", { timeout: 60_000 }, () => {
     const follows: unknown[] = [];
     const harness = createSandboxTargetHarness(writerPool, []);
     const registry: ExecutionTargetRegistry = { sandbox: new SandboxTarget(harness.deps) };
-    const m = ready(createRunStarter({ pool: writerPool, registry, follow: async (args) => void follows.push(args) }));
+    const m = ready(createRunStarter({ pool: writerPool, registry, queued: "refuse", follow: async (args) => void follows.push(args) }));
     const { a, previewId, actionId } = await requested(m.previewReady);
     const first = await m.performStartPreview(actionId);
     expect(first).toMatchObject({ result: "done" });

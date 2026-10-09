@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { hasBlockingRetryChild } from "@fx/core/src/runActions/retryChild.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { IdempotencyKeyTakenError, WorkItemHaltedError, cancelRun, checkRetryAuthor, failClosedOnQueued, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { IdempotencyKeyTakenError, WorkItemHaltedError, cancelRun, acceptQueuedRunnerRun, checkRetryAuthor, startAgentRun, type AuthorCheckProvider, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 // A relative import: @fx/model-router is not a dependency of this package and this change may not touch the lockfile.
 import { escalate, type PreviousRun } from "../../model-router/src/escalate.js";
 import { PREVIEW_SEAT_REFUSALS, type PreviewSeatConfig } from "./preview.js";
@@ -215,8 +215,8 @@ export function createRetryModule(runnerPool: Pool, registry: ExecutionTargetReg
     };
     let started;
     try {
-      // A queued runner run is not a retry the caller can wait for here: it is cancelled and the retry fails (cleaned up below).
-      started = await failClosedOnQueued(runnerPool, accountId, await startAgentRun(runnerPool, registry, input));
+      // A retry on a runner repo is queued for a runner and nothing waits on it here: it is accepted and its id returned.
+      started = await acceptQueuedRunnerRun(runnerPool, accountId, await startAgentRun(runnerPool, registry, input));
     } catch (err) {
       if (err instanceof RetryBlockedError) return blockedOrOwn(accountId, userId, actionId);
       // The item was halted: the trigger refused the insert, so nothing exists. The person resumes with Approve or Build again.

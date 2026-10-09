@@ -20,8 +20,8 @@ import {
   type FailureReason,
 } from "../src/executionTarget.js";
 import { cancelRun } from "../src/cancelRun.js";
-import { QueuedRunNotSupportedError, failClosedOnQueued, startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
-import { pauseQueuedRuns, writeRunStatus } from "../src/runStatusWriter.js";
+import { QueuedRunNotSupportedError, acceptQueuedRunnerRun, failClosedOnQueued, startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
+import { insertAgentRun, pauseQueuedRuns, writeRunStatus } from "../src/runStatusWriter.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import { RunnerTarget, unwiredJobIssuer, unwiredRepoVisibility } from "../src/targets/runnerTarget.js";
 import { seedAccount, seedMember, seedRepo } from "./helpers/seed.js";
@@ -264,6 +264,61 @@ describe("runner runs through startAgentRun [pg]", () => {
       const { registry } = registryOf();
       const started = await startAgentRun(db.runWriterPool, registry, inputOf(w));
       expect(await failClosedOnQueued(db.runWriterPool, w.accountId, started)).toBe(started);
+    });
+  });
+
+  describe("callers whose wait is a status poll accept the queued run (D#6 C29)", () => {
+    const queuedLines = () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      return { info, lines: () => info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"run.queued"')) };
+    };
+
+    it("acceptQueuedRunnerRun returns the runner's queued result as it came: the run stays pending, and one run.queued line names the run and the account", async () => {
+      const w = await world();
+      const { registry } = registryOf();
+      const queued = await startAgentRun(db.runWriterPool, registry, inputOf(w));
+      const spy = queuedLines();
+      try {
+        expect(await acceptQueuedRunnerRun(db.runWriterPool, w.accountId, queued)).toBe(queued);
+        expect(spy.lines()).toEqual([JSON.stringify({ event: "run.queued", run_id: queued.id, account_id: w.accountId })]);
+      } finally {
+        spy.info.mockRestore();
+      }
+      expect((await rowOf(queued.id)).status).toBe("pending");
+      const { rows } = await db.admin.query(`SELECT 1 FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed'`, [queued.id]);
+      expect(rows).toHaveLength(0);
+    });
+
+    it("a pending result whose run is not a runner's (or that was not queued) is still cancelled, and nothing is logged", async () => {
+      const w = await world("sandbox");
+      const { registry } = registryOf();
+      const spy = queuedLines();
+      try {
+        // A sandbox run left pending, as a start that crashed between the insert and the dispatch would.
+        const { id } = await insertAgentRun(db.runWriterPool, { id: randomUUID(), accountId: w.accountId, role: "code-reviewer", runtime: "production", executionMode: "sandbox", dispatchRepoId: w.repoId });
+        await expect(acceptQueuedRunnerRun(db.runWriterPool, w.accountId, { id, status: "pending", queued: true } as const)).rejects.toThrow(QueuedRunNotSupportedError);
+        expect((await rowOf(id)).status).toBe("cancelled");
+        // A runner run handed over without the queued flag is not the runner target's answer either.
+        const runner = await world();
+        const queued = await startAgentRun(db.runWriterPool, registry, inputOf(runner));
+        await expect(acceptQueuedRunnerRun(db.runWriterPool, runner.accountId, { id: queued.id, status: "pending" })).rejects.toThrow(QueuedRunNotSupportedError);
+        expect((await rowOf(queued.id)).status).toBe("cancelled");
+        expect(spy.lines()).toEqual([]);
+      } finally {
+        spy.info.mockRestore();
+      }
+    });
+
+    it("a run whose runtime cannot be read fails closed, and every other result passes through untouched", async () => {
+      const w = await world();
+      const { registry } = registryOf();
+      const queued = await startAgentRun(db.runWriterPool, registry, inputOf(w));
+      const broken = { connect: async () => { throw new Error("password=hunter2"); } } as unknown as typeof db.runWriterPool;
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await expect(acceptQueuedRunnerRun(broken, w.accountId, queued)).rejects.toThrow(QueuedRunNotSupportedError);
+      const sandbox = await world("sandbox");
+      const started = await startAgentRun(db.runWriterPool, registry, inputOf(sandbox));
+      expect(await acceptQueuedRunnerRun(db.runWriterPool, sandbox.accountId, started)).toBe(started);
     });
   });
 

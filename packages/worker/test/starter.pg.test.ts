@@ -40,7 +40,7 @@ describe("createRunStarter [pg]", { timeout: 60_000 }, () => {
   function world(follow: (args: FollowArgs) => Promise<void>) {
     const harness = createSandboxTargetHarness(writerPool, []);
     const registry: ExecutionTargetRegistry = { sandbox: new SandboxTarget(harness.deps) };
-    return { harness, registry, starter: createRunStarter({ pool: writerPool, registry, follow }) };
+    return { harness, registry, starter: createRunStarter({ pool: writerPool, registry, follow, queued: "refuse" }) };
   }
 
   async function newInput(key: string, overCap = false): Promise<StartAgentRunInput> {
@@ -147,7 +147,7 @@ describe("createRunStarter [pg]", { timeout: 60_000 }, () => {
       sandbox: new SandboxTarget(harness.deps),
       runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: writerPool, issuer, visibility: createFakeVisibility(visibility) }),
     };
-    const starter = createRunStarter({ pool: writerPool, registry, follow });
+    const starter = createRunStarter({ pool: writerPool, registry, follow, queued: "refuse" });
     const input = await newInput(`run-action:${randomUUID()}`);
     await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [input.repoId]);
     return { harness, issuer, starter, input, follow };

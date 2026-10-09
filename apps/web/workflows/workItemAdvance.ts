@@ -511,6 +511,13 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     stage = await advanceStageStep(accountId, workItemId);
   }
   if (stage === "in_progress") {
+    // The webhook may never move the item: it reads "Closes #N" in the PR body, and a runner's pull request carries fixed text
+    // with no issue reference. Look for the pull request the way "Check the build" does before calling it missing.
+    const looked = await findBuiltPr(args, pinned);
+    if ("end" in looked) return looked.end;
+    stage = looked.stage;
+  }
+  if (stage === "in_progress") {
     // The run succeeded and opened no pull request (live: the Spec said the work was not buildable, and the executor
     // correctly made none). The item goes to Needs human; the executor's own summary, in the run, is the reason.
     const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "no_pull_request");
@@ -522,6 +529,28 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   // The pull request is open: the reviewers are next, in this same workflow.
   if (stage === "pr_opened" || stage === "changes_requested" || stage === "review_passed") return reviewPhase(args, pinned);
   return { status: "built", detail: stage ?? undefined };
+}
+
+/**
+ * The build's fallback when the webhook has not moved the item: the same lookup "Check the build" uses (the item's review
+ * context, then the open pull request by branch or by what a runner's `done` recorded). Found: the item moves to PR opened
+ * and the stage after is answered. None open: the stage stays In progress, so the caller reports `no_pull_request` as before.
+ * A lookup that decided nothing ends the driver with the same fixed codes "Check the build" records.
+ */
+async function findBuiltPr(args: AdvanceStartArgs, pinned: number | null): Promise<{ stage: string | null } | { end: Result }> {
+  const { accountId, userId, workItemId } = args;
+  const loaded = await advanceReviewLoadStep(accountId, userId, workItemId, args.haltEpoch, pinned);
+  if (!loaded.ok && isHaltReason(loaded.reason)) return { end: await haltedEnd(args, "build_pr_load") };
+  if (!loaded.ok) {
+    await stopped(args, "build_pr_load", CHECK_UNAVAILABLE);
+    return { end: { status: "failed", detail: `check_build_${loaded.reason}` } };
+  }
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+  const found = await advanceFindPrStep(ctx);
+  if (found.ok) return { stage: await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number) };
+  if (found.reason === "no_open_pr") return { stage: "in_progress" };
+  await stopped(args, "build_pr", found.reason === "ambiguous_pr" ? CHECK_AMBIGUOUS : CHECK_UNAVAILABLE);
+  return { end: { status: "no_pr", detail: found.reason } };
 }
 
 /**

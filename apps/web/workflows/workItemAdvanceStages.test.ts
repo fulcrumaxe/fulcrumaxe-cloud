@@ -16,6 +16,7 @@ vi.mock("workflow/api", () => ({ resumeHook: vi.fn(), start: vi.fn() }));
 
 import { setWorkerWiringForTests } from "../lib/worker";
 import { setIssueReaderForTests } from "../lib/github/issueRead";
+import { setInstallationHttpForTests } from "../lib/github/installationHttp";
 import { workItemAdvanceWorkflow } from "./workItemAdvance";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
@@ -72,7 +73,7 @@ function setup(o: SetupOptions = {}) {
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
-    advanceLoadReview: vi.fn(async () => ({ ok: false as const, reason: "no_spec" })),
+    advanceLoadReview: vi.fn(async (): Promise<{ ok: false; reason: string } | { ok: true; ctx: Record<string, unknown> }> => ({ ok: false, reason: "no_spec" })),
     advanceLightSpec: vi.fn(async (_who: unknown, _run: string, _action: string) => o.light ?? { status: "published", reason: null, version: 1 }),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });
@@ -90,6 +91,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   setWorkerWiringForTests();
   setIssueReaderForTests();
+  setInstallationHttpForTests();
 });
 const events = () => logs.map((l) => l.event);
 
@@ -231,7 +233,12 @@ describe("the build for an item at Spec ready", () => {
 
   it("a run that succeeded but opened no pull request is recorded after the grace period", async () => {
     const w = setup({ item: AT_SPEC, stages: ["in_progress"] });
+    // D#6 C29: after the grace period the build looks for the pull request itself; GitHub answers that none is open.
+    w.advanceLoadReview.mockResolvedValue({ ok: true, ctx: { workItemId: ITEM, stage: "in_progress", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } });
+    const asked: string[] = [];
+    setInstallationHttpForTests(async () => ({ request: async (req) => (asked.push(`${req.method} ${req.path}`), { status: 200, body: [] }) }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_no_pull_request" });
+    expect(asked).toEqual(["GET /repos/acme/widgets/pulls"]);
     expect(world.sleeps).toBe(9); // nine 20 second looks at the item: three minutes
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "no_pull_request");
     // The run SUCCEEDED (the Spec said not buildable and the executor correctly made no pull request): the reason is its summary, found through the run this fact names.

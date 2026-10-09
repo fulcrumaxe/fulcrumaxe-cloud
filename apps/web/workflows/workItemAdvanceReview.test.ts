@@ -835,3 +835,84 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     for (const req of t.started) expect(req.prompt).toContain("Its branch is fx/issue-7;");
   });
 });
+
+/**
+ * D#6 C29 section 3.1: the build waits for the webhook to move the item, and a runner's pull request body carries no issue
+ * reference, so the webhook never does. After the grace polls the build runs the same lookup "Check the build" uses.
+ */
+describe("the build finds the pull request itself when the webhook did not move the item (D#6 C29 section 3.1)", () => {
+  const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
+  const recorded = { number: 41, branch: RUN_BRANCH };
+  const SPEC_READY: AdvanceItem = { ...AT_PR, stage: "spec_ready", kind: "bug", executionMode: "runner_local", recordedPr: null };
+  const PR_GRACE_POLLS = 9;
+
+  /** The item reads Spec ready at the load and In progress ever after (the webhook never moved it); the executor run ended `succeeded`. */
+  function built(w: World, item: AdvanceItem = SPEC_READY) {
+    const t = setup(w, item);
+    let loads = 0;
+    t.worker.advanceLoadItem.mockImplementation(async () => (++loads === 1 ? item : { ...item, stage: "in_progress" }));
+    t.worker.advanceBuild.mockResolvedValue({ status: "started", runId: "run-b", branch: RUN_BRANCH });
+    const reviewers = t.worker.advanceRunOutcome.getMockImplementation()!;
+    t.worker.advanceRunOutcome.mockImplementation(async (account: string, runId: string) => (runId === "run-b" ? { status: "succeeded", done: true, envelope: { summary: "I opened the pull request." } } : reviewers(account, runId)));
+    return t;
+  }
+
+  it("a runner's pull request without 'Closes #N' is found through what its done recorded: the item moves to PR opened and the review follows", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out).toEqual({ status: "merged", detail: undefined });
+    // The webhook was given its whole grace period first.
+    expect(world.sleeps).toBeGreaterThanOrEqual(PR_GRACE_POLLS);
+    expect(t.worker.advancePrFound).toHaveBeenCalledWith(WHO, 41);
+    expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    // It was read by number, never searched for by the issue's branch.
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(true);
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls")).toBe(false);
+  });
+
+  it("none recorded and none open ends at Needs human as no_pull_request, as before", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded: null }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_no_pull_request" });
+    expect(t.worker.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "no_pull_request");
+    expect(t.worker.advancePrFound).not.toHaveBeenCalled();
+    expect(t.started).toEqual([]);
+  });
+
+  it("a recorded pull request that GitHub no longer has open is the same end", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded, noPr: true }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_no_pull_request" });
+    expect(t.worker.advancePrFound).not.toHaveBeenCalled();
+  });
+
+  it("a lookup that failed decides nothing: the existing 'could not check' stop, and the item is not sent to Needs human", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded, githubDown: true }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "no_pr", detail: "github_unavailable" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "check_build_unavailable" }));
+    expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(t.worker.advancePrFound).not.toHaveBeenCalled();
+  });
+
+  it("a review context that cannot be loaded stops the same way", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded, loadReview: { ok: false, reason: "spec_changed" } }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "check_build_spec_changed" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "check_build_unavailable" }));
+    expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+  });
+
+  it("every mode: a sandbox build whose webhook was lost is picked up by fx/issue-<n>", async () => {
+    const t = built(fresh(), { ...SPEC_READY, executionMode: "sandbox" });
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advancePrFound).toHaveBeenCalledWith(WHO, 41);
+    expect(t.requests.find((r) => r.path === "/repos/acme/widgets/pulls")!.query).toMatchObject({ head: "acme:fx/issue-7" });
+  });
+
+  it("when the webhook already moved the item, no lookup is made", async () => {
+    const t = built(fresh({ mode: "runner_local", recorded }));
+    let loads = 0;
+    t.worker.advanceLoadItem.mockImplementation(async () => (++loads === 1 ? SPEC_READY : { ...SPEC_READY, stage: "pr_opened" }));
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advancePrFound).not.toHaveBeenCalled();
+    expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+  });
+});

@@ -562,27 +562,46 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toEqual([expect.objectContaining({ run_id: won })]);
     });
 
-    it("D#6 R3a: a fix round the target queued for a runner is cancelled and recorded as a failure, never logged as resumed or reported as started", async () => {
-      const a = await seedAccount(admin, randomUUID());
-      const w = await item(a);
-      await buildRun(a, w);
-      const queued = vi.fn(async (_p: Pool, _r: ExecutionTargetRegistry, input: StartAgentRunInput) => {
+    /** A resume whose run the target queued: a runner's run, or (the backstop) a run of any other runtime that came back pending. */
+    const queuedResume = (runtime: "runner" | "production") =>
+      vi.fn(async (_p: Pool, _r: ExecutionTargetRegistry, input: StartAgentRunInput) => {
         const { id } = await insertAgentRun(writerPool, {
           id: randomUUID(), accountId: input.accountId, workItemId: input.workItemId, parentRunId: input.parentRunId, role: "executor",
-          runtime: "runner", executionMode: "runner_local", dispatchRepoId: input.repoId, idempotency: input.idempotency,
+          runtime, executionMode: runtime === "runner" ? "runner_local" : "sandbox", dispatchRepoId: input.repoId, idempotency: input.idempotency,
         });
         return { id, status: "pending", queued: true } as { id: string; status: string };
       });
+
+    it("D#6 C29: a fix round the runner target queued is accepted: the run stays pending, and the round is recorded as started and logged as resumed", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await buildRun(a, w);
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      try {
+        const out = await build({}, review({ resume: queuedResume("runner") })).module.advanceStartFix(who(a, w), fixRequest(a));
+        expect(out).toEqual({ ok: true, runId: expect.any(String) });
+        expect(info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("advance.resumed"))).toHaveLength(1);
+      } finally {
+        vi.restoreAllMocks();
+      }
+      expect((await admin.query("SELECT status FROM agent_runs WHERE account_id = $1 AND runtime = 'runner'", [a.accountId])).rows).toEqual([{ status: "pending" }]);
+      expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toHaveLength(1);
+    });
+
+    it("D#6 R3a: a queued fix round that is not a runner's is still cancelled and recorded as a failure, never logged as resumed or reported as started", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await buildRun(a, w);
       const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
       vi.spyOn(console, "warn").mockImplementation(() => undefined);
       try {
-        const out = await build({}, review({ resume: queued })).module.advanceStartFix(who(a, w), fixRequest(a));
+        const out = await build({}, review({ resume: queuedResume("production") })).module.advanceStartFix(who(a, w), fixRequest(a));
         expect(out).toEqual({ ok: false, reason: "resume_failed" });
         expect(info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("advance.resumed"))).toEqual([]);
       } finally {
         vi.restoreAllMocks();
       }
-      expect((await admin.query("SELECT status FROM agent_runs WHERE account_id = $1 AND runtime = 'runner'", [a.accountId])).rows).toEqual([{ status: "cancelled" }]);
+      expect((await admin.query("SELECT status FROM agent_runs WHERE account_id = $1 AND role = 'executor' AND status = 'cancelled'", [a.accountId])).rows).toEqual([{ status: "cancelled" }]);
       expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toEqual([]);
     });
 
