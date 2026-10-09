@@ -12,6 +12,7 @@
     "seed-dev": "tsx scripts/seed-dev.ts"
   },
   "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/billing": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",

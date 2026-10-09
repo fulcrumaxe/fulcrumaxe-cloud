@@ -71,6 +71,19 @@ async function allowed(client: PoolClient, ctx: OperatorMoveCtx, workItemId: str
   return facts;
 }
 
+/**
+ * Re-spec (D#6 R4d-5b, C34 section 2.3), the read-only half: asks the one table whether the caller may re-spec the item now, and throws the table's refusal
+ * if not. It writes nothing: the project manager's file-list run and the publish of the next Spec version belong to the stage driver, and that publish
+ * is the only write (and the only stage move) of a Re-spec, so the item is never left at Discussing with no panel running.
+ */
+export async function checkRespec(ctx: OperatorMoveCtx, workItemId: string): Promise<void> {
+  if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');
+  const { accountId, userId } = ctx.principal;
+  await withTenant(ctx.pool, accountId, userId, async (client) => {
+    await allowed(client, ctx, workItemId, 'respec');
+  });
+}
+
 /** Close: the item moves to `closed` and the audit row names who closed it and from which stage. */
 export async function closeWorkItem(ctx: OperatorMoveCtx, workItemId: string): Promise<{ workItemId: string; stage: 'closed' }> {
   if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');

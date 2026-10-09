@@ -91,6 +91,8 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
     provenance?: string;
     repo?: boolean;
     number?: boolean;
+    /** The Spec stores a readable file list (default: it does not, as every Spec written before D#6 R4d-5a). */
+    list?: boolean;
   }
   /** The pipeline's card for an issue: a work item with its discussion of `kind`, and (unless `spec` is false) one published Spec. */
   async function seed(accountId: string, over: Seed = {}): Promise<{ item: string; discussion: string | null }> {
@@ -114,7 +116,7 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
       await admin.query('UPDATE work_items SET discussion_id = $1 WHERE id = $2', [discussion, item]);
     }
     if (over.spec !== false) {
-      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')`, [accountId, item]);
+      await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system', $3::jsonb)`, [accountId, item, JSON.stringify(over.list === true ? { acceptance_files: ['src/**'] } : {})]);
     }
     return { item, discussion };
   }
@@ -139,6 +141,89 @@ describe('work item actions: back to discussion, treat as a feature, close', () 
     expect(await transitions(a)).toBe(0);
     expect(signal.sent).toEqual([]);
   }
+
+  describe('Re-spec (D#6 R4d-5b)', () => {
+    const path = (id: string) => `/work-items/${id}/respec`;
+
+    it.each([
+      ['owner', 'spec_ready'],
+      ['admin', 'needs_human'],
+    ] as const)('an %s re-specs an item at %s whose Spec has no list: 202, one respec_work_item request and its signal, and NOTHING else is written (no stage move, no audit, no Spec)', async (role, stage) => {
+      const p = await person(role);
+      const { item } = await seed(p.accountId, { stage });
+      const res = await post(p, path(item));
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as Accepted;
+      expect(body.state).toBe('accepted');
+      expect(await one('SELECT 1 AS x FROM run_action_requests WHERE id = $1 AND kind = $2 AND target_id = $3', [body.action_id, 'respec_work_item', item])).toBeTruthy();
+      expect(signal.sent).toEqual([{ actionId: body.action_id, accountId: p.accountId, kind: 'respec_work_item' }]);
+      expect(await stageOf(item)).toBe(stage);
+      expect(await audits(p.accountId)).toBe(0);
+      expect(await transitions(p.accountId)).toBe(0);
+      expect(Number((await one<{ n: string }>('SELECT count(*) AS n FROM spec_versions WHERE work_item_id = $1', [item]))!.n)).toBe(1);
+    });
+
+    it('a keyed repeat is the same action, and a second press while one is accepted is the same live request', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'spec_ready' });
+      const first = (await (await post(p, path(item), { headers: { 'idempotency-key': 'k1' } })).json()) as Accepted;
+      const again = (await (await post(p, path(item), { headers: { 'idempotency-key': 'k1' } })).json()) as Accepted;
+      expect(again.action_id).toBe(first.action_id);
+      expect(await requests(p.accountId)).toBe(1);
+    });
+
+    it('F11: an item whose newest Spec already has a readable list is 409 action_not_available and nothing is written', async () => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'spec_ready', list: true });
+      const res = await post(p, path(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('action_not_available');
+      await expectUntouched(p.accountId, item, 'spec_ready');
+    });
+
+    it.each(['triaged', 'discussing', 'in_progress', 'pr_opened', 'merged', 'closed'])('an item at %s is 409 action_not_available', async (stage) => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage });
+      const res = await post(p, path(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('action_not_available');
+      await expectUntouched(p.accountId, item, stage);
+    });
+
+    it('a member is 403 insufficient_role, a token is 403 session_required, an external item is 403 external_requires_human, no repository is 409 no_repo; nothing is written', async () => {
+      const m = await person('member');
+      const mine = await seed(m.accountId, { stage: 'spec_ready' });
+      const res = await post(m, path(mine.item));
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe('insufficient_role');
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'spec_ready' });
+      const viaToken = await post(await tokenFor(p, ['read', 'runs:cancel']), path(item));
+      expect(viaToken.status).toBe(403);
+      expect(await code(viaToken)).toBe('session_required');
+      expect(await code(await post(p, path((await seed(p.accountId, { stage: 'spec_ready', provenance: 'external' })).item)))).toBe('external_requires_human');
+      expect(await code(await post(p, path((await seed(p.accountId, { stage: 'spec_ready', repo: false })).item)))).toBe('no_repo');
+      expect(await requests(p.accountId)).toBe(0);
+      expect(await requests(m.accountId)).toBe(0);
+    });
+
+    it.each(['pending', 'running', 'paused'])('a %s run on the item is 409 already_running', async (status) => {
+      const p = await person('owner');
+      const { item } = await seed(p.accountId, { stage: 'needs_human' });
+      await seedRun(p.accountId, item, status);
+      const res = await post(p, path(item));
+      expect(res.status).toBe(409);
+      expect(await code(res)).toBe('already_running');
+      await expectUntouched(p.accountId, item, 'needs_human');
+    });
+
+    it("a malformed, an unknown and another account's id all get the same 404", async () => {
+      const a = await person('owner');
+      const b = await person('owner');
+      const foreign = (await seed(b.accountId, { stage: 'spec_ready' })).item;
+      for (const id of ['not-a-uuid', randomUUID(), foreign]) expect((await post(a, path(id))).status, id).toBe(404);
+    });
+  });
 
   describe('Back to discussion', () => {
     const path = (id: string) => `/work-items/${id}/back-to-discussion`;

@@ -1,4 +1,4 @@
-export const RUN_ACTION_KINDS = ['cancel_run', 'cancel_work_item', 'retry_run', 'continue_work_item', 'start_preview', 'advance_work_item'] as const;
+export const RUN_ACTION_KINDS = ['cancel_run', 'cancel_work_item', 'retry_run', 'continue_work_item', 'start_preview', 'advance_work_item', 'respec_work_item'] as const;
 export type RunActionKind = (typeof RUN_ACTION_KINDS)[number];
 
 export interface RunActionMessage {

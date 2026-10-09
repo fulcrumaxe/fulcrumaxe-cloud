@@ -7,6 +7,7 @@ import { BACK_TO_DISCUSSION_REF_PREFIX } from "@fx/core/src/work-items/operatorA
 import { pgHarness } from "./helpers/pgHarness.js";
 import { seedAccount, seedRepo } from "./build/helpers/seed.js";
 import { discussingItem, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
+import { publishRespec } from "../src/advance/respec.js";
 import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman, startBuildForItem } from "../src/advance/build.js";
 import { runPanelForItem, runSpecForItem, STEP_LIMIT_MS, SEAT_ROUND_TIMEOUT_MS, PM_TIMEOUT_MS, REPLAY_PANEL_TIMEOUT_MS } from "../src/advance/specFlow.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
@@ -455,6 +456,21 @@ describe("the build", () => {
       await setMode(t.workItemId, "sandbox");
       await h.admin.query("UPDATE spec_versions SET frontmatter = '{}'::jsonb WHERE work_item_id = $1", [t.workItemId]);
       expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
+    });
+
+    // D#6 R4d-5b (C34 section 2.3): the way out. The refused build, Re-spec, then Build again starts, pinned to the NEW version.
+    it.each(["spec_ready", "needs_human"])("a build refused for the missing list starts after a Re-spec (item at %s): the run pins version 2, which has the list", async (stage) => {
+      const t = await atSpecReady();
+      await setMode(t.workItemId, "runner_local");
+      await h.admin.query("UPDATE spec_versions SET frontmatter = '{}'::jsonb WHERE work_item_id = $1", [t.workItemId]);
+      if (stage === "needs_human") await h.admin.query("UPDATE work_items SET stage = 'needs_human' WHERE id = $1", [t.workItemId]);
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toEqual({ status: "refused", reason: "spec_has_no_file_list" });
+      expect(await publishRespec(h.runWriterPool, t.accountId, t.workItemId, { acceptance_files: ["src/a.ts"] }, 1)).toEqual({ status: "published", version: 2 });
+      expect(await stageOf(t.workItemId)).toBe("spec_ready");
+      const started = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+      expect(started).toMatchObject({ status: "started" });
+      const v2 = (await h.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 AND version = 2", [t.workItemId])).rows[0]!.id;
+      expect(t.world.requests.at(-1)).toMatchObject({ specVersionId: v2 });
     });
 
     it("starts on a runner_local repo whose Spec has a list, and pins the version it read on the run", async () => {

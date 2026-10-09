@@ -190,6 +190,8 @@ export function noticeBanner(data) {
   if (n.kind === "not_feasible") return { kind: "not_feasible", title: "Stopped before building. ", lead: "The project manager says this can't be built as written: ", tail: " Edit the issue on GitHub and approve again, or close it.", reason: n.reason };
   if (n.kind === "check_failed") return { kind: "check_failed", title: "Couldn't check the build. ", lead: "", tail: "", reason: n.reason };
   if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
+  // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
+  if (n.kind === "no_file_list" || n.kind === "respec_failed") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
   return null;
 }
 
@@ -300,7 +302,7 @@ export function createInsightPanel(deps) {
     const needsHuman = n.kind === "needs_human";
     return h(
       "div",
-      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
+      { class: "pl-ins-notice", "data-testid": needsHuman ? "pl-needs-human" : n.kind === "check_failed" ? "pl-check-failed" : n.kind === "no_file_list" ? "pl-no-file-list" : n.kind === "respec_failed" ? "pl-respec-failed" : "pl-not-feasible", "data-kind": n.kind, role: "status" },
       h("strong", null, n.title),
       n.lead,
       needsHuman ? text(n.reason) : h("span", { "data-testid": "pl-notice-reason" }, n.reason),

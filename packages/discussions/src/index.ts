@@ -56,11 +56,12 @@ export type {
   SpecVersion,
   SpecCorrection,
   PublishSpecInput,
+  RespecSpecInput,
   AddCorrectionInput,
   RunIdInput,
   SpecAsOfResult,
 } from "./specs.js";
-export { publishSpec, addCorrection, specAsOf, correctionsSince } from "./specs.js";
+export { publishSpec, respecSpec, addCorrection, specAsOf, correctionsSince } from "./specs.js";
 
 export type { SetStageInput } from "./stages.js";
 export { setStage, isHumanOnlyTransition } from "./stages.js";

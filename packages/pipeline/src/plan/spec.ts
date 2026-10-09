@@ -291,6 +291,23 @@ function allowedFilesSection(files: readonly string[]): string[] {
   return ["", "### Files this Spec allows", "", "The platform checks every pull request against this list and refuses one that changes any other file.", "", "```text", ...files, "```"];
 }
 
+/**
+ * The pipeline's own "Files this Spec allows" section at the END of a body, as `allowedFilesSection` writes it (entries cannot hold a backtick, so the match cannot
+ * run into the model's fenced text, whose closing fence comes before it). A Spec quoted inside a fence that merely contains the heading does not end in this shape.
+ */
+const TRAILING_FILES_SECTION = /\n### Files this Spec allows\n\nThe platform checks every pull request against this list and refuses one that changes any other file\.\n\n```text\n[^`]*\n```\n$/;
+
+/**
+ * D#6 R4d-5b (C34 section 2.3): `body` with its trailing "Files this Spec allows" section (if it has one) replaced by one for `files`, and every byte before it
+ * unchanged, so the Spec text a person already read stays the same and a list is never duplicated. The result is what `assembleSpecBodyChecked` writes for a Spec
+ * that had the same list from the start. The caller checks the size against the store's limit.
+ */
+export function withAllowedFilesSection(body: string, files: readonly string[]): string {
+  const stripped = body.replace(TRAILING_FILES_SECTION, "");
+  const base = stripped.endsWith("\n") ? stripped : `${stripped}\n`;
+  return `${base}${allowedFilesSection(files).join("\n")}\n`;
+}
+
 function quoted(label: string, nonce: string, text: string): string[] {
   return ["", label, "", `${FENCE}untrusted-${nonce}`, text, FENCE];
 }

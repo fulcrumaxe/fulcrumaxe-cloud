@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { COPY } from "@fulcrumaxe/runner-protocol";
+import { FILE_LIST_NOTICE_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
 
@@ -41,7 +42,7 @@ export const activityResponseSchema = z.object({
       finished_at: z.string().nullable(),
     }),
   ),
-  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed"]), reason: z.string() }).nullable(),
+  notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed"]), reason: z.string() }).nullable(),
   actions: z.array(z.enum(OPERATOR_ACTIONS)),
   close_on_github: z.boolean(),
 });
@@ -53,7 +54,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
     operationId: "getWorkItemActivity",
     summary: "What the pipeline is doing for one work item",
     description:
-      "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
+      "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -61,7 +62,11 @@ export const workItemActivityRoutes: RouteEntry[] = [
     paramsSchema: z.object({ id: z.string() }),
     responseSchema: activityResponseSchema,
     async handler(ctx, input) {
-      return getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const activity = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
+      const n = activity.notice;
+      if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };
+      return activity;
     },
   },
 ];

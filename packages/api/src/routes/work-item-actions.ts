@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
-import { OperatorMovedOnError, OperatorRefusedError, closeWorkItem, reopenWorkItem, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { OperatorMovedOnError, OperatorRefusedError, checkRespec, closeWorkItem, reopenWorkItem, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
 import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { ActionNotAvailableError, AlreadyRunningError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
@@ -55,8 +55,12 @@ async function guarded<T>(write: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Back to discussion and Treat as a feature: the write, then the stage driver's run action. */
-async function driven(ctx: RouteContext, id: string, write: (move: Parameters<typeof closeWorkItem>[0], id: string) => Promise<unknown>) {
+/**
+ * Back to discussion and Treat as a feature: the write, then the stage driver's run action. Re-spec (D#6 R4d-5b) is the same shape with a read-only "write" (the
+ * table's check) and a run action of its own kind, `respec_work_item`: its only write is the publish of the next Spec version, made by the driver once the
+ * project manager's list is read.
+ */
+async function driven(ctx: RouteContext, id: string, write: (move: Parameters<typeof closeWorkItem>[0], id: string) => Promise<unknown>, kind: "advance_work_item" | "respec_work_item" = "advance_work_item") {
   if (!UUID_RE.test(id)) throw notFound();
   const signal = runActionDeps.getRunActionSignal();
   if (!signal) throw new RunActionsUnavailableError();
@@ -64,10 +68,10 @@ async function driven(ctx: RouteContext, id: string, write: (move: Parameters<ty
 
   await guarded(() => write({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: key ?? null }, id));
 
-  const requestHash = createHash("sha256").update(`advance_work_item:${id.toLowerCase()}`).digest("hex");
+  const requestHash = createHash("sha256").update(`${kind}:${id.toLowerCase()}`).digest("hex");
   const result = await requestRunAction(
     { pool: ctx.pool, principal: ctx.principal },
-    { kind: "advance_work_item", targetId: id, idempotencyKey: key, requestHash },
+    { kind, targetId: id, idempotencyKey: key, requestHash },
     { signal },
   ).catch(mapDbError);
   if (result.replayed) ctx.markReplayed?.();
@@ -103,6 +107,23 @@ const SHARED_ERRORS =
   "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).";
 
 export const workItemActionRoutes: RouteEntry[] = [
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/respec",
+    operationId: "respecWorkItem",
+    summary: "Add the file list to a work item's Spec",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a Spec that has no file list the platform can read (every Spec written before the list existed, or one whose list is unreadable): asks the pipeline to have the project manager read the repository and list the files the Spec's change may touch, and then publishes the next Spec version, with the same text and the list added. Answers 202 `{ action_id, state }`; the outcome arrives through `GET /api/v1/run-actions/{id}`. " +
+      "Allowed only for an internal work item with a repository and a GitHub issue behind it, at `spec_ready` or `needs_human`, whose newest Spec has no readable file list, with no live run (pending, running or paused). Nothing is changed unless the project manager's list is read: an unreadable list publishes nothing and the item stays where it was. A Re-spec from `needs_human` leaves the item at `spec_ready`; then Build again. The route writes nothing itself.",
+    responseSchema: acceptedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (not at `spec_ready` or `needs_human`, no Spec, a kind that is not built, no GitHub issue, or the newest Spec already has a readable file list), `no_repo` (no repository) or `already_running` (agents are already working on it).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => driven(ctx, input.params.id!, checkRespec, "respec_work_item"),
+  },
   {
     ...common,
     path: "/api/v1/work-items/{id}/back-to-discussion",

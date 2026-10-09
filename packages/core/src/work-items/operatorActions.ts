@@ -1,5 +1,5 @@
 /**
- * The ways a person gets a stuck work item moving, or ends it: Build again, Back to discussion, Treat as a feature,
+ * The ways a person gets a stuck work item moving, or ends it: Build again, Re-spec, Back to discussion, Treat as a feature,
  * Close and Reopen. ONE table for all of them, asked by the routes (@fx/api), by the activity read the Pipeline app draws its
  * buttons from, and by the tests. The Pipeline app keeps no rule of its own: it shows a button only when the server's
  * activity read lists the action.
@@ -13,6 +13,7 @@
  * Pure: facts in, a verdict out.
  */
 import type { PoolClient } from 'pg';
+import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './advance.js';
 import { isLegalStageTransition } from './stages.js';
 
@@ -23,7 +24,7 @@ import { isLegalStageTransition } from './stages.js';
  */
 export const BACK_TO_DISCUSSION_REF_PREFIX = 'back_to_discussion:';
 
-export const OPERATOR_ACTIONS = ['build_again', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen'] as const;
+export const OPERATOR_ACTIONS = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen'] as const;
 export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /**
@@ -54,6 +55,11 @@ export interface OperatorFacts extends AdvanceFacts {
   live_run: boolean;
   /** The caller's role in the account. */
   role: string;
+  /**
+   * D#6 R4d-5b (C34 section 2.3): the newest unerased Spec version stores a file list the done check can read (the same parser). Re-spec is offered only
+   * while this is false. False too when the item has no Spec (the table then refuses for that reason first).
+   */
+  spec_file_list_known: boolean;
 }
 
 export type OperatorRefusal = 'role' | 'external' | 'no_repo' | 'no_issue' | 'live' | 'stage' | 'state';
@@ -62,7 +68,7 @@ export type OperatorVerdict = { ok: true } | { ok: false; reason: OperatorRefusa
 const no = (reason: OperatorRefusal, message: string): OperatorVerdict => ({ ok: false, reason, message });
 
 /** The actions the stage driver carries out (they need the repository and the issue behind the item). */
-const DRIVEN: readonly OperatorAction[] = ['build_again', 'back_to_discussion', 'treat_as_feature'];
+const DRIVEN: readonly OperatorAction[] = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature'];
 
 /** Whether the caller may do `action` to the item now; or why not. The first refusal in this order wins: who, what, where, busy, stage. */
 export function operatorVerdict(action: OperatorAction, f: OperatorFacts): OperatorVerdict {
@@ -80,6 +86,15 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
       const v = advanceActionFor(stageFacts);
       if (!v.ok) return no(v.reason, v.message);
       return v.action === 'rebuild' ? { ok: true } : no('stage', `work item is ${f.stage}`);
+    }
+    case 'respec': {
+      // D#6 R4d-5b (C34 section 2.3): at Spec ready or Needs a person (the two stages a build can start from), when the latest Spec has no readable file list.
+      // The stage and the buildable-kind rules are the build's own, asked of the one table, so the two cannot disagree about where a Spec is built.
+      const v = advanceActionFor(stageFacts);
+      if (!v.ok) return no(v.reason, v.message);
+      if (v.action !== 'build' && v.action !== 'rebuild') return no('stage', `work item is ${f.stage}`);
+      if (f.spec_file_list_known) return no('state', 'the latest Spec already has a file list');
+      return { ok: true };
     }
     case 'back_to_discussion':
       if (f.stage !== 'needs_human' || !isLegalStageTransition(f.stage, 'discussing')) return no('stage', `work item is ${f.stage}`);
@@ -117,14 +132,17 @@ export function closeOnGithub(f: Pick<OperatorFacts, 'stage' | 'provenance' | 'r
  * second sees the first's stage. Null when the item does not exist for this account.
  */
 export async function readOperatorFacts(client: PoolClient, workItemId: string, role: string, lock = false): Promise<OperatorFacts | null> {
-  const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; live_run: boolean }>(
+  const { rows } = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; kind: string | null; has_spec: boolean; acceptance_files: unknown; live_run: boolean }>(
     `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, d.kind,
             EXISTS (SELECT 1 FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
+            (SELECT s.frontmatter -> 'acceptance_files' FROM spec_versions s WHERE s.work_item_id = w.id AND s.erased_at IS NULL ORDER BY s.version DESC LIMIT 1) AS acceptance_files,
             EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = w.id AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled')) AS live_run
        FROM work_items w LEFT JOIN discussions d ON d.id = w.discussion_id
       WHERE w.id = $1::uuid${lock ? ' FOR UPDATE OF w' : ''}`,
     [workItemId],
   );
   const r = rows[0];
-  return r ? { ...r, role } : null;
+  if (!r) return null;
+  const { acceptance_files: acceptanceFiles, ...rest } = r;
+  return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known' };
 }

@@ -219,6 +219,9 @@ importers:
 
   packages/api:
     dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
       '@fx/billing':
         specifier: workspace:*
         version: link:../billing

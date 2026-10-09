@@ -127,7 +127,7 @@ export interface CreateWorkerOptions {
   /** pipeline's buildPreviewPrompt (this package cannot import @fx/pipeline). Absent, no preview can start: `previewReady()` stays false. */
   previewPrompt?: (repo: { owner: string; name: string }) => string;
   /** D#483 P1: the stage driver's injected pieces (apps/web owns the workflow and the pipeline). Absent, `advance_work_item` is refused `advance_unavailable`. */
-  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "review" | "lightSpec">;
+  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "review" | "lightSpec" | "respec">;
 }
 
 /**
@@ -292,7 +292,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const advanceStarter = options.ports.follow ? createRunStarter({ pool: pools.runnerPool, registry, follow: options.ports.follow, queued: "accept" }) : null;
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter: previewStarter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
-    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, registry });
+    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, respec: options.advance?.respec ?? null, registry });
     // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.
     const followUp = createFollowUpPorts({ pool: pools.runnerPool, registry, buildFailed: (accountId, workItemId, runId, code) => advance.advanceBuildFailed(accountId, workItemId, runId, code) });
     const runnerClaims = createRunnerClaimFacade(pools.runnerPool, { visibility: repoVisibility, followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.follow_up_failed", run_id: runId })) });
@@ -345,7 +345,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, sweepRunnerLeases, sweepRunnerQueue, sweepRunnerNotices, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceStartFix, advanceMergeGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -375,6 +375,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         previewReady,
         performRetryRun,
         performAdvanceWorkItem,
+        performRespecWorkItem,
         advanceLoadItem,
         advanceStartRun,
         advanceRunOutcome,
@@ -385,6 +386,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         advanceBuildFailed,
         advancePrFound,
         advanceLightSpec,
+        advanceRespec,
         advanceLoadReview,
         advanceLoadSpecText,
         advanceRecordRound,
