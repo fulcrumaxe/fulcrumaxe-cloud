@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("cleanEnv allowlist", () => {
   it("is a constant list, deep-equal to the documented one", () => {
     expect([...HOST_ENV_ALLOWLIST]).toEqual(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ"]);
-    expect(FIXED_ENV).toEqual({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" });
+    expect(FIXED_ENV).toEqual({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1" });
     expect(Object.isFrozen(HOST_ENV_ALLOWLIST)).toBe(true);
   });
 
@@ -241,6 +241,19 @@ describe("tool subprocesses do not inherit the credential", () => {
   it("a shell value for the switch cannot turn it off", () => {
     vi.stubEnv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "0");
     expect(cleanEnv({ mode: "subscription" }).CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe("1");
+  });
+});
+
+describe("the runner-job marker (D#6 R7e B4)", () => {
+  it("is set in both modes, with and without job variables, and a host value cannot change it", () => {
+    vi.stubEnv("FX_RUNNER_JOB", "0");
+    expect(cleanEnv({ mode: "subscription" }).FX_RUNNER_JOB).toBe("1");
+    expect(cleanEnv({ mode: "api_key", apiKey: "config-api-key-value" }).FX_RUNNER_JOB).toBe("1");
+    expect(cleanEnv({ mode: "subscription" }, { jobEnv: { XDG_CACHE_HOME: "/t/x" } }).FX_RUNNER_JOB).toBe("1");
+  });
+
+  it("a job cannot set it through its own variables", () => {
+    expect(() => cleanEnv({ mode: "subscription" }, { jobEnv: { FX_RUNNER_JOB: "0" } })).toThrow(/not an allowed/);
   });
 });
 

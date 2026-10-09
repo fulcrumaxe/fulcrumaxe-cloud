@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bwrapArgs } from "../src/sandbox/probe.js";
 import { grantsOf } from "../src/sandbox/allowances.js";
 import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
+import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
 /**
  * D#6 R7b, with real bubblewrap. The rules come from the one builder (`sandboxSettings`) with a job's allowances applied, are translated by the
@@ -15,7 +16,7 @@ import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"].find((candidate) => existsSync(candidate));
 const usable = ((): boolean => {
   if (BWRAP === undefined) return false;
-  return spawnSync(BWRAP, ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--", "/bin/sh", "-c", "exit 0"], { stdio: "ignore" }).status === 0;
+  return bwrapCanCreateNamespaces(BWRAP);
 })();
 
 const CANARY = "FX-R7B-CANARY-b1946ac92492d2347c6235b4d2611184";

@@ -7,6 +7,7 @@ import { filterDevEnv } from "../src/job/nixShellEnv.js";
 import { applyNixView, NIX_DAEMON_SOCKET_DIR } from "../src/sandbox/nixView.js";
 import { bwrapArgs } from "../src/sandbox/probe.js";
 import { sandboxSettings } from "../src/sandbox/sandboxSettings.js";
+import { bwrapCanCreateNamespaces } from "./helpers/bwrapProbe.js";
 
 /**
  * D#6 R7c with real bubblewrap: a job that was handed a Nix dev shell cannot reach the Nix daemon, and the shell's tools run from the environment `cleanEnv`
@@ -18,7 +19,7 @@ const BWRAP = ["/run/current-system/sw/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap
 const SOCKET = path.join(NIX_DAEMON_SOCKET_DIR, "socket");
 const usable = ((): boolean => {
   if (BWRAP === undefined || !existsSync(SOCKET)) return false;
-  return spawnSync(BWRAP, ["--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--", process.execPath, "-e", "0"], { stdio: "ignore" }).status === 0;
+  return bwrapCanCreateNamespaces(BWRAP);
 })();
 
 let root: string;

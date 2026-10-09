@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCapture } from "../src/engines/claude/capture.js";
 import { allowedUris, createNixShell, isTrustedUser, lockIsPinned, NIX_FIXED_ARGS, type NixSource } from "../src/daemon/nixShell.js";
 import type { NixViewFs } from "../src/sandbox/nixView.js";
-import { filterDevEnv } from "../src/job/nixShellEnv.js";
+import { NIX_ENV_NAMES, filterDevEnv } from "../src/job/nixShellEnv.js";
 import { cleanEnv } from "../src/job/cleanEnv.js";
 
 /**
@@ -352,6 +352,42 @@ describe("the cache", () => {
     expect(await step().prepare({ approved: false, sha: SHA, source: flake() })).toEqual({ ok: false, skip: "nix_not_approved" });
     writeFileSync(path.join(dir, "trusted"), "runner\n");
     expect(await step({ user: "runner" }).prepare({ approved: true, sha: SHA, source: flake() })).toEqual({ ok: false, skip: "nix_trusted_user" });
+  });
+});
+
+describe("PLAYWRIGHT_BROWSERS_PATH (D#6 R7e B3): a store path only", () => {
+  const browsers = (value: unknown) => filterDevEnv({ PLAYWRIGHT_BROWSERS_PATH: { type: "exported", value } });
+
+  it("is on the allowlist and a store path is accepted", () => {
+    expect(NIX_ENV_NAMES).toContain("PLAYWRIGHT_BROWSERS_PATH");
+    expect(browsers(`${STORE}-playwright-browsers`)).toEqual({ PLAYWRIGHT_BROWSERS_PATH: `${STORE}-playwright-browsers` });
+  });
+
+  it("refuses a path outside the store, a relative path, a `..` path, a bare name and a list", () => {
+    for (const bad of ["/home/someone/pw-browsers", "/nix/storefoo/x", "nix/store/abc-x", "./nix/store/abc-x", `${STORE}-x/../../etc`, "/nix/store/../etc", "chromium", `${STORE}-a:${STORE}-b`, "/nix/store/", ""]) {
+      expect(browsers(bad), bad).toEqual({});
+    }
+  });
+
+  it("is refused when the dev shell does not export it", () => {
+    expect(filterDevEnv({ PLAYWRIGHT_BROWSERS_PATH: { type: "var", value: `${STORE}-playwright-browsers` } })).toEqual({});
+  });
+
+  it("cleanEnv checks it again and puts a store path into the job env", () => {
+    const value = `${STORE}-playwright-browsers`;
+    expect(cleanEnv({ mode: "subscription" }, { jobEnv: { PLAYWRIGHT_BROWSERS_PATH: value } })["PLAYWRIGHT_BROWSERS_PATH"]).toBe(value);
+    for (const bad of ["/home/someone/pw", "pw", `${STORE}-x/../../etc`, "../nix/store/x"]) {
+      expect(() => cleanEnv({ mode: "subscription" }, { jobEnv: { PLAYWRIGHT_BROWSERS_PATH: bad } }), bad).toThrow(/bad dev shell/);
+    }
+  });
+
+  it("a host value of the same name never reaches the job", () => {
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/home/someone/pw");
+    try {
+      expect(cleanEnv({ mode: "subscription" })).not.toHaveProperty("PLAYWRIGHT_BROWSERS_PATH");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
