@@ -243,6 +243,8 @@ export interface AdvanceRunRequest {
   haltEpoch: number;
   /** D#6 R4d-1 (C32): the repository's execution mode the prompt was built for. Another mode at start refuses `execution_mode_changed`, and the role card is the one for this mode. */
   expectedExecutionMode?: string;
+  /** D#6 R4d-5a (C34): the `spec_versions.id` the run is built from, pinned on the run at insert (the database's foreign key refuses another account's). */
+  specVersionId?: string;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };
@@ -490,6 +492,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!deps.starter) return { ok: false, reason: "starter_unavailable" };
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
     if (req.expectedExecutionMode !== undefined && !MODE_RE.test(req.expectedExecutionMode)) return { ok: false, reason: "invalid_input" };
+    if (req.specVersionId !== undefined && !UUID_RE.test(req.specVersionId)) return { ok: false, reason: "invalid_input" };
     const key = `advance:${req.workItemId}:${req.step}`;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
       const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null; halted: boolean; halt_epoch: number }>(
@@ -532,6 +535,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       product: "team",
       prompt: req.prompt,
       ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
+      ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.

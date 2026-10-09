@@ -63,7 +63,7 @@ describe("the runner prompt and card by execution mode [pg]", { timeout: 60_000 
     const d = randomUUID();
     await admin.query("INSERT INTO discussions (id, account_id, number, kind, title, root_work_item_id, provenance, created_by_kind) VALUES ($1, $2, $3, 'feature', 't', $4, 'internal', 'user')", [d, a.accountId, nextNumber + 500, workItemId]);
     await admin.query("UPDATE work_items SET discussion_id = $1 WHERE id = $2", [d, workItemId]);
-    await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, $3, $4, 'system')", [a.accountId, workItemId, SPEC, sha256(SPEC)]);
+    await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, $3, $4, 'system', '{\"acceptance_files\":[\"src/**\"]}'::jsonb)", [a.accountId, workItemId, SPEC, sha256(SPEC)]);
     return { a, workItemId };
   }
 

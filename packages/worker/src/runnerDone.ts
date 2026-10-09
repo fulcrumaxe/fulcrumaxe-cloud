@@ -46,7 +46,7 @@ export interface RunnerDoneVerdict {
   /** The HTTP status GitHub refused the pull request with (`pr_rejected`); a number only. */
   prHttpStatus?: number;
   /** Why a `scope_unknown` ended the run, where that matters to the words shown: a renamed file, or a change type GitHub reported that the port does not know. */
-  detail?: "renamed" | "unknown_change_type";
+  detail?: "renamed" | "unknown_change_type" | "no_file_list";
 }
 
 export interface FinishRunnerDoneInput extends HeartbeatRunnerRunInput {
@@ -86,7 +86,7 @@ function requireVerdict(verdict: RunnerDoneVerdict): void {
   if (verdict.prNumber !== null && !(Number.isSafeInteger(verdict.prNumber) && verdict.prNumber >= 1)) throw new RunActionInputError();
   if (verdict.branch !== undefined && !(verdict.prNumber !== null && typeof verdict.branch === "string" && RUNNER_RUN_BRANCH.test(verdict.branch))) throw new RunActionInputError();
   if (verdict.prHttpStatus !== undefined && !(Number.isInteger(verdict.prHttpStatus) && verdict.prHttpStatus >= 100 && verdict.prHttpStatus <= 599)) throw new RunActionInputError();
-  if (verdict.detail !== undefined && !((verdict.detail === "renamed" || verdict.detail === "unknown_change_type") && verdict.failureReason === "scope_unknown")) throw new RunActionInputError();
+  if (verdict.detail !== undefined && !((verdict.detail === "renamed" || verdict.detail === "unknown_change_type" || verdict.detail === "no_file_list") && verdict.failureReason === "scope_unknown")) throw new RunActionInputError();
 }
 
 /** The stored output: redacted (G2) first, then dropped whole if it is still over the cap in UTF-8 bytes. */
@@ -126,7 +126,7 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
     prNumber,
     ...(prNumber !== null && typeof p.branch === "string" && RUNNER_RUN_BRANCH.test(p.branch) ? { branch: p.branch } : {}),
     ...(typeof p.prHttpStatus === "number" ? { prHttpStatus: p.prHttpStatus } : {}),
-    ...(p.detail === "renamed" || p.detail === "unknown_change_type" ? { detail: p.detail } : {}),
+    ...(p.detail === "renamed" || p.detail === "unknown_change_type" || p.detail === "no_file_list" ? { detail: p.detail } : {}),
   };
 }
 

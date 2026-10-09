@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
+    "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",

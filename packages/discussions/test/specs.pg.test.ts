@@ -23,7 +23,7 @@ describe("specs.ts [pg]", () => {
     const fromTriaged = await seedWorkItemAt(db.admin, t.accountId, "triaged");
     const fromDiscussing = await seedWorkItemAt(db.admin, t.accountId, "discussing");
 
-    const v1 = await publishSpec(ctx(t.owner), { workItemId: fromTriaged, body: "Spec v1" });
+    const v1 = await publishSpec(ctx(t.owner), { workItemId: fromTriaged, acceptanceFiles: ["src/**"], body: "Spec v1" });
     expect(v1.version).toBe(1);
     expect(v1.bodySha256).toBe(createHash("sha256").update("Spec v1").digest("hex"));
     const { rows: stage1 } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [fromTriaged]);
@@ -35,13 +35,13 @@ describe("specs.ts [pg]", () => {
     expect(tr).toEqual([{ from_stage: "triaged", to_stage: "spec_ready" }]);
 
     // From spec_ready: version 2, stage unchanged, no second transition.
-    const v2 = await publishSpec(ctx(t.admin), { workItemId: fromTriaged, body: "Spec v2" });
+    const v2 = await publishSpec(ctx(t.admin), { workItemId: fromTriaged, acceptanceFiles: ["src/**"], body: "Spec v2" });
     expect(v2.version).toBe(2);
     expect(await count(db.admin, `SELECT 1 FROM work_item_transitions WHERE work_item_id = $1`, [fromTriaged])).toBe(1);
     const { rows: stage2 } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [fromTriaged]);
     expect(stage2[0].stage).toBe("spec_ready");
 
-    await publishSpec(ctx(t.owner), { workItemId: fromDiscussing, body: "Spec" });
+    await publishSpec(ctx(t.owner), { workItemId: fromDiscussing, acceptanceFiles: ["src/**"], body: "Spec" });
     const { rows: stage3 } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [fromDiscussing]);
     expect(stage3[0].stage).toBe("spec_ready");
 
@@ -58,11 +58,11 @@ describe("specs.ts [pg]", () => {
       for (const wi of [person, system]) {
         await db.admin.query("UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1", [wi, randomUUID()]);
       }
-      await expect(publishSpec(ctx(t.system), { workItemId: system, body: "from the pipeline" })).rejects.toMatchObject({ name: "WorkItemHaltedError" });
+      await expect(publishSpec(ctx(t.system), { workItemId: system, acceptanceFiles: ["src/**"], body: "from the pipeline" })).rejects.toMatchObject({ name: "WorkItemHaltedError" });
       expect(await specRows(system)).toHaveLength(0);
       expect((await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [system])).rows[0].stage).toBe(stage);
 
-      await expect(publishSpec(ctx(t.owner), { workItemId: person, body: "from a person" })).resolves.toMatchObject({ version: 1 });
+      await expect(publishSpec(ctx(t.owner), { workItemId: person, acceptanceFiles: ["src/**"], body: "from a person" })).resolves.toMatchObject({ version: 1 });
       const { rows } = await db.admin.query(`SELECT stage, halted_at IS NOT NULL AS halted FROM work_items WHERE id = $1`, [person]);
       expect(rows[0]).toEqual({ stage: "spec_ready", halted: true });
     }
@@ -72,7 +72,7 @@ describe("specs.ts [pg]", () => {
     const t = await seedTenant(db.admin);
     for (const stage of ["in_progress", "pr_opened", "changes_requested", "review_passed", "needs_human", "merged", "closed_unmerged", "closed"]) {
       const wi = await seedWorkItemAt(db.admin, t.accountId, stage);
-      await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "late" })).rejects.toMatchObject({ code: "spec_frozen" });
+      await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "late" })).rejects.toMatchObject({ code: "spec_frozen" });
       expect(await specRows(wi)).toHaveLength(0);
       const { rows } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [wi]);
       expect(rows[0].stage).toBe(stage);
@@ -84,16 +84,16 @@ describe("specs.ts [pg]", () => {
     const t = await seedTenant(db.admin);
     for (const stage of ["triaged", "discussing", "spec_ready"]) {
       const wi = await seedWorkItemAt(db.admin, t.accountId, stage, { provenance: "external" });
-      await expect(publishSpec(ctx(t.system), { workItemId: wi, body: "s" })).rejects.toMatchObject({ code: "external_requires_human" });
+      await expect(publishSpec(ctx(t.system), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s" })).rejects.toMatchObject({ code: "external_requires_human" });
       expect(await specRows(wi)).toHaveLength(0);
       const { rows } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [wi]);
       expect(rows[0].stage).toBe(stage);
     }
     const external = await seedWorkItemAt(db.admin, t.accountId, "triaged", { provenance: "external" });
-    await expect(publishSpec(ctx(t.admin), { workItemId: external, body: "human approved" })).resolves.toMatchObject({ version: 1 });
+    await expect(publishSpec(ctx(t.admin), { workItemId: external, acceptanceFiles: ["src/**"], body: "human approved" })).resolves.toMatchObject({ version: 1 });
 
     const internal = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const v = await publishSpec(ctx(t.system), { workItemId: internal, body: "system, internal" });
+    const v = await publishSpec(ctx(t.system), { workItemId: internal, acceptanceFiles: ["src/**"], body: "system, internal" });
     expect(v.version).toBe(1);
     const rows = await specRows(internal);
     expect(rows[0]).toMatchObject({ created_by_kind: "system", created_by_user_id: null });
@@ -104,11 +104,11 @@ describe("specs.ts [pg]", () => {
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
     const run = await seedRunOn(db.admin, t.accountId, wi);
     for (const p of [t.member, t.tokenWrite, run]) {
-      await expect(publishSpec(ctx(p), { workItemId: wi, body: "s" })).rejects.toBeInstanceOf(ForbiddenError);
+      await expect(publishSpec(ctx(p), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s" })).rejects.toBeInstanceOf(ForbiddenError);
     }
     expect(await specRows(wi)).toHaveLength(0);
 
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "s" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s" });
     for (const p of [t.member, t.tokenWrite, run]) {
       await expect(addCorrection(ctx(p), { workItemId: wi, body: "c" })).rejects.toBeInstanceOf(ForbiddenError);
     }
@@ -121,13 +121,13 @@ describe("specs.ts [pg]", () => {
 
     await expect(addCorrection(ctx(t.owner), { workItemId: wi, body: "c" })).rejects.toMatchObject({ code: "no_spec_version" });
 
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "v1" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v1" });
     const c1 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "first" });
     const c2 = await addCorrection(ctx(t.system), { workItemId: wi, body: "second" });
     expect([c1.code, c2.code]).toEqual(["C1", "C2"]);
 
     // A new version restarts nothing: the next code is still C3, attached to v2.
-    const v2 = await publishSpec(ctx(t.owner), { workItemId: wi, body: "v2" });
+    const v2 = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v2" });
     const c3 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "third" });
     expect(c3.code).toBe("C3");
     expect(c3.specVersionId).toBe(v2.id);
@@ -142,7 +142,7 @@ describe("specs.ts [pg]", () => {
   it("criterion 7: concurrent corrections get distinct, gapless codes", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "v1" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v1" });
     const results = await Promise.all(
       Array.from({ length: 12 }, (_, i) => addCorrection(ctx(t.owner), { workItemId: wi, body: `c${i}` })),
     );
@@ -157,7 +157,7 @@ describe("specs.ts [pg]", () => {
     const grandchild = await seedWorkItemAt(db.admin, t.accountId, "triaged", { parentId: child });
     const unrelated = await seedWorkItemAt(db.admin, t.accountId, "triaged");
     const foreign = await seedWorkItemAt(db.admin, other.accountId, "triaged");
-    await publishSpec(ctx(t.owner), { workItemId: root, body: "v1" });
+    await publishSpec(ctx(t.owner), { workItemId: root, acceptanceFiles: ["src/**"], body: "v1" });
 
     const ok = await addCorrection(ctx(t.owner), { workItemId: root, body: "c", appliesTo: [root, child, grandchild, child] });
     expect([...ok.appliesTo].sort()).toEqual([root, child, grandchild].sort());
@@ -167,7 +167,7 @@ describe("specs.ts [pg]", () => {
       await expect(addCorrection(ctx(t.owner), { workItemId: root, body: "c", appliesTo: bad })).rejects.toMatchObject({ code: "invalid_input" });
     }
     // An ancestor is not a descendant: the parent chain is walked UP from the target only.
-    await publishSpec(ctx(t.owner), { workItemId: child, body: "child spec" });
+    await publishSpec(ctx(t.owner), { workItemId: child, acceptanceFiles: ["src/**"], body: "child spec" });
     await expect(addCorrection(ctx(t.owner), { workItemId: child, body: "c", appliesTo: [root] })).rejects.toMatchObject({ code: "invalid_input" });
     expect(await count(db.admin, `SELECT 1 FROM spec_corrections WHERE account_id = $1`, [t.accountId])).toBe(before);
   });
@@ -175,7 +175,7 @@ describe("specs.ts [pg]", () => {
   it("criterion 8: specAsOf returns the pinned Spec plus corrections at-or-before the run's created_at; correctionsSince returns the later ones", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const v1 = await publishSpec(ctx(t.owner), { workItemId: wi, body: "the pinned Spec" });
+    const v1 = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "the pinned Spec" });
     const c1 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "before the run" });
     const run = await seedRunOn(db.admin, t.accountId, wi, { specVersionId: v1.id });
     const c2 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "after the run" });
@@ -203,9 +203,9 @@ describe("specs.ts [pg]", () => {
   it("criterion 6 (R4): specAsOf is bounded by the pinned version and the run's created_at; correctionsSince is the complement", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const v1 = await publishSpec(ctx(t.owner), { workItemId: wi, body: "v1" });
+    const v1 = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v1" });
     const c1 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "on v1" });
-    const v2 = await publishSpec(ctx(t.owner), { workItemId: wi, body: "v2" });
+    const v2 = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v2" });
     const c2 = await addCorrection(ctx(t.owner), { workItemId: wi, body: "on v2" });
     expect([c1.specVersionId, c2.specVersionId]).toEqual([v1.id, v2.id]);
 
@@ -261,9 +261,9 @@ describe("specs.ts [pg]", () => {
     const parent = await seedWorkItemAt(db.admin, t.accountId, "triaged");
     const own = await seedWorkItemAt(db.admin, t.accountId, "triaged", { parentId: parent });
     const unrelated = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const parentSpec = await publishSpec(ctx(t.owner), { workItemId: parent, body: "parent spec" });
-    const ownSpec = await publishSpec(ctx(t.owner), { workItemId: own, body: "own spec" });
-    const unrelatedSpec = await publishSpec(ctx(t.owner), { workItemId: unrelated, body: "unrelated spec" });
+    const parentSpec = await publishSpec(ctx(t.owner), { workItemId: parent, acceptanceFiles: ["src/**"], body: "parent spec" });
+    const ownSpec = await publishSpec(ctx(t.owner), { workItemId: own, acceptanceFiles: ["src/**"], body: "own spec" });
+    const unrelatedSpec = await publishSpec(ctx(t.owner), { workItemId: unrelated, acceptanceFiles: ["src/**"], body: "unrelated spec" });
 
     const ownRun = await seedRunOn(db.admin, t.accountId, own, { specVersionId: ownSpec.id });
     const parentPinned = await seedRunOn(db.admin, t.accountId, own, { specVersionId: parentSpec.id });
@@ -291,14 +291,14 @@ describe("specs.ts [pg]", () => {
       return rows.length ? Number(rows[0].bytes_used) : 0;
     };
 
-    await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "x".repeat(MAX_BODY_BYTES + 1) })).rejects.toMatchObject({ code: "payload_too_large" });
+    await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "x".repeat(MAX_BODY_BYTES + 1) })).rejects.toMatchObject({ code: "payload_too_large" });
     // Multi-byte: 3 bytes per character crosses the byte limit well before the character limit.
-    await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "€".repeat(Math.floor(MAX_BODY_BYTES / 3) + 1) })).rejects.toMatchObject({ code: "payload_too_large" });
+    await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "€".repeat(Math.floor(MAX_BODY_BYTES / 3) + 1) })).rejects.toMatchObject({ code: "payload_too_large" });
     expect(await specRows(wi)).toHaveLength(0);
     expect(await bytes()).toBe(0);
 
     const specBody = "Spec with a euro sign €";
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: specBody });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: specBody });
     expect(await bytes()).toBe(utf8ByteLength(specBody));
     await expect(addCorrection(ctx(t.owner), { workItemId: wi, body: "y".repeat(MAX_BODY_BYTES + 1) })).rejects.toMatchObject({ code: "payload_too_large" });
     const corrBody = "correction ✓";
@@ -311,7 +311,7 @@ describe("specs.ts [pg]", () => {
     expect(rows.every((r) => !r.body.includes(fakeKey))).toBe(true);
 
     const wi2 = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const v = await publishSpec(ctx(t.system), { workItemId: wi2, body: `spec with ${fakeKey}` });
+    const v = await publishSpec(ctx(t.system), { workItemId: wi2, acceptanceFiles: ["src/**"], body: `spec with ${fakeKey}` });
     const stored = (await specRows(wi2))[0];
     expect(stored.body).not.toContain(fakeKey);
     // The stored hash is over the redacted body the row actually holds.
@@ -321,10 +321,10 @@ describe("specs.ts [pg]", () => {
   it("criterion 11: a Spec or correction that would take bytes_used over the plan quota is storage_quota_exceeded and writes no row", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "v1" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "v1" });
     await db.admin.query(`UPDATE discussion_counters SET bytes_used = $2 WHERE account_id = $1`, [t.accountId, STORAGE_QUOTA_BYTES.starter - 5]);
 
-    await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "x".repeat(100) })).rejects.toMatchObject({ code: "storage_quota_exceeded" });
+    await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "x".repeat(100) })).rejects.toMatchObject({ code: "storage_quota_exceeded" });
     await expect(addCorrection(ctx(t.owner), { workItemId: wi, body: "x".repeat(100) })).rejects.toMatchObject({ code: "storage_quota_exceeded" });
     expect(await specRows(wi)).toHaveLength(1);
     expect(await count(db.admin, `SELECT 1 FROM spec_corrections WHERE account_id = $1`, [t.accountId])).toBe(0);
@@ -335,7 +335,7 @@ describe("specs.ts [pg]", () => {
   it("criterion 15: publishSpec and addCorrection each emit exactly one event with ids and enums only", async () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
-    const v = await publishSpec(ctx(t.owner), { workItemId: wi, body: "SECRET-SPEC-BODY" });
+    const v = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "SECRET-SPEC-BODY" });
     const c = await addCorrection(ctx(t.owner), { workItemId: wi, body: "SECRET-CORRECTION-BODY" });
 
     const { rows } = await db.admin.query(
@@ -359,13 +359,42 @@ describe("specs.ts [pg]", () => {
     const t = await seedTenant(db.admin);
     const wi = await seedWorkItemAt(db.admin, t.accountId, "triaged");
     for (const key of ["account_id", "accountId"]) {
-      await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "s", [key]: randomUUID() } as never)).rejects.toMatchObject({ code: "invalid_input" });
+      await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s", [key]: randomUUID() } as never)).rejects.toMatchObject({ code: "invalid_input" });
     }
     expect(await specRows(wi)).toHaveLength(0);
-    await publishSpec(ctx(t.owner), { workItemId: wi, body: "s" });
+    await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: ["src/**"], body: "s" });
     await expect(addCorrection(ctx(t.owner), { workItemId: wi, body: "c", accountId: randomUUID() } as never)).rejects.toMatchObject({ code: "invalid_input" });
     const run = await seedRunOn(db.admin, t.accountId, wi);
     await expect(specAsOf(ctx(t.owner), { runId: run.runId, account_id: randomUUID() } as never)).rejects.toMatchObject({ code: "invalid_input" });
     expect(await count(db.admin, `SELECT 1 FROM spec_corrections WHERE account_id = $1`, [t.accountId])).toBe(0);
+  });
+
+  // D#6 R4d-5a (C34, F2): the store takes a Spec only with a file list the done check can read, and keeps it in `frontmatter`.
+  it("F2: a valid acceptanceFiles is stored as frontmatter {acceptance_files} and nothing else, as given", async () => {
+    const t = await seedTenant(db.admin);
+    const wi = await seedWorkItemAt(db.admin, t.accountId, "discussing");
+    const list = ["src/a.ts", "src/{b,c}.test.ts", "docs/**", "app/(group)/[id]/page.tsx"];
+    const v = await publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: list, body: "Spec" });
+    const { rows } = await db.admin.query(`SELECT frontmatter FROM spec_versions WHERE id = $1`, [v.id]);
+    expect(rows[0].frontmatter).toEqual({ acceptance_files: list });
+    expect(Object.keys(rows[0].frontmatter)).toEqual(["acceptance_files"]);
+    const { rows: raw } = await db.admin.query(`SELECT frontmatter -> 'acceptance_files' = $2::jsonb AS same FROM spec_versions WHERE id = $1`, [v.id, JSON.stringify(list)]);
+    expect(raw[0].same).toBe(true);
+  });
+
+  it("F2: no list, an empty one, a lone **, a parent path, a one-alternative brace group, a non-array or a missing key throws invalid_file_scope and writes nothing", async () => {
+    const t = await seedTenant(db.admin);
+    const wi = await seedWorkItemAt(db.admin, t.accountId, "discussing");
+    const transitionsBefore = await count(db.admin, `SELECT 1 FROM work_item_transitions WHERE work_item_id = $1`, [wi]);
+    for (const bad of [[], ["**"], ["../x"], ["a/{b}"], "src/a.ts", null, 7, { 0: "src/a.ts" }, ["src/a.ts", 3]]) {
+      await expect(publishSpec(ctx(t.owner), { workItemId: wi, acceptanceFiles: bad as never, body: "s" }), JSON.stringify(bad)).rejects.toMatchObject({ code: "invalid_file_scope" });
+    }
+    // The key missing altogether (a caller that skips the type), and an inherited one.
+    await expect(publishSpec(ctx(t.owner), { workItemId: wi, body: "s" } as never)).rejects.toMatchObject({ code: "invalid_file_scope" });
+    await expect(publishSpec(ctx(t.owner), Object.assign(Object.create({ acceptanceFiles: ["src/**"] }), { workItemId: wi, body: "s" }) as never)).rejects.toMatchObject({ code: "invalid_file_scope" });
+    expect(await specRows(wi)).toHaveLength(0);
+    const { rows } = await db.admin.query(`SELECT stage FROM work_items WHERE id = $1`, [wi]);
+    expect(rows[0].stage).toBe("discussing");
+    expect(await count(db.admin, `SELECT 1 FROM work_item_transitions WHERE work_item_id = $1`, [wi])).toBe(transitionsBefore);
   });
 });

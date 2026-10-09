@@ -157,7 +157,7 @@ export interface RunnerDoneStored {
   branch?: string;
   prHttpStatus?: number;
   /** Why a `scope_unknown` ended the run, where that matters to the words shown: a renamed file, or a change type GitHub reported that the port does not know. */
-  detail?: "renamed" | "unknown_change_type";
+  detail?: "renamed" | "unknown_change_type" | "no_file_list";
 }
 
 /** The leases object, or 503 when the worker is not configured. */

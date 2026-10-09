@@ -156,7 +156,7 @@ describe("customer halt and the pipeline's writers [pg]", () => {
   it("8: the pipeline publishes no Spec on a halted item at discussing or spec_ready, and its setStage moves nothing at triaged", async () => {
     for (const stage of ["discussing", "spec_ready"]) {
       const f = await fixture(stage);
-      const out = await publishLightSpec(db.runWriterPool, f.accountId, f.workItemId, { summary: "s", spec: "# Spec\n\nDo the thing." });
+      const out = await publishLightSpec(db.runWriterPool, f.accountId, f.workItemId, { summary: "s", spec: "# Spec\n\nDo the thing.", acceptance_files: ["src/a.ts"] });
       expect(out).toEqual({ status: "refused", reason: "item_halted" });
       expect((await db.admin.query("SELECT count(*)::int AS n FROM spec_versions WHERE work_item_id = $1", [f.workItemId])).rows[0].n).toBe(0);
       expect(await state(f.workItemId)).toBe(stage);
@@ -170,7 +170,7 @@ describe("customer halt and the pipeline's writers [pg]", () => {
 
   it("8 (control): the same publish on an item that is not halted still works", async () => {
     const f = await fixture("discussing", false);
-    const out = await publishLightSpec(db.runWriterPool, f.accountId, f.workItemId, { summary: "s", spec: "# Spec\n\nDo the thing." });
+    const out = await publishLightSpec(db.runWriterPool, f.accountId, f.workItemId, { summary: "s", spec: "# Spec\n\nDo the thing.", acceptance_files: ["src/a.ts"] });
     expect(out.status).toBe("published");
     expect(await state(f.workItemId)).toBe("spec_ready");
   });

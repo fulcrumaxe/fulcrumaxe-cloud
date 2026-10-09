@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
@@ -133,18 +134,22 @@ interface BuildFacts {
   kind: string | null;
   version: number | null;
   body: string | null;
+  /** The id of the version read: the one the run pins (D#6 R4d-5a). */
+  spec_version_id: string | null;
   execution_mode: string | null;
+  /** The stored `frontmatter -> 'acceptance_files'` of the version read (D#6 R4d-5a). */
+  acceptance_files: unknown;
 }
 
 async function readFacts(pool: Pool, accountId: string, workItemId: string): Promise<BuildFacts | null> {
   return withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<BuildFacts>(
-      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, r.execution_mode
+      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, r.execution_mode
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
          LEFT JOIN LATERAL (
-           SELECT sv.version, sv.body FROM spec_versions sv
+           SELECT sv.id, sv.version, sv.body, sv.frontmatter -> 'acceptance_files' AS acceptance_files FROM spec_versions sv
             WHERE sv.account_id = w.account_id AND sv.work_item_id = w.id AND sv.erased_at IS NULL
             ORDER BY sv.version DESC LIMIT 1
          ) s ON true
@@ -186,8 +191,12 @@ export async function startBuildForItem(
   const number = Number(facts.gh_number);
   // The prompt is built for the mode read here; the start refuses `execution_mode_changed` if the repository's mode is different by then.
   const executionMode = facts.execution_mode ?? "sandbox";
+  // D#6 R4d-5a (C34 section 2.1): a runner build is checked against the Spec's own file list at done, so a Spec with no readable list is refused HERE, before any
+  // run exists: nothing is recorded, no job is issued, the item stays where it is, and the customer's machine spends nothing. It is the row `readFacts` just read
+  // (the latest unerased version, the one the run will pin), through the same parser the done check uses. Hosted (sandbox) builds are not checked and still start.
+  if (executionMode === "runner_local" && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
   const prompt = buildExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode) });
-  const started = await ports.startRun({ step: `build:v${facts.version}:${approvalId}`, role: "executor", prompt, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode });
+  const started = await ports.startRun({ step: `build:v${facts.version}:${approvalId}`, role: "executor", prompt, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
   // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
   if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
 

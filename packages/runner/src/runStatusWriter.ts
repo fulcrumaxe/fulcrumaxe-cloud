@@ -56,6 +56,12 @@ export interface InsertAgentRunParams {
   /** D#6 R3a: the member who started the run. Written by `agent_run_create` only, which refuses a user who is not a
    * member of the account; no later write can change it (0714). */
   initiatedBy?: string | null;
+  /**
+   * D#6 R4d-5a (C34 section 0): the Spec version the run is built from, written at insert only (`spec_versions.id`; the definer's foreign key refuses
+   * another account's). It is what the done check reads the file scope of (`loadAcceptanceScope`), so a Spec re-published mid-run never changes what
+   * the run is held to. Absent: the run pins nothing (every run of a role that has no Spec).
+   */
+  specVersionId?: string | null;
   /** D#5 E9: the environment the run uses, written at insert only. Both or neither (the definer refuses half a record). */
   envVersionId?: string | null;
   imageDigest?: string | null;
@@ -353,7 +359,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
       }
       await client.query(
         `SELECT agent_run_create($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::text, $7::text,
-                                $8::text, $9::uuid, $10::bigint, NULL::uuid, $11::jsonb, $12::text, $13::uuid, $14::text, $15::text)`,
+                                $8::text, $9::uuid, $10::bigint, $16::uuid, $11::jsonb, $12::text, $13::uuid, $14::text, $15::text)`,
         [
           id,
           params.accountId,
@@ -370,6 +376,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
           params.initiatedBy ?? null,
           params.envVersionId ?? null,
           params.imageDigest ?? null,
+          params.specVersionId ?? null,
         ],
       );
       if (params.inCreateTransaction) await params.inCreateTransaction(client, id);
@@ -505,7 +512,7 @@ export interface WriteRunStatusParams {
    * transaction as the status write, so a repeat `done` for the same run and generation can replay it (no column, no migration). `prNumber` is
    * the pull request the verdict is about (null when none exists); `prHttpStatus` is the status GitHub refused the pull request with (a number
    * only: never a GitHub message). */
-  runnerDone?: { prNumber: number | null; branch?: string; prHttpStatus?: number; detail?: "renamed" | "unknown_change_type" };
+  runnerDone?: { prNumber: number | null; branch?: string; prHttpStatus?: number; detail?: "renamed" | "unknown_change_type" | "no_file_list" };
   /** D#2 H14c-5b-2a (C48 LIMIT-END): a limit ended this run resumably. Only
    * `running -> timed_out` with `run_time`/`model_calls`/`turns`/`silence`, or
    * `running -> killed_spend` with `per_run_usd`; anything else throws before

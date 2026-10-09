@@ -72,7 +72,7 @@ describe("a repo switched off a runner, through the real advance workflow [pg]",
     const d = randomUUID();
     await admin.query("INSERT INTO discussions (id, account_id, number, kind, title, root_work_item_id, provenance, created_by_kind) VALUES ($1, $2, 9001, 'feature', 't', $3, 'internal', 'user')", [d, a.accountId, id]);
     await admin.query("UPDATE work_items SET discussion_id = $1 WHERE id = $2", [d, id]);
-    await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system')", [a.accountId, id]);
+    await admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system', '{\"acceptance_files\":[\"src/**\"]}'::jsonb)", [a.accountId, id]);
     return id;
   }
 

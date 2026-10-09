@@ -987,6 +987,9 @@ importers:
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../runner-protocol
+      '@fx/core':
+        specifier: workspace:*
+        version: link:../core
       '@fx/db':
         specifier: workspace:*
         version: link:../db

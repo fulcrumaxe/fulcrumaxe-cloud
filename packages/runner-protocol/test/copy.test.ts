@@ -51,6 +51,8 @@ describe("the runner copy (D#6 R2b)", () => {
       pullRequestTitleFallback: "Changes from your runner",
       scopeUnknown:
         "This work's file scope could not be read, so the changes were not checked and no pull request was opened. The branch is kept so you can open the PR yourself.",
+      specHasNoFileList:
+        "This Spec has no file list, so the platform cannot check the agent's changes and will not open a pull request. Re-spec to have the project manager add the list (the Spec's text stays the same), then Build again.",
       scopeUnknownRenamed:
         "GitHub reported a renamed file. A rename's old path can't be read without reading file contents, which this repository's runner setting forbids. The branch is kept so you can open the PR yourself.",
       prRejected: "GitHub refused to open the pull request (HTTP {status}). The branch is kept so you can open the PR yourself.",

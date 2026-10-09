@@ -24,6 +24,11 @@ export interface AdvanceRunRequest {
    * reaches a sandbox. Absent: no check (a prompt that does not depend on the mode).
    */
   expectedExecutionMode?: string;
+  /**
+   * D#6 R4d-5a (C34): the `spec_versions.id` the run is built from. The executor build sets it, so the run is held at done to the file list of exactly the Spec
+   * version it was started from. Absent: the run pins no version.
+   */
+  specVersionId?: string;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };

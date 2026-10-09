@@ -44,23 +44,25 @@ describe("loadAcceptanceScope [pg]", () => {
     expect(await read(A)).toEqual({ kind: "known", entries: ["packages/web/**", "README.md"] });
   });
 
-  it("is unknown for a spec version with no list, an unreadable list, an erased version, and a run with no spec version", async () => {
+  it("is unknown for a spec version with no list, an unreadable list, an erased version, and a run with no spec version, with the reason", async () => {
     await specFor(A, {});
-    expect(await read(A)).toEqual({ kind: "unknown" });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "absent" });
+    await specFor(A, { acceptance_files: [] });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "absent" });
     await specFor(A, { acceptance_files: "src/**" });
-    expect(await read(A)).toEqual({ kind: "unknown" });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "unreadable" });
     await specFor(A, { acceptance_files: ["src/{a}.ts"] });
-    expect(await read(A)).toEqual({ kind: "unknown" });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "unreadable" });
     await specFor(A, { acceptance_files: ["src/**"] }, { erased: true });
-    expect(await read(A)).toEqual({ kind: "unknown" });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "unreadable" });
     await specFor(A, { acceptance_files: ["src/**"] }, { attach: false });
-    expect(await read(A)).toEqual({ kind: "unknown" });
+    expect(await read(A)).toEqual({ kind: "unknown", reason: "unreadable" });
   });
 
   it("never reads another account's run, even by id", async () => {
     await specFor(B, { acceptance_files: ["secret/**"] });
-    expect(await withTenant(h.appPool, A.accountId, (client) => loadAcceptanceScope(client, { accountId: A.accountId, runId: B.runId }))).toEqual({ kind: "unknown" });
-    expect(await withTenant(h.appPool, A.accountId, (client) => loadAcceptanceScope(client, { accountId: B.accountId, runId: B.runId }))).toEqual({ kind: "unknown" });
+    expect(await withTenant(h.appPool, A.accountId, (client) => loadAcceptanceScope(client, { accountId: A.accountId, runId: B.runId }))).toEqual({ kind: "unknown", reason: "unreadable" });
+    expect(await withTenant(h.appPool, A.accountId, (client) => loadAcceptanceScope(client, { accountId: B.accountId, runId: B.runId }))).toEqual({ kind: "unknown", reason: "unreadable" });
   });
 
   it("loads the pull request text inputs: the run id, its work item's id and the work item's title, tenant-scoped", async () => {

@@ -297,11 +297,14 @@ describe("done route [pg]", () => {
   });
 
   describe("the scope cannot be checked (C21 section 5.4)", () => {
-    for (const [label, scope] of [
-      ["no Spec version on the run", false],
-      ["a Spec with an empty list", []],
-      ["a list the matcher cannot read", ["src/[ab].ts"]],
-      ["a list that is not a list", "src/**"],
+    // D#6 R4d-5a (C34 section 2.2, F7): a Spec with no list (an empty one, or none stored) names the cause; an unreadable list keeps the detail-less answer.
+    for (const [label, scope, detail] of [
+      ["no Spec version on the run", false, undefined],
+      ["a Spec with an empty list", [], "no_file_list"],
+      ["a Spec whose stored list is null", null, "no_file_list"],
+      ["a list the matcher cannot read", ["src/[ab].ts"], undefined],
+      ["a brace group with one alternative", ["a/{b}"], undefined],
+      ["a list that is not a list", "src/**", undefined],
     ] as const) {
       it(`${label} ends failed scope_unknown, with no pull request and the branch kept`, async () => {
         const s = await scene({ scope });
@@ -310,7 +313,7 @@ describe("done route [pg]", () => {
         expect(s.repo.pulls).toHaveLength(0);
         expect(s.repo.branches.has(s.branch)).toBe(true);
         expect(labels(s.fake)).not.toContain("A4");
-        expect(verdictOf().detail).toBeUndefined();
+        expect(verdictOf().detail).toBe(detail);
       });
     }
   });

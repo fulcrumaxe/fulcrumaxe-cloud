@@ -58,7 +58,7 @@ class World implements AdvanceRunPorts {
       r.envelope =
         envelope ??
         (r.role === "project-manager"
-          ? { summary: "**technical-architect**: agrees.\n**security-expert**: agrees.\n**cost-analyst**: agrees.", spec: "1. The thing works.\n2. The thing is tested." }
+          ? { summary: "**technical-architect**: agrees.\n**security-expert**: agrees.\n**cost-analyst**: agrees.", spec: "1. The thing works.\n2. The thing is tested.", acceptance_files: ["src/a.ts"] }
           : { comment: `${r.role}: fine.`, stance: "agree", challenge: false });
     }
   }
