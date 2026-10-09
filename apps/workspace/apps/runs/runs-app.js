@@ -9,7 +9,7 @@ import { h, timeNode } from "../_lib/dom.js";
 import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
-import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, titleOf } from "./runs-detail.js";
+import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, runnerEventLine, titleOf } from "./runs-detail.js";
 import {
   EVENT_CAP, STATUS_LABELS, coalesce, formatUsd, isLiveStatus, isTruncated, loadRun, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
@@ -77,6 +77,8 @@ function body(ev) {
     case "agent.output":
       if (isObj(p) && typeof p.text === "string") return markdownBody(p.text);
       return plainLine(short(displayText(ev.kind), 80));
+    case "runner.event":
+      return plainLine(runnerEventLine(p));
     default:
       return plainLine(short(displayText(ev.kind), 80));
   }

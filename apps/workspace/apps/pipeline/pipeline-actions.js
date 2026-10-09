@@ -54,6 +54,27 @@ const GENERIC = "That didn't work. Nothing was changed.";
 export const sentenceFor = (code) => (Object.prototype.hasOwnProperty.call(SENTENCES, code) ? SENTENCES[code] : GENERIC);
 
 const money = (n) => "$" + Number(n).toFixed(2);
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const apiUsd = (n) => "$" + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2));
+const tok = (n) => (Number.isFinite(n) ? n.toLocaleString("en-US") : "0");
+
+/**
+ * D#6 R2b-5b: a run on the person's own machine, what it would have cost at API prices (information, never spend). The same words
+ * as the Runs app's detail (runs-detail.js runnerUsageLine; test/runs-detail.test.mjs pins the two together). A sandbox run has none.
+ */
+export function runnerUsageText(run) {
+  if (!run || run.runtime !== "runner") return null;
+  const u = isObj(run.runner_usage) ? run.runner_usage : null;
+  if (!u) return null;
+  const price = Number.isFinite(u.api_equivalent_usd) ? apiUsd(u.api_equivalent_usd) : null;
+  const toks = tok(u.tokens_in) + " in / " + tok(u.tokens_out) + " out tokens";
+  if (u.credential_mode === "api_key") return "On your own API key \u00b7 " + (price ? price + " at API prices" : "no API price for this model") + " \u00b7 " + toks;
+  return "On your Claude plan \u00b7 " + (price ? "API-equivalent " + price : "no API price for this model") + " \u00b7 " + toks;
+}
+
+/** The work item's separate total, shown only when its runs on the person's machine have one. */
+export const ownPlanText = (usd) => (Number.isFinite(usd) && usd > 0 ? "On your own plan (API-equivalent): " + apiUsd(usd) : null);
+
 const validRun = (r) => r && typeof r === "object" && typeof r.id === "string" && typeof r.role === "string" && typeof r.status === "string";
 
 /** Cancel for a live run; Retry for a failed-kind run that is the newest of its role. `runs` is newest first. */
@@ -256,7 +277,7 @@ export function createActions({ itemId, repoId, call = api, uuid = () => crypto.
 }
 
 /** The Runs section: `el` goes into the detail; label() is the pending text for the card. */
-export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {} }) {
+export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlanUsd = () => null }) {
   let lastLabel = null;
   let lastLive = false;
   let dlg = null;
@@ -292,6 +313,7 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       "li",
       { class: "pl-run", tabindex: "-1", "data-testid": "pl-run", "data-run-id": run.id, "data-status": run.status, "data-action-id": p ? p.actionId : null },
       h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", STATUS_WORDS[run.status] || "Another status", Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
+      runnerUsageText(run) ? h("span", { class: "pl-run-usage pl-muted", "data-testid": "pl-run-usage" }, runnerUsageText(run)) : null,
       p ? h("span", { class: "pl-run-pending", "data-testid": "pl-run-pending" }, p.kind === "cancel" ? "Cancelling…" : "Retrying…") : null,
       c.cancel ? btn("cancel", "Cancel run", "pl-cancel") : null,
       c.retry ? btn("retry", "Retry run", "pl-retry") : null
@@ -348,11 +370,12 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       : st.list === "error" ? h("p", { class: "pl-muted", "data-testid": "pl-runs-error" }, "Runs aren't available right now.")
       : st.runs.length === 0 ? h("p", { class: "pl-muted" }, "No runs yet.")
       : h("ul", { class: "pl-runlist" }, st.runs.map(row), st.more ? h("li", { class: "pl-muted" }, "Older runs are in the Runs app.") : null);
+    const own = st.list === "ready" ? ownPlanText(ownPlanUsd()) : null;
     // Rebuilding the rows must not drop keyboard focus: put it back on the same control of the same run.
     const held = list.contains(document.activeElement) && document.activeElement.closest("[data-run-id]");
     const heldId = held && held.dataset.runId;
     const heldTest = held && document.activeElement.dataset.testid;
-    list.replaceChildren(body);
+    list.replaceChildren(body, ...(own ? [h("p", { class: "pl-muted", "data-testid": "pl-own-plan" }, own)] : []));
     if (held) {
       const again = list.querySelector('[data-run-id="' + heldId + '"]');
       const target = again && ((heldTest && again.querySelector('[data-testid="' + heldTest + '"]')) || again);

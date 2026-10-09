@@ -69,11 +69,33 @@ const MODEL_BILL = {
 };
 const COMPUTE_BILL = { sandbox: "Sandbox compute, billed to the workspace", workflow: "Workflow compute, billed to the workspace" };
 
-/** The two cost lines, separately. Each says what is recorded and, only when the record names it, whose bill it is on. */
-export function costRows(cost, status) {
+/**
+ * The model-usage line of a run on the person's own machine (D#6 R2b-5b). What it would have cost at API prices: information, never
+ * spend, so it is never worded as a charge. `u.api_equivalent_usd` is the cloud's own figure; null means the model has no price row.
+ */
+export function runnerUsageLine(u) {
+  const price = Number.isFinite(u.api_equivalent_usd) ? usd(u.api_equivalent_usd) : null;
+  const toks = (tokens(u.tokens_in) || "0") + " in / " + (tokens(u.tokens_out) || "0") + " out tokens";
+  if (u.credential_mode === "api_key") return "On your own API key · " + (price ? price + " at API prices" : "no API price for this model") + " · " + toks;
+  return "On your Claude plan · " + (price ? "API-equivalent " + price : "no API price for this model") + " · " + toks;
+}
+
+/**
+ * The two cost lines, separately. Each says what is recorded and, only when the record names it, whose bill it is on.
+ * `runnerUsage` is the insight's `runner_usage`: undefined for a sandbox run (its output is unchanged), null for a run on the
+ * person's machine that recorded no usage yet, else the object.
+ */
+export function costRows(cost, status, runnerUsage) {
   const m = isObj(cost) && isObj(cost.model) ? cost.model : {};
   const c = isObj(cost) && isObj(cost.compute) ? cost.compute : {};
   const live = status === "pending" || status === "running";
+  if (runnerUsage !== undefined) {
+    const u = isObj(runnerUsage) ? runnerUsage : null;
+    return [
+      { key: "model", label: "Model usage", value: u ? runnerUsageLine(u) : live ? "Counting…" : "Not recorded", bill: null, detail: u ? "Estimate, priced at this run's model" : null },
+      { key: "compute", label: "Compute", value: "Ran on your machine: no sandbox compute", bill: null, detail: null },
+    ];
+  }
   const tok = [tokens(m.tokens_in) && tokens(m.tokens_in) + " in", tokens(m.tokens_out) && tokens(m.tokens_out) + " out"].filter(Boolean).join(", ");
   const modelValue = m.source === "operator_subscription" ? "No per-token charge" : usd(m.usd) || (live ? "Counting…" : "Not recorded");
   const computeValue = usd(c.usd) || (live ? "Settled when the run ends" : "Not recorded");
@@ -81,6 +103,88 @@ export function costRows(cost, status) {
     { key: "model", label: "Model usage", value: modelValue, bill: MODEL_BILL[m.source] || null, detail: tok || null },
     { key: "compute", label: "Sandbox compute", value: computeValue, bill: COMPUTE_BILL[c.source] || null, detail: null },
   ];
+}
+
+// D#6 R2b-5b: one line for each event the runner sends. The words of the run_ended lines are the runner protocol's copy.ts
+// (test/runs-detail.test.mjs pins each against it); nothing here reads model text, a diff or a command line, because none is sent.
+const RUN_ENDED_LINES = {
+  job_refused: (d) => "Your runner refused this job (" + d + "). Update the runner, then retry.",
+  agent_failed: () => "The agent stopped without finishing. Retry, or open the run for details.",
+  push_rejected: () => "Your runner could not push to the pull request's branch, because the branch changed while the agent was working. Retry to run on the new head.",
+};
+const SETUP_LINES = {
+  clone_limited: "This repository has used today's download allowance through our proxy. The runner keeps a copy, so this is rare. It resets at 00:00 UTC.",
+  push_ref_refused: "The runner would not publish the agent's work, because it was not shaped like a run's branch. Nothing was published. Build again.",
+  snapshot_refused: "The runner could not safely copy the agent's work out of its folder (it may be too large), so nothing was published. Build again.",
+  push_failed: "The runner could not push the agent's work to GitHub with your git credentials, so nothing was published. Check that git can push to this repository from that machine, then Build again.",
+  mirror_failed: "The runner could not update its local copy of this repository, so the run did not start. Check the runner machine's git access to the repository, then Build again.",
+  mirror_dir_insecure: "The folder where the runner keeps its repository copies is not private enough to use. Fix its permissions, then Build again.",
+  git_version_unsupported: "The git on the runner machine is too old. Update git, then Build again.",
+  workspace_failed: "The runner could not prepare a working folder for the agent. Check the disk space and git access on that machine, then Build again.",
+  workspace_git_refused: "The runner could not safely read the agent's git folder, so nothing was published. Update fx-runner, then Build again.",
+  head_not_from_base: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
+  sandbox_stub_committed: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
+};
+const CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const num = (v) => (Number.isFinite(v) ? v : null);
+
+function runEndedLine(p) {
+  const reason = typeof p.reason === "string" && CODE.test(p.reason) ? p.reason : "";
+  const detail = typeof p.detail === "string" && CODE.test(p.detail) ? p.detail : "";
+  if (reason === "runner_setup") {
+    if (detail === "push_too_large" && Number.isInteger(p.size_mb) && p.size_mb >= 5) return "This push is " + p.size_mb + " MB; the limit through our proxy is 4 MB. A person can push this commit, or you can switch this repo to local-only (auto-merge turns off).";
+    return SETUP_LINES[detail] || "Your runner could not start the agent (" + (detail || "other") + "). Check the runner's setup, then retry.";
+  }
+  if (Object.hasOwn(RUN_ENDED_LINES, reason)) return RUN_ENDED_LINES[reason](detail || "other");
+  // wall_clock, runner_shutdown and repo_not_private have no line in copy.ts: the closed reason is shown as words.
+  return reason ? "The run ended (" + word(reason) + ")" : "The run ended";
+}
+
+/** One runner event (the `payload` of a `runner.event`) as a line. An unknown or malformed `type` is "Runner step". */
+export function runnerEventLine(p) {
+  const e = isObj(p) ? p : {};
+  const tool = typeof e.tool_name === "string" && e.tool_name !== "" ? e.tool_name : null;
+  const file = typeof e.file_path === "string" && e.file_path !== "" ? e.file_path : null;
+  let line;
+  switch (e.type) {
+    case "tool_use":
+      line = "Used " + (tool || "a tool") + (file ? " · " + file : "");
+      break;
+    case "file_changed":
+      line = "Changed " + (file || "a file");
+      break;
+    case "command_exit": {
+      const secs = num(e.duration_ms) === null ? null : Math.round(e.duration_ms / 100) / 10;
+      line = "Command exited" + (num(e.exit_code) === null ? "" : " " + e.exit_code) + (secs === null ? "" : " after " + secs + "s");
+      break;
+    }
+    case "engine_version":
+      line = typeof e.engine_version === "string" && e.engine_version !== "" ? "Claude " + e.engine_version : "Engine version";
+      break;
+    case "usage": {
+      // Tokens only: the runner's own `usd` is never shown (the cloud recomputes the figure; the cost block shows that one).
+      const u = isObj(e.usage) ? e.usage : {};
+      line = (tokens(u.input) || "0") + " in / " + (tokens(u.output) || "0") + " out tokens";
+      break;
+    }
+    case "run_ended":
+      line = runEndedLine(e);
+      break;
+    case "usage_limit_reached": {
+      const t = typeof e.reset_at === "string" ? Date.parse(e.reset_at) : NaN;
+      line = "Plan usage limit reached" + (Number.isFinite(t) ? "; resumes at " + new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "");
+      break;
+    }
+    case "credential_mismatch":
+      line = "The sign-in on your runner is not the one this run was set up with.";
+      break;
+    case "taken_over":
+      line = "Taken over on the machine";
+      break;
+    default:
+      line = "Runner step";
+  }
+  return displayText(line);
 }
 
 const LIMIT_LABELS = {
@@ -274,8 +378,11 @@ function outcomeBody(insight, o, role) {
   return kids;
 }
 
+/** undefined for a sandbox run; the usage object (or null) for a run on the person's own machine. */
+const runnerUsageOf = (insight) => (insight.run.runtime === "runner" ? (isObj(insight.runner_usage) ? insight.runner_usage : null) : undefined);
+
 function costSection(insight) {
-  const rows = costRows(insight.cost, insight.run.status).map((r) =>
+  const rows = costRows(insight.cost, insight.run.status, runnerUsageOf(insight)).map((r) =>
     h(
       "div",
       { class: "runs-cost-row", "data-testid": "runs-cost-" + r.key },
