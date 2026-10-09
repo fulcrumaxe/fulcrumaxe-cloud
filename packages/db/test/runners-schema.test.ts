@@ -132,11 +132,11 @@ describe('runner schema (0711)', () => {
     for (const bad of ['runner_verified', 'local', '']) await rejects(`UPDATE repos SET execution_mode = $2 WHERE id = $1`, [refs.repoId, bad], '23514');
   });
 
-  it("agent_runs_execution_mode_check allows 'runner_local' since 0714 (C8 section 5 moved the widening to R3) and never 'runner_verified'; accounts.plan stays unconstrained", async () => {
+  it("agent_runs_execution_mode_check allows 'runner_local' since 0714 (C8 section 5 moved the widening to R3) and 'runner_verified' since 0765 (repos stays closed to it); accounts.plan stays unconstrained", async () => {
     const { rows } = await admin.query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'agent_runs_execution_mode_check'`);
     expect(rows[0]!.def).toContain("'sandbox'");
     expect(rows[0]!.def).toContain("'runner_local'");
-    expect(rows[0]!.def).not.toContain('runner_verified');
+    expect(rows[0]!.def).toContain("'runner_verified'");
     const plan = await admin.query(`SELECT 1 FROM pg_constraint WHERE conrelid = 'accounts'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) ILIKE '%plan%'`);
     expect(plan.rowCount).toBe(0);
   });

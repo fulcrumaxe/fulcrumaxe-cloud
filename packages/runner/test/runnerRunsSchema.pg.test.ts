@@ -47,12 +47,13 @@ describe("0714 runner runs [pg]", () => {
     const insertWith = (accountId: string, mode: string | null, runtime = "runner") =>
       db.admin.query(`INSERT INTO agent_runs (account_id, role, runtime, status, execution_mode) VALUES ($1, 'code-reviewer', $2, 'pending', $3)`, [accountId, runtime, mode]);
 
-    it("allows sandbox, runner_local and none; refuses runner_verified and anything else", async () => {
+    it("allows sandbox, runner_local, runner_verified (since 0765) and none; refuses anything else", async () => {
       const w = await world();
       await insertWith(w.accountId, "sandbox", "production");
       await insertWith(w.accountId, "runner_local");
+      await insertWith(w.accountId, "runner_verified");
       await insertWith(w.accountId, null);
-      for (const mode of ["runner_verified", "runner", "Runner_Local", ""]) {
+      for (const mode of ["runner", "Runner_Local", "Runner_Verified", ""]) {
         await expect(insertWith(w.accountId, mode), mode).rejects.toThrow(/agent_runs_execution_mode_check/);
       }
     });

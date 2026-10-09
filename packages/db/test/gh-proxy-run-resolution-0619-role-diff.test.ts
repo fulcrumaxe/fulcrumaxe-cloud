@@ -76,9 +76,12 @@ describe('migration 0619: app_user and partner_user column privileges are unchan
     pool = createPool(pg.url);
     guard = guardPoolTeardown(pool, 'roleDiffPool');
 
-    // Every migration file EXCEPT 0619 -- the "before" state.
+    // Every migration file EXCEPT 0619 -- the "before" state -- and except the files that grant a column 0619 adds
+    // (repos.gh_owner, repos.gh_name), which cannot apply without it. They apply right after 0619 in the second run below,
+    // and give app_user and partner_user nothing on either table.
+    const NEEDS_0619_COLUMNS = ['0765_runner_git_path_a.sql'];
     beforeMigrationsDir = mkdtempSync(path.join(tmpdir(), 'fx-614-diff-migrations-'));
-    const files = readdirSync(DEFAULT_MIGRATIONS_DIR).filter((f) => f.endsWith('.sql') && f !== '0619_gh_proxy_run_resolution.sql');
+    const files = readdirSync(DEFAULT_MIGRATIONS_DIR).filter((f) => f.endsWith('.sql') && f !== '0619_gh_proxy_run_resolution.sql' && !NEEDS_0619_COLUMNS.includes(f));
     for (const f of files) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeMigrationsDir, f));
     }
@@ -87,7 +90,7 @@ describe('migration 0619: app_user and partner_user column privileges are unchan
     appUserBefore = await columnPrivileges('app_user');
     partnerUserBefore = await columnPrivileges('partner_user');
 
-    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies exactly 0619 -- everything else is already recorded.
+    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0619, then the files held back above -- everything else is already recorded.
     appUserAfter = await columnPrivileges('app_user');
     partnerUserAfter = await columnPrivileges('partner_user');
   }, 90_000);
