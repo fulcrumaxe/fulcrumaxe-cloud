@@ -6,6 +6,7 @@
  */
 import { CredentialMode, RegisterMessage, RegisterResponse, RevokeMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../cliError.js";
+import { requireUsable } from "../protectionBypass.js";
 import { REGISTER_PATH, REVOKE_PATH, errorCodeOf, normaliseOrigin, refusalError, signedPost } from "../cloud.js";
 import { loadRegistration, saveRegistration, withRegisterLock } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
@@ -23,7 +24,7 @@ function stringFlag(flags: Flags, name: string): string {
 async function selfRevoke(origin: string, key: RunnerKey, ctx: CommandContext, reason: string): Promise<boolean> {
   try {
     const body = RevokeMessage.parse({ reason });
-    const reply = await signedPost({ origin, path: REVOKE_PATH, body, key, now: ctx.now(), fetchFn: ctx.fetchFn });
+    const reply = await signedPost({ origin, path: REVOKE_PATH, body, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     const revoked = (reply.body as { revoked?: unknown } | undefined)?.revoked === true;
     // 503 leases_not_failed also means the runner is revoked (the cloud could not yet stop its jobs, and a new runner has none).
     return revoked && (reply.status === 200 || (reply.status === 503 && errorCodeOf(reply.body) === "leases_not_failed"));
@@ -57,7 +58,7 @@ export async function registerCommand(flags: Flags, ctx: CommandContext): Promis
       );
     }
 
-    const reply = await signedPost({ origin, path: REGISTER_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn });
+    const reply = await signedPost({ origin, path: REGISTER_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     if (reply.status !== 201) throw refusalError(reply);
     const parsed = RegisterResponse.safeParse(reply.body);
     if (!parsed.success) {

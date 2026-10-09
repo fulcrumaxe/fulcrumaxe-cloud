@@ -19,6 +19,7 @@
  */
 import path from "node:path";
 import { CliError } from "../cliError.js";
+import { requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { createRunnerClient } from "../daemon/client.js";
@@ -30,7 +31,7 @@ import { createJobHandler } from "../daemon/jobHandler.js";
 import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
-import { mirrorKeepClear, mirrorsRootFor, type RepoRef } from "../daemon/mirror.js";
+import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
@@ -155,10 +156,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
 
   // The runner's own directories. The state directory is private; the workspaces, temp directories and mirrors sit beside each other in the cache directory.
   const stateDir = ctx.stateDir;
-  const mirrorsRoot = mirrorsRootFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
-  const cacheDir = path.dirname(mirrorsRoot);
-  const workspaceRoot = path.join(cacheDir, "workspaces");
-  const tempRoot = path.join(cacheDir, "tmp");
+  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
   const keepClear = mirrorKeepClear({ home, stateDir, binaryDir: path.dirname(binaryPath), workspaceRoot, tempRoot });
   if (keepClear.some((other) => pathsOverlap(mirrorsRoot, other))) throw new CliError("mirrors_root_overlap: the repo mirrors directory overlaps the runner's state, binary, workspace or temp directory");
 
@@ -178,7 +176,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const clock = hooks.clock ?? realClock;
     const relay = createEventRelay();
     const stopped = new AbortController();
-    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn });
+    const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
     const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });

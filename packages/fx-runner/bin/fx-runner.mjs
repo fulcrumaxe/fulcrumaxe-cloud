@@ -20,6 +20,11 @@ const code = await runCli({
   argv: process.argv.slice(2),
   home: process.env.HOME,
   stateDirOverride: process.env.FX_RUNNER_HOME,
+  // A file holding the Vercel protection bypass secret, for a staging or protected-preview cloud. Only the path is read here; src/protectionBypass.ts reads the file.
+  protectionBypassFile: process.env.FX_RUNNER_PROTECTION_BYPASS_FILE,
+  uid: process.getuid?.(),
+  platform: process.platform,
+  xdgCacheHome: process.env.XDG_CACHE_HOME,
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
   host: {
