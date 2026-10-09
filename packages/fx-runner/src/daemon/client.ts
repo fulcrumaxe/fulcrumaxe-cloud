@@ -63,13 +63,15 @@ export interface RunnerClientConfig {
   key: RunnerKey;
   now: () => Date;
   fetchFn: typeof fetch;
+  /** The Vercel protection bypass secret, if set; passed to every call and sent only to `origin`. */
+  bypass?: string | undefined;
 }
 
 export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
   /** One signed POST; undefined when the cloud could not be reached. */
   async function send(path: string, body: unknown): Promise<CloudReply | undefined> {
     try {
-      return await signedPost({ origin: config.origin, path, body, key: config.key, now: config.now(), fetchFn: config.fetchFn });
+      return await signedPost({ origin: config.origin, path, body, key: config.key, now: config.now(), fetchFn: config.fetchFn, bypass: config.bypass });
     } catch {
       // fx-swallow-ok: signedPost reports a network failure in fixed words; the caller sees it as status 0 and decides whether to retry
       return undefined;

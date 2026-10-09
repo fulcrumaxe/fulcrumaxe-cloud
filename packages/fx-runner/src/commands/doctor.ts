@@ -14,7 +14,9 @@ import { CliError } from "../cliError.js";
 import type { CommandContext } from "../context.js";
 import type { EngineKit } from "../daemon/engineKit.js";
 import { cleanEnv } from "../job/cleanEnv.js";
+import { isProtectedDeployment, readCapped } from "../cloud.js";
 import { loadRunnerKey } from "../keys.js";
+import { BYPASS_ENV_NAME, bypassHeaders, bypassSecret, bypassRefusalText } from "../protectionBypass.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
@@ -97,15 +99,37 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost): Prom
     else line("PASS", "Registration", `runner ${registration.runner_id}, ${registration.credential_mode} mode, key ${ageDays} days old`);
 
     try {
-      // Any answer at all means the cloud is reachable; the status, headers and body are not read.
-      const response = await ctx.fetchFn(`${registration.cloud_origin}/`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS) });
-      await response.body?.cancel();
-      line("PASS", "Cloud", `${registration.cloud_origin} answers`);
+      // Any answer at all means the cloud is reachable. On a 401 a small part of the body is read, only to tell Vercel's own protected-deployment answer from the cloud's; it is never shown.
+      const secret = bypassSecret(ctx.bypass);
+      const url = `${registration.cloud_origin}/`;
+      const response = await ctx.fetchFn(url, { method: "GET", headers: { accept: "application/json", ...bypassHeaders(secret, registration.cloud_origin, url) }, redirect: "manual", signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS) });
+      let body: unknown;
+      if (response.status === 401) {
+        try {
+          body = JSON.parse(await readCapped(response, 8192));
+        } catch {
+          // fx-swallow-ok: a body that cannot be read or is not JSON is not Vercel's protection answer
+          body = undefined;
+        }
+      } else {
+        await response.body?.cancel();
+      }
+      if (isProtectedDeployment(response.status, response.headers.get("server"), body)) {
+        const why = secret === undefined ? `${BYPASS_ENV_NAME} is not set` : `the secret in the file ${BYPASS_ENV_NAME} names was not accepted`;
+        line("FAIL", "Cloud", `${registration.cloud_origin} answers Vercel's protected-deployment 401: ${why}. For staging or a protected preview, set ${BYPASS_ENV_NAME} to a file holding the Protection Bypass for Automation secret`);
+      } else {
+        line("PASS", "Cloud", `${registration.cloud_origin} answers`);
+      }
     } catch {
       // fx-swallow-ok: the point of the check is the yes or no; the error text may carry an address
       line("FAIL", "Cloud", `${registration.cloud_origin} is not reachable`);
     }
   }
+
+  // The value is never shown: only whether it is set and the file passed its checks.
+  if (ctx.bypass?.kind === "ok") line("PASS", "Protection bypass", "set (file ok)");
+  else if (ctx.bypass?.kind === "refused") line("FAIL", "Protection bypass", bypassRefusalText(ctx.bypass.code));
+  else line("INFO", "Protection bypass", "not set");
 
   const mode = registration?.credential_mode;
   let binaryPath: string | undefined;

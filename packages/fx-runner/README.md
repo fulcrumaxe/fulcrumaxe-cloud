@@ -48,7 +48,7 @@ It only calls out (no listening socket).
 
 ## Command line
 
-`bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME` and `XDG_CACHE_HOME` by name and hands everything else to
+`bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE` and `XDG_CACHE_HOME` by name and hands everything else to
 `runCli` in `src/cli.ts`. It runs from a build of `src/` (the installer comes later), not from the TypeScript directly.
 
 - `fx-runner register --code <code> --credential-mode subscription|api_key --cloud-url <url>`: makes an Ed25519 key on
@@ -128,6 +128,36 @@ There is one install path per OS: the installer script, which arrives with the r
 macOS and the Linux build on Linux, and WSL2 uses the Linux one. Claude Code itself must already be installed and signed in.
 
 `FX_RUNNER_HOME` moves the state directory. A key over 90 days old is refused by the cloud: revoke and register again.
+
+### Reaching a protected staging cloud
+
+For staging or a protected preview only; production needs no bypass. A cloud behind Vercel Deployment Protection answers every
+runner call with Vercel's own 401 "Protected deployment". Put the project's "Protection Bypass for Automation" secret in a file and
+name the file in `FX_RUNNER_PROTECTION_BYPASS_FILE`:
+
+    mkdir -p -m 700 ~/.fx-runner && install -m 600 /dev/null ~/.fx-runner/bypass && printf '%s\n' '<the secret>' > ~/.fx-runner/bypass
+    FX_RUNNER_PROTECTION_BYPASS_FILE=~/.fx-runner/bypass fx-runner run
+
+- **Where the file must live.** Under your home directory; the state directory (`~/.fx-runner/`) is the place we recommend. A job's
+  agent runs as your user, so file mode and owner do not hide the file from it. What does is the job sandbox, which denies reads of
+  the home directory and of the state directory. So the file's real path (every link followed) must be inside your home directory
+  and not inside a directory the sandbox re-allows for reads: the cache directory's `workspaces`, `tmp` and `mirrors`
+  (`~/.cache/fx-runner/` on Linux, `~/Library/Caches/fx-runner/` on macOS, or under `XDG_CACHE_HOME` when that is set). A file
+  anywhere else, for example in a system temp directory or a service directory outside home, is refused with `bypass_file_location`.
+- The file must be a plain file (not a link), owned by you, mode 0600 or stricter, holding one value of printable characters
+  without spaces. Anything else stops `register`, `revoke` and `run` before a request, with a closed code
+  (`bypass_file_unreadable`, `bypass_file_not_regular`, `bypass_file_not_owned`, `bypass_file_mode`, `bypass_file_invalid`, and `bypass_file_location` for the rule above).
+- The value is sent as the `x-vercel-protection-bypass` header on every runner call to the registered cloud address (same scheme,
+  host and port), and nowhere else: not to GitHub, not to the git proxy, not to any other host. A redirect from the cloud is
+  not followed. It is never printed, logged, put in an argument list or written into `registration.json`.
+- `fx-runner doctor` prints `Protection bypass: set (file ok)` or `not set`, never the value. If the cloud answers with Vercel's
+  protected-deployment 401, doctor says so and names the variable.
+- `fx-runner service install` carries the variable into the systemd or launchd unit the same way it carries `FX_RUNNER_HOME`: the
+  unit holds the path of the file, never the secret. The path must be absolute and plain (letters, digits and `_ . / @ + = -`), and
+  install does not open the file. Run `service install` again after you change the variable; with it unset, the rewritten unit
+  has no such line.
+- Vercel's protection answer is recognised by a 401 whose JSON body says `protection.vercel_auth_enabled` is true or whose
+  `error.message` is "Protected deployment". The cloud's own refusals (for example `runner_revoked`) are never taken for it.
 
 ## Boundaries
 

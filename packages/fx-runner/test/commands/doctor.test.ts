@@ -15,6 +15,7 @@ import { MACOS_PREVIEW_NOTICE } from "../../src/platformSupport.js";
 import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engines/claude/harness.js";
 import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { findOnPath } from "../helpers/findOnPath.js";
+import { VERCEL_PROTECTED_ROOT_BODY, ownCloud401Response, vercelProtectedResponse } from "../helpers/vercelProtected.js";
 
 let root: string;
 let stateDir: string;
@@ -57,9 +58,9 @@ interface Result {
   out: string;
 }
 
-async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date } = {}): Promise<Result> {
+async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"] } = {}): Promise<Result> {
   const lines: string[] = [];
-  const ctx: CommandContext = { stateDir, out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch) };
+  const ctx: CommandContext = { stateDir, out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
   const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), ...over.host };
   const code = await doctorCommand(ctx, host);
   return { code, out: lines.join("\n") };
@@ -366,5 +367,108 @@ describe("the sandbox check", () => {
     expect(levelOf(result.out, "Sandbox")).toBe("FAIL");
     for (const value of Object.values(SECRETS)) expect(result.out).not.toContain(value);
     expect(JSON.stringify(host.calls)).not.toContain(SECRETS.CLAUDE_CODE_OAUTH_TOKEN);
+  });
+});
+
+describe("the protection bypass", () => {
+  // Built at run time from parts, so a secret scanner finds no literal that looks like a live key.
+  const SECRET = ["bypass", "fixture", "0123456789abcdef"].join("-");
+  const protectedReply = (): typeof fetch => (async () => vercelProtectedResponse()) as typeof fetch;
+
+  it("not set: an INFO line, no value", async () => {
+    register();
+    const result = await doctor();
+    expect(result.out).toContain("Protection bypass: not set");
+    expect(result.code).toBe(0);
+  });
+
+  it("set: says so without the value, and the GET to the cloud carries the header", async () => {
+    register();
+    const seen: Array<Record<string, string>> = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.headers as Record<string, string>);
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await doctor({ bypass: { kind: "ok", secret: SECRET }, fetchFn });
+    expect(result.out).toContain("Protection bypass: set (file ok)");
+    expect(levelOf(result.out, "Protection bypass")).toBe("PASS");
+    expect(result.out).not.toContain(SECRET);
+    expect(seen).toEqual([{ accept: "application/json", "x-vercel-protection-bypass": SECRET }]);
+  });
+
+  it("a file that failed its checks: FAIL with the closed code, nothing sent, no value", async () => {
+    register();
+    const seen: Array<Record<string, string>> = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.headers as Record<string, string>);
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await doctor({ bypass: { kind: "refused", code: "bypass_file_mode" }, fetchFn });
+    expect(levelOf(result.out, "Protection bypass")).toBe("FAIL");
+    expect(result.out).toContain("bypass_file_mode");
+    expect(seen).toEqual([{ accept: "application/json" }]);
+    expect(result.code).toBe(1);
+  });
+
+  it("a file in the wrong place: FAIL with the location code and where the file must be, nothing sent, no value", async () => {
+    register();
+    const seen: Array<Record<string, string>> = [];
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.headers as Record<string, string>);
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await doctor({ bypass: { kind: "refused", code: "bypass_file_location" }, fetchFn });
+    expect(levelOf(result.out, "Protection bypass")).toBe("FAIL");
+    expect(result.out).toContain("bypass_file_location");
+    expect(result.out).toContain("home directory");
+    expect(seen).toEqual([{ accept: "application/json" }]);
+    expect(result.code).toBe(1);
+  });
+
+  it("the protected answer to GET / (the shape the staging root gives) is recognised, with and without a secret", async () => {
+    register();
+    const reply = (): typeof fetch => (async () => new Response(JSON.stringify(VERCEL_PROTECTED_ROOT_BODY), { status: 401, headers: { "content-type": "application/json", server: "Vercel" } })) as typeof fetch;
+    const without = await doctor({ fetchFn: reply() });
+    expect(levelOf(without.out, "Cloud")).toBe("FAIL");
+    expect(without.out).toContain("FX_RUNNER_PROTECTION_BYPASS_FILE is not set");
+    const withSecret = await doctor({ bypass: { kind: "ok", secret: SECRET }, fetchFn: reply() });
+    expect(levelOf(withSecret.out, "Cloud")).toBe("FAIL");
+    expect(withSecret.out).toContain("was not accepted");
+    expect(withSecret.out).not.toContain(SECRET);
+  });
+
+  it("Vercel's protected-deployment 401 without a bypass: FAIL naming the variable", async () => {
+    register();
+    const result = await doctor({ fetchFn: protectedReply() });
+    expect(levelOf(result.out, "Cloud")).toBe("FAIL");
+    expect(result.out).toContain("protected-deployment 401");
+    expect(result.out).toContain("FX_RUNNER_PROTECTION_BYPASS_FILE is not set");
+    expect(result.code).toBe(1);
+  });
+
+  it("the same 401 with a secret set: says it was not accepted, still no value", async () => {
+    register();
+    const result = await doctor({ bypass: { kind: "ok", secret: SECRET }, fetchFn: protectedReply() });
+    expect(result.out).toContain("was not accepted");
+    expect(result.out).not.toContain(SECRET);
+  });
+
+  it("our own cloud's 401, also served by Vercel, is just an answer", async () => {
+    register();
+    const result = await doctor({ fetchFn: (async () => ownCloud401Response()) as typeof fetch });
+    expect(levelOf(result.out, "Cloud")).toBe("PASS");
+    expect(result.out).not.toContain("protected-deployment");
+  });
+
+  it("a Vercel header with an HTML 401 body is not enough", async () => {
+    register();
+    const result = await doctor({ fetchFn: (async () => new Response("<html>Authentication Required</html>", { status: 401, headers: { server: "Vercel" } })) as typeof fetch });
+    expect(levelOf(result.out, "Cloud")).toBe("PASS");
+  });
+
+  it("a 401 that is not Vercel's is just an answer", async () => {
+    register();
+    const result = await doctor({ fetchFn: (async () => new Response("", { status: 401, headers: { server: "nginx" } })) as typeof fetch });
+    expect(levelOf(result.out, "Cloud")).toBe("PASS");
   });
 });

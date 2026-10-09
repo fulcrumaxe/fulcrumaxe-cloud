@@ -11,7 +11,7 @@
  */
 import path from "node:path";
 import { printable } from "../commands/logs.js";
-import { mirrorsRootFor } from "../daemon/mirror.js";
+import { cacheRootsFor } from "../daemon/mirror.js";
 import { cleanEnv } from "../job/cleanEnv.js";
 import { SandboxRefused } from "./platform.js";
 import { sandboxSettings } from "./sandboxSettings.js";
@@ -55,9 +55,7 @@ const DETAIL_MAX = 160;
 
 /** The settings a job would get, for a workspace and temp directory that stand in for a job's, built by the one shared function. */
 export function probeSettings(input: SandboxProbeInput): Record<string, unknown> {
-  const cacheDir = path.dirname(mirrorsRootFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome }));
-  const workspaceRoot = path.join(cacheDir, "workspaces");
-  const tempRoot = path.join(cacheDir, "tmp");
+  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome });
   return sandboxSettings({
     workspace: path.join(workspaceRoot, "fx-probe"),
     tempDir: path.join(tempRoot, "fx-probe"),
@@ -66,7 +64,7 @@ export function probeSettings(input: SandboxProbeInput): Record<string, unknown>
     binaryDir: input.binaryDir,
     workspaceRoot,
     tempRoot,
-    mirrorsRoot: mirrorsRootFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome }),
+    mirrorsRoot,
   });
 }
 

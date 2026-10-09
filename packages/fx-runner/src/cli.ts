@@ -8,6 +8,7 @@ import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { attachCommand } from "./commands/attach.js";
 import { registerCommand } from "./commands/register.js";
+import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
 import { logsCommand } from "./commands/logs.js";
@@ -23,6 +24,13 @@ export interface CliIo {
   home: string | undefined;
   /** `FX_RUNNER_HOME`, looked up by name by the caller: a state directory other than `~/.fx-runner`. */
   stateDirOverride?: string | undefined;
+  /** `FX_RUNNER_PROTECTION_BYPASS_FILE`, looked up by name by the caller: a file holding the Vercel protection bypass secret (staging only). */
+  protectionBypassFile?: string | undefined;
+  /** The user id the process runs as, for the owner check on that file. */
+  uid?: number | undefined;
+  /** The platform and `XDG_CACHE_HOME`, looked up by name by the caller: where the runner's cache directories are, which that file must stay out of. */
+  platform?: NodeJS.Platform | undefined;
+  xdgCacheHome?: string | undefined;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   now?: () => Date;
@@ -113,7 +121,11 @@ export async function runCli(io: CliIo): Promise<number> {
       err: (line) => io.stderr(`${line}\n`),
       now: io.now ?? (() => new Date()),
       fetchFn: io.fetchFn ?? fetch,
+      bypass: loadBypass(io.protectionBypassFile, io.uid, { home: io.home, platform: io.platform ?? "linux", xdgCacheHome: io.xdgCacheHome }),
+      bypassFile: io.protectionBypassFile,
     };
+    // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
+    if (command === "register" || command === "revoke" || command === "run") requireUsable(ctx.bypass);
     if (command === "register") return await registerCommand(flags, ctx);
     if (command === "revoke") return await revokeCommand(flags, ctx);
     if (command === "run") {

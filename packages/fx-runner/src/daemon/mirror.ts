@@ -43,6 +43,16 @@ export function mirrorsRootFor(input: { home: string; platform: NodeJS.Platform;
   return path.join(cache, "fx-runner", "mirrors");
 }
 
+/**
+ * The three runner directories under the cache directory that a job's sandbox can read or is made under: the mirrors, the workspaces
+ * and the job temp directories. One function, used by `run`, the sandbox probe and the protection-bypass location check, so they agree.
+ */
+export function cacheRootsFor(input: { home: string; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { mirrorsRoot: string; workspaceRoot: string; tempRoot: string } {
+  const mirrorsRoot = mirrorsRootFor(input);
+  const cacheDir = path.dirname(mirrorsRoot);
+  return { mirrorsRoot, workspaceRoot: path.join(cacheDir, "workspaces"), tempRoot: path.join(cacheDir, "tmp") };
+}
+
 /** The runner roots and protected locations the mirrors directory must not overlap, as the sandbox builder lists them. */
 export function mirrorKeepClear(input: { home: string; stateDir: string; binaryDir: string; workspaceRoot: string; tempRoot: string }): string[] {
   return [input.stateDir, input.binaryDir, input.workspaceRoot, input.tempRoot, ...CREDENTIAL_FLOOR.map((entry) => path.join(input.home, entry))];

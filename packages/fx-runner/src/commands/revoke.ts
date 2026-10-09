@@ -7,6 +7,7 @@
  */
 import { RevokeMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../cliError.js";
+import { requireUsable } from "../protectionBypass.js";
 import { REVOKE_PATH, errorCodeOf, refusalError, signedPost } from "../cloud.js";
 import { KEY_FILE, REGISTRATION_FILE, loadRegistration, removeStateFile } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
@@ -37,7 +38,7 @@ export async function revokeCommand(flags: Flags, ctx: CommandContext): Promise<
   const message = RevokeMessage.safeParse(reason === undefined ? {} : { reason });
   if (!message.success) throw new CliError("--reason must be at most 200 characters with no control characters", 2);
 
-  const reply = await signedPost({ origin: registration.cloud_origin, path: REVOKE_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn });
+  const reply = await signedPost({ origin: registration.cloud_origin, path: REVOKE_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
   const body = reply.body as { revoked?: unknown; runs_failed?: unknown } | undefined;
   if (reply.status === 200 && body?.revoked === true) {
     forget(ctx);

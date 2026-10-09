@@ -5,6 +5,7 @@
 import { randomBytes } from "node:crypto";
 import { signRequest } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "./cliError.js";
+import { BYPASS_ENV_NAME, bypassHeaders } from "./protectionBypass.js";
 import type { RunnerKey } from "./keys.js";
 
 export const REGISTER_PATH = "/api/runner/register";
@@ -33,6 +34,8 @@ export interface CloudReply {
   /** The parsed JSON body, or undefined when it was not JSON. */
   body: unknown;
   retryAfter: number | undefined;
+  /** True for Vercel's own "Protected deployment" 401: the platform answered before the cloud's code ran. */
+  protectedDeployment: boolean;
 }
 
 export interface SignedPost {
@@ -42,6 +45,23 @@ export interface SignedPost {
   key: RunnerKey;
   now: Date;
   fetchFn: typeof fetch;
+  /** The Vercel protection bypass secret, if the user set one. Sent only to `origin`; see protectionBypass.ts. */
+  bypass?: string | undefined;
+}
+
+/**
+ * Vercel's protection answer, as captured from a protected staging deployment: status 401, a JSON body whose `protection` object has
+ * `vercel_auth_enabled: true` or whose `error.message` is "Protected deployment". Its `error.code` is the string "401", which our own
+ * snake_case codes never are, but the code is not what decides. `server: Vercel` only supports a body that carries a `protection`
+ * object; it never decides alone, because our own cloud also runs on Vercel and answers 401 itself (`runner_revoked`).
+ */
+export function isProtectedDeployment(status: number, serverHeader: string | null, body: unknown): boolean {
+  if (status !== 401 || typeof body !== "object" || body === null) return false;
+  const { protection, error } = body as { protection?: unknown; error?: unknown };
+  const protectionObject = typeof protection === "object" && protection !== null ? (protection as { vercel_auth_enabled?: unknown }) : undefined;
+  if (protectionObject?.vercel_auth_enabled === true) return true;
+  if (typeof error === "object" && error !== null && (error as { message?: unknown }).message === "Protected deployment") return true;
+  return serverHeader?.toLowerCase() === "vercel" && protectionObject !== undefined;
 }
 
 /** At most `max` bytes of the reply body, read chunk by chunk; the rest of the stream is cancelled unread. */
@@ -84,7 +104,7 @@ export async function signedPost(input: SignedPost): Promise<CloudReply> {
   try {
     response = await input.fetchFn(url, {
       method: "POST",
-      headers: { "content-type": "application/json", ...headers },
+      headers: { "content-type": "application/json", ...headers, ...bypassHeaders(input.bypass, input.origin, url) },
       body: text,
       redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -101,7 +121,12 @@ export async function signedPost(input: SignedPost): Promise<CloudReply> {
     body = undefined;
   }
   const retry = Number(response.headers.get("retry-after"));
-  return { status: response.status, body, retryAfter: Number.isFinite(retry) && retry > 0 ? Math.min(retry, 86_400) : undefined };
+  return {
+    status: response.status,
+    body,
+    retryAfter: Number.isFinite(retry) && retry > 0 ? Math.min(retry, 86_400) : undefined,
+    protectedDeployment: isProtectedDeployment(response.status, response.headers.get("server"), body),
+  };
 }
 
 /** The `error.code` of a refusal when it is a short lower-case word; nothing else the server says is ever shown. */
@@ -126,6 +151,9 @@ const HINTS: Readonly<Record<string, string>> = {
 /** A fixed-text error for a refusal, with the code and, for a rate limit, the wait. */
 export function refusalError(reply: CloudReply): CliError {
   const code = errorCodeOf(reply.body);
+  if (reply.protectedDeployment) {
+    return new CliError(`the cloud is behind Vercel Deployment Protection (401); for staging or a protected preview set ${BYPASS_ENV_NAME} to a file holding the project's Protection Bypass for Automation secret`);
+  }
   if (reply.status === 429) return new CliError(`too many attempts; wait ${reply.retryAfter ?? 60} seconds and try again`);
   const hint = code ? HINTS[code] : undefined;
   return new CliError(`the cloud refused the request (${reply.status}${code ? ` ${code}` : ""})${hint ? `: ${hint}` : ""}`);

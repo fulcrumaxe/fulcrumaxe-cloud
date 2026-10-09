@@ -50,7 +50,7 @@ describe("bin/fx-runner.mjs", () => {
 
   it("reads the environment only by name, never as a whole", () => {
     const reads = [...text.matchAll(/process\.env(\.\w+|\[[^\]]*\]|[^\w.[])/g)].map((m) => m[1]);
-    expect(reads).toEqual([".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".HOME", ".FX_RUNNER_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".HOME", ".XDG_CACHE_HOME", ".HOME", ".XDG_CONFIG_HOME", ".PATH"]);
+    expect(reads).toEqual([".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".HOME", ".FX_RUNNER_HOME", ".FX_RUNNER_PROTECTION_BYPASS_FILE", ".XDG_CACHE_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".HOME", ".XDG_CACHE_HOME", ".HOME", ".XDG_CONFIG_HOME", ".PATH"]);
     expect(text).not.toMatch(/\.\.\.\s*process|Object\.\w+\(\s*process\.env|globalThis|\bglobal\b/);
   });
 });

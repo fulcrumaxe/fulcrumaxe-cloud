@@ -19,6 +19,7 @@ import { CliError } from "../cliError.js";
 import { STATE_DIR_NAME, loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
+import { BYPASS_ENV_NAME } from "../protectionBypass.js";
 
 export const SYSTEMD_UNIT_NAME = "fx-runner.service";
 export const LAUNCHD_LABEL = "dev.fulcrumaxe.fx-runner";
@@ -50,6 +51,8 @@ export interface UnitInput {
   pathEntries: readonly string[];
   /** Set when the state directory is not the default `~/.fx-runner`. */
   stateDir?: string;
+  /** Set when `FX_RUNNER_PROTECTION_BYPASS_FILE` is set: the PATH of the file, never its content. */
+  bypassFile?: string;
   /** Where `run`'s output goes (launchd only; systemd uses the journal). */
   logFile: string;
 }
@@ -66,6 +69,7 @@ export function renderSystemdUnit(input: UnitInput): string {
   ];
   if (input.pathEntries.length > 0) lines.push(`Environment="PATH=${input.pathEntries.join(":")}"`);
   if (input.stateDir !== undefined) lines.push(`Environment="FX_RUNNER_HOME=${input.stateDir}"`);
+  if (input.bypassFile !== undefined) lines.push(`Environment="${BYPASS_ENV_NAME}=${input.bypassFile}"`);
   lines.push("Restart=on-failure", "RestartSec=30", "TimeoutStopSec=20", "", "[Install]", "WantedBy=default.target", "");
   return lines.join("\n");
 }
@@ -76,6 +80,7 @@ export function renderLaunchdPlist(input: UnitInput): string {
   const env: string[] = [];
   if (input.pathEntries.length > 0) env.push(`    <key>PATH</key>\n    <string>${xml(input.pathEntries.join(":"))}</string>`);
   if (input.stateDir !== undefined) env.push(`    <key>FX_RUNNER_HOME</key>\n    <string>${xml(input.stateDir)}</string>`);
+  if (input.bypassFile !== undefined) env.push(`    <key>${BYPASS_ENV_NAME}</key>\n    <string>${xml(input.bypassFile)}</string>`);
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
@@ -171,8 +176,9 @@ export function serviceCommand(action: string | undefined, ctx: CommandContext, 
   if (host.command.length < 2 || host.command[host.command.length - 1] !== "run") throw new CliError("service_path_unsupported: the service command must end with run");
   const command = host.command.map((arg, i) => (i === host.command.length - 1 ? arg : plainPath(arg, "the command the service runs")));
   const stateDir = ctx.stateDir === path.join(home, STATE_DIR_NAME) ? undefined : plainPath(ctx.stateDir, "the state directory");
+  const bypassFile = ctx.bypassFile === undefined || ctx.bypassFile === "" ? undefined : plainPath(ctx.bypassFile, BYPASS_ENV_NAME);
   const pathEntries = (host.path ?? "").split(":").filter((entry) => path.isAbsolute(entry) && PLAIN.test(entry));
-  const text = target.render({ command, pathEntries, ...(stateDir === undefined ? {} : { stateDir }), logFile: path.join(ctx.stateDir, "service.log") });
+  const text = target.render({ command, pathEntries, ...(stateDir === undefined ? {} : { stateDir }), ...(bypassFile === undefined ? {} : { bypassFile }), logFile: path.join(ctx.stateDir, "service.log") });
 
   if (existing.kind === "ours" && existing.text === text) {
     ctx.out(`Already installed: ${target.file} is up to date.`);

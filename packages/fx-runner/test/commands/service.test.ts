@@ -20,9 +20,9 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 const COMMAND = ["/opt/node/bin/node", "/opt/fx-runner/bin/fx-runner.mjs", "run"];
 const hostOf = (over: Partial<ServiceHost> = {}): ServiceHost => ({ home, platform: "linux", xdgConfigHome: undefined, command: COMMAND, path: "/usr/bin:/home/someone/.local/bin", ...over });
 
-function run(action: string | undefined, over: { host?: Partial<ServiceHost>; stateDir?: string } = {}): { code: number; out: string } {
+function run(action: string | undefined, over: { host?: Partial<ServiceHost>; stateDir?: string; bypassFile?: string } = {}): { code: number; out: string } {
   const lines: string[] = [];
-  const ctx: CommandContext = { stateDir: over.stateDir ?? path.join(home, ".fx-runner"), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: fetch };
+  const ctx: CommandContext = { stateDir: over.stateDir ?? path.join(home, ".fx-runner"), out: (l) => lines.push(l), err: (l) => lines.push(l), now: () => new Date(), fetchFn: fetch, ...(over.bypassFile === undefined ? {} : { bypassFile: over.bypassFile }) };
   const code = serviceCommand(action, ctx, hostOf(over.host));
   return { code, out: lines.join("\n") };
 }
@@ -103,6 +103,63 @@ describe("the generated text, exactly", () => {
   it("both formats open with the marker the uninstall path looks for", () => {
     expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
     expect(renderLaunchdPlist({ command: COMMAND, pathEntries: [], logFile: "/l" })).toContain(SERVICE_MARKER);
+  });
+});
+
+describe("the protection bypass file's path in the unit", () => {
+  const FILE = "/srv/runner/bypass-file";
+
+  it("systemd carries the path as an Environment line, and launchd as an EnvironmentVariables entry", () => {
+    expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], bypassFile: FILE, logFile: "/l" })).toContain(`Environment="FX_RUNNER_PROTECTION_BYPASS_FILE=${FILE}"`);
+    const plist = renderLaunchdPlist({ command: COMMAND, pathEntries: [], bypassFile: FILE, logFile: "/l" });
+    expect(plist).toContain(`<key>FX_RUNNER_PROTECTION_BYPASS_FILE</key>\n    <string>${FILE}</string>`);
+  });
+
+  it("without the variable neither unit mentions it", () => {
+    expect(renderSystemdUnit({ command: COMMAND, pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
+    expect(renderLaunchdPlist({ command: COMMAND, pathEntries: [], logFile: "/l" })).not.toContain("PROTECTION_BYPASS");
+  });
+
+  it("install writes the path, never the secret: the file is not even read", () => {
+    const file = path.join(root, "bypass");
+    // Built at run time, so a secret scanner finds no literal that looks like a live key.
+    const value = ["the", "bypass", "value", "0123"].join("-");
+    writeFileSync(file, `${value}\n`, { mode: 0o600 });
+    expect(run("install", { bypassFile: file }).code).toBe(0);
+    const text = readFileSync(linuxFile(), "utf8");
+    expect(text).toContain(`Environment="FX_RUNNER_PROTECTION_BYPASS_FILE=${file}"`);
+    expect(text).not.toContain(value);
+    expect(run("install", { host: { platform: "darwin" }, bypassFile: file }).code).toBe(0);
+    const plist = readFileSync(macFile(), "utf8");
+    expect(plist).toContain(file);
+    expect(plist).not.toContain(value);
+  });
+
+  it("an empty variable adds nothing, a changed path rewrites the same unit, and removing it rewrites it without", () => {
+    run("install", { bypassFile: "" });
+    expect(readFileSync(linuxFile(), "utf8")).not.toContain("PROTECTION_BYPASS");
+    run("install", { bypassFile: "/srv/a" });
+    expect(readFileSync(linuxFile(), "utf8")).toContain("PROTECTION_BYPASS_FILE=/srv/a");
+    run("install", { bypassFile: "/srv/b" });
+    const text = readFileSync(linuxFile(), "utf8");
+    expect(text).toContain("PROTECTION_BYPASS_FILE=/srv/b");
+    expect(text).not.toContain("/srv/a");
+    run("install");
+    expect(readFileSync(linuxFile(), "utf8")).not.toContain("PROTECTION_BYPASS");
+  });
+
+  it("a relative path, or one with a space or quote, is refused and nothing is written", () => {
+    for (const bad of ["relative/file", "/srv/has space", '/srv/q"uote']) {
+      expect(() => run("install", { bypassFile: bad }), bad).toThrow(/service_path_unsupported/);
+    }
+    expect(existsSync(linuxFile())).toBe(false);
+  });
+
+  it("through the command line the variable reaches the unit", async () => {
+    const file = path.join(root, "cli-bypass");
+    const code = await runCli({ argv: ["service", "install"], home, stateDirOverride: path.join(home, ".fx-runner"), stdout: () => undefined, stderr: () => undefined, protectionBypassFile: file, serviceHost: hostOf() });
+    expect(code).toBe(0);
+    expect(readFileSync(linuxFile(), "utf8")).toContain(`FX_RUNNER_PROTECTION_BYPASS_FILE=${file}`);
   });
 });
 
