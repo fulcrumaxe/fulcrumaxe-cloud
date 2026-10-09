@@ -58,11 +58,11 @@ interface Result {
   out: string;
 }
 
-async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"] } = {}): Promise<Result> {
+async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"]; sandboxOnly?: boolean } = {}): Promise<Result> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
   const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), ...over.host };
-  const code = await doctorCommand(ctx, host);
+  const code = await doctorCommand(ctx, host, over.sandboxOnly === undefined ? {} : { sandboxOnly: over.sandboxOnly });
   return { code, out: lines.join("\n") };
 }
 
@@ -501,5 +501,36 @@ describe("the protection bypass", () => {
     register();
     const result = await doctor({ fetchFn: (async () => new Response("", { status: 401, headers: { server: "nginx" } })) as typeof fetch });
     expect(levelOf(result.out, "Cloud")).toBe("PASS");
+  });
+});
+
+describe("doctor --sandbox-only (the probe install.sh runs, C16 section 2)", () => {
+  it("prints the sandbox line only, makes no network call and asks the CLI nothing, exit 0 on a pass", async () => {
+    const result = await doctor({ sandboxOnly: true, fetchFn: (async () => { throw new Error("no network call expected"); }) as typeof fetch });
+    expect(result.out).toBe("PASS  Sandbox:           a test command ran inside the job's sandbox rules (bubblewrap)");
+    expect(result.code).toBe(0);
+    expect(fake.calls()).toEqual([]);
+  });
+
+  it("on a failed probe prints the failed line and the fix, and exits 1", async () => {
+    const files = { ["/etc/os-" + "release"]: "ID=fedora\n" };
+    const result = await doctor({ sandboxOnly: true, host: { sandbox: fakeSandboxHost({ files, outcome: failing("bwrap: odd failure") }) } });
+    expect(result.out).toContain("FAIL  Sandbox:           probe_failed_other: bwrap: odd failure");
+    expect(result.out).toContain("Run: sudo dnf install -y bubblewrap socat");
+    expect(result.out).not.toContain("Registration");
+    expect(result.code).toBe(1);
+  });
+
+  it("works with no Claude CLI on the machine", async () => {
+    const bare = path.join(root, "bare");
+    mkdirSync(bare);
+    for (const name of ["bwrap", "socat"]) {
+      writeFileSync(path.join(bare, name), "#!/bin/sh\n");
+      chmodSync(path.join(bare, name), 0o755);
+    }
+    vi.stubEnv("PATH", bare);
+    const result = await doctor({ sandboxOnly: true });
+    expect(levelOf(result.out, "Sandbox")).toBe("PASS");
+    expect(result.code).toBe(0);
   });
 });

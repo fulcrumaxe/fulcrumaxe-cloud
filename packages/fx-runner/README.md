@@ -49,7 +49,7 @@ It only calls out (no listening socket).
 ## Command line
 
 `bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE` and `XDG_CACHE_HOME` by name and hands everything else to
-`runCli` in `src/cli.ts`. It runs from a build of `src/` (the installer comes later), not from the TypeScript directly.
+`runCli` in `src/cli.ts`. It runs from a build of `src/`, not from the TypeScript directly: see "Build from source".
 
 - `fx-runner register --code <code> --credential-mode subscription|api_key --cloud-url <url>`: makes an Ed25519 key on
   this machine and registers it. The code comes from the workspace, works once and expires after 10 minutes. The request
@@ -110,6 +110,20 @@ It only calls out (no listening socket).
   second copy on the same state directory. A file at that path that `service` did not write is never overwritten or removed.
   The unit carries your shell's `PATH` (so it finds Claude Code) and, if you use `FX_RUNNER_HOME`, that too; a path with a
   space or another unusual character is refused.
+
+## Build from source
+
+`scripts/build-sea.mjs` builds the release program: one executable with Node inside it, for the platform it runs on.
+
+    SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) node scripts/build-sea.mjs [--out-dir dist/sea]
+
+It bundles `bin/fx-runner.mjs` and `src/**` into one CommonJS file with esbuild, downloads the pinned Node release
+(`NODE_VERSION` in the script) and checks it against nodejs.org's `SHASUMS256.txt` and against the SHA-256 pinned in the
+script, makes the single-executable blob with that Node, and injects it with postject (on macOS it removes the signature,
+injects, signs ad hoc and verifies). It writes `fx-runner-<platform>` and `release-manifest.json` (version, platform,
+SHA-256, size) to `--out-dir`, and writes nothing if any step fails. A target is built on a machine of the same platform.
+Two builds of one commit with the same `SOURCE_DATE_EPOCH` are byte-identical. The release file names are the
+`ARTIFACT_NAMES` constant in `scripts/release-manifest.mjs` (`node scripts/release-manifest.mjs --names` prints them).
 
 ## Supported platforms
 

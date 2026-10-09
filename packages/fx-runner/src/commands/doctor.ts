@@ -71,12 +71,28 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
   for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
 }
 
-export async function doctorCommand(ctx: CommandContext, host: DoctorHost): Promise<number> {
+/** `doctor --sandbox-only` (the probe `install.sh` runs, C16 section 2): just the sandbox line and its fix. It reads no registration and makes no network call. */
+async function sandboxOnly(ctx: CommandContext, host: DoctorHost, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  let binaryPath: string | undefined;
+  try {
+    binaryPath = host.engine.locate(cleanEnv({ mode: "subscription" }).PATH ?? "");
+  } catch (error) {
+    // fx-swallow-ok: the probe runs without the Claude CLI's folder; a missing CLI is the full doctor's finding, not this check's
+    if (!(error instanceof Error) || error.name !== "EngineRefusal") throw error;
+  }
+  await sandboxCheck(ctx, host, binaryPath, line);
+}
+
+export async function doctorCommand(ctx: CommandContext, host: DoctorHost, options: { sandboxOnly?: boolean } = {}): Promise<number> {
   let failed = 0;
   const line = (level: Level, label: string, detail: string): void => {
     if (level === "FAIL") failed++;
     ctx.out(`${level.padEnd(4)}  ${`${label}:`.padEnd(19)}${detail}`);
   };
+  if (options.sandboxOnly === true) {
+    await sandboxOnly(ctx, host, line);
+    return failed === 0 ? 0 : 1;
+  }
 
   // A refusal from the loaders carries its own fixed text with the right remedy (chmod for a file others can read, revoke for a damaged one), so it is shown as it is.
   const refusal = (error: unknown): string => {

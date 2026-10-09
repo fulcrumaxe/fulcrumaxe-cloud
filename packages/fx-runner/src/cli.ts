@@ -11,6 +11,7 @@ import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
+import { versionLine } from "./version.js";
 import { logsCommand } from "./commands/logs.js";
 import { runCommand, type RunHost } from "./commands/run.js";
 import { serviceCommand, type ServiceHost } from "./commands/service.js";
@@ -54,7 +55,9 @@ Commands:
                      List this machine's running jobs, or watch one read-only. --take-over stops the agent and hands the session to you.
   revoke [--reason <text>] [--local]
                      Revoke this runner and delete its key. --local only deletes the local files.
-  doctor             Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request.
+  doctor [--sandbox-only]
+                     Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request. --sandbox-only runs only the sandbox test.
+  --version          Print the version.
   logs <run id>      Print the local transcript of a run on this machine.
   service install | uninstall
                      Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
@@ -70,7 +73,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   // The two commands a tmux pane runs; not in --help.
   __watch: { flags: [], switches: [], positionals: 1 },
   __takeover: { flags: [], switches: [], positionals: 1 },
-  doctor: { flags: [], switches: [] },
+  doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
   service: { flags: [], switches: [], positionals: 1 },
 };
@@ -109,6 +112,10 @@ function parseFlags(command: string, rest: readonly string[]): { flags: Flags; p
 export async function runCli(io: CliIo): Promise<number> {
   const [command, ...rest] = io.argv;
   try {
+    if (command === "--version" || command === "-V") {
+      io.stdout(`${versionLine()}\n`);
+      return 0;
+    }
     if (command === undefined || command === "--help" || command === "-h" || command === "help") {
       io.stdout(USAGE);
       return command === undefined ? 2 : 0;
@@ -141,7 +148,7 @@ export async function runCli(io: CliIo): Promise<number> {
     }
     if (command === "doctor") {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
-      return await doctorCommand(ctx, io.doctorHost);
+      return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
     if (command === "logs") return logsCommand(positionals[0], ctx);
     if (command === "service") {
