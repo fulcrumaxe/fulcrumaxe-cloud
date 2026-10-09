@@ -16,6 +16,11 @@ export interface JobAllowanceGrant {
   entries: readonly AllowanceEntry[];
   commandTimeoutS: number;
   storeKey: string;
+  /**
+   * D#6 R7c: the filtered environment of the repo's Nix dev shell, set by the daemon before the job starts and only for a job that carries
+   * allowances (it is not part of the signed set). The host sandbox adds it to the job's environment and grants a read of the Nix store.
+   */
+  nixEnv?: Readonly<Record<string, string>>;
 }
 
 /** A path the runner cannot resolve with certainty (a link loop, a link that cannot be read, a chain that is too long). The caller refuses it. */

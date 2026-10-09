@@ -6,6 +6,7 @@ import { verifyJob } from "../src/daemon/verifyJob.js";
 import { JOB_ENV_NAMES, cleanEnv } from "../src/job/cleanEnv.js";
 import { allowanceRefusal, grantsOf, jobEnvFor, storeKeyOf } from "../src/sandbox/allowances.js";
 import { HostSandboxRefused, createHostSandbox } from "../src/sandbox/hostSandbox.js";
+import { NIX_DAEMON_SOCKET_DIR } from "../src/sandbox/nixView.js";
 import { SandboxGrantRefused, sandboxSettings } from "../src/sandbox/sandboxSettings.js";
 import { KEYRING, NOW, jobFor, signRaw, signedJob } from "./helpers/signedJob.js";
 
@@ -241,6 +242,19 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
     expect(JSON.stringify(b)).not.toMatch(/r7b-scratch-a|registry\.npmjs|\/nix\/store/);
     expect(b!.network.allowLocalBinding).toBe(false);
     expect(r.envs[1]).toBeUndefined();
+  });
+
+  it("D#6 R7c: the Nix daemon socket directory is denied to every job: none, one with allowances but no dev shell, and one with a dev shell", async () => {
+    const r = rig();
+    await r.launch();
+    await r.launch(grant());
+    await r.launch(grant({ entries: [rw("/nix/store"), rw(SCRATCH_B, "write")], nixEnv: { PATH: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-tool/bin" } }));
+    const [plain, allowed, shell] = r.blocks;
+    for (const block of [plain!, allowed!, shell!]) expect(block.filesystem.denyRead).toContain(NIX_DAEMON_SOCKET_DIR);
+    // the store is readable only for the job that has a dev shell: the job with allowances but no shell gets the entries it was signed for and nothing from the view
+    expect(plain!.filesystem.allowRead).not.toContain("/nix/store");
+    expect(shell!.filesystem.allowRead).toContain("/nix/store");
+    expect(shell!.filesystem.allowWrite).not.toContain(NIX_DAEMON_SOCKET_DIR);
   });
 
   it("two repos get two stores, and a store is made only for a job that carries allowances", async () => {

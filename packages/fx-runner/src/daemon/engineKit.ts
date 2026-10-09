@@ -45,6 +45,8 @@ export interface EngineKit {
   recordSession(stateDir: string, sessionId: string, workspace: string): Promise<void>;
   /** The bounded, shell-less capture the daemon runs git through. */
   capture: GitCapture;
+  /** Like `capture`, with a large output limit (8 MB), for `nix print-dev-env`. Absent: no dev shell step is wired (D#6 R7c). */
+  captureLarge?: GitCapture;
   /**
    * Runs a program in the foreground on the terminal's own streams (no shell, an explicit environment) and gives its exit code (null if it could
    * not start). The tmux client of `attach` goes through it.

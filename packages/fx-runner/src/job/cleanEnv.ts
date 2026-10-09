@@ -5,6 +5,7 @@
  * greps the source for that). Each allowed name is looked up by name, so a variable that is not on the list cannot
  * reach the agent, however it got into the host's environment.
  */
+import { NIX_ENV_NAMES, nixEnvValue } from "./nixShellEnv.js";
 
 /** Host variables copied through when they are set. `HOME` is how the agent's binary finds the user's own login. */
 export const HOST_ENV_ALLOWLIST: readonly string[] = Object.freeze(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ"]);
@@ -52,7 +53,7 @@ export interface CleanEnvOptions {
   jobEnv?: Readonly<Record<string, string>>;
 }
 
-/** The only names a job's own environment may set. */
+/** The only names a job's own environment may set. A repo's Nix dev shell (D#6 R7c) adds only the names in `NIX_ENV_NAMES`, each value checked again. */
 export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["XDG_CACHE_HOME", "npm_config_store_dir", "npm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
 
 /** True for a PATH entry that is an absolute directory with no NUL byte. */
@@ -87,7 +88,15 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
   Object.assign(env, FIXED_ENV);
   if (options.jobEnv !== undefined) {
     const given = options.jobEnv;
-    for (const name of Object.getOwnPropertyNames(given)) if (!JOB_ENV_NAMES.includes(name)) throw new TypeError("cleanEnv: not an allowed per-job variable");
+    for (const name of Object.getOwnPropertyNames(given)) if (!JOB_ENV_NAMES.includes(name) && !NIX_ENV_NAMES.includes(name)) throw new TypeError("cleanEnv: not an allowed per-job variable");
+    // The dev shell's tools: store paths only. PATH entries go after the host's own (never in front of them); the other names are set as given.
+    for (const name of NIX_ENV_NAMES) {
+      const value = given[name];
+      if (value === undefined) continue;
+      const checked = nixEnvValue(name, value);
+      if (checked === undefined || checked !== value) throw new TypeError("cleanEnv: bad dev shell variable value");
+      env[name] = name === "PATH" ? [...new Set([...(env.PATH === undefined ? [] : env.PATH.split(":")), ...checked.split(":")])].join(":") : checked;
+    }
     for (const name of JOB_ENV_NAMES) {
       const value = given[name];
       if (value === undefined) continue;

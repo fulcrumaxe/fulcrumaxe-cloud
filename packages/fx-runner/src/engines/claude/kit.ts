@@ -44,6 +44,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
     recordSession: (stateDir, sessionId, workspace) => recordSession(sessionsFile(stateDir), sessionId, workspace),
     // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
     capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, undefined, 2048),
+    captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
     foreground: (command, args, env) => runForeground(starter.spawn, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);

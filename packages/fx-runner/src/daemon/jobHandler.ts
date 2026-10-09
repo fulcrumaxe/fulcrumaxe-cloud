@@ -14,7 +14,8 @@
  * A take-over (D#6 R4a-7) is asked for by the machine's owner through the tmux watch: the agent gets SIGINT, nothing is pushed, one
  * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import type { NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
@@ -63,6 +64,10 @@ export interface JobHandlerDeps {
   recordSession: (sessionId: string, workspace: string) => Promise<void>;
   /** Aborts when the daemon is asked to stop. */
   shutdown?: AbortSignal;
+  /** D#6 R7c: builds a repo's Nix dev shell before a job that carries allowances. Absent (no `nix` on this machine, or none wired): no job gets one. */
+  nix?: NixShellStep;
+  /** Told the closed detail when the dev shell step is skipped. */
+  onNixSkip?: (skip: NixSkip) => void;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
   heartbeatMs?: number;
@@ -134,6 +139,24 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
   const attempts = deps.doneAttempts ?? MAX_DONE_ATTEMPTS;
 
   const never = new AbortController().signal;
+
+  /**
+   * Builds the repo's dev shell outside the sandbox and hands its filtered environment to the job's grant (D#6 R7c). Called only for a job that carries
+   * allowances. A fix round, and any commit that is not in the default branch's history, is skipped with a closed detail; so is every failure.
+   */
+  async function prepareNix(job: Job, git: GitPath, grant: JobAllowanceGrant, base: string): Promise<void> {
+    if (deps.nix === undefined) return;
+    let result: NixResult;
+    try {
+      const source: NixSource = job.continues !== null || git.nixSource === undefined ? { kind: "not_default_branch" } : await git.nixSource(job, base);
+      result = await deps.nix.prepare({ approved: true, sha: base, source });
+    } catch {
+      // fx-swallow-ok: the step fails closed to "no dev shell"; the error text could hold a path
+      result = { ok: false, skip: "nix_failed" };
+    }
+    if (result.ok) grant.nixEnv = result.env;
+    else deps.onNixSkip?.(result.skip);
+  }
 
   /** A refusal made before anything is held: the one event is the only thing this run sends. */
   async function refuse(claimed: Claimed, reason: JobRefusal): Promise<JobResult> {
@@ -217,11 +240,14 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               planSession = () => fresh;
             }
           }
+          const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           const fill = async (workspace: string): Promise<void> => {
             started.base = (await git.prepare(job, claimed, workspace)).base;
+            // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
+            if (grant !== undefined) await prepareNix(job, git, grant, started.base);
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
-          const allowed = job.sandbox_allowances === undefined ? granted : withAllowances(granted, { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) });
+          const allowed = grant === undefined ? granted : withAllowances(granted, grant);
           result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
