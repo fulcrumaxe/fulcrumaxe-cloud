@@ -41,7 +41,8 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
       }),
     planSession: (stateDir, continues) => planSession(continues, readSessionIndex(sessionsFile(stateDir))),
     recordSession: (stateDir, sessionId, workspace) => recordSession(sessionsFile(stateDir), sessionId, workspace),
-    capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs),
+    // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
+    capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, undefined, 2048),
     captureWithStderr: async (command, args, env, timeoutMs) => {
       const out = await runCapture(starter.spawn, command, args, env, timeoutMs, 4096, 4096);
       return { code: out.code, stdout: out.stdout, stderr: out.stderr ?? "", timedOut: out.timedOut };

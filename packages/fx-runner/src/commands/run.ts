@@ -20,6 +20,7 @@ import type { CommandContext } from "../context.js";
 import { createRunnerClient } from "../daemon/client.js";
 import type { EngineKit } from "../daemon/engineKit.js";
 import { createGitPath } from "../daemon/gitPath.js";
+import { createGitPathA } from "../daemon/gitPathA.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/ledger.js";
@@ -29,7 +30,7 @@ import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
 import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
 import { createWorkspaceStore } from "../job/workspace.js";
 import { loadRunnerKey } from "../keys.js";
-import { keyringFor, type PinnedKeyrings } from "../keyring.js";
+import { gitProxyHashFor, keyringFor, type PinnedGitProxies, type PinnedKeyrings } from "../keyring.js";
 import { createHostSandbox } from "../sandbox/hostSandbox.js";
 import { SandboxRefused } from "../sandbox/platform.js";
 import { pathsOverlap } from "../sandbox/sandboxSettings.js";
@@ -56,6 +57,8 @@ export interface RunHost {
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
 export interface RunHooks {
   keyrings?: PinnedKeyrings;
+  /** The pinned GitHub proxies for path A (default: the build's `PINNED_GIT_PROXIES`). */
+  gitProxies?: PinnedGitProxies;
   clock?: Clock;
   /** The search path for the agent CLI, bubblewrap and socat. Default: the PATH of the clean environment. */
   searchPath?: string;
@@ -138,6 +141,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const stopped = new AbortController();
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn });
     const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+    // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
+    const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const sandbox = createHostSandbox({
       credentials,
       envOptions,
@@ -155,6 +160,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       clock,
       ledger,
       git,
+      ...(gitA === undefined ? {} : { gitA }),
       sandbox,
       events: relay,
       shutdown: stopped.signal,

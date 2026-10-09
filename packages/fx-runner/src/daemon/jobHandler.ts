@@ -50,6 +50,8 @@ export interface JobHandlerDeps {
   ledger: JobLedger;
   /** Git path B: the mirror, the workspace and the push. */
   git: GitPath;
+  /** Git path A (cloud-verified, D#6 R5a-3). Absent when this build pins no GitHub relay for the cloud: a `verified` job then ends `git_proxy_unpinned`. */
+  gitA?: GitPath;
   events: ReturnType<typeof createEventRelay>;
   /** Writes the local session index the next fix round reads (the engine's own recorder, bound to its file). */
   recordSession: (sessionId: string, workspace: string) => Promise<void>;
@@ -87,6 +89,20 @@ function stopOnAbort(port: SandboxPort, signal: AbortSignal): SandboxPort {
     },
   };
 }
+
+/** Stands in for path A on a build with no pinned relay: the first step refuses, so no git runs. */
+const UNPINNED_PATH: GitPath = {
+  check: () => {
+    throw new GitPathError("git_proxy_unpinned");
+  },
+  resume: () => Promise.reject(new GitPathError("git_proxy_unpinned")),
+  prepare: () => Promise.reject(new GitPathError("git_proxy_unpinned")),
+  publish: () => Promise.reject(new GitPathError("git_proxy_unpinned")),
+  readGrants: () => [],
+};
+
+/** The relay's 409 or 401: the cloud has ended or fenced the run, so nothing is reported (as for any stop reply). */
+const isGitStop = (code: string): boolean => code === "git_stopped" || code === "git_revoked";
 
 export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Promise<JobResult> {
   const run = deps.runJobFn ?? runJob;
@@ -126,6 +142,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const verified = verifyJob(claimed.signedJob, deps.keyring, deps.clock.now());
     if (!verified.ok) return refuse(claimed, verified.reason);
     const job = verified.job;
+    // The signed job's own mode picks the path (C27 section 4.1); nothing on this machine can change it.
+    const git: GitPath = job.mode === "verified" ? deps.gitA ?? UNPINNED_PATH : deps.git;
     // The reply's own run id must be the signed job's. The reply schema checks it as well; this is the second check.
     if (job.run_id !== claimed.runId) return refuse(claimed, "run_id_mismatch");
 
@@ -138,13 +156,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       const started: { base?: string } = {};
       let result: RunJobResult;
       try {
-        deps.git.check(job, claimed);
+        git.check(job, claimed);
         // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
         // workspace is left unused and the run starts fresh on the tip (C25 section 1.4). The decision is made here, before the run starts.
         let planSession = deps.run.planSession;
         const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
         if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
-          const resumed = await deps.git.resume(job, claimed, wanted.workspace);
+          const resumed = await git.resume(job, claimed, wanted.workspace);
           if (resumed !== null) started.base = resumed.base;
           else {
             const fresh = { kind: "fresh", branch: job.continues.branch } as const;
@@ -152,9 +170,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           }
         }
         const fill = async (workspace: string): Promise<void> => {
-          started.base = (await deps.git.prepare(job, claimed, workspace)).base;
+          started.base = (await git.prepare(job, claimed, workspace)).base;
         };
-        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, deps.git.readGrants(job)), stopRun), ledger: deps.ledger });
+        result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(withReadGrants(deps.sandbox, git.readGrants(job)), stopRun), ledger: deps.ledger });
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
         if (!(error instanceof GitPathError)) throw error;
@@ -182,6 +200,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         await lease.flush();
         const stopped = lease.ended();
         if (stopped !== undefined) return stoppedBy(stopped);
+        if (isGitStop(result.reason)) return { status: "stopped", reason: "lease_lost" };
         // A credential mismatch ends the run on its own event; the engine has queued it, so nothing more is sent for it.
         const end = lease.saw("credential_mismatch") ? null : endOfFailure(result.reason);
         if (end !== null) await reportEnd(lease, end);
@@ -189,13 +208,14 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       }
       try {
         if (started.base === undefined) throw new GitPathError("push_failed");
-        await deps.git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
+        await git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
       } catch (error) {
         if (!(error instanceof GitPathError)) throw error;
         await lease.flush();
         const stopped = lease.ended();
         if (stopped !== undefined) return stoppedBy(stopped);
-        await reportEnd(lease, endOfFailure(error.code)!);
+        if (isGitStop(error.code)) return { status: "stopped", reason: "lease_lost" };
+        await reportEnd(lease, endOfFailure(error.code, error.sizeMb)!);
         return { status: "failed", reason: error.code };
       }
       await lease.flush();

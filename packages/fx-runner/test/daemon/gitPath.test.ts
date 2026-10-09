@@ -500,7 +500,8 @@ describe("local-only means no reference to our proxy", () => {
   });
 
   it("no file of the daemon, the job runner or the host sandbox does either", () => {
-    const files = [...filesUnder(path.join(PACKAGE_DIR, "src", "daemon")), ...filesUnder(path.join(PACKAGE_DIR, "src", "job"))].filter((f) => f.endsWith(".ts"));
+    // gitPathA.ts is the cloud-verified path (D#6 R5a-3): it is the one file that must name the cloud's GitHub proxy address.
+    const files = [...filesUnder(path.join(PACKAGE_DIR, "src", "daemon")), ...filesUnder(path.join(PACKAGE_DIR, "src", "job"))].filter((f) => f.endsWith(".ts") && path.basename(f) !== "gitPathA.ts");
     expect(files.length).toBeGreaterThan(8);
     for (const file of files) expect(readFileSync(file, "utf8"), path.relative(PACKAGE_DIR, file)).not.toMatch(/gh-proxy|fulcrumaxe\.app|github_proxy|githubForwardHost/i);
   });
