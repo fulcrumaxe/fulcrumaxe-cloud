@@ -233,6 +233,14 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#6 R2b-4b: opening the Repos app also reads the account's runners (its Runners section). The fixture account has none; the
+    // runner cases are mocked in runner-approval.spec.ts through page.route().
+    if (urlPath === "/api/runners" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ runners: [], copy: {} }));
+      return;
+    }
+
     // D#37 WS-F1a: opening the Pipeline app lists work items (its repos read is the Repos block above).
     // GET only, body from the contract fixture; item, timeline and error cases are mocked by pipeline.spec.ts.
     if (urlPath === "/api/v1/work-items" && req.method === "GET") {

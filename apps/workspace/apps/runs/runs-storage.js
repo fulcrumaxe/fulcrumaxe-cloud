@@ -119,3 +119,51 @@ export function watchAccount({ onStatus, onRefresh: refresh }, live = { on, onRe
   const offs = [live.on("run.status_changed", (dto) => { const id = dto && dto.data && dto.data.runId; if (isUuid(id)) onStatus(id); }), live.onRefresh(refresh)];
   return () => offs.forEach((off) => off());
 }
+
+// ── run approval (D#6 R2b-4b) ───────────────────────────────────────────────
+// A run on a teammate's subscription runner can wait for that person to approve it. The server decides which runs wait (the repo's
+// runner-run setting and the plan holder's consent); this only reads the answer for the open run. The words are the `copy` of
+// GET /api/runners, never typed here. A name is put into a sentence without being parsed, and an empty name is never shown.
+const APPROVAL_COPY = ["approval", "approvalMine", "approvalButton", "approvalDone", "approvalRefused", "approvalAuto"];
+const named = (p) => (p && typeof p.name === "string" && p.name.trim() !== "" ? p.name.trim() : "");
+const autoName = (run) => (run && run.approval === "auto" ? named(run.approved_by) : "");
+
+/** What the open run's approval needs: `entry` while it waits for a person (else null), `copy` once it has a use (else null). Never rejects. */
+export async function loadRunApproval(run, get = api, signal) {
+  let entry = null;
+  let copy = null;
+  try {
+    if (run.status === "pending") {
+      const body = await get("GET", "/api/runners/approvals", undefined, signal);
+      const e = body && Array.isArray(body.approvals) ? body.approvals.find((a) => a && a.run_id === run.id) : null;
+      if (e) entry = { canApprove: e.can_approve === true, names: (Array.isArray(e.approvers) ? e.approvers : []).map(named).filter(Boolean) };
+    }
+    if (entry || autoName(run)) {
+      const c = (await get("GET", "/api/runners", undefined, signal))?.copy;
+      if (c && typeof c === "object" && APPROVAL_COPY.every((k) => typeof c[k] === "string" && c[k] !== "")) copy = c;
+    }
+  } catch {
+    /* the run shows without the approval line; the next read tries again */
+  }
+  return { entry, copy };
+}
+
+/** POST the approval. Resolves "done", "refused" (403 or 409: this person can no longer approve it) or "failed". */
+export async function approveRunnerRun(runId, get = api, signal) {
+  try {
+    await get("POST", "/api/runners/runs/" + encodeURIComponent(runId) + "/approve", undefined, signal);
+    return "done";
+  } catch (e) {
+    if (e && e.name === "AbortError") throw e;
+    return e && (e.status === 403 || e.status === 409) ? "refused" : "failed";
+  }
+}
+
+/** The one line about a run's approval, or "": the wait (yours, or the people who can approve), else the automatic approval. */
+export function approvalLine(run, state) {
+  const { entry, copy } = state;
+  if (!copy) return "";
+  if (entry) return entry.canApprove ? copy.approvalMine : entry.names.length ? copy.approval.replace("{person}", () => entry.names.join(" or ")) : "";
+  const who = autoName(run);
+  return who ? copy.approvalAuto.replace("{person}", () => who) : "";
+}

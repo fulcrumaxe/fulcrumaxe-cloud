@@ -283,21 +283,29 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
   let dlg = null;
   let parts = null;
   let shownFor = null;
-  const ctl = createActions({
-    itemId, repoId, call, uuid,
-    onChange: (st) => {
-      paint(st);
-      const l = ctl.label();
-      // The parent redraws when the card's label changes, and when the item gains or loses a live run (the approve button depends on it).
-      const live = st.runs.some((r) => LIVE_STATUSES.includes(r.status));
-      if (l !== lastLabel || live !== lastLive) {
-        lastLabel = l;
-        lastLive = live;
-        announce.textContent = l || "";
-        onChange();
-      }
-    },
-  });
+  let lastKey = "";
+  // Runs waiting for a person's approval (D#6 R2b-4b): read for the pending runs of this item, drawn in their rows and on the card.
+  const approvals = createApprovals({ call, onChange: () => changed(ctl.getState()) });
+  const labelOf = () => ctl.label() || approvals.label(ctl.getState().runs);
+  function changed(st) {
+    paint(st);
+    const l = labelOf();
+    // The parent redraws when the card's label changes, and when the item gains or loses a live run (the approve button depends on it).
+    const live = st.runs.some((r) => LIVE_STATUSES.includes(r.status));
+    if (l !== lastLabel || live !== lastLive) {
+      lastLabel = l;
+      lastLive = live;
+      announce.textContent = l || "";
+      onChange();
+    }
+    // The approvals are read again only when the runs list changed in a way that matters to them.
+    const key = st.runs.map((r) => r.id + r.status + (r.approval || "")).join();
+    if (key !== lastKey) {
+      lastKey = key;
+      approvals.sync(st.runs);
+    }
+  }
+  const ctl = createActions({ itemId, repoId, call, uuid, onChange: changed });
   const notice = h("p", { class: "pl-muted", role: "status", "data-testid": "pl-runs-notice" });
   // The card's label is rebuilt on every board paint, so the announcement comes from this one persistent polite region.
   const announce = h("p", { class: "pl-sr", "aria-live": "polite", "data-testid": "pl-announce" });
@@ -315,6 +323,7 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", STATUS_WORDS[run.status] || "Another status", Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
       runnerUsageText(run) ? h("span", { class: "pl-run-usage pl-muted", "data-testid": "pl-run-usage" }, runnerUsageText(run)) : null,
       p ? h("span", { class: "pl-run-pending", "data-testid": "pl-run-pending" }, p.kind === "cancel" ? "Cancelling…" : "Retrying…") : null,
+      ...approvalParts(run, approvals),
       c.cancel ? btn("cancel", "Cancel run", "pl-cancel") : null,
       c.retry ? btn("retry", "Retry run", "pl-retry") : null
     );
@@ -392,16 +401,18 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
   return {
     el,
     itemId,
-    label: ctl.label,
+    label: labelOf,
     liveTimers: ctl.liveTimers,
     /** True when any run read for this item is pending, running or paused: the approve button is not offered then. */
     hasLive: () => ctl.getState().runs.some((r) => LIVE_STATUSES.includes(r.status)),
     live(type, dto) {
       if (type === "run.status_changed") ctl.onRunChanged(dto && dto.data);
       else if (type === "refresh") ctl.load();
+      approvals.reload(); // a claim, a cancel or a changed setting can start or end a wait
     },
     destroy() {
       document.removeEventListener("visibilitychange", onVis);
+      approvals.destroy();
       ctl.destroy();
       if (lastLabel) onChange(); // the card's label goes with the panel
       if (dlg) {
@@ -411,6 +422,175 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       }
     },
   };
+}
+
+// --- Run approval (D#6 R2b-4b) ---
+// A run on a teammate's subscription runner can wait for that person's go-ahead. Which runs wait comes from the account's
+// approvals read (the server decides, from the repo's runner-run setting and the plan holder's consent); this file only shows it.
+//  - The words come from the `copy` of GET /api/runners, never from here, and a name is filled in without being parsed.
+//  - The "Approve run" button is offered only where the server says `can_approve`; one click is one POST, however fast.
+//  - 403 and 409 mean this person can no longer approve the run: that sentence is shown and the read is repeated.
+//  - A run the claim approved by itself says whose Claude plan it uses (`approvalAuto`).
+export const RUN_APPROVALS_PATH = "/api/runners/approvals";
+export const RUNNERS_PATH = "/api/runners";
+export const runApprovePath = (id) => "/api/runners/runs/" + encodeURIComponent(id) + "/approve";
+export const APPROVALS_POLL_MS = 30000;
+export const APPROVING = "Approving…";
+const APPROVAL_COPY = ["approval", "approvalMine", "approvalButton", "approvalDone", "approvalRefused", "approvalAuto"];
+const named = (p) => (p && typeof p.name === "string" && p.name.trim() !== "" ? p.name.trim() : "");
+const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+/** The copy strings from GET /api/runners, or null unless every one is present (a half-set would show holes). */
+export function readApprovalCopy(body) {
+  const c = body && body.copy;
+  return c && typeof c === "object" && APPROVAL_COPY.every((k) => typeof c[k] === "string" && c[k] !== "") ? Object.fromEntries(APPROVAL_COPY.map((k) => [k, c[k]])) : null;
+}
+
+/** Run id -> { canApprove, names } from GET /api/runners/approvals. An approver with no name is left out, never shown as a blank. */
+export function readApprovals(body) {
+  const out = new Map();
+  for (const e of body && Array.isArray(body.approvals) ? body.approvals : []) {
+    if (!e || !isUuid(e.run_id)) continue;
+    out.set(e.run_id, { canApprove: e.can_approve === true, names: (Array.isArray(e.approvers) ? e.approvers : []).map(named).filter(Boolean) });
+  }
+  return out;
+}
+
+/** The waiting sentence for one entry: yours, or the people who can approve. Null when there is nobody to name. */
+export function waitingText(entry, copy) {
+  if (!entry || !copy) return null;
+  if (entry.canApprove) return copy.approvalMine;
+  return entry.names.length > 0 ? copy.approval.replace("{person}", () => entry.names.join(" or ")) : null;
+}
+
+const autoName = (run) => (run && run.approval === "auto" ? named(run.approved_by) : "");
+
+/** "Approved automatically. It runs on {person}'s Claude plan." for a run the claim approved itself; null otherwise. */
+export function autoText(run, copy) {
+  const who = autoName(run);
+  return who && copy ? copy.approvalAuto.replace("{person}", () => who) : null;
+}
+
+export function createApprovals({ call = api, onChange = () => {}, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+  const ac = new AbortController();
+  const busy = new Set();
+  const outcome = new Map(); // run id -> "done" | "refused" | "failed"
+  let destroyed = false;
+  let entries = new Map();
+  let copy = null;
+  let copyAsked = false;
+  let seq = 0;
+  let timer = null;
+  let wanted = false; // the item has a pending run, so a live event is worth a read
+  const set = () => {
+    if (!destroyed) onChange();
+  };
+  function poll() {
+    if (entries.size > 0 && !timer) timer = setTimer(load, APPROVALS_POLL_MS);
+    else if (entries.size === 0 && timer) {
+      clearTimer(timer);
+      timer = null;
+    }
+  }
+  async function loadCopy() {
+    if (copy || copyAsked || destroyed) return;
+    copyAsked = true;
+    try {
+      copy = readApprovalCopy(await call("GET", RUNNERS_PATH, undefined, ac.signal));
+    } catch {
+      /* asked again with the next read */
+    }
+    if (copy === null) copyAsked = false;
+  }
+  async function load() {
+    if (destroyed) return;
+    const mine = ++seq;
+    try {
+      const next = readApprovals(await call("GET", RUN_APPROVALS_PATH, undefined, ac.signal));
+      if (destroyed || mine !== seq) return;
+      entries = next;
+    } catch {
+      if (destroyed || mine !== seq) return; // what is shown stays until the next read
+    }
+    poll();
+    if (entries.size > 0) await loadCopy();
+    set();
+  }
+  async function approve(runId) {
+    if (destroyed || busy.has(runId)) return;
+    busy.add(runId);
+    outcome.delete(runId);
+    set();
+    try {
+      await call("POST", runApprovePath(runId), undefined, ac.signal);
+      outcome.set(runId, "done");
+    } catch (e) {
+      if (destroyed || (e && e.name === "AbortError")) return;
+      outcome.set(runId, e && (e.status === 403 || e.status === 409) ? "refused" : "failed");
+    }
+    busy.delete(runId);
+    await load();
+  }
+  const self = {
+    get copy() {
+      return copy;
+    },
+    entryFor: (runId) => entries.get(runId) || null,
+    isBusy: (runId) => busy.has(runId),
+    outcomeOf: (runId) => outcome.get(runId) || null,
+    approve,
+    /** The card's pending text: the newest run of the list that is waiting for a person. */
+    label(runs) {
+      const run = copy && runs.find((r) => entries.has(r.id));
+      return run ? waitingText(entries.get(run.id), copy) : null;
+    },
+    /** The runs list changed: read the approvals if a run is pending, forget them if none is, and fetch the copy for an automatic approval. */
+    sync(runs) {
+      wanted = runs.some((r) => r.status === "pending");
+      if (wanted) load();
+      else {
+        seq++;
+        entries = new Map();
+        poll();
+      }
+      if (runs.some((r) => autoName(r))) loadCopy().then(set);
+    },
+    reload() {
+      if (wanted) load();
+    },
+    destroy() {
+      destroyed = true;
+      ac.abort();
+      if (timer) clearTimer(timer);
+      timer = null;
+    },
+  };
+  return self;
+}
+
+/** The approval parts of one run's row: the waiting or automatic line, what a click did, and the button when this person may approve. */
+export function approvalParts(run, approvals) {
+  const copy = approvals.copy;
+  if (!copy) return [];
+  const entry = approvals.entryFor(run.id);
+  const out = [];
+  const text = entry ? waitingText(entry, copy) : autoText(run, copy);
+  if (text) out.push(h("span", { class: "pl-run-approval", "data-testid": "pl-run-approval" }, text));
+  const state = approvals.outcomeOf(run.id);
+  const busy = approvals.isBusy(run.id);
+  const note = busy ? APPROVING : state === "done" && run.status === "pending" && !entry ? copy.approvalDone : state === "refused" ? copy.approvalRefused : state === "failed" ? GENERIC : null;
+  if (note) out.push(h("span", { class: "pl-run-approval-note", role: "status", "data-testid": "pl-run-approval-note" }, note));
+  if (entry && entry.canApprove) {
+    out.push(
+      h(
+        "button",
+        // aria-disabled, not disabled: a disabled button drops keyboard focus while the request is out.
+        { type: "button", class: "pl-act", "data-testid": "pl-approve-run", "aria-label": copy.approvalButton + ": " + run.role, "aria-disabled": busy ? "true" : "false", onClick: () => approvals.approve(run.id) },
+        busy ? APPROVING : copy.approvalButton
+      )
+    );
+  }
+  return out;
 }
 
 // --- Approve and start (folded in from pipeline-approve.js to keep the app within the boot-file budget) ---

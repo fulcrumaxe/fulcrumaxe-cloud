@@ -42,6 +42,7 @@
 .runs-row:hover { border-color: var(--accent, #1aff80); }
 .runs-row:focus-visible,
 .runs-back:focus-visible,
+.runs-approve:focus-visible,
 .runs-more:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .runs-row-name { flex: 1 1 8em; font-weight: 600; overflow-wrap: anywhere; }
 .runs-row-time { color: var(--text-muted, rgba(26, 255, 128, 0.55)); font-size: 0.78rem; }
@@ -159,3 +160,8 @@
 
 .runs-fold { margin: 10px 0; }
 .runs-fold-sum { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+
+/* D#6 R2b-4b: the open run's approval line and its Approve run button */
+.runs-approval { margin: 6px 0; }
+.runs-approve { margin-top: 4px; }
+.runs-approve[aria-disabled="true"] { opacity: 0.6; cursor: default; }

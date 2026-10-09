@@ -159,3 +159,6 @@
 .pl-ins-ready { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--accent, #1aff80); overflow-wrap: anywhere; }
 .pl-ins-notice { margin: 8px 0; padding: 8px 10px; border: 1px solid rgba(210, 120, 60, 0.8); overflow-wrap: anywhere; }
 .pl-ins a { color: var(--accent, #1aff80); }
+
+/* D#6 R2b-4b: a run waiting for a person to approve it, and the line for one approved automatically */
+.pl-run-approval, .pl-run-approval-note { flex: 1 1 100%; color: var(--text-muted, rgba(26, 255, 128, 0.7)); }

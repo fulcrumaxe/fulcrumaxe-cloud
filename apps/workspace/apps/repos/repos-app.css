@@ -78,3 +78,14 @@
 .repos-allow-file, .repos-allow-name { box-sizing: border-box; max-width: 100%; min-height: 32px; color: inherit; font: inherit; }
 .repos-allow-name { width: 100%; padding: 4px 8px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
 .repos-allow-confirm { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; overflow-wrap: anywhere; }
+/* D#6 R2b-4b: Runners section, consent switch and the runner-run setting */
+.repos-runners { margin-top: 18px; }
+.repos-runner { padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.repos-runner-head, .repos-runner-line { margin: 0 0 4px; overflow-wrap: anywhere; }
+.repos-switch-input:focus-visible, .repos-dial input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.repos-dial { margin: 0 0 10px; padding: 0; border: 0; min-width: 0; }
+.repos-dial legend { padding: 0; }
+.repos-dialog { box-sizing: border-box; width: min(92vw, 420px); max-height: 90vh; overflow: auto; padding: 0; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--accent, #1aff80); color: var(--text-primary, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; }
+.repos-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.repos-dialog-body { padding: 14px; }
+.repos-error:empty { display: none; }

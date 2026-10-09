@@ -11,6 +11,7 @@ import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSecond
 import { on, onRefresh } from "../../core/cloud-live.js";
 import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 import { createAllowancePanel } from "./repos-allowances.js";
+import { createDialControl, createRunnersSection } from "./repos-runners.js";
 
 const REPOS_URL = "/api/v1/repos";
 const allowancesUrl = (id) => "/api/runners/repos/" + encodeURIComponent(id) + "/sandbox-allowances";
@@ -90,6 +91,16 @@ function mountRepos(host, installNote) {
   const detailEl = h("section", { class: "repos-detail", "aria-label": "Repo settings" });
   root.append(headEl, noteEl, h("div", { class: "repos-body" }, listEl, detailEl));
   host.replaceChildren(root);
+
+  // D#6 R2b-4b: the Runners section below the repos, and the runner-run setting in the open repo's settings (it reads the same runners answer).
+  let dial = null;
+  const runners = createRunnersSection({ signal: abort.signal, onData: () => dial && dial.repaint() });
+  // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
+  root.append(runners.el);
+  const makeDial = () => {
+    dial = st.openId ? createDialControl({ signal: abort.signal, repoId: st.openId, data: runners.data }) : null;
+    if (dial) dial.load();
+  };
 
   // ── the wait after a 429 on the install link: "Try again in N seconds", the install buttons off until it ends ──
   const waiting = () => gate.remaining > 0;
@@ -197,6 +208,8 @@ function mountRepos(host, installNote) {
       toggle("Block auto-merge for outside contributors", "Pull requests from people outside your account are never merged automatically.",
         st.settings.block_external_auto_merge && !st.pendingOff, "repos-guard", guardChanged),
       ...(st.pendingOff ? [renderConfirm()] : []),
+      // dom-insert-ok: dial.el is the fieldset createDialControl built with h()
+      ...(dial ? [dial.el] : []),
       ...(st.isAdmin ? [] : [h("p", { id: "repos-admin-only-detail", class: "repos-muted", "data-testid": "repos-settings-admin-only" }, ADMIN_ONLY)]),
       ...(st.saveError ? [line(st.saveError, "repos-save-error", "repos-error", "alert")] : [])
     );
@@ -234,7 +247,7 @@ function mountRepos(host, installNote) {
       st.loadFailed = true;
     }
     st.loading = false;
-    if (st.openId && !openRepo()) st.openId = null;
+    if (st.openId && !openRepo()) { st.openId = null; dial = null; }
     render();
   }
 
@@ -268,6 +281,7 @@ function mountRepos(host, installNote) {
     if (id === st.openId) return;
     st.openId = id;
     st.pendingOff = false; st.ack = false; st.ackError = false; st.saveError = "";
+    makeDial();
     loadSettings(id, false);
     allowances.show(openRepo());
   }
@@ -313,6 +327,8 @@ function mountRepos(host, installNote) {
 
   const unsubscribe = onRefresh(() => {
     loadRepos();
+    runners.load();
+    if (dial) dial.reload();
     if (st.openId && !st.pendingOff && !st.saving) loadSettings(st.openId, true); // a pending confirmation is never overwritten
   });
   // The install state is derived on the server, so an install, uninstall, suspend or repo sync only needs a re-read of the list.
@@ -320,11 +336,13 @@ function mountRepos(host, installNote) {
   render();
   loadMe();
   loadRepos();
+  runners.load();
 
   return {
     destroy() {
       destroyed = true;
       allowances.clear();
+      runners.destroy();
       gate.cancel();
       abort.abort();
       unsubscribe();

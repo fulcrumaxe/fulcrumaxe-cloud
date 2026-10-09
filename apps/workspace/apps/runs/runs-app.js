@@ -11,7 +11,7 @@ import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-dis
 import { openRunStream } from "../_lib/stream.js";
 import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, runnerEventLine, titleOf } from "./runs-detail.js";
 import {
-  EVENT_CAP, STATUS_LABELS, coalesce, formatUsd, isLiveStatus, isTruncated, loadRun, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
+  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, loadRun, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
 
 const FULC = window.FULC;
@@ -105,6 +105,22 @@ function eventItems(events) {
     carry = nextCarry(gap ? "" : carry, li.textContent);
     return gap ? [h("li", { "aria-hidden": "true" }, "…"), li] : [li];
   });
+}
+const APPROVE_FAILED = "That didn't work. Nothing was changed.";
+
+/**
+ * D#6 R2b-4b: the open run's approval. The waiting or automatic line (words from the server's copy), what the last click did, and, only
+ * for a run with no work item (it has no other home for the button) that this person may approve, the Approve run button. A run that
+ * belongs to a work item gets its button in Pipeline; this only says it is waiting.
+ */
+function approvalBlock(run, a, approve) {
+  const line = displayText(approvalLine(run, a));
+  const note = a.phase === "busy" ? "Approving…" : a.phase === "done" && !a.entry && a.copy ? a.copy.approvalDone : a.phase === "refused" && a.copy ? a.copy.approvalRefused : a.phase === "failed" ? APPROVE_FAILED : "";
+  const button = a.entry && a.entry.canApprove && a.copy && !run.work_item_id
+    ? h("button", { type: "button", class: "runs-more runs-approve", "data-testid": "runs-approve", "aria-label": a.copy.approvalButton + ": " + roleName(run.role), "aria-disabled": a.phase === "busy" ? "true" : "false", onClick: approve }, a.phase === "busy" ? "Approving…" : a.copy.approvalButton)
+    : null;
+  if (!line && !note && !button) return null;
+  return h("div", { class: "runs-approval", "data-testid": "runs-approval" }, line ? h("p", { class: "runs-head-meta", "data-testid": "runs-approval-line" }, line) : null, note ? h("p", { class: "runs-muted", role: "status", "data-testid": "runs-approval-note" }, displayText(note)) : null, button);
 }
 const UNAVAILABLE = "This run isn't available right now.";
 const CAPPED = "This run has more events than the window shows.";
@@ -247,6 +263,7 @@ function mountApp(contentEl) {
           statusChip(run.status),
           h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, formatUsd(run.usd))
         ),
+        approvalBlock(run, detail.approval, () => approve(detail)),
         ins ? headMeta(ins) : null,
         ins ? headLinks(ins, { openPipeline: () => window.FULCWM && window.FULCWM.open("pipeline", { workItemId: ins.work_item.id }) }) : null,
         insight,
@@ -290,6 +307,8 @@ function mountApp(contentEl) {
   const unwatch = watchAccount({
     onStatus: (id) => loadRun(id, undefined, liveAc.signal).then((run) => {
       if (listState === "ready" && run && run.id === id) { rows = upsertRow(rows, run); paintList(); }
+      // The open run changed (claimed, cancelled ...): its approval is read again from the fresh run.
+      if (run && run.id === id && id === openId && detail && detail.status === "ready") { detail.run = { ...detail.run, ...run }; loadApproval(detail); }
     }, () => {}),
     onRefresh: refresh,
   });
@@ -322,6 +341,29 @@ function mountApp(contentEl) {
       }
     );
   }
+  // D#6 R2b-4b: whether the open run waits for a person, read once it is open and again when its status changes or after a click.
+  function loadApproval(mine) {
+    const ac = detailAc;
+    loadRunApproval(mine.run, undefined, ac.signal).then((a) => {
+      if (ac.signal.aborted || detail !== mine) return;
+      mine.approval = { ...mine.approval, entry: a.entry, copy: a.copy || mine.approval.copy }; // the words, once read, stay for the click's outcome
+      repaintKeepFocus();
+    });
+  }
+  function approve(mine) {
+    const ac = detailAc;
+    if (detail !== mine || mine.approval.phase === "busy") return; // one click is one request
+    mine.approval = { ...mine.approval, phase: "busy" };
+    repaintKeepFocus();
+    approveRunnerRun(mine.run.id, undefined, ac.signal).then(
+      (phase) => {
+        if (ac.signal.aborted || detail !== mine) return;
+        mine.approval = { ...mine.approval, phase };
+        loadApproval(mine);
+      },
+      () => {}
+    );
+  }
   function onLive(ev, mine) {
     if (detail !== mine || mine.events.length >= EVENT_CAP) return;
     mine.events.push(ev);
@@ -347,8 +389,10 @@ function mountApp(contentEl) {
       (d) => {
         if (ac.signal.aborted) return;
         const mine = (detail = { status: "ready", run: d.run, events: d.events.slice(0, EVENT_CAP), capped: d.capped, insight: undefined, ui: {} });
+        mine.approval = { entry: null, copy: null, phase: null };
         mine.reinsight = coalesce(() => loadInsight(mine, id), 5000);
         mine.reinsight();
+        loadApproval(mine);
         paintDetail();
         pane.querySelector(".runs-back").focus();
         if (isLiveStatus(d.run.status) && !d.capped) {
