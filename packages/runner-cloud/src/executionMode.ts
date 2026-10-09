@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { recordRunStatusMove, type FailureReason } from "@fx/runner";
+import { isRunnerMode, recordRunStatusMove, type FailureReason } from "@fx/runner";
 import { setAsideSandboxAllowances } from "./sandboxAllowances.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -166,12 +166,16 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
           autoMergeOff = (await client.query<{ changed: boolean }>("SELECT repo_local_review_optin_set($1, false) AS changed", [repoId])).rows[0]?.changed === true;
         }
         await client.query("UPDATE repos SET execution_mode = $2, updated_at = now() WHERE id = $1", [repoId, parsed.mode]);
-        // Leaving runner_local ends the repo's queued runner runs with it. The definer moves them (the web tier's login cannot write
+        // Leaving the runner modes (to sandbox) ends the repo's queued runner runs with it. The definer moves them (the web tier's login cannot write
         // a run's status) and answers their ids; the events are written here, by the code every status change uses, in this transaction.
         let cancelled = 0;
+        // D#6 R5b-1 (C26 section 3, C38): only a move that LEAVES the runner modes ends the queued runs. runner_local <-> runner_verified cancels nothing.
         if (repo.execution_mode === "runner_local") {
+          // The allowance set-aside stays runner_local-only: it keys on the old mode being runner_local, whatever the new one is.
           // D#6 R7a (C15 section 4): the repo's approved sandbox allowances are set aside, so a repo that comes back is approved again first.
           await setAsideSandboxAllowances(client, repoId);
+        }
+        if (isRunnerMode(repo.execution_mode) && !isRunnerMode(parsed.mode)) {
           const { rows: moved } = await client.query<{ run_id: string }>("SELECT run_id FROM repo_cancel_pending_runner_runs($1)", [repoId]);
           for (const run of moved) {
             await recordRunStatusMove(client, { accountId: principal.accountId, runId: run.run_id, from: "pending", to: "cancelled", failureReason: CANCEL_REASON });

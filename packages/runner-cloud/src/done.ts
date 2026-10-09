@@ -1,5 +1,6 @@
 import { DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type Job } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { isRunnerMode } from "@fx/runner";
 import {
   RunnerHttpError,
   MAX_BODY_BYTES,
@@ -160,8 +161,8 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   // `succeeded` on its done; its envelope is stored after redaction (C21 section 5.2).
   if (ctx.role !== "executor" && ctx.role !== "docs-writer") return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: null });
 
-  // The local-only rules are keyed on the run's own mode. A run that is not a `runner_local` runner run has no business here.
-  if (ctx.runtime !== "runner" || ctx.executionMode !== "runner_local" || !ctx.repo || !ctx.job) return failed("internal_error");
+  // The local-only rules are keyed on the run's own mode. A run that is not a runner run (either runner mode) has no business here.
+  if (ctx.runtime !== "runner" || !isRunnerMode(ctx.executionMode) || !ctx.repo || !ctx.job) return failed("internal_error");
   const port = deps.pullRequests;
   if (!port) throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub access configured");
   return judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)));

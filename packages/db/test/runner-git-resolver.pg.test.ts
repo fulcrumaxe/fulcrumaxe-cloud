@@ -317,9 +317,10 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
       await expect(insert('runner', 'runner_remote')).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION, constraint: 'agent_runs_execution_mode_check' });
     });
 
-    it("repos.execution_mode still refuses 'runner_verified' (23514): path A stays dormant until a later change opens it", async () => {
+    it("repos.execution_mode accepts 'runner_verified' since 0771 (the route still refuses it until R5b-2b), and refuses any other word", async () => {
       const refs = await seedAccount(admin, randomUUID());
-      await expect(admin.query(`UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1`, [refs.repoId])).rejects.toMatchObject({
+      await admin.query(`UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1`, [refs.repoId]);
+      await expect(admin.query(`UPDATE repos SET execution_mode = 'runner_other' WHERE id = $1`, [refs.repoId])).rejects.toMatchObject({
         code: PG_ERROR.CHECK_VIOLATION,
         constraint: 'repos_execution_mode_check',
       });

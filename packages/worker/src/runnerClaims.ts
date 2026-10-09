@@ -16,7 +16,7 @@ import {
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RUNNER_RUN_CATALOGUE_VERSION } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { insertRunnerEvent, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
+import { RUNNER_MODES_SQL, insertRunnerEvent, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
 import { recordRunnerUsage } from "./runnerUsage.js";
@@ -305,8 +305,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                  FROM agent_runs a
                  JOIN repos r ON r.account_id = a.account_id AND r.id = a.dispatch_repo_id
                  LEFT JOIN agent_runs p ON p.account_id = a.account_id AND p.id = a.parent_run_id
-                WHERE a.account_id = $1 AND a.status = 'pending' AND a.runtime = 'runner' AND a.execution_mode = 'runner_local'
-                  AND a.runner_id IS NULL AND a.job_signed IS NOT NULL AND r.execution_mode = 'runner_local'
+                WHERE a.account_id = $1 AND a.status = 'pending' AND a.runtime = 'runner' AND a.execution_mode IN (${RUNNER_MODES_SQL})
+                  AND a.runner_id IS NULL AND a.job_signed IS NOT NULL AND r.execution_mode IN (${RUNNER_MODES_SQL})
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
                   AND a.id <> ALL($6::uuid[])

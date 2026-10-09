@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_QUEUE_TTL_MS, writeRunStatus } from "@fx/runner";
+import { RUNNER_QUEUE_TTL_MS, isRunnerMode, writeRunStatus } from "@fx/runner";
 
 /**
  * D#6 R2b (correction C12 sections 2.9 and 5): the runner queue sweep. A run for a `runner_local` repo waits in `pending`
@@ -90,7 +90,7 @@ export function createRunnerQueueSweeper(pool: Pool, deps: RunnerQueueSweepDeps 
             result.skipped++;
             continue;
           }
-          if (state.repo_mode !== null && state.repo_mode !== "runner_local") {
+          if (state.repo_mode !== null && !isRunnerMode(state.repo_mode)) {
             const moved = await writeRunStatus(pool, { accountId: row.account_id, runId: row.run_id, from: "pending", to: "cancelled", failureReason: "execution_mode_changed" });
             if (moved.updated) result.cancelled++;
             else result.skipped++;

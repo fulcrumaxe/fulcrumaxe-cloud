@@ -23,8 +23,9 @@ const FORBIDDEN = ["checkout -b", "checkout -B", "git push", "api.github.com", "
 const noneOf = (text: string): string[] => FORBIDDEN.filter((f) => text.includes(f));
 
 describe("promptRuntimeOf", () => {
-  it("is runner exactly for runner_local; every other word, and none, is the sandbox", () => {
+  it("is runner for both runner modes (D#6 R5b-1); every other word, and none, is the sandbox", () => {
     expect(promptRuntimeOf("runner_local")).toBe("runner");
+    expect(promptRuntimeOf("runner_verified")).toBe("runner");
     for (const other of ["sandbox", "", "Runner_Local", "runner", null, undefined]) expect(promptRuntimeOf(other), String(other)).toBe("sandbox");
   });
 });

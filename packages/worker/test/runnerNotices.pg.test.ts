@@ -28,7 +28,7 @@ describe("runner notices [pg]", () => {
   });
   beforeEach(async () => {
     clock = T0;
-    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode = 'runner_local' AND status = 'pending'`);
+    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode IN ('runner_local', 'runner_verified') AND status = 'pending'`);
     await admin.query(`DELETE FROM runners WHERE account_id IN ($1, $2)`, [A.accountId, B.accountId]);
   });
   afterAll(async () => {

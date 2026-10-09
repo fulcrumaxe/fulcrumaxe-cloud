@@ -16,6 +16,8 @@ const ROLE = 'runner_mode_switch_definer';
 const CANCEL = 'repo_cancel_pending_runner_runs(uuid)';
 const AUDIT = 'repo_execution_mode_switch_audit(uuid,text,text,boolean,integer)';
 const DEFINERS = [CANCEL, AUDIT];
+/** Later migrations that replace this file's functions (0771, D#6 R5b-1) cannot run without it, so the 'before' cluster leaves them out too. */
+const DEPENDS_ON_MIGRATION = new Set(['0771_runner_verified_repo_mode.sql']);
 
 /** Everything the role holds, exactly: column grants only on what its two bodies read and write. */
 const EXPECTED_PRIVILEGES = [
@@ -114,11 +116,11 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
       await admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'Acme', 'widgets', $4)", [id, accountId, Math.floor(Math.random() * 1e12), mode]);
       return id;
     }
-    async function run(accountId: string, repoId: string, status = 'pending', runtime = 'runner'): Promise<string> {
+    async function run(accountId: string, repoId: string, status = 'pending', runtime = 'runner', mode = 'runner_local'): Promise<string> {
       const id = randomUUID();
       await admin.query(
         `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, 'code-reviewer', $3, $4, $5, $6)`,
-        [id, accountId, runtime, status, runtime === 'runner' ? 'runner_local' : 'sandbox', repoId],
+        [id, accountId, runtime, status, runtime === 'runner' ? mode : 'sandbox', repoId],
       );
       return id;
     }
@@ -171,6 +173,21 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
       expect(await statusOf(queued)).toBe('pending');
     });
 
+    // D#6 R5b-1 (C26 section 3, C38, 0771): both runner modes are runner modes. Only a repo that left them cancels anything.
+    it('cancels verified runs and local runs alike once the repo is on sandbox, and refuses a repo still on runner_verified (55000) without moving a run', async () => {
+      const gone = await repo(f.accountId, 'sandbox');
+      const queued = [await run(f.accountId, gone, 'pending', 'runner', 'runner_verified'), await run(f.accountId, gone)];
+      await asApp(f.a1, f.accountId, async () => {
+        expect((await cancel(gone)).sort()).toEqual([...queued].sort());
+      });
+      const stays = await repo(f.accountId, 'runner_verified');
+      const waiting = await run(f.accountId, stays, 'pending', 'runner', 'runner_verified');
+      await asApp(f.a1, f.accountId, async () => {
+        await expect(sp(() => cancel(stays))).rejects.toMatchObject({ code: '55000' });
+      });
+      expect(await statusOf(waiting)).toBe('pending');
+    });
+
     it('refuses a member who is not an owner or admin (42501), no user in context (42501), another account\'s repo and an unknown repo (P0002), and a null repo (22023)', async () => {
       const id = await repo(f.accountId, 'sandbox');
       const queued = await run(f.accountId, id);
@@ -219,6 +236,18 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
         await asApp(f.a1, f.accountId, async () => {
           await audit(id, 'runner_local', 'sandbox', true, 3);
           expect(await rows(id)).toEqual([{ actor: f.a1, payload: { repo_id: id, from: 'runner_local', to: 'sandbox', auto_merge_turned_off: true, cancelled_runs: 3 } }]);
+        });
+      });
+
+      it('records a move between the runner modes with no cancelled run, and a verified repo leaving for sandbox with its count; a count on a move that stays on a runner is refused', async () => {
+        const id = await repo(f.accountId, 'runner_verified');
+        await asApp(f.a1, f.accountId, async () => {
+          await audit(id, 'runner_local', 'runner_verified', false, 0);
+          await audit(id, 'runner_verified', 'runner_local', false, 0);
+          await audit(id, 'runner_verified', 'sandbox', false, 2);
+          expect((await rows(id)).map((r) => [r.payload.from, r.payload.to, r.payload.cancelled_runs])).toEqual([['runner_local', 'runner_verified', 0], ['runner_verified', 'runner_local', 0], ['runner_verified', 'sandbox', 2]]);
+          await expect(sp(() => audit(id, 'runner_local', 'runner_verified', false, 1))).rejects.toMatchObject({ code: '22023' });
+          await expect(sp(() => audit(id, 'runner_verified', 'runner_local', false, 1))).rejects.toMatchObject({ code: '22023' });
         });
       });
 
@@ -300,7 +329,7 @@ describe('migration 0759 gives platform_ops nothing', () => {
     pool = createPool(pg.url);
     guard = guardPoolTeardown(pool, 'platformOpsDiff0759Pool');
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0759-diff-migrations-'));
-    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION)) {
+    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !DEPENDS_ON_MIGRATION.has(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), path.join(beforeDir, file));
     }
     await runMigrations(pool, beforeDir);

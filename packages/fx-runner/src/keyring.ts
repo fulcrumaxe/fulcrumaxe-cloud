@@ -40,9 +40,12 @@ export type PinnedGitProxies = Readonly<Record<string, string>>;
 /**
  * Same pattern as `PINNED_JOB_KEYS`: hashes of `new URL(address).origin`, never the host text (a private host name must not appear in public code).
  * An address with no entry has no proxy, so a cloud-verified job there ends `git_proxy_unpinned` before any git call. The production address has
- * no entry until its proxy and ticket keys exist. The staging entry is added when the staging proxy host is confirmed (hash only).
+ * no entry until its proxy and ticket keys exist (D#6 R6-W). The staging entry (D#6 R5b-1, C38) is a hash pair and nothing else.
  */
-export const PINNED_GIT_PROXIES: PinnedGitProxies = Object.freeze({});
+export const PINNED_GIT_PROXIES: PinnedGitProxies = Object.freeze({
+  // staging cloud origin (the hash that keys the staging job key above) -> staging GitHub proxy origin (private hosts; hashes only)
+  c99106f0f3e8720c0d2d5f275f8d341a21367d193ffbb416e7a73a9ebb00fe0f: "716e6a8da9466577d9c61b05fc22d60a52ec8508e7e9ed84bf66c0c948ea2fc2",
+});
 
 /** The pinned proxy origin hash for a cloud address, or undefined. */
 export function gitProxyHashFor(cloudAddress: string, table: PinnedGitProxies = PINNED_GIT_PROXIES): string | undefined {

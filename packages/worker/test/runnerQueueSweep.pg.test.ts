@@ -29,7 +29,7 @@ describe("runner queue sweep [pg]", () => {
   });
   beforeEach(async () => {
     // Other files of this package leave waiting runner runs in the shared database; the sweep is cross-tenant, so clear them.
-    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode = 'runner_local' AND status = 'pending'`);
+    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE runtime = 'runner' AND execution_mode IN ('runner_local', 'runner_verified') AND status = 'pending'`);
   });
   afterAll(async () => {
     admin.release();
@@ -182,12 +182,12 @@ describe("runner queue sweep [pg]", () => {
   });
 
   describe("race backstop (C24 section 2): a pending runner run whose repo left runner_local", () => {
-    async function inRepo(accountId: string, repoId: string | null, createdAt: number): Promise<string> {
+    async function inRepo(accountId: string, repoId: string | null, createdAt: number, mode = "runner_local"): Promise<string> {
       const id = randomUUID();
       await admin.query(
         `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, created_at)
-         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', 'runner_local', $3, to_timestamp($4 / 1000.0))`,
-        [id, accountId, repoId, createdAt],
+         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', $5, $3, to_timestamp($4 / 1000.0))`,
+        [id, accountId, repoId, createdAt, mode],
       );
       return id;
     }
@@ -210,6 +210,25 @@ describe("runner queue sweep [pg]", () => {
         expect(await sweeper().sweepRunnerQueue()).toMatchObject({ cancelled: 0 });
       } finally {
         await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [B.repoId]);
+      }
+    });
+
+    // D#6 R5b-1 (C26 section 3, C38): the backstop acts only when the repo's new mode is not a runner mode.
+    it("a verified run is cancelled when its repo is on sandbox, and is NOT cancelled on a verified or a runner_local repo (a move between the runner modes cancels nothing)", async () => {
+      try {
+        await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
+        await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [B.repoId]);
+        const onVerified = await inRepo(A.accountId, A.repoId, NOW - 70 * HOUR, "runner_verified");
+        const toSandbox = await inRepo(B.accountId, B.repoId, NOW - 60_000, "runner_verified");
+        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 2, cancelled: 1, waiting: 1 });
+        expect(await status(toSandbox)).toBe("cancelled");
+        expect(await events(toSandbox)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+        expect(await status(onVerified)).toBe("pending");
+        await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 1, cancelled: 0 });
+        expect(await status(onVerified)).toBe("pending");
+      } finally {
+        await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id IN ($1, $2)", [A.repoId, B.repoId]);
       }
     });
   });

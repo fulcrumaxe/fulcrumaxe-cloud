@@ -68,7 +68,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       run_id: id,
       repo: { id: o.repoId ?? A.repoId, owner: "acme", name: "app", private: true },
       role: (o.role ?? "executor") as Job["role"],
-      mode: "local",
+      mode: o.mode === "runner_verified" ? "verified" : "local",
       spec: null,
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
@@ -100,6 +100,28 @@ describe("runner claim, heartbeat and events [pg]", () => {
   const hb = (runId: string, leaseGeneration: number, runnerId = runner) => facade.heartbeatRunnerRun({ accountId: A.accountId, runnerId, runId, leaseGeneration });
 
   describe("claim", () => {
+    // D#6 R5b-1 (C38): a run whose own mode is runner_verified is claimable while its repo is on either runner mode, and never on sandbox.
+    it("hands a verified run to an eligible runner, its job still saying verified, whether the repo is verified or has moved to runner_local", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
+      const id = await pending({ mode: "runner_verified" });
+      const first = await claim();
+      expect(first).toMatchObject({ kind: "claimed", runId: id, leaseGeneration: 1 });
+      expect(first.kind === "claimed" && first.signedJob.job.mode).toBe("verified");
+      expect(await row(id)).toMatchObject({ status: "running", runner_id: runner });
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+      const moved = await pending({ mode: "runner_verified" });
+      const second = await claim();
+      expect(second).toMatchObject({ kind: "claimed", runId: moved });
+      expect(second.kind === "claimed" && second.signedJob.job.mode).toBe("verified");
+    });
+
+    it("hands out nothing for a verified run whose repo is on sandbox", async () => {
+      const id = await pending({ mode: "runner_verified" });
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).toBe("pending");
+    });
+
     it("hands out a pending run: running, this runner, generation 1, lease 90 s, one status event", async () => {
       const id = await pending();
       const result = await claim();

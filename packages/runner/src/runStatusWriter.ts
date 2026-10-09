@@ -10,6 +10,7 @@ import { FEATURE_CATALOGUE } from "../../features/src/featureExposure.js";
 import { assertLegalRunTransition, type RunStatus } from "./statusTransitions.js";
 import type { ExtensionProgress } from "./runLimitDecision.js";
 import type { Role } from "./types.js";
+import { isRunnerMode } from "./runnerModes.js";
 
 /**
  * D#2 H09b, correction C10, pass/fail 13: "Every write of
@@ -147,7 +148,7 @@ async function resolveSpecVersionId(client: PoolClient, p: InsertAgentRunParams)
   const { rows } = await client.query<{ spec_version_id: string | null }>("SELECT spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2", [parentId, p.accountId]);
   const inherited = rows[0]?.spec_version_id ?? null;
   if (p.specVersionId != null && p.specVersionId !== inherited) throw new SpecVersionMismatchError();
-  if (inherited === null && p.executionMode === "runner_local" && SPEC_PINNED_RUNNER_ROLES.has(p.role)) throw new NoSpecVersionError();
+  if (inherited === null && isRunnerMode(p.executionMode) && SPEC_PINNED_RUNNER_ROLES.has(p.role)) throw new NoSpecVersionError();
   return inherited;
 }
 
@@ -455,7 +456,7 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
 
 /**
  * D#6 R3a (C12 A8): records the signed job on a runner run, through the `agent_run_set_runner_job` definer (0714) and no
- * other path. The definer writes once: only to a `pending` `runner_local` run with `runtime = 'runner'` and no job yet.
+ * other path. The definer writes once: only to a `pending` runner run with `runtime = 'runner'` and no job yet.
  * Returns whether this call wrote it; false means the run was not in that state (already has a job, already claimed,
  * cancelled) and nothing changed.
  */
