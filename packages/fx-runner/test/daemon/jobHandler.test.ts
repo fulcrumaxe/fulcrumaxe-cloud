@@ -525,6 +525,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       ["bad_start_options", "runner_setup", "bad_start_options"],
       ["no_init_line", "runner_setup", "no_init_line"],
       ["permission_mode_forced", "runner_setup", "permission_mode_forced"],
+      ["model_unsupported", "runner_setup", "model_unsupported"],
       // The set of codes runJob returns is open. Anything else is a setup failure of an unknown kind, and the code itself is never sent.
       ["sandbox_grant_refused", "runner_setup", "other"],
       ["some_new_code", "runner_setup", "other"],
@@ -883,6 +884,22 @@ describe("git path B around the run (D#6 R4a-3)", () => {
     expect(git.calls.map((c) => c.split(" ")[0])).toEqual(["check", "resume", "publish"]);
     expect(rig.port.starts.map((s) => s.workdir)).toEqual([kept]);
     expect(publishedBase).toBe("e".repeat(40));
+  });
+
+  it("a fix round whose model hint is not in the price table ends model_unsupported before any git call, sandbox or run", async () => {
+    const kept = path.join(root, "work", "kept");
+    mkdirSync(kept, { recursive: true });
+    const git = fakeGitPath({ resume: async () => ({ base: "e".repeat(40) }), prepare: async () => ({ base: "d".repeat(40) }) });
+    const rig = makeRig({ handler: { git } });
+    rig.deps.run.planSession = () => ({ kind: "resume", sessionId: "s1", workspace: kept });
+    const claimed = await rig.claim(signRaw(continuing(RUN_BRANCH, { model_hint: "opus-9" })) as never);
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "model_unsupported" });
+    // Not check, resume or prepare: the refusal comes before the first of them.
+    expect(git.calls).toEqual([]);
+    expect(rig.port.calls).toEqual([]);
+    expect(rig.runJobCalls()).toBe(0);
+    expect(sentToCloud().some((p) => p.endsWith("/done"))).toBe(false);
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "model_unsupported" });
   });
 
   it("an error that is not the git path's own is not swallowed", async () => {

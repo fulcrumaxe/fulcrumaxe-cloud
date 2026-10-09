@@ -143,7 +143,7 @@ describe("LocalOnlyEvent", () => {
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
       for (const reason of Object.keys(DETAILS_OF_RUN_ENDED)) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
       expect(DETAILS_OF_RUN_ENDED.job_refused).toEqual(["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role"]);
-      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other", "git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete"]);
+      expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other", "git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete", "model_unsupported"]);
       for (const [reason, details] of Object.entries(DETAILS_OF_RUN_ENDED)) {
         for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail }).success, `${reason}/${detail}`).toBe(true);
       }

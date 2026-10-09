@@ -69,9 +69,9 @@ describe("G2: a minted ticket is removed by redaction (it is a JWT)", () => {
 describe("the new runner_setup details and size_mb (C27 section 4.5)", () => {
   const NEW = ["git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete"];
 
-  it("RUNNER_SETUP_DETAILS gains exactly the six, at the end, after every earlier detail", () => {
-    expect(RUNNER_SETUP_DETAILS.slice(-6)).toEqual(NEW);
-    expect(RUNNER_SETUP_DETAILS.slice(0, -6)).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
+  it("RUNNER_SETUP_DETAILS gains exactly the six, after every earlier detail (and before the later model_unsupported)", () => {
+    expect(RUNNER_SETUP_DETAILS.slice(-7, -1)).toEqual(NEW);
+    expect(RUNNER_SETUP_DETAILS.slice(0, -7)).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other"]);
     expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(RUNNER_SETUP_DETAILS);
   });
 
