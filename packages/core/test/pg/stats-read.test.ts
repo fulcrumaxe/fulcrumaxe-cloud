@@ -119,6 +119,8 @@ describe('getStats / getWorkItemTimeline (D#45 S3)', () => {
       expect(result.metrics.merged_count.value).toBeGreaterThanOrEqual(1);
       expect(result.metrics.time_to_merge_minutes.n).toBeGreaterThanOrEqual(1);
       expect(Object.keys(result.metrics)).toHaveLength(16);
+      // D#6 R2b-5a: the runner figure is present beside the metrics (0 with no runner runs), and not one of them.
+      expect(result.runner_api_equivalent_usd).toBe(0);
     });
   });
 

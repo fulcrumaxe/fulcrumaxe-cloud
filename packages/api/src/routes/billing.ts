@@ -81,6 +81,8 @@ export const usageResponseSchema = z.object({
   model: budgetUsageSchema,
   foreground_compute: budgetUsageSchema,
   background_compute: budgetUsageSchema,
+  // D#6 R2b-5a: the API-equivalent of this month's runs on the person's own machine. Information; never part of any budget above.
+  own_plan_api_equivalent_usd: z.number().describe("What this month's runs on the person's own machine would have cost at API prices. Information, never spend, and not part of any budget above. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."),
 });
 
 /** `model_usd_month` of 0 means "not set" (the column default). */

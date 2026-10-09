@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { outsideMeterLabel, type EndReason } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
+import { runnerUsageSchema } from "./runs.js";
 
 const linkedRun = z.object({ id: z.string().uuid(), role: z.string(), status: z.string(), created_at: z.string() });
 const costSource = z.enum(["operator_subscription", "customer_gateway", "customer_anthropic", "sandbox", "workflow"]);
@@ -61,6 +62,8 @@ export const runInsightResponseSchema = z.object({
     added_usd: z.number().nullable(),
     text: z.string(),
   }),
+  // D#6 R2b-5a: a runner run only. API-equivalent usage, as information; `cost` above stays the spend.
+  runner_usage: runnerUsageSchema.nullable().optional(),
 });
 
 export const runInsightRoutes: RouteEntry[] = [

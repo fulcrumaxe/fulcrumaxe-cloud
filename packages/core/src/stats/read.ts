@@ -3,6 +3,7 @@ import { computeKpis, type InstallationKpiRow, type KpiResults, type RunKpiRow, 
 import { NotFoundError } from '../tenancy/errors.js';
 import type { InstallationAppKind } from '../repos/appKinds.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { runnerApiEquivalentUsd } from '../runs/runnerUsage.js';
 
 /** D#45 S3: this module's own local copy of the ctx principal shape (matches work-items/read.ts's). */
 export interface Principal {
@@ -110,6 +111,8 @@ export interface GetStatsResult {
   window: { from: string; to: string; repo_id: string | null };
   generated_at: string;
   metrics: KpiResults;
+  /** D#6 R2b-5a: information, never spend. Not a KPI: kept outside `metrics` and read by no cost KPI. */
+  runner_api_equivalent_usd: number;
 }
 
 /**
@@ -153,10 +156,13 @@ export async function getStats(ctx: StatsReadCtx, input: GetStatsInput): Promise
         ? scoped.first_pr_from_install
         : computeKpis({ items: allItems, runs: allRuns, installations }, window).first_pr_from_install;
 
+    const runnerApiEquivalent = await runnerApiEquivalentUsd(client, { from, to, repoId });
+
     return {
       window: { from: from.toISOString(), to: to.toISOString(), repo_id: repoId },
       generated_at: generatedAt.toISOString(),
       metrics: { ...scoped, first_pr_from_install: firstPrFromInstall },
+      runner_api_equivalent_usd: runnerApiEquivalent,
     };
   });
 }

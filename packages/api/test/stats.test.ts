@@ -92,6 +92,13 @@ describe('stats: response schema shape (D#45 S3 criteria 3, 9)', () => {
     expect(metricsKeys).toEqual(kpiIds);
   });
 
+  it('carries runner_api_equivalent_usd beside metrics, not inside it, and as a required number', () => {
+    expect(Object.keys(statsResponseSchema.shape)).toContain('runner_api_equivalent_usd');
+    expect(Object.keys(statsResponseSchema.shape.metrics.shape)).not.toContain('runner_api_equivalent_usd');
+    expect(statsResponseSchema.shape.runner_api_equivalent_usd.safeParse(1.25).success).toBe(true);
+    expect(statsResponseSchema.shape.runner_api_equivalent_usd.safeParse(undefined).success).toBe(false);
+  });
+
   it('no schema key anywhere matches /budget|plan|price|margin|revenue/i', () => {
     const FORBIDDEN = /budget|plan|price|margin|revenue/i;
     function walk(node: unknown): void {
@@ -202,8 +209,9 @@ describe('stats: GET /api/v1/stats, GET /api/v1/work-items/{id}/timeline (D#45 S
       const { accountId, userId } = await seedAccountWithMember(admin);
       const res = await dispatch(await sessionRequest('http://localhost/api/v1/stats', { accountId, userId }));
       expect(res.status).toBe(200);
-      const body = (await res.json()) as { window: unknown; generated_at: string; metrics: Record<string, unknown> };
-      expect(Object.keys(body).sort()).toEqual(['generated_at', 'metrics', 'window']);
+      const body = (await res.json()) as { window: unknown; generated_at: string; metrics: Record<string, unknown>; runner_api_equivalent_usd: number };
+      expect(Object.keys(body).sort()).toEqual(['generated_at', 'metrics', 'runner_api_equivalent_usd', 'window']);
+      expect(typeof body.runner_api_equivalent_usd).toBe('number');
       expect(Object.keys(body.metrics).sort()).toEqual(KPI_METRIC_IDS);
     });
   });

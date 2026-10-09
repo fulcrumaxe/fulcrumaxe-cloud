@@ -81,11 +81,12 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         priority: 'normal',
         queue_rank: null,
         cost_usd: 0,
+        own_plan_api_equivalent_usd: 0,
         created_at: createdAt.toISOString(),
         updated_at: createdAt.toISOString(),
       });
       expect(Object.keys(dto).sort()).toEqual(
-        ['id', 'repo_id', 'kind', 'issue_number', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'created_at', 'updated_at'].sort(),
+        ['id', 'repo_id', 'kind', 'issue_number', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'created_at', 'updated_at'].sort(),
       );
     });
 

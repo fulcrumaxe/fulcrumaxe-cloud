@@ -150,6 +150,7 @@ describe('runs/read (D#31 API-3a)', () => {
         parent_run_id: null,
         role: 'build',
         status: 'succeeded',
+        runtime: 'local',
         usd: 1.25,
         tokens_in: 1000,
         tokens_out: 200,
@@ -159,7 +160,7 @@ describe('runs/read (D#31 API-3a)', () => {
         approval: null,
       });
       const expectedKeys = [
-        'id', 'work_item_id', 'parent_run_id', 'role', 'status',
+        'id', 'work_item_id', 'parent_run_id', 'role', 'status', 'runtime',
         'usd', 'tokens_in', 'tokens_out', 'created_at', 'updated_at',
         'approved_by', 'approval',
       ];

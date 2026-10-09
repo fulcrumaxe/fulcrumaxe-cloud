@@ -23,6 +23,11 @@ export interface Usage {
   model: BudgetUsage;
   foreground_compute: BudgetUsage;
   background_compute: BudgetUsage;
+  /**
+   * D#6 R2b-5a: what this month's runs on the person's own machine would have cost at API prices. INFORMATION, NEVER SPEND: it is not in
+   * `model` or any other budget above, is not reserved, and no cap or refusal reads it.
+   */
+  own_plan_api_equivalent_usd: number;
 }
 
 export interface AccountBudgets {
@@ -87,11 +92,17 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     );
     const pick = (rows: { budget: Budget; sum: string }[], b: Budget): number =>
       Number(rows.find((r) => r.budget === b)?.sum ?? 0);
-    return (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) });
+    const ownPlan = await client.query<{ sum: string }>(
+      `SELECT COALESCE(SUM(api_equivalent_usd), 0)::text AS sum FROM runner_run_usage
+        WHERE account_id = $1 AND recorded_at >= $2 AND recorded_at < $3`,
+      [accountId, periodStart, new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, 1))],
+    );
+    const ownPlanUsd = Number(ownPlan.rows[0]?.sum ?? 0);
+    return { at: (b: Budget) => ({ spent: pick(ledger.rows, b), reserved: pick(open.rows, b) }), ownPlanUsd };
   });
   const usage = (b: Budget, limit: number): BudgetUsage => ({
-    spent_usd: round4(sums(b).spent),
-    reserved_usd: round4(sums(b).reserved),
+    spent_usd: round4(sums.at(b).spent),
+    reserved_usd: round4(sums.at(b).reserved),
     limit_usd: round4(limit),
   });
   return {
@@ -99,5 +110,6 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     model: usage('model', budgets.model_usd_month),
     foreground_compute: usage('foreground_compute', budgets.foreground_compute_usd_month),
     background_compute: usage('background_compute', budgets.background_compute_usd_month),
+    own_plan_api_equivalent_usd: round4(sums.ownPlanUsd),
   };
 }

@@ -19,6 +19,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { insertRunnerEvent, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
+import { recordRunnerUsage } from "./runnerUsage.js";
 import { requestFollowUp, settleFollowUp, type FollowUpOutcome, type FollowUpPorts } from "./runnerFollowUp.js";
 
 /**
@@ -377,6 +378,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           let duplicates = 0;
           let conflicts = 0;
           let ending: Ending | null = null;
+          const newlyStored: LocalOnlyEvent[] = [];
           for (const event of input.events) {
             // G2 at ingest: the runner redacts before it sends, and the cloud does it again before anything is stored.
             const clean = redactDeep(event, []);
@@ -388,13 +390,17 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
               bodySha256: createHash("sha256").update(canonicalJson(event), "utf8").digest("hex"),
               payload: clean as unknown as Record<string, unknown>,
             });
-            if (outcome === "stored") stored++;
-            else {
+            if (outcome === "stored") {
+              stored++;
+              newlyStored.push(event);
+            } else {
               duplicates++;
               if (outcome === "conflict") conflicts++;
             }
             if (outcome === "stored" && ending === null) ending = endingOf(event);
           }
+          // D#6 R2b-5a: the API-equivalent figure for the usage events stored just now. Information only; it is written to its own table.
+          await recordRunnerUsage(client, { accountId: input.accountId, runId: input.runId, runnerId: input.runnerId, stored: newlyStored });
           if (ending === null) {
             await leaseVerdict(client, input, at, RUNNER_LEASE_SECONDS, maxWallClockMs);
             return { outcome: "accepted", stored, duplicates, conflicts, ended: null, leaseExpiresAt: new Date(at.getTime() + RUNNER_LEASE_SECONDS * 1000) };

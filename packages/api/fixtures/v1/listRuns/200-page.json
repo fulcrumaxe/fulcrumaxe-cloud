@@ -6,6 +6,7 @@
       "parent_run_id": null,
       "role": "build",
       "status": "succeeded",
+      "runtime": "production",
       "usd": 1.25,
       "tokens_in": 12000,
       "tokens_out": 3400,
