@@ -139,7 +139,14 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
       if (req.method === "GET" && req.path === `${base}/pulls`) {
         if (w.githubDown) return { status: 502, body: { message: "Bad Gateway" } };
         if (w.noPr) return { status: 200, body: [] };
-        return { status: 200, body: [{ number: 41, head: { sha: w.head, ref: "fx/issue-7", repo: { full_name: "acme/widgets" } }, base: { ref: "main" } }] };
+        // The branch asked for: `fx/issue-7` for a sandbox build, the recorded run branch for a runner run (the list call, A3).
+        const asked = String(req.query?.head ?? "acme:fx/issue-7").split(":")[1]!;
+        return { status: 200, body: [{ number: 41, state: "open", head: { sha: w.head, ref: asked, repo: { full_name: "acme/widgets" } }, base: { ref: "main" } }] };
+      }
+      // A runner repo's changed files come from the fixed PullRequestFiles document: paths and change types, never a patch.
+      if (req.method === "POST" && req.path === "/graphql") {
+        const nodes = w.files.map((f) => ({ path: f.filename, changeType: "MODIFIED" }));
+        return { status: 200, body: { data: { repository: { pullRequest: { files: { totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } } } };
       }
       // A runner run's pull request is read by its recorded number; its head is the recorded run branch.
       if (req.method === "GET" && req.path === `${base}/pulls/41`) {
@@ -768,7 +775,8 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     const t = setup(runner());
     const out = await workItemAdvanceWorkflow(ARGS);
     expect(out).toEqual({ status: "merged", detail: undefined });
-    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    // R3c: a runner repo's file list has paths and no patches, so the security reviewer is required as well.
+    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer", "security-reviewer"]);
     for (const req of t.started) {
       expect(req.prompt).toContain(`Its branch is ${RUN_BRANCH};`);
       // D#6 R4d-4a (C33): a runner repo's reviewers are told the workspace is already at the head (detached), with no fetch or checkout.
@@ -778,8 +786,13 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
       expect(req.expectedExecutionMode).toBe("runner_local");
       expect(req.prompt).not.toContain("fx/issue-7");
     }
-    expect(listCalls(t.requests)).toEqual([]);
-    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(true);
+    // The pull request is found with the list call (A3) for the recorded branch, and the issue's branch is never asked for.
+    expect(listCalls(t.requests).map((r) => r.query)).toEqual([{ state: "open", head: `acme:${RUN_BRANCH}`, per_page: 5 }]);
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(false);
+    expect(JSON.stringify(t.requests)).not.toContain("fx/issue-7");
+    // The files came from the fixed GraphQL document, not from the REST file list (which carries patches).
+    expect(t.requests.some((r) => r.path.endsWith("/files"))).toBe(false);
+    expect(t.requests.some((r) => r.method === "POST" && r.path === "/graphql")).toBe(true);
     expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
   });
 
@@ -841,7 +854,7 @@ describe("a runner run's pull request is the one its done recorded (D#6 C25 sect
     const open = setup(runner(), STUCK);
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "rebuild_pr_open" });
     expect(open.worker.advanceBuild).not.toHaveBeenCalled();
-    expect(listCalls(open.requests)).toEqual([]);
+    expect(JSON.stringify(open.requests)).not.toContain("fx/issue-7");
     const none = setup(runner({ recorded: null }), { ...STUCK, recordedPr: null });
     none.worker.advanceBuild.mockResolvedValue({ status: "refused", reason: "start_no_model" });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_no_model" });
@@ -893,10 +906,10 @@ describe("the build finds the pull request itself when the webhook did not move 
     expect(world.sleeps).toBeGreaterThanOrEqual(PR_GRACE_POLLS);
     expect(t.worker.advancePrFound).toHaveBeenCalledWith(WHO, 41);
     expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
-    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
-    // It was read by number, never searched for by the issue's branch.
-    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(true);
-    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls")).toBe(false);
+    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer", "security-reviewer"]);
+    // It was found through the recorded branch (the list call), never searched for by the issue's branch.
+    expect(t.requests.some((r) => r.path === "/repos/acme/widgets/pulls/41")).toBe(false);
+    expect(t.requests.filter((r) => r.path === "/repos/acme/widgets/pulls").every((r) => r.query?.head === `acme:${RUN_BRANCH}`)).toBe(true);
   });
 
   it("none recorded and none open ends at Needs human as no_pull_request, as before", async () => {

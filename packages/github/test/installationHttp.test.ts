@@ -170,6 +170,27 @@ describe("createInstallationHttp", () => {
       expect(t.calls).toEqual([]);
     });
 
+    it("D#6 R3c: allowGraphql lets a read or merge_gate client send POST /graphql and nothing else it could not before; off by default", async () => {
+      const t = setup((u) => (u.pathname === "/graphql" ? json(200, { data: {} }) : u.pathname === "/repos/acme/widgets/pulls" ? json(200, []) : undefined));
+      for (const kind of ["read", "merge_gate"] as const) {
+        const off = await t.open(kind, TARGET);
+        await expect(off.request({ method: "POST", path: "/graphql", body: {} }), `${kind} default`).rejects.toThrow("path_refused");
+        const on = await t.open(kind, { ...TARGET, allowGraphql: true });
+        expect(await on.request({ method: "POST", path: "/graphql", body: { query: "query X { __typename }", variables: {} } })).toEqual({ status: 200, body: { data: {} } });
+        // The flag adds the one path. Everything else keeps its rule.
+        await expect(on.request({ method: "GET", path: "/graphql" }), `${kind} GET graphql`).rejects.toThrow("path_refused");
+        await expect(on.request({ method: "POST", path: "/graphql/x", body: {} }), `${kind} graphql/x`).rejects.toThrow("path_refused");
+        await expect(on.request({ method: "POST", path: "/graphql?x=1", body: {} }), `${kind} graphql?x`).rejects.toThrow("path_refused");
+        await expect(on.request({ method: "PATCH", path: "/repos/acme/widgets/pulls/3", body: {} }), `${kind} PATCH`).rejects.toThrow("method_refused");
+        await expect(on.request({ method: "GET", path: "/repos/acme/other/pulls" }), `${kind} other repo`).rejects.toThrow("path_refused");
+      }
+      // A read client still may not write over REST, flag or not.
+      const read = await t.open("read", { ...TARGET, allowGraphql: true });
+      await expect(read.request({ method: "POST", path: "/repos/acme/widgets/pulls", body: {} })).rejects.toThrow("method_refused");
+      await expect(read.request({ method: "PUT", path: "/repos/acme/widgets/pulls/3/merge", body: {} })).rejects.toThrow("method_refused");
+      expect(t.calls.map((c) => new URL(c.url).pathname)).toEqual(["/graphql", "/graphql"]);
+    });
+
     it.each([
       ["GET", "/repos/acme/widgets/contents/src/a.ts"],
       ["GET", "/repos/acme/widgets/readme"],

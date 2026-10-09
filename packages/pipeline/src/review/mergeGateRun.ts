@@ -3,9 +3,10 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
-import { createGitHubMergeGatePort, type GitHubHttp } from "../build/githubMergePort.js";
-import { loadRunsOnSha, reviewerReasons, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
-import { listChangedFiles, postReviewStatus } from "./githubReads.js";
+import { readRecordedRunnerPullRequest } from "@fx/runner";
+import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
+import { gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
+import { listChangedFiles, listChangedFilesLocal, postReviewStatus } from "./githubReads.js";
 import { loadReviewContext } from "./context.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
@@ -90,8 +91,24 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
   const debaterEnabled = ctx.debaterMode === "always" || ctx.debaterMode === "feature_critical";
 
   const pr = { repoId: ctx.repoId, prNumber };
+  // D#6 R3c: a runner_local repo's whole review and merge path goes through the local-only client. Anything else refuses before a call.
+  const localHttp = ctx.executionMode === "runner_local" ? http : null;
+  if (localHttp !== null && !isLocalGitHubHttp(localHttp)) throw new Error("merge gate: a runner_local repo needs the local-only GitHub client");
   const port = createGitHubMergeGatePort({
     http,
+    ...(localHttp !== null && isLocalGitHubHttp(localHttp)
+      ? {
+          local: {
+            http: localHttp,
+            // The branch the run recorded with its `done`. The pull request the workflow found must be that one.
+            recordedBranch: async () => {
+              const recorded = await withTenant(pool, accountId, (client) => readRecordedRunnerPullRequest(client, { accountId, workItemId }));
+              if (recorded === null || recorded.number !== prNumber) throw new Error("merge gate: the pull request is not the run's recorded one");
+              return recorded.branch;
+            },
+          },
+        }
+      : {}),
     resolveRepo: async () => ({ owner: ctx.owner, name: ctx.name }),
     // The block reasons are recorded as a driver event below, right after the gate answers: that is the marking.
     markReadyForHumanMerge: async () => undefined,
@@ -106,7 +123,9 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
 
   if (head.state === "open" && !head.merged && SHA_PATTERN.test(headSha)) {
     // 2. Who is required on that head.
-    const files = await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: prNumber });
+    const files = localHttp !== null && isLocalGitHubHttp(localHttp)
+      ? await listChangedFilesLocal(localHttp, { owner: ctx.owner, name: ctx.name, pr: prNumber })
+      : await listChangedFiles(http, { owner: ctx.owner, name: ctx.name, pr: prNumber });
     if (!files.ok) throw new Error(`merge gate: files ${files.reason}`);
     const plan = reviewPlanFor({
       tier: ctx.tier,
@@ -117,7 +136,8 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     gateSecurityTrigger = plan.gateSecurityTrigger;
     // 3. Owner ruling B: only when the reviewers clear this head by our records.
     const rows = await loadRunsOnSha(pool, accountId, workItemId, headSha);
-    if (reviewerReasons(plan.roles, rows, reviewMode).length === 0) {
+    // Never in `runner_local_off`: the opt-in is off, so the gate cannot merge on these reviews and our status must not say it can.
+    if (reviewMode !== "runner_local_off" && gateReviewerReasons(plan.roles, rows, reviewMode).length === 0) {
       const posted = await postReviewStatus(http, { owner: ctx.owner, name: ctx.name, sha: headSha, local: reviewMode === "runner_local_on" });
       status = posted.ok ? "posted" : "failed";
     }

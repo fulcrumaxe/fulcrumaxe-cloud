@@ -225,7 +225,9 @@ export class FakeGithub implements GithubClient {
     if (!keysAre(body, ["query", "variables"])) this.deny("graphql body keys");
     const { query, variables } = body as { query: string; variables: unknown };
     const op = (Object.keys(GITHUB_GRAPHQL_DOCUMENTS) as Array<keyof typeof GITHUB_GRAPHQL_DOCUMENTS>).find((k) => GITHUB_GRAPHQL_DOCUMENTS[k] === query);
-    if (!op) return this.deny("graphql query text is not one of the three fixed documents");
+    if (!op) return this.deny("graphql query text is not one of the fixed documents");
+    // The review path's document (A9) is not part of the `done` path this fake models.
+    if (op === "CommitChecks") return this.deny("CommitChecks is the review path's, not the done path's");
     if (typeof variables !== "object" || variables === null || Array.isArray(variables)) this.deny("graphql variables");
     const given = variables as Record<string, unknown>;
     const declared = declaredVariables(query);

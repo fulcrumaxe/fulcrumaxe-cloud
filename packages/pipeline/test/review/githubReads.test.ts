@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { GitHubHttp } from "../../src/build/githubMergePort.js";
-import { REVIEW_STATUS_CONTEXT, findOpenPullRequest, findPullRequestForItem, findRecordedPullRequest, listChangedFiles, postReviewStatus } from "../../src/review/githubReads.js";
+import type { GitHubHttp, LocalGitHubHttp } from "../../src/build/githubMergePort.js";
+import { REVIEW_STATUS_CONTEXT, findOpenPullRequest, findPullRequestForItem, findRecordedPullRequest, listChangedFiles, listChangedFilesLocal, postReviewStatus } from "../../src/review/githubReads.js";
+import { securityTriggers } from "../../src/review/securityTrigger.js";
 import { fakeGitHubRest, freshRepo } from "./helpers/fakeGitHubRest.js";
 
 /** D#483 P3: the driver's GitHub reads and the one write, against the fake that answers like GitHub. */
@@ -95,12 +96,12 @@ describe("findRecordedPullRequest (a runner run's pull request, by what its done
 });
 
 describe("findPullRequestForItem (the runner or sandbox switch)", () => {
-  it("a runner_local repo is found by its recorded pull request, and never asks for fx/issue-<n>", async () => {
-    const { http, calls } = recordingHttp(200, runnerPull());
+  it("a runner_local repo is found by its recorded pull request through the list call (A3), and never asks for fx/issue-<n> or GET pulls/<n>", async () => {
+    const { http, calls } = recordingHttp(200, [runnerPull()]);
     const out = await findPullRequestForItem(http, { ...repo, issue: 7, executionMode: "runner_local", recordedPr: recorded });
     expect(out).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: RUN_BRANCH } });
     expect(JSON.stringify(calls)).not.toContain("fx/issue-7");
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([{ method: "GET", path: "/repos/acme/widgets/pulls", query: { state: "open", head: `acme:${RUN_BRANCH}`, per_page: 5 } }]);
   });
 
   it("a runner_local repo with no recorded pull request fails closed as no_open_pr without asking GitHub, even when fx/issue-<n> has one open", async () => {
@@ -187,5 +188,75 @@ describe("postReviewStatus", () => {
     const s = freshRepo();
     await expect(postReviewStatus(fakeGitHubRest(s), { ...repo, sha: "main" })).rejects.toThrow("malformed sha");
     expect(s.requests).toEqual([]);
+  });
+});
+
+describe("findRecordedPullRequest, local-only (D#6 R3c: only the list call is on the allowlist)", () => {
+  const local = (body: unknown, status = 200) => recordingHttp(status, body);
+  const find = (h: GitHubHttp) => findRecordedPullRequest(h, repo, recorded, { local: true });
+
+  it("finds the recorded number among the open pull requests of the recorded branch", async () => {
+    expect(await find(local([runnerPull({ number: 40 }), runnerPull()]).http)).toEqual({ ok: true, pr: { number: 41, headSha: HEAD, baseRef: "main", branch: RUN_BRANCH } });
+  });
+
+  it("an empty list is no_open_pr; a list without the recorded number, one from another repository, and a non-list are malformed", async () => {
+    expect(await find(local([]).http)).toEqual({ ok: false, reason: "no_open_pr" });
+    expect(await find(local([runnerPull({ number: 42 })]).http)).toEqual({ ok: false, reason: "malformed" });
+    expect(await find(local([runnerPull({ head: { sha: HEAD, ref: RUN_BRANCH, repo: { full_name: "evil/widgets" } } })]).http)).toEqual({ ok: false, reason: "malformed" });
+    expect(await find(local({ message: "x" }).http)).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  it("a head on another branch than the recorded one is malformed, and any status but 200 is github_unavailable", async () => {
+    expect(await find(local([runnerPull({ head: { sha: HEAD, ref: "fx/issue-7", repo: { full_name: "acme/widgets" } } })]).http)).toEqual({ ok: false, reason: "malformed" });
+    for (const status of [401, 403, 404, 500]) expect(await find(local([], status).http)).toEqual({ ok: false, reason: "github_unavailable" });
+  });
+});
+
+describe("listChangedFilesLocal (D#6 R3c: paths only, through the PullRequestFiles document)", () => {
+  const page = (nodes: Array<{ path: string; changeType: string }>, over: { hasNextPage?: boolean; endCursor?: string | null; totalCount?: number } = {}) => ({
+    status: 200,
+    body: { data: { repository: { pullRequest: { files: { totalCount: over.totalCount ?? nodes.length, pageInfo: { hasNextPage: over.hasNextPage ?? false, endCursor: over.endCursor ?? null }, nodes } } } } },
+  });
+  const client = (answers: Array<{ status: number; body: unknown }>) => {
+    const calls: Array<{ op: string; variables: Record<string, unknown> }> = [];
+    const http: LocalGitHubHttp = {
+      request: async () => {
+        throw new Error("the REST file list must not be called");
+      },
+      graphql: async (op, variables) => (calls.push({ op, variables: { ...variables } }), answers[Math.min(calls.length - 1, answers.length - 1)]!),
+    };
+    return { http, calls };
+  };
+  const where = { ...repo, pr: 41 };
+
+  it("reads paths and change types only: no patch, and the security check fires for every file, so the security reviewer is required", async () => {
+    const { http, calls } = client([page([{ path: "docs/readme.md", changeType: "MODIFIED" }])]);
+    const out = await listChangedFilesLocal(http, where);
+    expect(out).toEqual({ ok: true, files: [{ path: "docs/readme.md", previousPath: null, patch: null, changes: 1 }], truncated: false });
+    expect(calls).toEqual([{ op: "PullRequestFiles", variables: { owner: "acme", name: "widgets", number: 41 } }]);
+    if (out.ok) expect(securityTriggers({ files: out.files, truncated: out.truncated })).toContain("diff_unavailable");
+  });
+
+  it("follows the cursor through every page", async () => {
+    const first = page([{ path: "a.md", changeType: "ADDED" }], { hasNextPage: true, endCursor: "c1", totalCount: 2 });
+    const second = page([{ path: "b.md", changeType: "ADDED" }], { totalCount: 2 });
+    const { http, calls } = client([first, second]);
+    const out = await listChangedFilesLocal(http, where);
+    expect(out).toMatchObject({ ok: true, truncated: false });
+    expect(out.ok && out.files.map((f) => f.path)).toEqual(["a.md", "b.md"]);
+    expect(calls[1]!.variables.cursor).toBe("c1");
+  });
+
+  it("fewer files than GitHub's total is truncated, and a list cut by the page cap is truncated", async () => {
+    expect(await listChangedFilesLocal(client([page([{ path: "a.md", changeType: "ADDED" }], { totalCount: 5 })]).http, where)).toMatchObject({ ok: true, truncated: true });
+    const endless = page([{ path: "a.md", changeType: "ADDED" }], { hasNextPage: true, endCursor: "c", totalCount: 99999 });
+    expect(await listChangedFilesLocal(client([endless]).http, where)).toMatchObject({ ok: true, truncated: true });
+  });
+
+  it("a GraphQL error (status 200 with errors), a bad status and a body of the wrong shape are failures, never an empty list", async () => {
+    expect(await listChangedFilesLocal(client([{ status: 200, body: { data: { repository: null }, errors: [{ message: "x" }] } }]).http, where)).toEqual({ ok: false, reason: "github_unavailable" });
+    expect(await listChangedFilesLocal(client([{ status: 502, body: {} }]).http, where)).toEqual({ ok: false, reason: "github_unavailable" });
+    expect(await listChangedFilesLocal(client([{ status: 200, body: { data: { repository: { pullRequest: null } } } }]).http, where)).toEqual({ ok: false, reason: "malformed" });
+    expect(await listChangedFilesLocal(client([page([{ path: 5 as never, changeType: "ADDED" }])]).http, where)).toEqual({ ok: false, reason: "malformed" });
   });
 });

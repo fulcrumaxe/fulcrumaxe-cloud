@@ -1,6 +1,7 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
 import { createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type VerdictRole } from "@fx/pipeline";
 import { openInstallationHttp } from "./github/installationHttp";
+import { openForRepo } from "./github/localOnlyHttp";
 
 /**
  * D#483 P3: the review stage's pipeline pieces, as the plain-data functions the worker's `review` dependency takes
@@ -37,7 +38,8 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       if (!loaded.ok) return { outcome: "refused", reason: loaded.reason };
       const c = loaded.ctx;
       try {
-        const http = await open("merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name });
+        // D#6 R3c: a runner_local repo's gate (find, files, CI, protection, status, merge) goes through the local-only fence.
+        const http = await openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name });
         // D#6 R2b: the stored per-repo opt-in decides whether a runner repo's local reviews count; a repo with none is advisory.
         const out = await runMergeGateForItem({ pool, http, localReviewOptIn: createPgLocalReviewOptIn(pool) }, input);
         return out.outcome === "refused" ? { outcome: "refused", reason: out.reason } : { outcome: out.outcome, headSha: out.headSha, reasons: out.reasons, status: out.status };

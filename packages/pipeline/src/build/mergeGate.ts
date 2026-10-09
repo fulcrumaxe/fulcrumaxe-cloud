@@ -221,6 +221,7 @@ export type MergeBlockReason =
   | "repo_ci_missing"
   | "no_branch_protection"
   | "local_review_not_enabled"
+  | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
   | "human_merge_only"
   | "merge_call_refused";
@@ -410,6 +411,19 @@ export function vetoReasons(role: GatedRole, rows: readonly RunRow[], localOn = 
   return reasons;
 }
 
+/**
+ * D#6 R3c (C35 section 3.3): `reviewerReasons`, with one honest change for a `runner_local` repo whose opt-in is off. There the
+ * per-role runtime reasons would tell the person that reviews are missing, when every required role has a trusted runner pass on
+ * this head. When that is so (the same rows clear the head under the opt-in-on rules), they are replaced by the single
+ * `local_reviews_passed_advisory`. The block itself is not touched: `local_review_not_enabled` is added by the gate as before. A role
+ * without a trusted pass keeps today's reasons.
+ */
+export function gateReviewerReasons(roles: readonly GatedRole[], rows: readonly RunRow[], mode: ReviewMode): MergeBlockReason[] {
+  const reasons = reviewerReasons(roles, rows, mode);
+  if (mode === "runner_local_off" && reasons.length > 0 && reviewerReasons(roles, rows, "runner_local_on").length === 0) return ["local_reviews_passed_advisory"];
+  return reasons;
+}
+
 export async function loadRunsOnSha(
   pool: Pool,
   accountId: string,
@@ -489,7 +503,7 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // A throw propagates to the step's retry, which lands here again.
   if (rows.length === 0) await deps.requestReviews(input.pr, headSha);
   const mode: ReviewMode = input.reviewMode ?? "cloud";
-  reasons.push(...reviewerReasons(roles, rows, mode));
+  reasons.push(...gateReviewerReasons(roles, rows, mode));
   // A runner_local repo whose admin has not opted in never merges on this gate, whatever the rows say.
   if (mode === "runner_local_off") reasons.push("local_review_not_enabled");
 

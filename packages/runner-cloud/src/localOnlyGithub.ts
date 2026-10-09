@@ -19,13 +19,18 @@
  *     diff or patch media type is refused whatever the path. A call that supplies none is sent with the first, so no call this
  *     wrapper forwards ever leaves it to GitHub's default media type.
  *
- * `POST /graphql` (A1) is allowed only for three documents fixed in this module, byte for byte, with variables of their own
+ * `POST /graphql` (A1) is allowed only for four documents fixed in this module, byte for byte, with variables of their own
  * schema. A caller never supplies a query (`graphql(op, variables)` takes the operation's name and looks the text up here); the documents select refs, counts, oids and changed paths with their change type, and
  * none selects a patch, a diff, text, a blob, contents or a body (a test holds that).
  *
- * Calls not listed are refused until a numbered correction adds them with their own negative tests. That includes the review gate's
- * (commit status, branch protection, CI state, the merge); reading CI state must use a fixed GraphQL document that selects state and
- * conclusion only, never a check run's output text.
+ * D#6 R3c (C35 section 3.3) adds the review driver's and the merge gate's calls, each as narrow as the call itself:
+ *   A7   POST /repos/{owner}/{repo}/statuses/{sha}, body exactly { state, context, description } with our review context
+ *   A8   GET  /repos/{owner}/{repo}/branches/{branch}/protection (one path segment for the branch)
+ *   A9   the fixed GraphQL document `CommitChecks`, keyed by pull request number and reading its last commit (check-run name, status, conclusion and app id; status-context name and state)
+ *   A10  PUT  /repos/{owner}/{repo}/pulls/{n}/merge, body exactly { sha, merge_method: "squash" }
+ *
+ * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
+ * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
  */
 
 /** The shape of the App client's request. The Accept header is optional because the production client sends none of its own. */
@@ -52,7 +57,7 @@ export class LocalOnlyGithubError extends Error {
   }
 }
 
-/** The three GraphQL documents A1 allows, fixed here. They select refs, counts, oids, changed paths and their change type; nothing that carries source. */
+/** The four GraphQL documents A1 allows, fixed here. They select refs, counts, oids, changed paths and their change type, and check names and states; nothing that carries source. */
 export const GITHUB_GRAPHQL_DOCUMENTS = Object.freeze({
   RunBranchState: `query RunBranchState($owner: String!, $name: String!, $head: String!, $base: String!) {
   repository(owner: $owner, name: $name) {
@@ -75,19 +80,45 @@ export const GITHUB_GRAPHQL_DOCUMENTS = Object.freeze({
   MarkReady: `mutation MarkReady($id: ID!) {
   markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { number isDraft } }
 }`,
+  // D#6 R3c (A9): the CI signal for one commit. Names, statuses, conclusions, the app that ran a check, and status contexts with their
+  // state. It never selects a check run's output, summary, text, details or annotations.
+  CommitChecks: `query CommitChecks($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts(first: 100, after: $cursor) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion checkSuite { app { databaseId } } }
+                  ... on StatusContext { context state }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`,
 });
 export type GithubGraphqlOperation = keyof typeof GITHUB_GRAPHQL_DOCUMENTS;
 
 /** One allowed call. `paths` are templates; `query` lists the only query keys; `body` says in words what the body must be. */
 export interface LocalOnlyAllowlistEntry {
   id: string;
-  method: "GET" | "POST" | "PATCH";
+  method: "GET" | "POST" | "PATCH" | "PUT";
   paths: readonly string[];
   query: readonly string[];
   body: string;
 }
 
-/** The calls R2b-3 makes (C22 section 6), nothing else. A test holds this list equal to the table in the Spec. */
+/** The calls R2b-3 makes (C22 section 6) and R3c adds (C35 section 3.3), nothing else. A test holds this list equal to the table in the Spec. */
 export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.freeze(
   [
     { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
@@ -96,6 +127,9 @@ export const LOCAL_ONLY_ALLOWLIST: readonly LocalOnlyAllowlistEntry[] = Object.f
     { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
     { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
     { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
+    { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
+    { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
+    { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
   ].map((entry) => Object.freeze(entry) as LocalOnlyAllowlistEntry),
 );
 
@@ -112,6 +146,8 @@ const PLACEHOLDERS: Readonly<Record<string, (segment: string) => boolean>> = {
   "{repo}": (s) => NAME.test(s) && s !== "." && s !== "..",
   "{n}": (s) => DIGITS.test(s),
   "{id}": (s) => DIGITS.test(s),
+  "{sha}": (s) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s),
+  "{branch}": (s) => NAME.test(s) && s !== "." && s !== "..",
 };
 
 function decoded(value: string): string {
@@ -172,6 +208,9 @@ const hasExactKeys = (value: Record<string, unknown>, required: readonly string[
 const OWNER_OR_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
 const REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._/:-]{0,254}$/;
 const CURSOR = /^[A-Za-z0-9+/=_-]{1,200}$/;
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** The context of the platform's own commit status. A test in the pipeline package holds it equal to the gate's constant. */
+export const LOCAL_ONLY_REVIEW_STATUS_CONTEXT = "fulcrumaxe/review";
 const NODE_ID = /^[A-Za-z0-9_=+/-]{1,100}$/;
 const str = (value: unknown, pattern: RegExp): boolean => typeof value === "string" && pattern.test(value) && !value.includes("..");
 /** An owner or repository name: the pattern, and never `.` or `..` themselves (a name may hold two dots in a row). */
@@ -184,6 +223,8 @@ const VARIABLES: Readonly<Record<GithubGraphqlOperation, (v: Record<string, unkn
   PullRequestFiles: (v) =>
     hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && (v.cursor === undefined || v.cursor === null || str(v.cursor, CURSOR)),
   MarkReady: (v) => hasExactKeys(v, ["id"]) && str(v.id, NODE_ID),
+  CommitChecks: (v) =>
+    hasExactKeys(v, ["owner", "name", "number"], ["cursor"]) && ownerOrName(v.owner) && ownerOrName(v.name) && positiveInt(v.number) && (v.cursor === undefined || v.cursor === null || str(v.cursor, CURSOR)),
 };
 
 /** Whether the body has the shape the entry names. */
@@ -204,6 +245,16 @@ function bodyFits(entry: LocalOnlyAllowlistEntry, body: unknown): boolean {
         typeof body.body === "string" && body.body.length <= 65536 &&
         typeof body.draft === "boolean"
       );
+    case "A7":
+      return (
+        isPlainObject(body) &&
+        hasExactKeys(body, ["state", "context", "description"]) &&
+        (body.state === "success" || body.state === "failure" || body.state === "pending" || body.state === "error") &&
+        body.context === LOCAL_ONLY_REVIEW_STATUS_CONTEXT &&
+        typeof body.description === "string" && body.description.length <= 140
+      );
+    case "A10":
+      return isPlainObject(body) && hasExactKeys(body, ["sha", "merge_method"]) && typeof body.sha === "string" && SHA.test(body.sha) && body.merge_method === "squash";
     case "A5":
       return isPlainObject(body) && hasExactKeys(body, ["state"]) && body.state === "closed";
     case "A6": {

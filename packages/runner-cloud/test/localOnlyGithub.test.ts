@@ -31,6 +31,10 @@ const DOC = GITHUB_GRAPHQL_DOCUMENTS;
 const branchState = { owner: "acme", name: "app", head: "fx/run-g1", base: "main" };
 const graphql = (query: string, variables: unknown): GithubRequest => ({ method: "POST", path: "/graphql", body: { query, variables } });
 const pr = { title: "Add the footer", head: "fx/run-g1", base: "main", body: "Run r1, work item w1.", draft: true };
+const SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567";
+const status = { state: "success", context: "fulcrumaxe/review", description: "Local review: every required reviewer passed on this commit, on your machine" };
+const merge = { sha: SHA, merge_method: "squash" };
+const checks = { owner: "acme", name: "app", number: 12 };
 
 /** The calls the run path makes: each is one entry of the allowlist. */
 const ALLOWED: Array<[string, GithubRequest]> = [
@@ -49,6 +53,12 @@ const ALLOWED: Array<[string, GithubRequest]> = [
   ["A6 an installation token", { method: "POST", path: "/app/installations/99/access_tokens" }],
   ["A6 an installation token with an empty body", { method: "POST", path: "/app/installations/99/access_tokens", body: {} }],
   ["A6 an installation token for one repository", { method: "POST", path: "/app/installations/99/access_tokens", body: { repository_ids: [1234567] } }],
+  ["A1 CommitChecks (A9)", graphql(DOC.CommitChecks, checks)],
+  ["A1 CommitChecks, next page", graphql(DOC.CommitChecks, { ...checks, cursor: "Y3Vyc29yOnYyOpHOAAAB" })],
+  ["A7 the review status", { method: "POST", path: `${R}/statuses/${SHA}`, body: status }],
+  ["A7 a pending review status", { method: "POST", path: `${R}/statuses/${SHA}`, body: { ...status, state: "pending" } }],
+  ["A8 branch protection", { method: "GET", path: `${R}/branches/main/protection` }],
+  ["A10 the squash merge", { method: "PUT", path: `${R}/pulls/12/merge`, body: merge }],
   ["a JSON Accept", { method: "GET", path: R, headers: { accept: "application/vnd.github+json" } }],
   ["a v3 JSON Accept", { method: "GET", path: R, headers: { Accept: "application/vnd.github.v3+json" } }],
   ["a trailing slash and doubled slashes read as the same path", { method: "GET", path: "//repos//acme/app/" }],
@@ -56,7 +66,7 @@ const ALLOWED: Array<[string, GithubRequest]> = [
 ];
 
 describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 section 6)", () => {
-  it("holds exactly the entries of the Spec's table, A1 to A6, and nothing else", () => {
+  it("holds exactly the entries of the Spec's table, A1 to A8 and A10 (A9 is a fixed document of A1), and nothing else", () => {
     expect(LOCAL_ONLY_ALLOWLIST).toEqual([
       { id: "A1", method: "POST", paths: ["/graphql"], query: [], body: "{ query: one of the three fixed documents, variables: that document's schema }" },
       { id: "A2", method: "GET", paths: ["/repos/{owner}/{repo}", "/repositories/{id}"], query: [], body: "none" },
@@ -64,6 +74,9 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       { id: "A4", method: "POST", paths: ["/repos/{owner}/{repo}/pulls"], query: [], body: "{ title, head, base, body, draft: boolean }" },
       { id: "A5", method: "PATCH", paths: ["/repos/{owner}/{repo}/pulls/{n}"], query: [], body: '{ state: "closed" }' },
       { id: "A6", method: "POST", paths: ["/app/installations/{id}/access_tokens"], query: [], body: "none, or { repository_ids: [the repo id] }" },
+      { id: "A7", method: "POST", paths: ["/repos/{owner}/{repo}/statuses/{sha}"], query: [], body: '{ state, context: "fulcrumaxe/review", description }' },
+      { id: "A8", method: "GET", paths: ["/repos/{owner}/{repo}/branches/{branch}/protection"], query: [], body: "none" },
+      { id: "A10", method: "PUT", paths: ["/repos/{owner}/{repo}/pulls/{n}/merge"], query: [], body: '{ sha, merge_method: "squash" }' },
     ]);
     expect(Object.isFrozen(LOCAL_ONLY_ALLOWLIST)).toBe(true);
   });
@@ -160,6 +173,7 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
         ["RunBranchState", branchState],
         ["PullRequestFiles", { owner: "acme", name: "app", number: 12 }],
         ["MarkReady", { id: "PR_kwDOAbCd123" }],
+        ["CommitChecks", checks],
       ] as const) {
         const doc = DOC[op];
         for (const at of [0, 1, Math.floor(doc.length / 2), doc.length - 1, doc.length]) {
@@ -186,6 +200,14 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
         ["MarkReady", { id: "PR id with spaces" }],
         ["MarkReady", { id: "PR_x", extra: 1 }],
         ["MarkReady", {}],
+        ["CommitChecks", { ...checks, sha: SHA }],
+        ["CommitChecks", { owner: "acme", name: "app" }],
+        ["CommitChecks", { ...checks, number: "12" }],
+        ["CommitChecks", { ...checks, number: 0 }],
+        ["CommitChecks", { ...checks, cursor: "has space" }],
+        ["CommitChecks", { ...checks, first: 100 }],
+        ["CommitChecks", { ...checks, owner: ".." }],
+        ["CommitChecks", null],
       ];
       for (const [op, variables] of cases) {
         expect((await attempt(graphql(DOC[op as keyof typeof DOC], variables))).result, `${op} ${JSON.stringify(variables)}`).toBe(NOT);
@@ -313,6 +335,137 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
     });
   });
 
+  describe("A7 to A10 (D#6 R3c, C35 section 3.3): the narrowest request passes, anything wider is refused", () => {
+    const STATUS_PATH = `${R}/statuses/${SHA}`;
+
+    it("A7 refuses another context, an extra key, a missing key, a wrong state or a too long description", async () => {
+      const bad: unknown[] = [
+        undefined,
+        null,
+        [],
+        "success",
+        { ...status, context: "ci/other" },
+        { ...status, context: "Fulcrumaxe/review" },
+        { ...status, context: "fulcrumaxe/review " },
+        { ...status, target_url: "https://example.com" },
+        { ...status, state: "approved" },
+        { ...status, state: "SUCCESS" },
+        { ...status, state: undefined },
+        { ...status, description: 5 },
+        { ...status, description: "d".repeat(141) },
+        { state: status.state, context: status.context },
+        { context: status.context, description: status.description },
+      ];
+      for (const body of bad) expect((await attempt({ method: "POST", path: STATUS_PATH, body })).result, JSON.stringify(body)).toBe(NOT);
+    });
+
+    it("A7 refuses a path that is not a full commit sha, an extra segment, the wrong method and a query", async () => {
+      const cases: GithubRequest[] = [
+        { method: "POST", path: `${R}/statuses/main`, body: status },
+        { method: "POST", path: `${R}/statuses/abc123`, body: status },
+        { method: "POST", path: `${R}/statuses/${SHA}0`, body: status },
+        { method: "POST", path: `${R}/statuses/${"g".repeat(40)}`, body: status },
+        { method: "POST", path: `${R}/statuses`, body: status },
+        { method: "POST", path: `${STATUS_PATH}/extra`, body: status },
+        { method: "POST", path: `${R}/statuses/fx%2Frun`, body: status },
+        { method: "GET", path: STATUS_PATH },
+        { method: "PUT", path: STATUS_PATH, body: status },
+        { method: "PATCH", path: STATUS_PATH, body: status },
+        { method: "POST", path: STATUS_PATH, query: { x: "1" }, body: status },
+        // Reading statuses is not allowed by REST: the CI state comes from the CommitChecks document.
+        { method: "GET", path: `${R}/commits/${SHA}/status` },
+        { method: "GET", path: `${R}/commits/${SHA}/statuses` },
+        { method: "GET", path: `${R}/commits/${SHA}/check-runs` },
+        { method: "GET", path: `${R}/check-runs/12` },
+        { method: "GET", path: `${R}/check-runs/12/annotations` },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+
+    it("A8 takes one branch segment and no query or body, and only the protection path itself", async () => {
+      const cases: GithubRequest[] = [
+        { method: "GET", path: `${R}/branches/main/protection/required_status_checks` },
+        { method: "GET", path: `${R}/branches/main/protection/restrictions` },
+        { method: "GET", path: `${R}/branches/main` },
+        { method: "GET", path: `${R}/branches` },
+        { method: "GET", path: `${R}/branches/release%2F1/protection` },
+        { method: "GET", path: `${R}/branches/release/1/protection` },
+        { method: "GET", path: `${R}/branches/../protection` },
+        { method: "GET", path: `${R}/branches/%2e%2e/protection` },
+        { method: "GET", path: `${R}/branches/main/protection`, query: { x: "1" } },
+        { method: "GET", path: `${R}/branches/main/protection?x=1` },
+        { method: "GET", path: `${R}/branches/main/protection`, body: {} },
+        { method: "PUT", path: `${R}/branches/main/protection`, body: {} },
+        { method: "POST", path: `${R}/branches/main/protection`, body: {} },
+        { method: "DELETE", path: `${R}/branches/main/protection` },
+        { method: "GET", path: `${R}/rules/branches/main` },
+        { method: "GET", path: `${R}/rulesets` },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+
+    it("A9 is the one fixed document: another text, or an extra character, is refused (see the per-document cases above)", async () => {
+      const wider = DOC.CommitChecks.replace("name status conclusion", "name status conclusion output { text }");
+      expect((await attempt(graphql(wider, checks))).result).toBe(NOT);
+      const withSummary = DOC.CommitChecks.replace("nodes {\n                  __typename", "nodes {\n                  __typename summary");
+      expect(withSummary).not.toBe(DOC.CommitChecks);
+      expect((await attempt(graphql(withSummary, checks))).result).toBe(NOT);
+    });
+
+    it("A10 refuses a merge_method other than squash, an extra key, a missing sha and a malformed sha", async () => {
+      const bad: unknown[] = [
+        undefined,
+        null,
+        [],
+        { sha: SHA },
+        { merge_method: "squash" },
+        { ...merge, merge_method: "merge" },
+        { ...merge, merge_method: "rebase" },
+        { ...merge, merge_method: "Squash" },
+        { ...merge, commit_title: "x" },
+        { ...merge, commit_message: "x" },
+        { ...merge, extra: 1 },
+        { ...merge, sha: "main" },
+        { ...merge, sha: SHA.slice(1) },
+        { ...merge, sha: 5 },
+        { ...merge, sha: undefined },
+      ];
+      for (const body of bad) expect((await attempt({ method: "PUT", path: `${R}/pulls/12/merge`, body })).result, JSON.stringify(body)).toBe(NOT);
+    });
+
+    it("A10 refuses a path that is not a pull request number, an extra segment, another method and a query", async () => {
+      const cases: GithubRequest[] = [
+        { method: "PUT", path: `${R}/pulls/abc/merge`, body: merge },
+        { method: "PUT", path: `${R}/pulls/12/merge/extra`, body: merge },
+        { method: "PUT", path: `${R}/pulls/merge`, body: merge },
+        { method: "PUT", path: `${R}/pulls/12`, body: merge },
+        { method: "PUT", path: `${R}/pulls/12/merge`, query: { x: "1" }, body: merge },
+        { method: "GET", path: `${R}/pulls/12/merge` },
+        { method: "POST", path: `${R}/pulls/12/merge`, body: merge },
+        { method: "PATCH", path: `${R}/pulls/12/merge`, body: merge },
+        { method: "DELETE", path: `${R}/pulls/12/merge` },
+        { method: "PUT", path: `${R}/merges`, body: { base: "main", head: "x" } },
+        { method: "POST", path: `${R}/merges`, body: { base: "main", head: "x" } },
+        { method: "PUT", path: `${R}/pulls/12/update-branch`, body: {} },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+
+    it("what a wider request would reach stays refused: patches, contents, blobs and the file list", async () => {
+      const cases: GithubRequest[] = [
+        { method: "GET", path: `${R}/pulls/12/files` },
+        { method: "GET", path: `${R}/pulls/12/files`, query: { per_page: 100 } },
+        { method: "GET", path: `${R}/pulls/12.patch` },
+        { method: "GET", path: `${R}/pulls/12`, headers: { accept: "application/vnd.github.patch" } },
+        { method: "GET", path: `${R}/contents/src/a.ts` },
+        { method: "GET", path: `${R}/git/blobs/${SHA}` },
+        { method: "GET", path: `${R}/commits/${SHA}` },
+        { method: "GET", path: `${R}/compare/main...fx/run-g1` },
+      ];
+      for (const req of cases) expect((await attempt(req)).result, `${req.method} ${req.path}`).toBe(NOT);
+    });
+  });
+
   describe("the Accept rule (C21 section 5)", () => {
     it("sends application/vnd.github+json on every call that supplies no Accept, and keeps the one a caller supplied when it is allowed", async () => {
       const { client, seen } = recorder();
@@ -383,8 +536,8 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
   });
 
   describe("the GraphQL documents", () => {
-    it("are the three named in the Spec, and nothing else", () => {
-      expect(Object.keys(GITHUB_GRAPHQL_DOCUMENTS)).toEqual(["RunBranchState", "PullRequestFiles", "MarkReady"]);
+    it("are the four named in the Specs, and nothing else", () => {
+      expect(Object.keys(GITHUB_GRAPHQL_DOCUMENTS)).toEqual(["RunBranchState", "PullRequestFiles", "MarkReady", "CommitChecks"]);
       expect(Object.isFrozen(GITHUB_GRAPHQL_DOCUMENTS)).toBe(true);
       for (const [op, document] of Object.entries(GITHUB_GRAPHQL_DOCUMENTS)) expect(document).toMatch(new RegExp(`^(?:query|mutation) ${op}\\(`));
     });
@@ -401,6 +554,17 @@ describe("the local-only GitHub allowlist (D#6 R2b-3, body criterion 9, C22 sect
       expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("nodes { path changeType }");
       expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("totalCount");
       expect(GITHUB_GRAPHQL_DOCUMENTS.PullRequestFiles).toContain("hasNextPage");
+    });
+
+    it("CommitChecks (A9) selects check-run name, status, conclusion and app id, and status-context name and state, and nothing else", () => {
+      const doc = DOC.CommitChecks;
+      const selected = [...doc.matchAll(/[{}]|\.\.\. on \w+|\w+(?:\([^)]*\))?/g)].map((m) => m[0]);
+      // Every field name the document selects, read from the text: nothing may be added without this list changing.
+      const fields = new Set(selected.filter((t) => /^[a-zA-Z_]+/.test(t) && !t.startsWith("... on")).map((t) => t.replace(/\(.*/, "")));
+      for (const f of ["name", "status", "conclusion", "databaseId", "context", "state", "totalCount", "hasNextPage", "endCursor", "oid"]) expect(fields.has(f), f).toBe(true);
+      for (const word of ["output", "summary", "title", "annotations", "annotation", "details", "detailsUrl", "targetUrl", "description", "url", "permalink", "text", "login", "author", "committer", "messageHeadline", "checkSuites", "workflowRun"]) {
+        expect(doc, `selects ${word}`).not.toMatch(new RegExp(`\\b${word}\\b`, "i"));
+      }
     });
 
     it("RunBranchState reads the run branch's oid, how far it is ahead of the base, and the default branch", () => {

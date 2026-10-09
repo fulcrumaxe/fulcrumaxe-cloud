@@ -8,14 +8,20 @@ import { discussingItem } from "../plan/helpers/panelFixtures.js";
 import { seedAccount, seedRepo } from "../build/helpers/seed.js";
 import { pgHarness } from "../helpers/pgHarness.js";
 import { fakeGitHubRest, freshRepo, type FakeRepoState } from "./helpers/fakeGitHubRest.js";
+import { fakeGitHubLocal } from "./helpers/fakeGitHubLocal.js";
 
 /**
  * D#6 R3b [pg] (correction C12 section 1): the merge gate for a `runner_local` repo, whose reviewers ran on the customer's
  * machine. Over a fake GitHub that answers like the real one and real `agent_runs`, `runners` and `account_members` rows.
  * Every merge-or-not decision below is read from the fake GitHub's merge log (`gh.merges`), not from the gate's own answer.
+ *
+ * D#6 R3c: a runner_local repo's gate talks to GitHub only through the local-only fence (`fakeGitHubLocal` is the strict GitHub behind
+ * the real wrapper), so a world of that kind has no file patches, no REST check or status reads, and the security reviewer is always
+ * required (it reads paths only). A sandbox repo keeps the REST fake.
  */
 const h = pgHarness();
 const HEAD = "a".repeat(40);
+const BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
 const greenCheck = { name: "ci", status: "completed", conclusion: "success" };
 let nextKey = 0;
 
@@ -26,6 +32,8 @@ interface World {
   gh: FakeRepoState;
   /** A runner registered by an owner/admin of the account. */
   adminRunner: string;
+  /** The repo is runner_local: its GitHub is the local-only fence. */
+  local: boolean;
 }
 
 async function user(accountId: string, role: "owner" | "admin" | "member"): Promise<string> {
@@ -46,12 +54,12 @@ async function runner(accountId: string, registeredBy: string, over: { revoked?:
   return id;
 }
 
-async function world(opts: { executionMode?: string; repo?: Partial<FakeRepoState>; kind?: "feature" | "critical" } = {}): Promise<World> {
+async function world(opts: { executionMode?: string; repo?: Partial<FakeRepoState>; kind?: "feature" | "critical"; autoMerge?: boolean } = {}): Promise<World> {
   const accountId = randomUUID();
   const repoId = randomUUID();
   await seedAccount(h.admin, accountId);
   await seedRepo(h.admin, accountId, repoId);
-  await h.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets', execution_mode = $2, settings = '{\"autoMerge\":true}'::jsonb WHERE id = $1", [repoId, opts.executionMode ?? "runner_local"]);
+  await h.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'widgets', execution_mode = $2, settings = $3::jsonb WHERE id = $1", [repoId, opts.executionMode ?? "runner_local", JSON.stringify({ autoMerge: opts.autoMerge ?? true })]);
   const { workItemId } = await discussingItem(h.runWriterPool, accountId, { title: "Add a footer", body: "Show the year in the footer.", category: opts.kind ?? "feature", repoId });
   await h.admin.query("UPDATE work_items SET gh_number = 7, repo_id = $2, stage = 'pr_opened', provenance = 'internal' WHERE id = $1", [workItemId, repoId]);
   const body = "1. The footer shows the year.";
@@ -59,9 +67,25 @@ async function world(opts: { executionMode?: string; repo?: Partial<FakeRepoStat
   const admin = await user(accountId, "admin");
   const adminRunner = await runner(accountId, admin);
   // The repository's own CI is green, and the base branch is protected: the fully satisfied state. Tests take one piece away.
-  const gh = freshRepo({ headSha: HEAD, checks: { [HEAD]: [greenCheck] }, protectedWithoutChecks: true, ...opts.repo });
-  return { accountId, workItemId, repoId, gh, adminRunner };
+  const gh = freshRepo({ headSha: HEAD, checks: { [HEAD]: [greenCheck] }, protectedWithoutChecks: true, runBranch: BRANCH, ...opts.repo });
+  const local = (opts.executionMode ?? "runner_local") === "runner_local";
+  if (local) {
+    // What the runner's `done` recorded for the work item: the pull request and the run branch the review must be about.
+    const executor = randomUUID();
+    await h.admin.query(
+      `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded', 'runner_local', $4)`,
+      [executor, accountId, workItemId, adminRunner],
+    );
+    await h.admin.query(
+      `INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`,
+      [accountId, executor, JSON.stringify({ from: "running", to: "succeeded", viaRunnerDone: true, prNumber: gh.prNumber, branch: BRANCH })],
+    );
+  }
+  return { accountId, workItemId, repoId, gh, adminRunner, local };
 }
+
+/** The GitHub client the gate gets: the fence over the strict local-only fake for a runner_local repo, the REST fake otherwise. */
+const httpFor = (w: World) => (w.local ? fakeGitHubLocal(w.gh).http : fakeGitHubRest(w.gh));
 
 /** A reviewer run on HEAD. Runner runs are `runner_local` ones by default. */
 async function run(w: World, role: string, verdict: string, over: { runnerId?: string | null; runtime?: string; mode?: string | null; head?: string; extra?: Record<string, unknown> } = {}): Promise<void> {
@@ -72,14 +96,16 @@ async function run(w: World, role: string, verdict: string, over: { runnerId?: s
     [w.accountId, w.workItemId, role, runtime, JSON.stringify({ verdict, ...(over.extra ?? {}) }), over.head ?? HEAD, over.mode === undefined ? (runtime === "runner" ? "runner_local" : "sandbox") : over.mode, over.runnerId === undefined ? (runtime === "runner" ? w.adminRunner : null) : over.runnerId],
   );
 }
+/** Every reviewer the gate requires passes. On a runner_local repo that includes the security reviewer: the file list has paths and no patches, so it is always required. */
 const passBoth = async (w: World, over: Parameters<typeof run>[3] = {}) => {
   await run(w, "code-reviewer", "pass", over);
   await run(w, "acceptance-tester", "pass", over);
+  if (w.local) await run(w, "security-reviewer", "pass", over);
 };
 
 const on: LocalReviewOptInPort = { enabled: async () => true };
 const gate = (w: World, optIn: LocalReviewOptInPort = on) =>
-  runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+  runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: optIn }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
 const reasonsOf = (out: Awaited<ReturnType<typeof gate>>) => (out.outcome === "ready_human_merges" ? out.reasons : []);
 
 describe("runner_local: every condition met", () => {
@@ -95,10 +121,18 @@ describe("runner_local: every condition met", () => {
     expect(LOCAL_REVIEW_DESCRIPTION.length).toBeLessThanOrEqual(140);
   });
 
-  it("a ruleset that applies to the base branch is protection too", async () => {
+  it("a ruleset that applies to the base branch is protection too, for a repo that is not behind the fence", async () => {
+    const w = await world({ executionMode: "sandbox", repo: { protectedWithoutChecks: false, rulesetRules: [{ type: "pull_request" }] } });
+    await passBoth(w, { runtime: "production" });
+    expect((await gate(w)).outcome).toBe("merged");
+  });
+
+  it("a ruleset is not visible through the allowlist, so a runner_local base branch guarded only by one reads as unprotected: a person merges", async () => {
     const w = await world({ repo: { protectedWithoutChecks: false, rulesetRules: [{ type: "pull_request" }] } });
     await passBoth(w);
-    expect((await gate(w)).outcome).toBe("merged");
+    const out = await gate(w);
+    expect(reasonsOf(out)).toEqual(["no_branch_protection"]);
+    expect(w.gh.merges).toEqual([]);
   });
 
   it("the owner of the account counts as an admin registrant", async () => {
@@ -115,7 +149,8 @@ describe("(a) the opt-in", () => {
     await passBoth(w);
     const out = await gate(w, localReviewOptInOff);
     expect(out.outcome).toBe("ready_human_merges");
-    expect(reasonsOf(out)).toEqual(expect.arrayContaining(["local_review_not_enabled", "run_not_production_code_reviewer", "run_not_production_acceptance_tester"]));
+    // C35: every required role has a trusted runner pass, so the person is told that, once, instead of "no production run" per role.
+    expect(reasonsOf(out)).toEqual(["local_reviews_passed_advisory", "local_review_not_enabled"]);
     expect(w.gh.merges).toEqual([]);
     expect(w.gh.posts).toEqual([]);
   });
@@ -123,7 +158,7 @@ describe("(a) the opt-in", () => {
   it("no port given at all is off", async () => {
     const w = await world();
     await passBoth(w);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w) }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
     expect(out.outcome).toBe("ready_human_merges");
     expect(w.gh.merges).toEqual([]);
   });
@@ -250,7 +285,8 @@ describe("(b) only runners an admin registered", () => {
     await run(w, "acceptance-tester", "pass");
     const reasons = reasonsOf(await gate(w));
     expect(reasons).toContain("runner_not_trusted_code_reviewer");
-    expect(reasons).not.toContain("missing_run_security_reviewer");
+    // Not because of the flag: on a runner_local repo the security reviewer is required whatever anyone says (R3c).
+    expect(reasons).toContain("missing_run_security_reviewer");
   });
 
   it("only a pass on the exact head counts: a trusted pass on an older commit does not", async () => {
@@ -302,23 +338,17 @@ describe("(c) GitHub still decides CI and protection", () => {
   });
 
   it("a base branch whose protection GitHub refuses to show (403) reads as no_branch_protection: a block, not an error, and nothing merges", async () => {
-    const w = await world();
+    const w = await world({ repo: { protectionStatus: 403 } });
     await passBoth(w);
-    const http = fakeGitHubRest(w.gh);
-    const refused = { request: async (req: Parameters<typeof http.request>[0]) => (req.path.includes("/protection/") ? { status: 403, body: { message: "Resource not accessible" } } : http.request(req)) };
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: refused, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    const out = await gate(w);
     expect(reasonsOf(out)).toEqual(expect.arrayContaining(["no_branch_protection", "ci_not_green"]));
     expect(w.gh.merges).toEqual([]);
   });
 
   it("a protection read that fails any other way (500) still throws and nothing merges", async () => {
-    const w = await world();
+    const w = await world({ repo: { protectionStatus: 500 } });
     await passBoth(w);
-    const http = fakeGitHubRest(w.gh);
-    const broken = { request: async (req: Parameters<typeof http.request>[0]) => (req.path.includes("/protection/") ? { status: 500, body: { message: "boom" } } : http.request(req)) };
-    await expect(
-      runMergeGateForItem({ pool: h.runWriterPool, http: broken, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber }),
-    ).rejects.toThrow(/branch protection/);
+    await expect(gate(w)).rejects.toThrow(/branch protection/);
     expect(w.gh.merges).toEqual([]);
   });
 });
@@ -342,9 +372,9 @@ describe("an unreadable protection read never makes CI look greener (CWE-636)", 
   });
 
   it("runner_local with the opt-in off: the same 403 does not merge either", async () => {
-    const w = await world({ repo: { rulesetRules: slowCiRuleset } });
+    const w = await world({ repo: { protectionStatus: 403 } });
     await passBoth(w);
-    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: refuse403(w), localReviewOptIn: { enabled: async () => false } }, input(w));
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: { enabled: async () => false } }, input(w));
     expect(reasonsOf(out)).toEqual(expect.arrayContaining(["ci_not_green", "local_review_not_enabled"]));
     expect(w.gh.merges).toEqual([]);
   });
@@ -439,5 +469,160 @@ describe("the stored opt-in, end to end (D#6 R2b, migration 0733)", () => {
     await passBoth(w);
     expect((await gate(w, broken)).outcome).toBe("ready_human_merges");
     expect(w.gh.merges).toEqual([]);
+  });
+});
+
+describe("D#6 R3c: the review and merge path of a runner_local repo stays inside the local-only fence (C35 section 3.3)", () => {
+  const docsOnly = [{ filename: "docs/readme.md", patch: "@@ -1 +1 @@\n+Hello", changes: 1 }];
+
+  it("a full review-and-gate pass makes only calls of the allowlist (A1 to A10), reads no file list over REST and sees no patch", async () => {
+    const w = await world();
+    await passBoth(w);
+    const fake = fakeGitHubLocal(w.gh);
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    expect(out).toMatchObject({ outcome: "merged", headSha: HEAD, status: "posted" });
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+    // Every call that reached GitHub, by allowlist entry.
+    expect(new Set(fake.calls.map((c) => c.label))).toEqual(new Set(["A3", "A1 PullRequestFiles", "A9 CommitChecks", "A8", "A7", "A10"]));
+    expect(fake.denied).toEqual([]);
+    expect(fake.refused).toEqual([]);
+    for (const c of fake.calls) {
+      expect(c.path, c.label).not.toMatch(/\/files$|\/contents|\/git\/|\/commits|\/check-runs|\/status$|\/rules\//);
+    }
+    expect(JSON.stringify(fake.answers)).not.toContain('"patch"');
+    // The one write of each kind carried exactly the narrow body.
+    expect(w.gh.posts).toHaveLength(1);
+    expect(Object.keys(w.gh.posts[0]!.body).sort()).toEqual(["context", "description", "state"]);
+  });
+
+  it("the same gate over a plain REST client is refused before any call: a runner_local repo never gets an unfenced client", async () => {
+    const w = await world();
+    await passBoth(w);
+    const rest = fakeGitHubRest(w.gh);
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: rest, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
+    expect(w.gh.requests).toEqual([]);
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("a pull request that is not the run's recorded one is not gated", async () => {
+    const w = await world();
+    await passBoth(w);
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: httpFor(w), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber + 1 })).rejects.toThrow(/recorded/);
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("a one-file docs change needs the security reviewer on a runner_local repo, and still does not on a sandbox repo", async () => {
+    const w = await world({ repo: { files: docsOnly } });
+    await run(w, "code-reviewer", "pass");
+    await run(w, "acceptance-tester", "pass");
+    expect(reasonsOf(await gate(w))).toEqual(["missing_run_security_reviewer"]);
+    expect(w.gh.merges).toEqual([]);
+    await run(w, "security-reviewer", "pass");
+    expect((await gate(w)).outcome).toBe("merged");
+
+    const sandbox = await world({ executionMode: "sandbox", repo: { files: docsOnly } });
+    await passBoth(sandbox, { runtime: "production" });
+    expect((await gate(sandbox)).outcome).toBe("merged");
+    expect(sandbox.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+
+  describe("with the opt-in off, reviews that all passed on the runner read as one honest advisory reason", () => {
+    const off = (w: World) => gate(w, localReviewOptInOff);
+
+    it("gives exactly the advisory, the opt-in block and the auto-merge reason, and posts no status", async () => {
+      const w = await world({ autoMerge: false });
+      await passBoth(w);
+      expect(reasonsOf(await off(w)).sort()).toEqual(["auto_merge_not_allowed", "local_review_not_enabled", "local_reviews_passed_advisory"]);
+      expect(w.gh.posts).toEqual([]);
+      expect(w.gh.merges).toEqual([]);
+    });
+
+    it("adds ci_not_green when CI is red, and nothing else", async () => {
+      const w = await world({ autoMerge: false, repo: { checks: { [HEAD]: [{ name: "ci", status: "completed", conclusion: "failure" }] } } });
+      await passBoth(w);
+      expect(reasonsOf(await off(w)).sort()).toEqual(["auto_merge_not_allowed", "ci_not_green", "local_review_not_enabled", "local_reviews_passed_advisory"]);
+      expect(w.gh.posts).toEqual([]);
+    });
+
+    it("one role with an untrusted (revoked) runner keeps that role's own reason, and the advisory is not given", async () => {
+      const w = await world({ autoMerge: false });
+      const admin = await user(w.accountId, "admin");
+      await run(w, "code-reviewer", "pass", { runnerId: await runner(w.accountId, admin, { revoked: true }) });
+      await run(w, "acceptance-tester", "pass");
+      await run(w, "security-reviewer", "pass");
+      const reasons = reasonsOf(await off(w));
+      expect(reasons).toContain("run_not_production_code_reviewer");
+      expect(reasons).not.toContain("local_reviews_passed_advisory");
+      expect(reasons).toContain("local_review_not_enabled");
+      expect(w.gh.posts).toEqual([]);
+    });
+
+    it("a role that is missing, or whose verdict is not a pass, keeps its own reason too", async () => {
+      const w = await world({ autoMerge: false });
+      await run(w, "code-reviewer", "pass");
+      await run(w, "security-reviewer", "needs-fix");
+      const reasons = reasonsOf(await off(w));
+      expect(reasons).toEqual(expect.arrayContaining(["missing_run_acceptance_tester", "verdict_not_pass_security_reviewer", "local_review_not_enabled"]));
+      expect(reasons).not.toContain("local_reviews_passed_advisory");
+    });
+
+    it("a sandbox repo never sees the advisory", async () => {
+      const w = await world({ executionMode: "sandbox", autoMerge: false });
+      await passBoth(w);
+      const reasons = reasonsOf(await gate(w));
+      expect(reasons).toEqual(expect.arrayContaining(["run_not_production_code_reviewer"]));
+      expect(reasons).not.toContain("local_reviews_passed_advisory");
+    });
+  });
+
+  describe("CI is read from the one fixed document, fail closed", () => {
+    it("reads every page of a long check list and still merges when all are green", async () => {
+      const many = Array.from({ length: 230 }, (_, i) => ({ name: `job-${i}`, status: "completed", conclusion: "success" }));
+      const w = await world({ repo: { checks: { [HEAD]: many } } });
+      await passBoth(w);
+      const fake = fakeGitHubLocal(w.gh);
+      const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fake.http, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+      expect(out.outcome).toBe("merged");
+      expect(fake.calls.filter((c) => c.op === "CommitChecks")).toHaveLength(3);
+    });
+
+    it("a failing check on the last page blocks the merge", async () => {
+      const many = [...Array.from({ length: 150 }, (_, i) => ({ name: `job-${i}`, status: "completed", conclusion: "success" })), { name: "last", status: "completed", conclusion: "failure" }];
+      const w = await world({ repo: { checks: { [HEAD]: many } } });
+      await passBoth(w);
+      expect(reasonsOf(await gate(w))).toEqual(["ci_not_green"]);
+      expect(w.gh.merges).toEqual([]);
+    });
+
+    it("a GraphQL error answered with status 200 is a failure, never a green or an empty list", async () => {
+      const w = await world();
+      await passBoth(w);
+      const fake = fakeGitHubLocal(w.gh);
+      const erroring = { ...fake.http, graphql: async (op: "PullRequestFiles" | "CommitChecks", v: Readonly<Record<string, unknown>>) => (op === "CommitChecks" ? { status: 200, body: { data: null, errors: [{ message: "boom" }] } } : fake.http.graphql(op, v)) };
+      await expect(runMergeGateForItem({ pool: h.runWriterPool, http: erroring, localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/GraphQL error/);
+      expect(w.gh.merges).toEqual([]);
+    });
+
+    it("a pending status blocks, and a rollup of a different commit than the head is not this head's CI", async () => {
+      const w = await world({ repo: { statuses: { [HEAD]: { "ci/other": "pending" } } } });
+      await passBoth(w);
+      expect(reasonsOf(await gate(w))).toEqual(["ci_not_green"]);
+
+      const moved = await world();
+      await passBoth(moved);
+      const fake = fakeGitHubLocal(moved.gh);
+      // The head moves after the pull request is read: the rollup the document returns is for a commit the reviews are not bound to.
+      let reads = 0;
+      const racing = {
+        ...fake.http,
+        graphql: async (op: "PullRequestFiles" | "CommitChecks", v: Readonly<Record<string, unknown>>) => {
+          if (op === "CommitChecks" && ++reads === 1) moved.gh.headSha = "b".repeat(40);
+          return fake.http.graphql(op, v);
+        },
+      };
+      const out = await runMergeGateForItem({ pool: h.runWriterPool, http: racing, localReviewOptIn: on }, { accountId: moved.accountId, workItemId: moved.workItemId, prNumber: moved.gh.prNumber });
+      expect(out.outcome).not.toBe("merged");
+      expect(moved.gh.merges).toEqual([]);
+    });
   });
 });
