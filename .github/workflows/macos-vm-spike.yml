@@ -1,0 +1,73 @@
+name: macOS VM spike
+
+# A one-off measurement, started by hand (Actions tab, or `gh workflow run macos-vm-spike.yml`). It asks whether
+# an Apple Virtualization VM can boot on a free GitHub-hosted macOS runner and, if not, measures the Seatbelt
+# (sandbox-exec) path instead. The script is scripts/spike/macos-vm-spike.sh; it writes results.jsonl, which is
+# uploaded as an artifact and turned into the job summary by scripts/spike/macos-spike-report.py.
+#
+# No secrets, no inputs, a read-only token. Each job also requires a public repository, so the private plane
+# never spends macOS minutes (the same guard ci.yml's runner expression gives its Linux jobs). To undo, delete
+# this file.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.0
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Run the spike
+        run: bash scripts/spike/macos-vm-spike.sh "$RUNNER_TEMP/macos-vm-spike-arm64"
+      - name: Job summary
+        if: always()
+        run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-arm64" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw results and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-vm-spike-arm64
+          path: ${{ runner.temp }}/macos-vm-spike-arm64
+          if-no-files-found: warn
+
+  # Intel hosts expose virtualization differently. If GitHub retires this label the job never gets a runner:
+  # it waits in the queue (GitHub drops it after about 24 hours) and costs nothing, because timeout-minutes
+  # only counts once a runner has picked a job up. Nothing reports this automatically, so whoever posts the
+  # report notes that the Intel job did not run.
+  macos-intel:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.0
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Run the spike
+        run: bash scripts/spike/macos-vm-spike.sh "$RUNNER_TEMP/macos-vm-spike-intel"
+      - name: Job summary
+        if: always()
+        run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-intel" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw results and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-vm-spike-intel
+          path: ${{ runner.temp }}/macos-vm-spike-intel
+          if-no-files-found: warn

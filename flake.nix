@@ -133,7 +133,8 @@
         # Minimal Python, from the UNMODIFIED pkgs.python312 so it substitutes
         # from the public cache: ci-workflow.test.mjs parses ci.yml with
         # PyYAML, and the staging-reset tests drive a pty with python3.
-        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) ];
+        # pkgs.actionlint: ci-workflow.test.mjs validates every workflow file with it.
+        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint ];
         LD_LIBRARY_PATH = sharedLdLibraryPath;
         shellHook = sharedShellHook;
       };
