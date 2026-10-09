@@ -135,6 +135,7 @@ const REASON_WORDS = {
   run_timestamp_invalid: "a review run has an invalid time",
   ci_not_green: "CI is not green",
   auto_merge_not_allowed: "auto-merge is not allowed",
+  human_merge_only: "the operator set this repository so that a person merges",
   merge_call_refused: "GitHub refused the merge",
 };
 const ROLE_CODES = { code_reviewer: "code review", security_reviewer: "security review", acceptance_tester: "acceptance test", debater: "debate" };

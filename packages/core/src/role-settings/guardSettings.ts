@@ -3,7 +3,9 @@ import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
 import { getRepoSettingsOrNotFound } from './internal.js';
 import { writeRoleSettingsAuditLog } from './auditLog.js';
-import { InvalidRoleSettingsInputError } from './errors.js';
+import { HumanMergeOnlyError, InvalidRoleSettingsInputError, NotFoundError } from './errors.js';
+import { humanMergeOnly } from '@fx/db/src/humanMergeOnly.js';
+import type { PoolClient } from 'pg';
 import type { RepoGuardSettings, RoleSettingsCtx } from './types.js';
 
 /**
@@ -31,6 +33,24 @@ export async function getRepoGuardSettings(ctx: RoleSettingsCtx, repoId: string)
     const raw = await getRepoSettingsOrNotFound(client, repoId);
     return readGuardSettings(raw);
   });
+}
+
+/**
+ * D#6 M1G-a: whether the operator locked this repository to human merges. Read from the environment on this call (see
+ * `humanMergeOnly`); a missing or other-tenant repo is a NotFoundError like every other read here.
+ */
+export async function isRepoHumanMergeOnly(ctx: RoleSettingsCtx, repoId: string): Promise<boolean> {
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    await assertActiveMembership(client, accountId, userId);
+    return humanMergeOnly(await getRepoGhId(client, repoId));
+  });
+}
+
+async function getRepoGhId(client: PoolClient, repoId: string): Promise<string> {
+  const { rows } = await client.query<{ gh_repo_id: string }>('SELECT gh_repo_id FROM repos WHERE id = $1', [repoId]);
+  if (rows[0] === undefined) throw new NotFoundError(`repos ${repoId} not found`);
+  return rows[0].gh_repo_id;
 }
 
 export interface SetRepoGuardSettingsInput {
@@ -95,6 +115,9 @@ export async function setRepoGuardSettings(
     requireOwnerOrAdmin(rows[0]?.role ?? null);
 
     const rawBefore = await getRepoSettingsOrNotFound(client, repoId);
+    // D#6 M1G-a: the operator's lock. Turning auto-merge on is refused before anything is written (no row change, no audit
+    // row); turning it off is always allowed.
+    if (input.autoMerge === true && humanMergeOnly(await getRepoGhId(client, repoId))) throw new HumanMergeOnlyError();
     const before = readGuardSettings(rawBefore);
     const after: RepoGuardSettings = {
       autoMerge: input.autoMerge ?? before.autoMerge,

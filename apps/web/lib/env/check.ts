@@ -143,6 +143,9 @@ export function validateValue(validation: Validation, value: string): string | n
       return /^https:\/\/oidc\.vercel\.com\/team_[A-Za-z0-9]+\/\.well-known\/jwks$/.test(value) ? null : "not_an_oidc_jwks_url";
     case "uuid-list":
       return value.split(",").every((part) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(part.trim())) ? null : "not_a_uuid_list";
+    case "repo-id-list":
+      // The same parse packages/db/src/humanMergeOnly.ts does (a test runs both over the same fixtures): comma-separated GitHub repository ids, no spaces, no empty entry, no sign, no leading zero. The reason is the fixed code health reports.
+      return value.split(",").every((part) => /^[1-9][0-9]{0,14}$/.test(part)) ? null : "human_merge_only_config_invalid";
     case "subscription-token":
       return /^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{10,}$/.test(value) ? null : "not_a_subscription_token";
     case "iso-timestamp":

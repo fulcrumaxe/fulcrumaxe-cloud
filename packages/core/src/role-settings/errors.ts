@@ -26,3 +26,14 @@ export class InvalidRoleSettingsInputError extends Error {
     this.name = 'InvalidRoleSettingsInputError';
   }
 }
+
+/**
+ * D#6 M1G-a: the operator locked this repository to human merges (`FX_HUMAN_MERGE_ONLY_REPO_IDS`), so auto-merge cannot be
+ * turned on. Nothing was written. The API layer maps it to 409 `human_merge_only`.
+ */
+export class HumanMergeOnlyError extends Error {
+  constructor(message = 'a person merges every pull request in this repository; the operator set this') {
+    super(message);
+    this.name = 'HumanMergeOnlyError';
+  }
+}

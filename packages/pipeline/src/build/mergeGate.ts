@@ -183,6 +183,12 @@ export interface MergeGateInput {
    * the production rule, plus a block that always holds. `"runner_local_on"`: runner verdicts that meet (b) count, and (c) applies.
    */
   reviewMode?: ReviewMode;
+  /**
+   * D#6 M1G-a: the operator locked this repository to human merges (`humanMergeOnly(repoGhId)` in @fx/db, read by the caller
+   * once per request). When `true` the gate adds `human_merge_only` and never calls merge, whatever the review mode, the opt-in
+   * or `autoMerge` says. Absent or false: today's rule.
+   */
+  humanMergeOnly?: boolean;
 }
 
 export type ReviewMode = "cloud" | "runner_local_off" | "runner_local_on";
@@ -216,6 +222,7 @@ export type MergeBlockReason =
   | "no_branch_protection"
   | "local_review_not_enabled"
   | "auto_merge_not_allowed"
+  | "human_merge_only"
   | "merge_call_refused";
 
 export type MergeGateResult =
@@ -496,6 +503,8 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
 
   const allowed = await deps.isAutoMergeAllowed({ accountId: input.accountId, workItemId: input.workItemId });
   if (allowed !== true) reasons.push("auto_merge_not_allowed");
+  // D#6 M1G-a: the operator's lock. A reason is always added, so the merge call below is unreachable for a locked repo.
+  if (input.humanMergeOnly === true) reasons.push("human_merge_only");
 
   if (reasons.length > 0) {
     return markHuman(deps, input.pr, headSha, reasons);

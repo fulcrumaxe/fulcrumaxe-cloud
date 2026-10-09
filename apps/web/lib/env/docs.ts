@@ -61,6 +61,8 @@ export function describeValidation(validation: Validation): string {
       return "`<issuer>/.well-known/jwks`";
     case "uuid-list":
       return "comma-separated account ids (UUIDs)";
+    case "repo-id-list":
+      return "comma-separated GitHub repository ids (digits, no spaces)";
     case "subscription-token":
       return "`sk-ant-oat` subscription token";
     case "iso-timestamp":

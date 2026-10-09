@@ -9,6 +9,7 @@
 import { h } from "../_lib/dom.js";
 import { api, ApiFailure, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 import { on, onRefresh } from "../../core/cloud-live.js";
+import { autoMergeDisabled, lockNote } from "./repos-lock.js";
 
 const REPOS_URL = "/api/v1/repos";
 const LIVE_EVENTS = ["installation.changed", "repos.changed"];
@@ -59,7 +60,7 @@ function githubUrl(raw) {
 
 const pickSettings = (s) =>
   s && typeof s.auto_merge === "boolean" && typeof s.block_external_auto_merge === "boolean"
-    ? { auto_merge: s.auto_merge, block_external_auto_merge: s.block_external_auto_merge }
+    ? { auto_merge: s.auto_merge, block_external_auto_merge: s.block_external_auto_merge, human_merge_only: s.human_merge_only === true }
     : null;
 const isRepo = (r) => r && typeof r.id === "string" && typeof r.product === "string";
 const cancelled = (e) => e && e.name === "AbortError";
@@ -145,9 +146,9 @@ function mountRepos(host, installNote) {
     )));
   }
 
-  function toggle(label, help, checked, testid, onChange) {
+  function toggle(label, help, checked, testid, onChange, disabled) {
     const box = h("input", {
-      type: "checkbox", checked, disabled: !st.isAdmin || st.saving, "data-testid": testid,
+      type: "checkbox", checked, disabled: disabled === undefined ? !st.isAdmin || st.saving : disabled, "data-testid": testid,
       "aria-describedby": st.isAdmin ? null : "repos-admin-only-detail", onChange: () => onChange(box.checked),
     });
     return h("label", { class: "repos-toggle" }, box, h("span", null, h("strong", null, label), h("span", { class: "repos-muted" }, help)));
@@ -186,7 +187,9 @@ function mountRepos(host, installNote) {
     if (st.settingsState !== "ok" || !st.settings) return detailEl.replaceChildren(title, line("Settings aren't available right now.", "repos-settings-error", "", "alert"));
     detailEl.replaceChildren(
       title,
-      toggle("Auto-merge", "Merge a pull request automatically once it passes review.", st.settings.auto_merge, "repos-auto-merge", (on) => patch({ auto_merge: on })),
+      ...(lockNote(st.settings) ? [line(lockNote(st.settings), "repos-human-merge-only", "repos-muted")] : []),
+      toggle("Auto-merge", "Merge a pull request automatically once it passes review.", st.settings.auto_merge, "repos-auto-merge", (on) => patch({ auto_merge: on }),
+        autoMergeDisabled(st.settings, { isAdmin: st.isAdmin, saving: st.saving })),
       toggle("Block auto-merge for outside contributors", "Pull requests from people outside your account are never merged automatically.",
         st.settings.block_external_auto_merge && !st.pendingOff, "repos-guard", guardChanged),
       ...(st.pendingOff ? [renderConfirm()] : []),

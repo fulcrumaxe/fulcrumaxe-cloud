@@ -4,6 +4,7 @@ import { sessionSecretProblems } from "@fx/core/src/auth/session";
 import { planDataStatus } from "@fx/plan-data";
 import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
+import { HUMAN_MERGE_ONLY_ENV, HUMAN_MERGE_ONLY_INVALID_CODE } from "@fx/db/src/humanMergeOnly";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
 
 /**
@@ -77,8 +78,24 @@ function withSessionSecretProblems(report: EnvReport, env: EnvLike, nowMs: numbe
   };
 }
 
+/**
+ * D#6 M1G-a: a malformed human-merge-only list is an error in every deploy kind, not a quiet optional miss: the merge gate
+ * is then locking EVERY repository to human merges (fail closed), and the operator has to fix the value. The detail names the
+ * setting and the fixed code `human_merge_only_config_invalid`, never the value.
+ */
+function withHumanMergeOnlyProblem(report: EnvReport): EnvReport {
+  const bad = report.invalidOptional.filter((i) => i.name === HUMAN_MERGE_ONLY_ENV);
+  if (bad.length === 0) return report;
+  return {
+    ...report,
+    ok: false,
+    invalid: [...report.invalid, ...bad.map((i) => ({ name: i.name, reason: HUMAN_MERGE_ONLY_INVALID_CODE }))],
+    invalidOptional: report.invalidOptional.filter((i) => i.name !== HUMAN_MERGE_ONLY_ENV),
+  };
+}
+
 export function healthResponse(env: EnvLike, authHeader: string | null, nowMs: number = Date.now()): NextResponse {
-  const report = withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs);
+  const report = withHumanMergeOnlyProblem(withSessionSecretProblems(evaluateEnv(ENV_MANIFEST, env, deployKindOf(env)), env, nowMs));
   const body = { ok: report.ok, config: report.ok ? "ok" : "incomplete", planData: planDataStatus(), outside_meter: outsideMeterOn(env.FX_OUTSIDE_METER) ? "on" : "off", ...identity(env) };
   const init = { status: report.ok ? 200 : 503, headers: { "Cache-Control": "no-store" } };
   if (isOperator(authHeader, env.CRON_SECRET)) return NextResponse.json({ ...body, ...detail(report) }, init);

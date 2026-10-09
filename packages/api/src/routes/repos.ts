@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { INSTALLATION_APP_KINDS } from "@fx/core/src/repos/appKinds.js";
 import { assertRepoIdShape, getRepo, listRepos, type RepoDTO } from "@fx/core/src/repos/read.js";
-import { getRepoGuardSettings, setRepoGuardSettings } from "@fx/core/src/role-settings/guardSettings.js";
+import { getRepoGuardSettings, isRepoHumanMergeOnly, setRepoGuardSettings } from "@fx/core/src/role-settings/guardSettings.js";
 import type { RepoGuardSettings } from "@fx/core/src/role-settings/types.js";
 import type { RouteEntry } from "../registry.js";
 import { decodeCursor, encodeCursor, parseLimit } from "../pagination.js";
@@ -31,6 +31,8 @@ const repoIdParamsSchema = z.object({ id: z.string() });
 const settingsResponseSchema = z.object({
   auto_merge: z.boolean(),
   block_external_auto_merge: z.boolean(),
+  /** D#6 M1G-a: present (true) only when the operator locked this repository to human merges; absent otherwise. */
+  human_merge_only: z.literal(true).optional(),
 });
 
 /**
@@ -58,8 +60,12 @@ function toRepoItem(repo: RepoDTO): z.infer<typeof repoResponseSchema> {
   };
 }
 
-function toSettingsItem(s: RepoGuardSettings): z.infer<typeof settingsResponseSchema> {
-  return { auto_merge: s.autoMerge, block_external_auto_merge: s.blockExternalAutoMerge };
+function toSettingsItem(s: RepoGuardSettings, humanMergeOnly = false): z.infer<typeof settingsResponseSchema> {
+  return {
+    auto_merge: s.autoMerge,
+    block_external_auto_merge: s.blockExternalAutoMerge,
+    ...(humanMergeOnly ? { human_merge_only: true as const } : {}),
+  };
 }
 
 /** "The v1 contract" > route table, API-8a rows: repos and settings reads (S+T(read), member), settings PATCH (S, owner/admin). */
@@ -121,7 +127,8 @@ export const repoRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const repoId = input.params.id!;
       assertRepoIdShape(repoId);
-      return toSettingsItem(await getRepoGuardSettings({ pool: ctx.pool, principal: ctx.principal }, repoId));
+      const rctx = { pool: ctx.pool, principal: ctx.principal };
+      return toSettingsItem(await getRepoGuardSettings(rctx, repoId), await isRepoHumanMergeOnly(rctx, repoId));
     },
   },
   {
@@ -147,7 +154,7 @@ export const repoRoutes: RouteEntry[] = [
         blockExternalAutoMerge: body.block_external_auto_merge,
         confirmed: body.acknowledge_external_risk,
       });
-      return toSettingsItem(after);
+      return toSettingsItem(after, await isRepoHumanMergeOnly({ pool: ctx.pool, principal: ctx.principal }, repoId));
     },
   },
 ];
