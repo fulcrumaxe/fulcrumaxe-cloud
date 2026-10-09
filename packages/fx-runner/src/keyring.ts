@@ -34,6 +34,36 @@ export function originHash(address: string): string | undefined {
   return createHash("sha256").update(origin, "utf8").digest("hex");
 }
 
+/** The pinned GitHub proxy of each cloud address (D#6 R5a-3, C27 section 4.2): the SHA-256 of the cloud origin maps to the SHA-256 of the proxy origin. */
+export type PinnedGitProxies = Readonly<Record<string, string>>;
+
+/**
+ * Same pattern as `PINNED_JOB_KEYS`: hashes of `new URL(address).origin`, never the host text (a private host name must not appear in public code).
+ * An address with no entry has no proxy, so a cloud-verified job there ends `git_proxy_unpinned` before any git call. The production address has
+ * no entry until its proxy and ticket keys exist. The staging entry is added when the staging proxy host is confirmed (hash only).
+ */
+export const PINNED_GIT_PROXIES: PinnedGitProxies = Object.freeze({});
+
+/** The pinned proxy origin hash for a cloud address, or undefined. */
+export function gitProxyHashFor(cloudAddress: string, table: PinnedGitProxies = PINNED_GIT_PROXIES): string | undefined {
+  const hash = originHash(cloudAddress);
+  return hash !== undefined && Object.hasOwn(table, hash) ? table[hash] : undefined;
+}
+
+/** True only when `proxyOrigin` is an `https:` origin whose hash is the one pinned for `cloudAddress`. */
+export function gitProxyPinned(cloudAddress: string, proxyOrigin: string, table: PinnedGitProxies = PINNED_GIT_PROXIES): boolean {
+  const pinned = gitProxyHashFor(cloudAddress, table);
+  if (pinned === undefined) return false;
+  let url: URL;
+  try {
+    url = new URL(proxyOrigin);
+  } catch {
+    // fx-swallow-ok: not an address, so not the pinned proxy
+    return false;
+  }
+  return url.protocol === "https:" && url.origin === proxyOrigin && originHash(proxyOrigin) === pinned;
+}
+
 /** The pinned keys for `address`, or undefined when this build pins none. */
 export function keyringFor(address: string, table: PinnedKeyrings = PINNED_JOB_KEYS): JobKeyring | undefined {
   const hash = originHash(address);

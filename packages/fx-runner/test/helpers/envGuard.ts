@@ -49,6 +49,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id
+  "src/daemon/gitPathA.ts": ["fs", "os", "path"], // cloud-verified path: realpath and statfs of the mirrors directory (must not be a temp directory or memory-backed), and the temp directory's location
   "src/daemon/gitPath.ts": ["path"], // the snapshots directory under the runner's state directory
   "src/daemon/snapshot.ts": ["fs", "fs/promises", "path"], // the daemon-owned copy of the workspace's git files: no-follow reads, one 0700 directory per push
   "src/daemon/staleTemp.ts": ["fs", "path"], // `fx-runner run` at start: lstat and unlink of exact-name regular files next to the ledger, nothing else

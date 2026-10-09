@@ -5,7 +5,7 @@
  */
 import {
   ClaimMessage, ClaimRateLimitedReply, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
-  HeartbeatReply, SeqNotIncreasingReply, StopReply, type LocalOnlyEvent, type SignedJob, type StopReason,
+  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type LocalOnlyEvent, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -36,6 +36,9 @@ export type DoneResult =
   | { kind: "retry"; retryAfter: number }
   | CallError;
 
+/** A git ticket for a cloud-verified run (D#6 R5a-3): the compact JWS, when it expires, and the proxy origin it is good for (checked against the build's pin by the caller). */
+export type GitTicketResult = { kind: "ticket"; ticket: string; expiresAt: string; proxyOrigin: string } | { kind: "stop"; reason: StopReason } | CallError;
+
 export interface DoneInput {
   runId: string;
   leaseGeneration: number;
@@ -48,6 +51,7 @@ export interface RunnerClient {
   heartbeat(runId: string, leaseGeneration: number): Promise<HeartbeatResult>;
   events(runId: string, leaseGeneration: number, events: readonly LocalOnlyEvent[]): Promise<EventsResult>;
   done(input: DoneInput): Promise<DoneResult>;
+  gitTicket(runId: string, leaseGeneration: number): Promise<GitTicketResult>;
 }
 
 export interface RunnerClientConfig {
@@ -95,6 +99,19 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       if (reply?.status === 200) {
         const parsed = HeartbeatReply.safeParse(reply.body);
         return parsed.success ? { kind: "ok", leaseExpiresAt: parsed.data.lease_expires_at } : fail(reply, "invalid_reply");
+      }
+      if (reply?.status === 409) {
+        const parsed = StopReply.safeParse(reply.body);
+        return parsed.success ? { kind: "stop", reason: parsed.data.reason } : fail(reply, "invalid_reply");
+      }
+      return fail(reply);
+    },
+
+    async gitTicket(runId, leaseGeneration) {
+      const reply = await send(GIT_TICKET_PATH, GitTicketMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
+      if (reply?.status === 200) {
+        const parsed = GitTicketReply.safeParse(reply.body);
+        return parsed.success ? { kind: "ticket", ticket: parsed.data.ticket, expiresAt: parsed.data.expires_at, proxyOrigin: parsed.data.proxy_origin } : fail(reply, "invalid_reply");
       }
       if (reply?.status === 409) {
         const parsed = StopReply.safeParse(reply.body);

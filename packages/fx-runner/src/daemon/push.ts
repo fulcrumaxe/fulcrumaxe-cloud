@@ -70,9 +70,28 @@ export function assertAllowedRefspec(refspec: string, lease: PushLease, continue
   if (refspec !== pushPlan(lease, continues).refspec) throw new GitPathError("push_ref_refused");
 }
 
+/** What a chunk push (path A) may name as its source: a full object id between the run's `base` and its pushed `sha`. */
+export interface ChunkBounds {
+  base: string;
+  sha: string;
+}
+
+/**
+ * Path A's chunk refspec (C27 section 4.3): `<oid>:refs/heads/<branch>`, where the target is exactly the plan's branch and `oid` is a full
+ * object id that is a descendant of `base` and an ancestor of `sha`. Anything else, `+` included, throws `push_ref_refused`.
+ */
+export async function assertAllowedChunkRefspec(git: Git, mirrorDir: string, refspec: string, lease: PushLease, continues: PushContinues | null, bounds: ChunkBounds): Promise<void> {
+  const plan = pushPlan(lease, continues);
+  const [source, target, ...rest] = refspec.split(":");
+  if (rest.length > 0 || source === undefined || !OBJECT_ID.test(source) || target !== `refs/heads/${plan.branch}` || !OBJECT_ID.test(bounds.base) || !OBJECT_ID.test(bounds.sha)) throw new GitPathError("push_ref_refused");
+  await git.run("push_ref_refused", ["-C", mirrorDir, "merge-base", "--is-ancestor", bounds.base, source]);
+  await git.run("push_ref_refused", ["-C", mirrorDir, "merge-base", "--is-ancestor", source, bounds.sha]);
+}
+
 /** Pushes `refspec`, out of the mirror at `mirrorDir`, to `url`, after checking it against the lease. Never forced, no hooks, no tags, no submodules. */
-export async function runPush(git: Git, mirrorDir: string, url: string, refspec: string, lease: PushLease, continues: PushContinues | null = null): Promise<void> {
-  assertAllowedRefspec(refspec, lease, continues);
+export async function runPush(git: Git, mirrorDir: string, url: string, refspec: string, lease: PushLease, continues: PushContinues | null = null, chunk?: ChunkBounds): Promise<void> {
+  if (chunk !== undefined && refspec !== pushPlan(lease, continues).refspec) await assertAllowedChunkRefspec(git, mirrorDir, refspec, lease, continues, chunk);
+  else assertAllowedRefspec(refspec, lease, continues);
   await git.run("push_failed", ["-C", mirrorDir, "push", "--porcelain", "--atomic", "--no-verify", "--no-follow-tags", "--no-recurse-submodules", "--", url, refspec]);
 }
 
@@ -102,14 +121,100 @@ export async function workspaceHead(git: Git, mirrorDir: string, workspace: stri
   }
 }
 
+/** The most one push may carry through the cloud's relay: its 4 MiB cap less 64 KiB of headroom for pkt-lines (C27 section 4.3). */
+export const PUSH_BUDGET_BYTES = 4_194_304 - 65_536;
+/** Path A retries a failed chunk this many more times, each with a fresh ticket. */
+export const CHUNK_RETRIES = 2;
+
+/** A size in whole MB (1 MiB each), rounded up, never below the 5 the protocol allows. */
+export const sizeMbOf = (bytes: number): number => Math.max(5, Math.ceil(bytes / 1_048_576));
+
+/** The bytes the objects of `commit` that `previous` lacks take on disk: a stand-in for the pack a push would send, measured without reading any of it. */
+async function newBytes(git: Git, mirrorDir: string, commit: string, previous: string): Promise<number> {
+  const out = (await git.run("push_failed", ["-C", mirrorDir, "rev-list", "--objects", "--disk-usage", commit, `^${previous}`])).trim();
+  if (!/^\d{1,15}$/.test(out)) throw new GitPathError("push_failed");
+  return Number(out);
+}
+
+/**
+ * Where a run's commits are cut into pushes (C27 section 4.3). Nothing is pushed here. If `sha` as a whole fits the budget the answer is
+ * `[sha]`. Otherwise the first-parent commits are measured one by one against their predecessor, and grouped greedily into runs that each fit;
+ * the answer is each group's last commit. A single commit over the budget throws `push_too_large` with the largest one's size, so a push
+ * either goes whole or does not start.
+ */
+export async function planChunks(git: Git, mirrorDir: string, base: string, sha: string, budget: number = PUSH_BUDGET_BYTES): Promise<string[]> {
+  if ((await newBytes(git, mirrorDir, sha, base)) <= budget) return [sha];
+  const commits = (await git.run("push_failed", ["-C", mirrorDir, "rev-list", "--reverse", "--first-parent", `${base}..${sha}`])).split("\n").filter((line) => line !== "");
+  if (commits.length === 0 || commits.some((oid) => !OBJECT_ID.test(oid)) || commits[commits.length - 1] !== sha) throw new GitPathError("push_failed");
+  const sizes: number[] = [];
+  let previous = base;
+  for (const commit of commits) {
+    sizes.push(await newBytes(git, mirrorDir, commit, previous));
+    previous = commit;
+  }
+  const largest = Math.max(...sizes);
+  if (largest > budget) throw new GitPathError("push_too_large", sizeMbOf(largest));
+  const ends: string[] = [];
+  let used = 0;
+  commits.forEach((commit, index) => {
+    const size = sizes[index]!;
+    if (used > 0 && used + size > budget) ends.push(commits[index - 1]!);
+    used = used > 0 && used + size <= budget ? used + size : size;
+  });
+  ends.push(sha);
+  return ends;
+}
+
+/** Codes that end a path A push at once: retrying cannot help, or must not happen. */
+const NO_RETRY: ReadonlySet<string> = new Set(["git_stopped", "git_revoked", "clone_limited", "push_too_large", "git_ticket_refused", "git_proxy_unpinned", "push_ref_refused", "push_rejected", "continuation_branch_missing"]);
+
+/** Path A's way into the network: each `open` is a git (and the remote address) good for one network command or one push chunk, with a fresh ticket. */
+export interface PushTransport {
+  open(): Promise<{ git: Git; url: string }>;
+}
+
 export interface PublishOptions {
+  /** Path A: network commands and pushes go through this, in chunks that fit the relay's cap. Absent: path B, one push with `git`. */
+  transport?: PushTransport;
   /** The verified job's `continues`: the push then goes to its branch, which must exist with its tip at `base`. */
   continues?: PushContinues | null;
   /** True once the cloud has said stop: nothing is pushed after that (C24 section 1.3). Asked right before the push. */
   stopped?: () => boolean;
 }
 
-export type Published = { pushed: false } | { pushed: true; branch: string; sha: string };
+/**
+ * Pushes each chunk's last commit in order, one ref per push, no `+`. A failed chunk is tried up to `CHUNK_RETRIES` more times, each with a
+ * fresh ticket, and then ends `push_incomplete`; the codes in `NO_RETRY` end it at once. A lost race on a fix round's branch is `push_rejected`
+ * (read from what the remote holds now), and a chunk that turns out to have landed anyway counts as pushed. Returns false when `stopped` says so.
+ */
+async function pushChunks(transport: PushTransport, mirrorDir: string, ends: readonly string[], plan: PushPlan, lease: PushLease, continues: PushContinues | null, bounds: ChunkBounds, stopped: (() => boolean) | undefined): Promise<boolean> {
+  let expectedTip = bounds.base;
+  for (const oid of ends) {
+    const refspec = ends.length === 1 ? plan.refspec : `${oid}:refs/heads/${plan.branch}`;
+    for (let attempt = 0; ; attempt++) {
+      if (stopped?.() === true) return false;
+      try {
+        const net = await transport.open();
+        await runPush(net.git, mirrorDir, net.url, refspec, lease, continues, bounds);
+        break;
+      } catch (error) {
+        if (!(error instanceof GitPathError)) throw error;
+        if (NO_RETRY.has(error.code)) throw error;
+        if (continues !== null) {
+          const net = await transport.open();
+          const now = await remoteBranchTip(net.git, mirrorDir, net.url, plan.branch).catch(() => undefined); // fx-swallow-ok: the push's own failure stands when the remote cannot be asked
+          if (now === oid) break;
+          if (now !== undefined && now !== expectedTip) throw new GitPathError("push_rejected");
+        }
+        if (attempt >= CHUNK_RETRIES) throw new GitPathError("push_incomplete");
+      }
+    }
+    expectedTip = oid;
+  }
+  return true;
+}
+
+export type Published ={ pushed: false } | { pushed: true; branch: string; sha: string };
 
 /**
  * Brings the workspace's HEAD into the mirror and pushes it to the run's branch. Nothing is pushed when HEAD is still the commit the
@@ -139,12 +244,20 @@ export async function publishBranch(git: Git, mirrorDir: string, url: string, wo
       if (sha === base) return { pushed: false };
       // Backstop for the checks above: what is pushed must grow from the commit this run started at, whatever git read to find it.
       await git.run("push_ref_refused", ["-C", mirrorDir, "merge-base", "--is-ancestor", base, sha]);
+      const transport = options.transport;
       if (continues !== null) {
         // A fix round updates a pull request's branch, so the branch must still be there, still at the commit this run started from.
         // A moved tip cannot take this push (it would not be a fast-forward), and the daemon does not retry: it reports `push_rejected`.
-        const remoteTip = await remoteBranchTip(git, mirrorDir, url, plan.branch);
+        const net = transport === undefined ? { git, url } : await transport.open();
+        const remoteTip = await remoteBranchTip(net.git, mirrorDir, net.url, plan.branch);
         if (remoteTip === null) throw new GitPathError("continuation_branch_missing");
         if (remoteTip !== base) throw new GitPathError("push_rejected");
+      }
+      if (transport !== undefined) {
+        // Path A: sized before anything is sent, so a commit the relay would refuse stops the run with nothing pushed.
+        const ends = await planChunks(git, mirrorDir, base, sha);
+        if (!(await pushChunks(transport, mirrorDir, ends, plan, lease, continues, { base, sha }, options.stopped))) return { pushed: false };
+        return { pushed: true, branch: plan.branch, sha };
       }
       if (options.stopped?.() === true) return { pushed: false };
       try {

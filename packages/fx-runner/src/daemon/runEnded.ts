@@ -21,6 +21,8 @@ export const SHUTDOWN_REPORT_MS = 5_000;
 export interface RunEnd {
   reason: RunEndedReason;
   detail?: RunEndedDetail;
+  /** Only with `push_too_large` (C27 section 4.5): the largest commit, in whole MB. */
+  sizeMb?: number;
 }
 
 /**
@@ -40,18 +42,19 @@ const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "a
  * its own event (the engine sends it), and `run_ended` is never sent for it. The set of codes `runJob` can return is open; anything
  * not listed here is a setup failure of an unknown kind.
  */
-export function endOfFailure(code: string): RunEnd | null {
+export function endOfFailure(code: string, sizeMb?: number): RunEnd | null {
   if (code === "credential_mismatch") return null;
   if (code === "wall_clock") return { reason: "wall_clock" };
   if (code === "push_rejected") return { reason: "push_rejected" };
   if (AGENT_CODES.has(code)) return { reason: "agent_failed" };
+  if (code === "push_too_large") return { reason: "runner_setup", detail: "push_too_large", ...(sizeMb === undefined ? {} : { sizeMb }) };
   if (SETUP_CODES.has(code)) return { reason: "runner_setup", detail: code as RunEndedDetail };
   return { reason: "runner_setup", detail: "other" };
 }
 
 /** The event for an end. Throws if the protocol would not accept it, which would be a bug in this file. */
 export function runEndedEvent(seq: number, now: Date, end: RunEnd): LocalOnlyEvent {
-  return LocalOnlyEvent.parse({ seq, ts: now.toISOString(), type: "run_ended", reason: end.reason, ...(end.detail === undefined ? {} : { detail: end.detail }) });
+  return LocalOnlyEvent.parse({ seq, ts: now.toISOString(), type: "run_ended", reason: end.reason, ...(end.detail === undefined ? {} : { detail: end.detail }), ...(end.sizeMb === undefined ? {} : { size_mb: end.sizeMb }) });
 }
 
 /**
