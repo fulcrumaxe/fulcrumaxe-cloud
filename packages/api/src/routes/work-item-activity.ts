@@ -5,6 +5,7 @@ import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
 import { withRunnerWords } from "./runnerLineWords.js";
+import { readRunWait, runWaitSchema } from "./runnerWait.js";
 
 /**
  * D#483 P4: `GET /api/v1/work-items/{id}/activity`, what the pipeline is doing for one work item. Read only, session
@@ -36,6 +37,8 @@ export const activityResponseSchema = z.object({
       runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
       runner_usage_note: z.string().nullable().optional(),
       runner_checked_in_at: z.string().nullable().optional(),
+      // D#6 C42-3b: a runner run only: why it is not running yet (non-null only while it is pending), with the sentence to show.
+      wait: runWaitSchema.nullable().optional(),
     }),
   ),
   runs_truncated: z.boolean(),
@@ -72,7 +75,11 @@ export const workItemActivityRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const read = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
       // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows.
-      const activity = { ...read, runs: read.runs.map((r) => ({ ...r, lines: withRunnerWords(r.lines) })) };
+      const runs = await Promise.all(read.runs.map(async (r) => {
+        const wait = r.runtime === "runner" ? await readRunWait(ctx.pool, ctx.principal.accountId, r) : undefined;
+        return { ...r, lines: withRunnerWords(r.lines), ...(wait === undefined ? {} : { wait }) };
+      }));
+      const activity = { ...read, runs };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };

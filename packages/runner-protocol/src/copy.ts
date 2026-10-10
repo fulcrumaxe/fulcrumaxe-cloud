@@ -150,3 +150,32 @@ export function runnerSetupText(detail: string, sizeMb?: number): string {
   if (detail === "push_too_large" && sizeMb !== undefined && Number.isSafeInteger(sizeMb) && sizeMb >= 5) return COPY.pushTooLarge.replace("{size}", String(sizeMb));
   return COPY.runnerSetupFailed.replace("{detail}", detail);
 }
+
+/**
+ * D#6 C42-3b: why a queued runner run is not running yet, one plain sentence for each wait reason the cloud derives and each cause a runner
+ * gives for a full slot. The cloud names the reason and the cause; the screens show these words and retype none.
+ */
+export const WAIT_LINES = {
+  waiting_for_runner: "Waiting for your runner to come online",
+  waiting_for_account_cap: "Waiting: your account's runner job limit is reached",
+  waiting_for_runner_slot: "Waiting for a free slot on your runner",
+  waiting_for_approval: "Waiting for approval before it runs on a Claude plan",
+  runner_lost_retrying: "Your runner lost contact. A new attempt is waiting to start",
+  timed_out_waiting: COPY.timedOut,
+  paused_usage_limit: "Paused: Claude usage limit reached. It starts again when the limit resets",
+} as const;
+
+/** The sentence for a slot that is full, by the cause the runner gave (`limited_by`). */
+export const SLOT_CAUSE_LINES = {
+  memory: "Waiting for a free slot on your runner (memory is short)",
+  cpu: "Waiting for a free slot on your runner (CPU is busy)",
+  disk: "Waiting for a free slot on your runner (disk is low)",
+  paused: "Your runner is paused",
+  ceiling: "Waiting: your runner is at its job limit",
+} as const;
+
+/** The one sentence for a wait. An unknown reason or cause falls back to the plainest line, never to a code. */
+export function waitText(reason: string, limitedBy: string | null): string {
+  if (reason === "waiting_for_runner_slot" && limitedBy !== null && Object.hasOwn(SLOT_CAUSE_LINES, limitedBy)) return SLOT_CAUSE_LINES[limitedBy as keyof typeof SLOT_CAUSE_LINES];
+  return Object.hasOwn(WAIT_LINES, reason) ? WAIT_LINES[reason as keyof typeof WAIT_LINES] : WAIT_LINES.waiting_for_runner;
+}

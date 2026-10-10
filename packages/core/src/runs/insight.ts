@@ -4,7 +4,7 @@ import { resolveRunLimits } from '../run-limits/resolve.js';
 import type { RunLimits } from '../run-limits/types.js';
 import { ACTIVITY_LIMITS, RUNNER_VERDICT_PR_SQL, capText, readRunLines, runnerCheckedInAt, type ActivityLine } from '../work-items/activity.js';
 import type { RunsReadCtx } from './read.js';
-import { RUNNER_USAGE_COLUMN, toRunnerUsage, type RunnerUsage } from './runnerUsage.js';
+import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from './runnerUsage.js';
 
 /**
  * D#483 P5: everything the Runs app's detail shows about ONE run that `GET /api/v1/runs/{id}` does not carry: the agent's
@@ -80,6 +80,9 @@ export interface RunInsight {
   outside_meter: { state: 'pending' | 'matches' | 'higher' | 'unavailable' | 'off'; reason: string | null; added_usd: number | null };
   /** D#6 R2b-5a: a runner run only (absent on any other): what it would have cost at API prices. Information; never part of `cost`, which stays spend. */
   runner_usage?: RunnerUsage | null;
+  /** D#6 C42-3b: a runner run only: that usage as a state (never a silent 0; null while the run is live) and the sentence for the states with no figure, the same as the Pipeline's. */
+  runner_usage_state?: RunnerUsageState | null;
+  runner_usage_note?: string | null;
   /** D#6 C42-3: a runner run only (absent on any other): when the runner last checked in, while the run is live (its lease expiry less the lease length); null once it has ended. */
   runner_checked_in_at?: string | null;
 }
@@ -220,6 +223,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
     ).rows[0]?.code;
 
     const runnerUsage = toRunnerUsage(r.runtime, r.runner_usage_json);
+    const usageState = runnerUsageStateOf(r.runtime, r.status, runnerUsage);
     return {
       server_time: now.toISOString(),
       run: {
@@ -267,7 +271,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       escalated_from: escalatedFrom,
       children,
       outside_meter: outsideMeterOf(r),
-      ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage, runner_checked_in_at: runnerCheckedInAt(r.status, r.lease_expires_at) }),
+      ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage, runner_usage_state: usageState?.state ?? null, runner_usage_note: usageState?.note ?? null, runner_checked_in_at: runnerCheckedInAt(r.status, r.lease_expires_at) }),
     };
   });
 }

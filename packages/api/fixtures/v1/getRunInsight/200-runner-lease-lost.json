@@ -63,5 +63,8 @@
     "text": "Outside check off"
   },
   "runner_usage": null,
-  "runner_checked_in_at": null
+  "runner_usage_state": "not_recorded",
+  "runner_usage_note": "This run ended without reporting how many tokens it used, so there is no cost estimate. That is not the same as $0.",
+  "runner_checked_in_at": null,
+  "wait": null
 }

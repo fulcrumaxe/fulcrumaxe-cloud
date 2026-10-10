@@ -20,6 +20,7 @@
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",
     "@fx/plan-data": "workspace:*",
+    "@fx/runner-cloud": "workspace:*",
     "@fx/sitekit-publish-gates": "workspace:*",
     "@fx/spend": "workspace:*",
     "@fx/telemetry": "workspace:*",

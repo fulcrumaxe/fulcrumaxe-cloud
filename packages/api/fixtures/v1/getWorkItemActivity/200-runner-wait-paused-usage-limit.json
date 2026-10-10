@@ -1,0 +1,40 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 595,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [
+    {
+      "id": "00000000-0000-4000-8000-500000000011",
+      "role": "executor",
+      "status": "pending",
+      "usd": null,
+      "created_at": "2026-10-03T10:00:00.000Z",
+      "summary": null,
+      "lines": [],
+      "runtime": "runner",
+      "runner_usage": null,
+      "runner_usage_state": null,
+      "runner_usage_note": null,
+      "runner_checked_in_at": null,
+      "wait": {
+        "reason": "paused_usage_limit",
+        "limited_by": null,
+        "text": "Paused: Claude usage limit reached. It starts again when the limit resets"
+      }
+    }
+  ],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [],
+  "close_on_github": false
+}

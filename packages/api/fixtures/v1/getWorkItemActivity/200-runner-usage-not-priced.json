@@ -38,7 +38,8 @@
       },
       "runner_usage_state": "not_priced",
       "runner_usage_note": "The tokens were recorded, but there is no API price for this run's model, so no dollar estimate is shown. That is not the same as $0.",
-      "runner_checked_in_at": null
+      "runner_checked_in_at": null,
+      "wait": null
     }
   ],
   "runs_truncated": false,
