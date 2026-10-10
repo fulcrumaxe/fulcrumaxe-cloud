@@ -77,6 +77,8 @@ export interface JobHandlerDeps {
   runJobFn?: typeof runJob;
   heartbeatMs?: number;
   flushMs?: number;
+  /** The lease's short flush while an activity or stage event waits (default 2 s). */
+  activityFlushMs?: number;
   doneAttempts?: number;
   /** The tmux watch and take-over (R4a-7). Absent: no watch. */
   watch?: JobWatch;
@@ -210,9 +212,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     if (job.run_id !== claimed.runId) return refuse(claimed, "run_id_mismatch");
 
     // The first heartbeat and the first events batch are an interval away, so a run that is refused or repeated at once sends neither.
-    const lease = startLease({ client: deps.client, clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }) });
+    const lease = startLease({ client: deps.client, clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }), ...(deps.activityFlushMs === undefined ? {} : { activityFlushMs: deps.activityFlushMs }) });
     const stopRun = deps.shutdown === undefined ? lease.signal : AbortSignal.any([lease.signal, deps.shutdown]);
-    const detach = deps.events.attach((event) => lease.push(event));
+    // One run, one `seq` line: the engine numbers its events from 0 on each start and the stage marks below are made here, so every event is
+    // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
+    const next = (): number => (lease.highestSeq() ?? -1) + 1;
+    const detach = deps.events.attach((event) => lease.push({ ...event, seq: next() }));
+    const mark = (stage: "workspace_ready" | "cloned"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
     const held: HeldSandbox = {};
     const ran = new AbortController();
@@ -251,7 +257,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
           if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
             const resumed = await git.resume(job, claimed, wanted.workspace);
-            if (resumed !== null) started.base = resumed.base;
+            if (resumed !== null) {
+              started.base = resumed.base;
+              mark("workspace_ready");
+              mark("cloned");
+            }
             else {
               const fresh = { kind: "fresh", branch: job.continues.branch } as const;
               planSession = () => fresh;
@@ -259,7 +269,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           }
           const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           const fill = async (workspace: string): Promise<void> => {
+            // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
+            mark("workspace_ready");
             started.base = (await git.prepare(job, claimed, workspace)).base;
+            mark("cloned");
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
           };

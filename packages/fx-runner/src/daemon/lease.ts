@@ -9,6 +9,12 @@ import type { RunnerClient } from "./client.js";
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 export const EVENT_FLUSH_INTERVAL_MS = 5_000;
+/** While an event that carries an `activity` or a `stage` waits, the queue is sent after this long instead of `EVENT_FLUSH_INTERVAL_MS` (D#6 C42-2). */
+export const ACTIVITY_FLUSH_INTERVAL_MS = 2_000;
+/** Activity-bearing events per run; later tool uses go out without their `activity`. */
+export const MAX_ACTIVITY_EVENTS = 400;
+/** Tool uses within this long of the first of a burst (by their own `ts`) keep one `activity`: the newest. */
+export const ACTIVITY_WINDOW_MS = 250;
 /** Events kept for sending; past this the oldest are dropped (they are display metadata, and memory is bounded). */
 export const MAX_QUEUED_EVENTS = 5_000;
 /** Resends after `seq_not_increasing` in one flush. */
@@ -67,6 +73,7 @@ export interface LeaseConfig {
   leaseGeneration: number;
   heartbeatMs?: number;
   flushMs?: number;
+  activityFlushMs?: number;
 }
 
 export function startLease(config: LeaseConfig): Lease {
@@ -80,6 +87,10 @@ export function startLease(config: LeaseConfig): Lease {
   let sending: Promise<void> = Promise.resolve();
   let highest: number | undefined;
   const seenTypes = new Set<LocalOnlyEvent["type"]>();
+  const stagesSent = new Set<string>();
+  let activityKept = 0;
+  let burst: { anchor: number; event: LocalOnlyEvent } | undefined;
+  let soonArmed = false;
 
   const end = (how: LeaseEnd): void => {
     if (endedWith !== undefined) return;
@@ -140,7 +151,43 @@ export function startLease(config: LeaseConfig): Lease {
     }
   }
 
-  const loops = [heartbeats(), flushes()];
+  const loops: Array<Promise<void>> = [heartbeats(), flushes()];
+
+  /** Arms the short flush once while an activity or stage event waits; the regular 5 s loop covers everything else. */
+  async function soon(): Promise<void> {
+    await clock.sleep(config.activityFlushMs ?? ACTIVITY_FLUSH_INTERVAL_MS, loopSignal);
+    soonArmed = false;
+    if (!loopSignal.aborted) await flush();
+  }
+
+  /** The event as it will be queued: a repeat stage is dropped, a burst keeps its newest `activity`, and the run's cap strips the rest. */
+  function shaped(event: LocalOnlyEvent): LocalOnlyEvent | undefined {
+    if (event.type === "stage") {
+      if (event.stage === undefined || stagesSent.has(event.stage)) return undefined;
+      stagesSent.add(event.stage);
+      return event;
+    }
+    if (event.activity === undefined) return event;
+    const at = Date.parse(event.ts);
+    if (burst !== undefined && Math.abs(at - burst.anchor) < ACTIVITY_WINDOW_MS) {
+      // The older event of the burst is still waiting: it goes out as a bare tool use, and this one carries the burst's activity.
+      const index = queue.indexOf(burst.event);
+      if (index >= 0) {
+        const { activity: _older, ...bare } = burst.event;
+        void _older;
+        queue[index] = bare;
+        activityKept--;
+      }
+    } else burst = undefined;
+    if (activityKept >= MAX_ACTIVITY_EVENTS) {
+      const { activity: _over, ...bare } = event;
+      void _over;
+      return bare;
+    }
+    activityKept++;
+    burst = { anchor: burst?.anchor ?? at, event };
+    return event;
+  }
 
   return {
     signal: stopCtl.signal,
@@ -150,7 +197,13 @@ export function startLease(config: LeaseConfig): Lease {
       if (!parsed.success) return;
       if (highest === undefined || parsed.data.seq > highest) highest = parsed.data.seq;
       seenTypes.add(parsed.data.type);
-      queue.push(parsed.data);
+      const shown = shaped(parsed.data);
+      if (shown === undefined) return;
+      queue.push(shown);
+      if ((shown.type === "stage" || shown.activity !== undefined) && !soonArmed) {
+        soonArmed = true;
+        loops.push(soon());
+      }
       if (queue.length > MAX_QUEUED_EVENTS) queue = queue.slice(queue.length - MAX_QUEUED_EVENTS);
     },
     highestSeq: () => highest,

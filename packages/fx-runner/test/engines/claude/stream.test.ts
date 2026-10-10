@@ -18,13 +18,14 @@ describe("stream", () => {
     expect((opts.events as Array<{ type: string; seq: number }>).map((event) => [event.type, event.seq])).toEqual([["system", 0], ["assistant", 1], ["user", 2], ["result", 3]]);
     // The local transcript keeps the model's text; the cloud-bound events have no field that could hold it.
     expect(JSON.stringify(opts.events)).toContain("PRIVATE-MODEL-TEXT");
-    expect(local.map((event) => event.type)).toEqual(["engine_version", "tool_use", "file_changed", "usage"]);
-    expect(local[1]).toMatchObject({ tool_name: "Write", file_path: "src/a.ts" });
-    expect(local[2]).toMatchObject({ type: "file_changed", file_path: "src/a.ts" });
-    expect(local[3]).toMatchObject({ usage: { input: 12, output: 7, usd: 0.0123 } });
+    expect(local.map((event) => event.type)).toEqual(["engine_version", "stage", "tool_use", "file_changed", "usage"]);
+    expect(local[1]).toMatchObject({ stage: "writing_result" });
+    expect(local[2]).toMatchObject({ tool_name: "Write", file_path: "src/a.ts" });
+    expect(local[3]).toMatchObject({ type: "file_changed", file_path: "src/a.ts" });
+    expect(local[4]).toMatchObject({ usage: { input: 12, output: 7, usd: 0.0123 } });
     // This stream's result line has no cache counts, so the event carries none (an absent field, never a zero).
-    expect(Object.keys((local[3] as { usage: object }).usage).sort()).toEqual(["input", "output", "usd"]);
-    expect(local.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
+    expect(Object.keys((local[4] as { usage: object }).usage).sort()).toEqual(["input", "output", "usd"]);
+    expect(local.map((event) => event.seq)).toEqual([0, 1, 2, 3, 4]);
     for (const event of local) expect(LocalOnlyEvent.safeParse(event).success).toBe(true);
     expect(JSON.stringify(local)).not.toMatch(/PRIVATE-/);
   });
