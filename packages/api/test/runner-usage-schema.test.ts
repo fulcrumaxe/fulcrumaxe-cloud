@@ -38,8 +38,13 @@ describe('runner usage schemas', () => {
     }
   });
 
-  it('a work item and the month carry own_plan_api_equivalent_usd as a required number', () => {
-    for (const schema of [workItemResponseSchema, usageResponseSchema]) {
+  it('a work item carries own_plan_api_equivalent_usd as a required number-or-null with a usage state, and the month as a required number', () => {
+    const item = workItemResponseSchema.shape;
+    expect(item.own_plan_api_equivalent_usd.safeParse(null).success).toBe(true);
+    expect(item.own_plan_api_equivalent_usd.safeParse(undefined).success).toBe(false);
+    expect(item.own_plan_usage_state.safeParse('not_priced').success).toBe(true);
+    expect(item.own_plan_usage_state.safeParse('zero').success).toBe(false);
+    for (const schema of [usageResponseSchema]) {
       const field = schema.shape.own_plan_api_equivalent_usd;
       expect(field.safeParse(1.25).success).toBe(true);
       expect(field.safeParse(undefined).success).toBe(false);

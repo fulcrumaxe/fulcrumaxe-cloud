@@ -185,6 +185,38 @@ export const leaseVerdict = async (client: PoolClient, i: HeartbeatRunnerRunInpu
   return rows[0]!.verdict;
 };
 
+/** C42-5: how long after its run ended the runner that held it may still report its `usage` (the lease length). */
+export const LATE_USAGE_GRACE_SECONDS = RUNNER_LEASE_SECONDS;
+
+/**
+ * C42-5: a batch that arrives after `done` (or any end) ended the run is refused with the stop reply, as always. But the tokens the run spent
+ * are not lost: when the SAME runner at the SAME generation sends it within the grace, its `usage` events (and only those) are stored once
+ * and added to the run's usage row. Every other kind is dropped unstored. A replay stores nothing, so it adds no tokens.
+ */
+async function recordLateUsage(client: PoolClient, input: IngestRunnerEventsInput, at: Date): Promise<void> {
+  const { rows } = await client.query<{ ok: boolean }>(
+    `SELECT true AS ok FROM agent_runs WHERE account_id = $1 AND id = $2 AND runtime = 'runner' AND runner_id = $3 AND lease_generation = $4
+        AND status NOT IN ('pending', 'running') AND updated_at >= $5::timestamptz - make_interval(secs => $6)`,
+    [input.accountId, input.runId, input.runnerId, input.leaseGeneration, at, LATE_USAGE_GRACE_SECONDS],
+  );
+  if (rows.length !== 1) return;
+  const last = await client.query<{ last: string | null }>("SELECT max(runner_seq) AS last FROM run_events WHERE run_id = $1 AND account_id = $2", [input.runId, input.accountId]);
+  const floor = last.rows[0]?.last == null ? -1 : Number(last.rows[0].last);
+  const stored: LocalOnlyEvent[] = [];
+  for (const event of input.events) {
+    if (event.type !== "usage" || event.seq <= floor) continue;
+    const outcome = await insertRunnerEvent(client, {
+      accountId: input.accountId,
+      runId: input.runId,
+      runnerSeq: event.seq,
+      bodySha256: createHash("sha256").update(canonicalJson(event), "utf8").digest("hex"),
+      payload: redactDeep(event, []) as unknown as Record<string, unknown>,
+    });
+    if (outcome === "stored") stored.push(event);
+  }
+  await recordRunnerUsage(client, { accountId: input.accountId, runId: input.runId, runnerId: input.runnerId, stored });
+}
+
 export function requireLease(input: HeartbeatRunnerRunInput): void {
   if (typeof input !== "object" || input === null) throw new RunActionInputError();
   requireUuid(input.accountId);
@@ -370,7 +402,11 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           // Fence first, without moving the lease: a refused batch must leave it alone. The fence takes the run row's lock and
           // holds it to the end of this transaction, so the last accepted number read below cannot move under it.
           const held = await leaseVerdict(client, input, at, 0, maxWallClockMs);
-          if (held !== "ok") return { outcome: "fenced", verdict: held, reason: stopReasonFor(held) };
+          if (held !== "ok") {
+            // C42-5: the answer is still the stop, but a `usage` event of a run this runner just finished is not lost.
+            if (held === "not_running") await recordLateUsage(client, input, at);
+            return { outcome: "fenced", verdict: held, reason: stopReasonFor(held) };
+          }
           const last = await client.query<{ last: string | null }>("SELECT max(runner_seq) AS last FROM run_events WHERE run_id = $1 AND account_id = $2", [input.runId, input.accountId]);
           if (last.rows[0]?.last != null && input.events[0]!.seq <= Number(last.rows[0].last)) return { outcome: "seq_not_increasing", lastAcceptedSeq: Number(last.rows[0].last) };
 

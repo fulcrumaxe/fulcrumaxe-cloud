@@ -14,6 +14,7 @@ import { getStats } from "@fx/core/src/stats/read.js";
 import { computeUsd, getUsage, monthToDateUsd, priceFor, pricingFetchedAt, reserve } from "@fx/spend";
 import { resetPlanDataCache } from "@fx/plan-data";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "../src/runnerClaims.js";
+import { createRunnerDoneFacade } from "../src/runnerDone.js";
 
 /**
  * [pg] D#6 R2b-5a (C32 section 5, E1 to E6): the API-equivalent usage of runner runs, against the real definers (0768), the real run-writer
@@ -57,7 +58,7 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
     return id;
   }
   /** A pending runner run with a real signed job, on `model`, optionally under the account's seeded work item. */
-  async function pending(o: { model?: string | null; workItem?: boolean; createdAt?: number } = {}): Promise<string> {
+  async function pending(o: { model?: string | null; hint?: string | null; workItem?: boolean; createdAt?: number } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -72,7 +73,7 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       role_tools_sha256: "a".repeat(64),
       continues: null,
       branch_prefix: "fx/",
-      model_hint: null,
+      model_hint: o.hint ?? null,
       issued_at: new Date(T0 - 1000).toISOString(),
       expires_at: new Date(T0 + 72 * 3_600_000).toISOString(),
       key_id: "k1",
@@ -438,7 +439,7 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       const other = await seedAccount(admin, randomUUID());
       expect((await stats({ accountId: other.accountId, userId: other.userId }, new Date(at.getTime() - 86_400_000), new Date(at.getTime() + 86_400_000), null)).runner_api_equivalent_usd).toBe(0);
       // ... and nothing else moved: every existing spend field is deep-equal to what it was.
-      const apart = <T extends { own_plan_api_equivalent_usd: number }>(v: T): Omit<T, "own_plan_api_equivalent_usd"> => ({ ...v, own_plan_api_equivalent_usd: undefined }) as never;
+      const apart = <T extends { own_plan_api_equivalent_usd: number | null }>(v: T): Omit<T, "own_plan_api_equivalent_usd"> => ({ ...v, own_plan_api_equivalent_usd: undefined, own_plan_usage_state: undefined, own_plan_tokens: undefined }) as never;
       const [itemBefore, itemAfter] = [apart(before.item), apart(after.item)];
       expect(JSON.parse(JSON.stringify(itemAfter))).toEqual(JSON.parse(JSON.stringify(itemBefore)));
       expect(itemAfter.cost_usd).toBe(2.5);
@@ -472,6 +473,100 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       expect((await getUsage({ pool: appPool, principal: principal() })).own_plan_api_equivalent_usd).toBe(want);
       const B = await seedAccount(admin, randomUUID());
       expect((await getUsage({ pool: appPool, principal: { accountId: B.accountId, userId: B.userId } })).own_plan_api_equivalent_usd).toBe(0);
+    });
+  });
+  describe("C42-5: model at dispatch, no silent zero, late usage", () => {
+    const itemRead = () => getWorkItem({ pool: appPool, principal: principal() }, A.workItemId);
+    /** Ends the run the way `done` does (a verdict under the fence), so it counts as finished. */
+    async function finish(id: string, g: number): Promise<void> {
+      const lease = { accountId: A.accountId, runnerId: runner, runId: id, leaseGeneration: g };
+      expect(await createRunnerDoneFacade(writerPool).beginRunnerDone(lease)).toEqual({ kind: "proceed" });
+      await createRunnerDoneFacade(writerPool).finishRunnerDone({ ...lease, verdict: { outcome: "succeeded", failureReason: null, prNumber: 5 } });
+    }
+
+    it("the claim copies a valid model hint of the signed job onto a run with no model, never replaces a model, and ignores an unknown hint", async () => {
+      const modelOf = async (id: string) => (await admin.query("SELECT model FROM agent_runs WHERE id = $1", [id])).rows[0].model;
+      const fresh = await pending({ model: null, hint: "sonnet-5", createdAt: T0 - 9000 });
+      await finish(fresh, await claimed(fresh));
+      expect(await modelOf(fresh)).toBe("sonnet-5");
+      const kept = await pending({ model: "opus-5", hint: "haiku-4.5", createdAt: T0 - 8000 });
+      await finish(kept, await claimed(kept));
+      expect(await modelOf(kept)).toBe("opus-5");
+      const unknown = await pending({ model: null, hint: "not-a-model", createdAt: T0 - 7000 });
+      await finish(unknown, await claimed(unknown));
+      expect(await modelOf(unknown)).toBeNull();
+      const none = await pending({ model: null, createdAt: T0 - 6000 });
+      await finish(none, await claimed(none));
+      expect(await modelOf(none)).toBeNull();
+    });
+
+    it("a run created with no model whose job names one is priced from its first usage event (the #595 shape)", async () => {
+      const id = await pending({ model: null, hint: MODEL, workItem: true });
+      const g = await claimed(id);
+      await send(id, g, [usageEvent(0, { input: 1000, output: 437 })]);
+      await finish(id, g);
+      expect(await usageRow(id)).toMatchObject({ model: MODEL, price_table_version: pricingFetchedAt() });
+      const item = await itemRead();
+      expect(item.own_plan_usage_state).toBe("recorded");
+      expect(item.own_plan_api_equivalent_usd).toBeGreaterThan(0);
+    });
+
+    it("a priced run reads recorded: the figure is computeUsd to the cent, the tokens are shown, and cost_usd stays 0", async () => {
+      const id = await pending({ workItem: true });
+      const g = await claimed(id);
+      await send(id, g, [usageEvent(0, { input: 1000, output: 437, usd: 99 })]);
+      await finish(id, g);
+      const item = await itemRead();
+      const expected = computeUsd(rate(), { inputTokens: 1000, outputTokens: 437, cacheReadTokens: 0, cacheWriteTokens: 0 });
+      expect(item.own_plan_usage_state).toBe("recorded");
+      expect(item.own_plan_api_equivalent_usd).toBeCloseTo(expected, 2);
+      expect(item.own_plan_tokens).toEqual({ input: 1000, output: 437, cache_read: 0, cache_write: 0 });
+      expect(item.cost_usd).toBe(0);
+    });
+
+    it("an unpriced run reads not_priced with its tokens and no figure; a finished run with no usage event reads not_recorded", async () => {
+      const unpriced = await pending({ workItem: true, model: null });
+      const g = await claimed(unpriced);
+      await send(unpriced, g, [usageEvent(0, { input: 70, output: 30 })]);
+      await finish(unpriced, g);
+      const item = await itemRead();
+      expect(item).toMatchObject({ own_plan_usage_state: "not_priced", own_plan_api_equivalent_usd: null, own_plan_tokens: { input: 70, output: 30 } });
+      expect(item.own_plan_api_equivalent_usd).not.toBe(0);
+
+      const silent = await pending({ workItem: true, createdAt: T0 - 4000 });
+      const g2 = await claimed(silent);
+      expect((await itemRead()).own_plan_usage_state, "a run still going is not yet missing").toBe("not_priced");
+      await finish(silent, g2);
+      expect(await itemRead()).toMatchObject({ own_plan_usage_state: "not_recorded", own_plan_api_equivalent_usd: null });
+    });
+
+    it("an item with no runner run is a real zero: recorded, 0, no tokens", async () => {
+      expect(await itemRead()).toMatchObject({ own_plan_usage_state: "recorded", own_plan_api_equivalent_usd: 0, own_plan_tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
+    });
+
+    it("a usage batch sent after done is recorded and the reply is still the stop; a tool_use in it is not stored; a replay adds nothing", async () => {
+      const id = await pending({ workItem: true });
+      const g = await claimed(id);
+      await send(id, g, [usageEvent(0, { input: 100, output: 10 })]);
+      await finish(id, g);
+      const late = [usageEvent(1, { input: 40, output: 5 }), { seq: 2, ts: "2026-10-10T12:00:01.000Z", type: "tool_use", tool_name: "Read" }];
+      expect(await send(id, g, late)).toMatchObject({ outcome: "fenced", reason: "run_terminal" });
+      expect(await usageRow(id)).toMatchObject({ input_tokens: "140", output_tokens: "15" });
+      expect((await admin.query("SELECT payload->>'type' AS t FROM run_events WHERE run_id = $1 AND kind = 'runner.event' ORDER BY runner_seq", [id])).rows.map((r) => r.t)).toEqual(["usage", "usage"]);
+      expect(await send(id, g, late)).toMatchObject({ outcome: "fenced" });
+      expect(await usageRow(id)).toMatchObject({ input_tokens: "140", output_tokens: "15" });
+    });
+
+    it("late usage from another runner, another generation or past the grace stores nothing", async () => {
+      const id = await pending({ workItem: true });
+      const g = await claimed(id);
+      await finish(id, g);
+      const other = await newRunner();
+      expect(await send(id, g, [usageEvent(0, { input: 9, output: 9 })], other)).toMatchObject({ outcome: "fenced" });
+      expect(await send(id, g + 1, [usageEvent(0, { input: 9, output: 9 })])).toMatchObject({ outcome: "fenced" });
+      await admin.query("UPDATE agent_runs SET updated_at = now() - interval '1 hour' WHERE id = $1", [id]);
+      expect(await send(id, g, [usageEvent(0, { input: 9, output: 9 })])).toMatchObject({ outcome: "fenced" });
+      expect(await usageRow(id)).toBeUndefined();
     });
   });
 });

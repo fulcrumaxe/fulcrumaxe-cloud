@@ -1289,8 +1289,45 @@
                             "type": "number"
                           },
                           "own_plan_api_equivalent_usd": {
-                            "type": "number",
-                            "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                            "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan). Null unless own_plan_usage_state is recorded: a figure that was never recorded or never priced is not zero.",
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "own_plan_usage_state": {
+                            "type": "string",
+                            "enum": [
+                              "recorded",
+                              "not_priced",
+                              "not_recorded"
+                            ],
+                            "description": "recorded: every finished run on the person's machine has a priced usage row (or there is none); not_priced: a run has tokens and no API price; not_recorded: a finished run reported no usage."
+                          },
+                          "own_plan_tokens": {
+                            "type": "object",
+                            "properties": {
+                              "input": {
+                                "type": "number"
+                              },
+                              "output": {
+                                "type": "number"
+                              },
+                              "cache_read": {
+                                "type": "number"
+                              },
+                              "cache_write": {
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "input",
+                              "output",
+                              "cache_read",
+                              "cache_write"
+                            ],
+                            "additionalProperties": false,
+                            "description": "The tokens the item's runs on the person's machine reported."
                           },
                           "created_at": {
                             "type": "string"
@@ -1310,6 +1347,8 @@
                           "queue_rank",
                           "cost_usd",
                           "own_plan_api_equivalent_usd",
+                          "own_plan_usage_state",
+                          "own_plan_tokens",
                           "created_at",
                           "updated_at"
                         ],
@@ -1520,8 +1559,45 @@
                       "type": "number"
                     },
                     "own_plan_api_equivalent_usd": {
-                      "type": "number",
-                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan). Null unless own_plan_usage_state is recorded: a figure that was never recorded or never priced is not zero.",
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "own_plan_usage_state": {
+                      "type": "string",
+                      "enum": [
+                        "recorded",
+                        "not_priced",
+                        "not_recorded"
+                      ],
+                      "description": "recorded: every finished run on the person's machine has a priced usage row (or there is none); not_priced: a run has tokens and no API price; not_recorded: a finished run reported no usage."
+                    },
+                    "own_plan_tokens": {
+                      "type": "object",
+                      "properties": {
+                        "input": {
+                          "type": "number"
+                        },
+                        "output": {
+                          "type": "number"
+                        },
+                        "cache_read": {
+                          "type": "number"
+                        },
+                        "cache_write": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "input",
+                        "output",
+                        "cache_read",
+                        "cache_write"
+                      ],
+                      "additionalProperties": false,
+                      "description": "The tokens the item's runs on the person's machine reported."
                     },
                     "created_at": {
                       "type": "string"
@@ -1541,6 +1617,8 @@
                     "queue_rank",
                     "cost_usd",
                     "own_plan_api_equivalent_usd",
+                    "own_plan_usage_state",
+                    "own_plan_tokens",
                     "created_at",
                     "updated_at"
                   ],
@@ -1787,8 +1865,45 @@
                       "type": "number"
                     },
                     "own_plan_api_equivalent_usd": {
-                      "type": "number",
-                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."
+                      "description": "What this item's runs on the person's own machine would have cost at API prices. Information, never spend. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan). Null unless own_plan_usage_state is recorded: a figure that was never recorded or never priced is not zero.",
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "own_plan_usage_state": {
+                      "type": "string",
+                      "enum": [
+                        "recorded",
+                        "not_priced",
+                        "not_recorded"
+                      ],
+                      "description": "recorded: every finished run on the person's machine has a priced usage row (or there is none); not_priced: a run has tokens and no API price; not_recorded: a finished run reported no usage."
+                    },
+                    "own_plan_tokens": {
+                      "type": "object",
+                      "properties": {
+                        "input": {
+                          "type": "number"
+                        },
+                        "output": {
+                          "type": "number"
+                        },
+                        "cache_read": {
+                          "type": "number"
+                        },
+                        "cache_write": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "input",
+                        "output",
+                        "cache_read",
+                        "cache_write"
+                      ],
+                      "additionalProperties": false,
+                      "description": "The tokens the item's runs on the person's machine reported."
                     },
                     "created_at": {
                       "type": "string"
@@ -1808,6 +1923,8 @@
                     "queue_rank",
                     "cost_usd",
                     "own_plan_api_equivalent_usd",
+                    "own_plan_usage_state",
+                    "own_plan_tokens",
                     "created_at",
                     "updated_at"
                   ],

@@ -154,6 +154,20 @@ describe("openDraft (A3, A4)", () => {
     expect(repo.pulls[0]!.body).toContain(RUN.workItemId);
   });
 
+  it("sends `Closes #<issue>` in the POST body on the draft path, and again on the draft-unsupported retry", async () => {
+    const issue = { ...RUN, issueNumber: 595 };
+    const draftSide = setup();
+    await draftSide.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: issue });
+    expect(draftSide.repo.pulls[0]!.body).toBe(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: 595 }));
+    expect(draftSide.repo.pulls[0]!.body).toContain("\nCloses #595");
+    const retrySide = setup({ drafts: false });
+    await retrySide.port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: issue });
+    expect(retrySide.repo.pulls).toHaveLength(1);
+    expect(retrySide.repo.pulls[0]!.body).toBe(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: 595 }, { readyFallback: true }));
+    expect(retrySide.repo.pulls[0]!.body).toMatch(/\nCloses #595\n\nOpened as ready/);
+    expect(draftSide.fake.denied + retrySide.fake.denied).toBe(0);
+  });
+
   it("is idempotent: an open pull request whose head is the branch is reused, and nothing is created", async () => {
     const { fake, repo, port } = setup();
     const first = await port.openDraft({ repo: REPO, branch: BRANCH, base: "main", run: RUN });
@@ -388,6 +402,27 @@ describe("the title and the body", () => {
     const body = pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId });
     expect(body).toBe(COPY.pullRequestBody.replace("{run}", RUN.runId).replace("{item}", RUN.workItemId));
     expect(body).not.toMatch(/\{[a-z]+\}/);
+  });
+
+  it("with an issue number the body holds exactly one `Closes #N` line; without one it is today's text byte for byte", () => {
+    const template = COPY.pullRequestBody.replace("{run}", RUN.runId).replace("{item}", RUN.workItemId);
+    const withIssue = pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: 595 });
+    expect(withIssue.split("\n").filter((l) => l === "Closes #595")).toHaveLength(1);
+    expect(withIssue).toBe(`${template}\n\nCloses #595`);
+    expect(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId })).toBe(template);
+    expect(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: null })).toBe(template);
+  });
+
+  it("refuses an issue number that is 0, negative, not an integer or 10 digits long", () => {
+    for (const bad of [0, -3, 1.5, Number.NaN, 1_000_000_000, 1234567890]) {
+      expect(() => pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: bad }), String(bad)).toThrow(TypeError);
+    }
+    expect(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: 999_999_999 })).toContain("Closes #999999999");
+  });
+
+  it("with the ready fallback the order is the template, then `Closes #N`, then the fallback line", () => {
+    const template = COPY.pullRequestBody.replace("{run}", RUN.runId).replace("{item}", RUN.workItemId);
+    expect(pullRequestBody({ runId: RUN.runId, workItemId: RUN.workItemId, issueNumber: 7 }, { readyFallback: true })).toBe(`${template}\n\nCloses #7\n\n${READY_FALLBACK_LINE}`);
   });
 
   it("the open call takes the ids and the title, and no body: a field named agentOutput or body on the input is never sent", async () => {

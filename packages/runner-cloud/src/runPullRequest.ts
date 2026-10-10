@@ -103,6 +103,8 @@ export interface RunPullRequestText {
   runId: string;
   workItemId: string;
   workItemTitle: string | null;
+  /** The work item's issue number from our own row (never the job or the runner), or null/absent when it has none. */
+  issueNumber?: number | null;
 }
 
 export interface RunPullRequestPort {
@@ -119,15 +121,20 @@ export interface RunPullRequestPort {
  * Null when the run has no work item. `client` must be under the run's tenant.
  */
 export async function loadRunPullRequestText(client: TenantQueryable, run: { accountId: string; runId: string }): Promise<RunPullRequestText | null> {
-  const { rows } = await client.query<{ work_item_id: string; title: string | null }>(
-    `SELECT ar.work_item_id, w.title
+  const { rows } = await client.query<{ work_item_id: string; title: string | null; gh_number: string | null }>(
+    `SELECT ar.work_item_id, w.title, w.gh_number
        FROM agent_runs ar
        JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
       WHERE ar.account_id = $1 AND ar.id = $2`,
     [run.accountId, run.runId],
   );
-  return rows.length === 1 ? { runId: run.runId, workItemId: rows[0]!.work_item_id, workItemTitle: rows[0]!.title } : null;
+  return rows.length === 1
+    ? { runId: run.runId, workItemId: rows[0]!.work_item_id, workItemTitle: rows[0]!.title, issueNumber: issueOf(rows[0]!.gh_number) }
+    : null;
 }
+
+/** An issue number a body may reference: a positive integer of at most 9 digits. Anything else (a huge bigint) is no reference, not a crash in `done`. */
+const issueOf = (raw: string | null): number | null => (raw !== null && /^[1-9][0-9]{0,8}$/.test(raw) ? Number(raw) : null);
 
 export const TITLE_MAX = 256;
 export const MAX_FILE_PAGES = 30;
@@ -147,10 +154,17 @@ export function pullRequestTitle(workItemTitle: string | null): string {
   return out.trimEnd() || COPY.pullRequestTitleFallback;
 }
 
-/** The pull request's description: the fixed template with the two ids. Nothing the agent wrote can reach it, because nothing else is an input. */
-export function pullRequestBody(input: { runId: string; workItemId: string }, options: { readyFallback?: boolean } = {}): string {
+/**
+ * The pull request's description: the fixed template with the two ids, then (when the item has an issue) one `Closes #<n>` line so the
+ * pull_request webhook moves the item at once. Nothing the agent wrote can reach it, because nothing else is an input. The number comes
+ * from our own work item row and must be a positive integer of at most 9 digits.
+ */
+export function pullRequestBody(input: { runId: string; workItemId: string; issueNumber?: number | null }, options: { readyFallback?: boolean } = {}): string {
   if (!UUID.test(input.runId) || !UUID.test(input.workItemId)) throw new TypeError("pullRequestBody: ids must be UUIDs");
-  const body = COPY.pullRequestBody.replace("{run}", input.runId).replace("{item}", input.workItemId);
+  const issue = input.issueNumber ?? null;
+  if (issue !== null && !(Number.isSafeInteger(issue) && issue >= 1 && issue <= 999_999_999)) throw new TypeError("pullRequestBody: the issue number must be a positive integer of at most 9 digits");
+  const template = COPY.pullRequestBody.replace("{run}", input.runId).replace("{item}", input.workItemId);
+  const body = issue === null ? template : `${template}\n\nCloses #${issue}`;
   return options.readyFallback === true ? `${body}
 
 ${READY_FALLBACK_LINE}` : body;
@@ -331,7 +345,7 @@ export function createRunPullRequestPort(deps: {
     },
 
     async openDraft({ repo, branch, base, run }) {
-      const ids = { runId: run.runId, workItemId: run.workItemId };
+      const ids = { runId: run.runId, workItemId: run.workItemId, issueNumber: run.issueNumber ?? null };
       const title = pullRequestTitle(run.workItemTitle);
       const body = pullRequestBody(ids);
       const gh = await client(repo);
