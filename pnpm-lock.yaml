@@ -619,6 +619,9 @@ importers:
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
+      js-yaml:
+        specifier: ^4.3.2
+        version: 4.3.2
       postject:
         specifier: 1.0.0-alpha.6
         version: 1.0.0-alpha.6

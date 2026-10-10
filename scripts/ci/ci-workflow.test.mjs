@@ -916,6 +916,19 @@ function judgeRunsOn(value) {
   if (HOSTED_LABEL.test(value)) return null;
   return `runs-on ${JSON.stringify(value)} is neither the guarded expression nor a literal ubuntu-*, macos-* or windows-* label`;
 }
+/**
+ * The literal runs-on values a job can have: its own, or, for exactly `${{ matrix.runner }}`, the `runner` of every entry in the
+ * matrix's `include` list (a release matrix of four hosted platforms). A missing or non-literal entry stays an unreadable value, so
+ * `judgeRunsOn` rejects it; any other matrix expression is still rejected as before.
+ */
+function runsOnValues(job) {
+  if (unwrap(job["runs-on"]) !== "matrix.runner") return [job["runs-on"]];
+  // Only a matrix made of `include` and nothing else: another axis (`runner: [self-hosted]`) or an `exclude` could add or hide runners.
+  const matrix = job.strategy?.matrix;
+  const include = matrix?.include;
+  const onlyInclude = matrix !== null && typeof matrix === "object" && Object.keys(matrix).length === 1 && Array.isArray(include) && include.length > 0;
+  return onlyInclude ? include.map((entry) => entry?.runner) : [job["runs-on"]];
+}
 /** What a job's runs-on resolves to for a repository with this `private` flag and CI_RUNS_ON value. */
 function resolveRunsOn(value, { isPrivate, ciRunsOn }) {
   const expr = unwrap(value);
@@ -930,7 +943,7 @@ test("runner guard: every job of every workflow runs-on exactly the guarded expr
   for (const { file, doc } of workflows) {
     for (const [name, job] of jobsOf(doc)) {
       jobs += 1;
-      assert.equal(judgeRunsOn(job["runs-on"]), null, `${file}: job ${name}`);
+      for (const value of runsOnValues(job)) assert.equal(judgeRunsOn(value), null, `${file}: job ${name}`);
     }
   }
   assert.ok(jobs >= 4, "ci.yml has pr-gates, check and workspace-e2e; ci-full-label.yml has one");
@@ -956,6 +969,16 @@ test("runner guard: fixture workflows with a self-hosted-capable runs-on are rej
   // A matrix job also names its runner outside the `runs-on:` line, which is why the value above is a plain string.
   const matrixDoc = parseYamlText("on: pull_request\njobs:\n  j:\n    strategy:\n      matrix:\n        os: [self-hosted]\n    runs-on: ${{ matrix.os }}\n    steps:\n      - run: echo\n");
   assert.notEqual(judgeRunsOn(matrixDoc.jobs.j["runs-on"]), null);
+  // The one allowed matrix form is `${{ matrix.runner }}` over an include list of literal hosted labels, and one bad entry fails it.
+  const matrixRunner = (runners) => parseYamlText(`on: workflow_dispatch\njobs:\n  j:\n    strategy:\n      matrix:\n        include:\n${runners.map((r) => `          - { runner: ${r} }\n`).join("")}    runs-on: \${{ matrix.runner }}\n    steps:\n      - run: echo\n`).jobs.j;
+  assert.deepEqual(runsOnValues(matrixRunner(["ubuntu-latest", "macos-15"])).map(judgeRunsOn), [null, null]);
+  assert.notEqual(runsOnValues(matrixRunner(["ubuntu-latest", "self-hosted"])).map(judgeRunsOn).find((reason) => reason !== null), undefined);
+  // A second axis next to `include`, or an `exclude`, is refused: the axis can name a self-hosted runner.
+  for (const extra of ["        runner: [self-hosted]\n", "        exclude:\n          - { runner: ubuntu-latest }\n", "        os: [self-hosted]\n"]) {
+    const doc = parseYamlText(`on: workflow_dispatch\njobs:\n  j:\n    strategy:\n      matrix:\n${extra}        include:\n          - { runner: ubuntu-latest }\n    runs-on: \${{ matrix.runner }}\n    steps:\n      - run: echo\n`);
+    assert.notEqual(runsOnValues(doc.jobs.j).map(judgeRunsOn).find((reason) => reason !== null), undefined, extra);
+  }
+  assert.notEqual(judgeRunsOn(runsOnValues(parseYamlText("on: workflow_dispatch\njobs:\n  j:\n    strategy:\n      matrix:\n        include:\n          - { platform: x }\n    runs-on: ${{ matrix.runner }}\n    steps:\n      - run: echo\n").jobs.j)[0]), null);
   for (const ok of [GUARD, "ubuntu-latest", "ubuntu-24.04", "macos-14", "macos-latest", "windows-2022"]) {
     assert.equal(judgeRunsOn(ok), null, ok);
   }
@@ -978,9 +1001,11 @@ test("runner guard: with repository.private == false every job resolves to a Git
   for (const { file, doc } of workflows) {
     for (const [name, job] of jobsOf(doc)) {
       for (const ciRunsOn of CI_RUNS_ON_VALUES) {
-        const got = resolveRunsOn(job["runs-on"], { isPrivate: false, ciRunsOn });
-        assert.match(String(got), HOSTED_LABEL, `${file}: ${name} with CI_RUNS_ON=${JSON.stringify(ciRunsOn)} resolved to ${JSON.stringify(got)}`);
-        checked += 1;
+        for (const value of runsOnValues(job)) {
+          const got = resolveRunsOn(value, { isPrivate: false, ciRunsOn });
+          assert.match(String(got), HOSTED_LABEL, `${file}: ${name} with CI_RUNS_ON=${JSON.stringify(ciRunsOn)} resolved to ${JSON.stringify(got)}`);
+          checked += 1;
+        }
       }
     }
   }
@@ -1015,22 +1040,91 @@ function untrustedInRun(doc) {
   return hits;
 }
 
-test("workflows: no pull_request_target or workflow_run trigger, no secrets., top-level permissions contents read only", () => {
+/**
+ * Every secret a workflow reads, by (file, job): this list is exhaustive. Naming a GitHub environment does not gate a secret by itself
+ * (an unknown environment name is created on first use, unprotected), so a job may read a secret only if it is listed here with exactly
+ * its environment and exactly these secrets: the two signing jobs of D#6 R6-5, whose environments the owner restricts to protected main.
+ */
+const RELEASE_PUBLISHERS = { "runner-release.yml": ["draft", "sign"], "tuf-timestamp.yml": ["refresh"] };
+const SECRET_ALLOWLIST = {
+  "runner-release.yml": { sign: { environment: "release", secrets: ["TUF_ONLINE_KEY", "TUF_TARGETS_KEY"] } },
+  "tuf-timestamp.yml": { refresh: { environment: "tuf-timestamp", secrets: ["TUF_ONLINE_KEY"] } },
+};
+/** The text of every `${{ }}` expression under a node, and of every `if:` value (which needs no braces). Plain words in names and comments do not count. */
+function expressionTexts(node, key = "", out = []) {
+  if (typeof node === "string") {
+    for (const m of node.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) out.push(m[1]);
+    if (key === "if") out.push(node);
+  } else if (Array.isArray(node)) for (const v of node) expressionTexts(v, key, out);
+  else if (node !== null && typeof node === "object") for (const [k, v] of Object.entries(node)) expressionTexts(v, k, out);
+  return out;
+}
+/** The secrets a node reads by name, and whether it reads them any other way (`toJSON(secrets)`, `secrets['X']`, `secrets[...]`, `secrets` alone). */
+function secretUse(node) {
+  const texts = expressionTexts(node);
+  const names = texts.flatMap((t) => [...t.matchAll(/\bsecrets\.([A-Za-z_][\w-]*)/g)].map((m) => m[1]));
+  const dynamic = texts.some((t) => /\bsecrets\b(?!\.[A-Za-z_])/.test(t));
+  return { names, dynamic, used: names.length > 0 || dynamic };
+}
+function secretViolations(file, doc) {
+  const out = [];
+  const { jobs, ...rest } = doc;
+  if (secretUse(rest).used) out.push("top level");
+  for (const [name, job] of Object.entries(jobs ?? {})) {
+    const use = secretUse(job);
+    if (!use.used) continue;
+    const allowed = SECRET_ALLOWLIST[file]?.[name];
+    if (allowed === undefined) {
+      out.push(`${name} is not an allowed secret reader`);
+      continue;
+    }
+    if (job.environment !== allowed.environment) out.push(`${name} must run in environment ${allowed.environment}`);
+    if (use.dynamic) out.push(`${name} reads secrets by a dynamic name`);
+    for (const n of new Set(use.names)) if (!allowed.secrets.includes(n)) out.push(`${name} reads ${n}`);
+    if (runsOnValues(job).some((value) => /^macos-/.test(String(value)))) out.push(`${name} runs on macOS`);
+  }
+  return out;
+}
+
+test("workflows: no pull_request_target or workflow_run trigger, secrets only in the two allowlisted signing jobs, top-level permissions contents read only", () => {
   for (const { file, text, doc } of workflows) {
     const on = triggersOf(doc);
     const keys = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on);
     for (const k of keys) assert.ok(!["pull_request_target", "workflow_run"].includes(k), `${file} has a ${k} trigger`);
-    assert.doesNotMatch(noComments(text), /secrets\./, `${file} reads a secret`);
+    assert.deepEqual(secretViolations(file, doc), [], `${file} reads a secret where it may not`);
+    assert.doesNotMatch(noComments(text), /secrets\.GITHUB_TOKEN/, `${file} reads the token as a secret`);
     assert.deepEqual(doc.permissions, { contents: "read" }, `${file}: top-level permissions`);
   }
+  const fixture = ({ on = "workflow_dispatch", job = "sign", environment = "release", expr = "secrets.TUF_ONLINE_KEY", runsOn = "ubuntu-latest", top = "" } = {}) =>
+    parseYamlText(`on: ${on}\n${top}jobs:\n  ${job}:\n    runs-on: ${runsOn}\n${environment === null ? "" : `    environment: ${environment}\n`}    steps:\n      - run: echo \${{ ${expr} }}\n`);
+  const rr = "runner-release.yml";
+  assert.deepEqual(secretViolations(rr, fixture()), []);
+  // teeth: an unlisted file, with a push trigger and any environment name
+  assert.deepEqual(secretViolations("evil.yml", fixture({ on: "push", environment: "anything", expr: "secrets.TUF_TARGETS_KEY" })), ["sign is not an allowed secret reader"]);
+  assert.deepEqual(secretViolations(rr, fixture({ job: "build" })), ["build is not an allowed secret reader"]);
+  // the right job with the wrong secret, without its environment, in the wrong environment, or on macOS
+  assert.deepEqual(secretViolations(rr, fixture({ expr: "secrets.OTHER_KEY" })), ["sign reads OTHER_KEY"]);
+  assert.deepEqual(secretViolations(rr, fixture({ environment: null })), ["sign must run in environment release"]);
+  assert.deepEqual(secretViolations(rr, fixture({ environment: "tuf-timestamp" })), ["sign must run in environment release"]);
+  assert.deepEqual(secretViolations(rr, fixture({ runsOn: "macos-15" })), ["sign runs on macOS"]);
+  assert.deepEqual(secretViolations("tuf-timestamp.yml", fixture({ job: "refresh", environment: "tuf-timestamp", expr: "secrets.TUF_TARGETS_KEY" })), ["refresh reads TUF_TARGETS_KEY"]);
+  // every other way of reading a secret is seen
+  assert.deepEqual(secretViolations(rr, fixture({ expr: "toJSON(secrets)" })), ["sign reads secrets by a dynamic name"]);
+  assert.deepEqual(secretViolations(rr, fixture({ expr: "secrets['TUF_TARGETS_KEY']" })), ["sign reads secrets by a dynamic name"]);
+  assert.deepEqual(secretViolations("ci.yml", fixture({ job: "check", environment: null, expr: "toJSON(secrets)" })), ["check is not an allowed secret reader"]);
+  assert.deepEqual(secretViolations(rr, fixture({ top: "env:\n  K: \${{ secrets.TUF_ONLINE_KEY }}\n" })), ["top level"]);
+  // a plain word "secrets" in a name is not a read
+  assert.deepEqual(secretViolations("ci.yml", parseYamlText("on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: no secrets here\n        run: echo secrets\n")), []);
 });
 
-test("workflows: no job asks for more than read except the label job's actions write, and no secrets are declared for a reusable call", () => {
+test("workflows: no job asks for more than read except the label job's actions write and the release publishers' contents write, and no secrets are declared for a reusable call", () => {
   for (const { file, doc } of workflows) {
     for (const [name, job] of jobsOf(doc)) {
       for (const [scope, level] of Object.entries(job.permissions ?? {})) {
         if (level === "read") continue;
-        assert.ok(file === "ci-full-label.yml" && scope === "actions" && level === "write", `${file}: ${name} asks for ${scope}: ${level}`);
+        // The release workflows publish a release and the update metadata: `contents: write`, in exactly these jobs (D#6 R6-5).
+        const publisher = scope === "contents" && level === "write" && (RELEASE_PUBLISHERS[file] ?? []).includes(name);
+        assert.ok(publisher || (file === "ci-full-label.yml" && scope === "actions" && level === "write"), `${file}: ${name} asks for ${scope}: ${level}`);
       }
       assert.equal(job.secrets, undefined, `${file}: ${name} passes secrets`);
       assert.equal(job.uses, undefined, `${file}: ${name} calls a reusable workflow`);
@@ -1090,7 +1184,7 @@ test("CI_DISABLED: with the variable set to true every job of every workflow is 
     { "github.event_name": "push", "github.event.repository.private": false },
     { "github.event_name": "push", "github.event.repository.private": true },
   ];
-  const base = { "github.event.label.name": "ci:full", "github.event.pull_request.head.repo.full_name": "org/repo", "github.repository": "org/repo" };
+  const base = { "github.event.label.name": "ci:full", "github.event.pull_request.head.repo.full_name": "org/repo", "github.repository": "org/repo", "github.ref": "refs/heads/main" };
   let jobs = 0;
   for (const { file, doc } of workflows) {
     for (const [name, job] of jobsOf(doc)) {
@@ -1112,10 +1206,24 @@ test("CI_DISABLED: unset, empty or anything but true leaves CI on (public pull r
     "github.event.label.name": "ci:full",
     "github.event.pull_request.head.repo.full_name": "org/repo",
     "github.repository": "org/repo",
+    "github.ref": "refs/heads/main",
     "vars.CI_DISABLED": v,
   });
+  // The release jobs (D#6 R6-5) also require the public code-plane repository and main; they are shown to run there.
+  const RELEASE_REPO = "fulcrumaxe/fulcrumaxe-cloud";
   for (const v of ["", "false", "TRUE-ish", "1", "yes"]) {
-    for (const { doc } of workflows) for (const [, job] of jobsOf(doc)) assert.equal(Boolean(evalExpr(job.if, ctx(v))), true, JSON.stringify(v));
+    for (const { file, doc } of workflows) {
+      const here = RELEASE_PUBLISHERS[file] === undefined ? ctx(v) : { ...ctx(v), "github.repository": RELEASE_REPO };
+      for (const [, job] of jobsOf(doc)) assert.equal(Boolean(evalExpr(job.if, here)), true, JSON.stringify(v));
+    }
+  }
+  for (const file of Object.keys(RELEASE_PUBLISHERS)) {
+    const { doc } = workflows.find((w) => w.file === file);
+    for (const [name, job] of jobsOf(doc)) {
+      const base = { ...ctx(""), "github.repository": RELEASE_REPO };
+      assert.equal(Boolean(evalExpr(job.if, { ...base, "github.ref": "refs/heads/some-branch" })), false, `${file}: ${name} ran from a branch`);
+      assert.equal(Boolean(evalExpr(job.if, { ...base, "github.repository": "someone/fork" })), false, `${file}: ${name} ran in another repository`);
+    }
   }
 });
 
@@ -1295,27 +1403,29 @@ test("merge gate: CI_DISABLED=true is a stand-down (exit 2), not a green result"
 // workflow that runs on macOS is manual only: it can only be started by hand (workflow_dispatch), never by a
 // pull request or a push, and it reads no secret.
 /** Names of jobs that run on macOS in a workflow that something other than a manual dispatch can start. */
-function macosViolations(doc, text) {
+function macosViolations(doc) {
   const on = triggersOf(doc);
   const keys = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on);
   const manualOnly = keys.length === 1 && keys[0] === "workflow_dispatch";
   const out = [];
   for (const [name, job] of jobsOf(doc)) {
-    if (typeof job["runs-on"] === "string" && /^macos-/.test(job["runs-on"]) && (!manualOnly || /secrets\./.test(noComments(text)))) out.push(name);
+    const onMacos = runsOnValues(job).some((value) => typeof value === "string" && /^macos-/.test(value));
+    // The macOS job itself reads no secret; a signing job on Linux in the same manual workflow may (secretViolations checks it).
+    if (onMacos && (!manualOnly || secretUse(job).used)) out.push(name);
   }
   return out;
 }
 
 test("macOS: any workflow with a macos-* job is workflow_dispatch only and reads no secret", () => {
-  for (const { file, text, doc } of workflows) assert.deepEqual(macosViolations(doc, text), [], file);
+  for (const { file, doc } of workflows) assert.deepEqual(macosViolations(doc), [], file);
   const auto = "on:\n  pull_request:\njobs:\n  mac:\n    runs-on: macos-latest\n    steps:\n      - run: echo\n";
-  assert.deepEqual(macosViolations(parseYamlText(auto), auto), ["mac"]);
+  assert.deepEqual(macosViolations(parseYamlText(auto)), ["mac"]);
   const manual = "on:\n  workflow_dispatch:\njobs:\n  mac:\n    runs-on: macos-latest\n    steps:\n      - run: echo\n";
-  assert.deepEqual(macosViolations(parseYamlText(manual), manual), []);
+  assert.deepEqual(macosViolations(parseYamlText(manual)), []);
   const both = "on:\n  workflow_dispatch:\n  push:\njobs:\n  mac:\n    runs-on: macos-14\n    steps:\n      - run: echo\n";
-  assert.deepEqual(macosViolations(parseYamlText(both), both), ["mac"]);
+  assert.deepEqual(macosViolations(parseYamlText(both)), ["mac"]);
   const secret = "on:\n  workflow_dispatch:\njobs:\n  mac:\n    runs-on: macos-14\n    steps:\n      - run: echo ${{ secrets.X }}\n";
-  assert.deepEqual(macosViolations(parseYamlText(secret), secret), ["mac"]);
+  assert.deepEqual(macosViolations(parseYamlText(secret)), ["mac"]);
 });
 
 // ---- the runner guard and the hosted setup, composed ---------------------------------------------------------

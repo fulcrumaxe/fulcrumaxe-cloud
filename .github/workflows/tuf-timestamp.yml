@@ -1,0 +1,57 @@
+name: Runner timestamp refresh
+
+# Re-signs the snapshot and timestamp of the runner's update metadata every week (D#6 R6-5), so that clients keep seeing fresh metadata
+# between releases. If this stops, updates pause on clients once the timestamp expires; jobs are never affected. It runs in the
+# `tuf-timestamp` environment, which holds only the online key. With the secret absent it fails loudly and publishes nothing. Nothing here
+# spends money. To undo, disable the workflow in the repository settings. The runbook is packages/fx-runner/docs/release-keys.md.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SCRIPTS: packages/fx-runner/scripts
+  # The owner's 1.root.json, committed on main by the wiring step (R6-W). It never comes from the downloaded metadata.
+  TRUSTED_ROOT: packages/fx-runner/tuf/1.root.json
+
+jobs:
+  refresh:
+    name: refresh timestamp
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: tuf-timestamp
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Require the online key and the trusted root
+        env:
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/release-check.mjs" signing-configured "$TRUSTED_ROOT" TUF_ONLINE_KEY
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts --filter "@fulcrumaxe/fx-runner..."
+      - name: Fetch the current metadata and verify it against the trusted root
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh "$SCRIPTS/release-metadata.sh" fetch meta
+          node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT"
+      - name: Re-sign the snapshot and timestamp
+        env:
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/tuf-release.mjs" refresh-timestamp --dir meta --trusted-root "$TRUSTED_ROOT" --online-key-env TUF_ONLINE_KEY
+      - name: Check the result and publish it (timestamp last)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT"
+          sh "$SCRIPTS/release-metadata.sh" publish meta

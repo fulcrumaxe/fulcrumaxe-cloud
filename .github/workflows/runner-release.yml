@@ -1,0 +1,177 @@
+name: Runner release
+
+# Builds the fx-runner executable on four GitHub-hosted runners, checks it, puts it in a DRAFT release, and signs the update metadata
+# (D#6 R6-5). Started by hand only (Actions tab, or `gh workflow run runner-release.yml -f version=x.y.z`); it never runs on a pull
+# request or a push. Hosted runners are free on this public repository; nothing here spends money.
+#
+# The logic lives in packages/fx-runner/scripts/ (release-build.sh, release-check.mjs, release-render.mjs, release-metadata.sh), where
+# it is tested. The `sign` job runs in the `release` environment, which needs the owner's approval for every release. With the signing
+# secrets absent it fails "release signing not configured" and the release stays a draft. To undo: delete the draft by hand, or
+# disable this workflow in the repository settings. The runbook is packages/fx-runner/docs/release-keys.md.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version x.y.z (must equal packages/fx-runner/package.json)
+        required: true
+        type: string
+      first_release:
+        description: Set only for the very first release, when no update metadata has been published yet. Otherwise a missing metadata release stops the job.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  FX_FORBID_MODEL_CALLS: "1"
+  SCRIPTS: packages/fx-runner/scripts
+  # The owner's 1.root.json, committed on main by the wiring step (R6-W). It never comes from the downloaded metadata.
+  TRUSTED_ROOT: packages/fx-runner/tuf/1.root.json
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-latest, strip: "" }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, strip: "" }
+          - { platform: darwin-arm64, runner: macos-15, strip: --strip-signature }
+          - { platform: darwin-x64, runner: macos-15-intel, strip: --strip-signature }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node "$SCRIPTS/release-check.mjs" version-matches "$VERSION"
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Build twice into fresh directories and compare
+        run: sh "$SCRIPTS/release-build.sh" "$RUNNER_TEMP/build" ${{ matrix.strip }}
+      - name: Run the built program
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node "$SCRIPTS/release-check.mjs" smoke "$RUNNER_TEMP/build/a/fx-runner-${{ matrix.platform }}" "$VERSION"
+      # seaReal.test.ts skips itself when nodejs.org cannot be reached; here a skip is a failure. It runs only on Linux x64, the one
+      # platform it builds for; the other three are covered by the smoke step above and the reproducibility check.
+      - name: Run seaReal.test.ts and require that it ran
+        if: matrix.platform == 'linux-x64'
+        run: |
+          pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/release/seaReal.test.ts --reporter=json --outputFile="$RUNNER_TEMP/sea-real.json"
+          node "$SCRIPTS/release-check.mjs" sea-real-ran "$RUNNER_TEMP/sea-real.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sea-${{ matrix.platform }}
+          path: ${{ runner.temp }}/build/a/fx-runner-${{ matrix.platform }}
+          if-no-files-found: error
+
+  draft:
+    name: draft release
+    needs: build
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: sea-*
+          merge-multiple: true
+          path: files
+      - name: Write the manifest, install.sh, the formula and the checksums
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node "$SCRIPTS/release-manifest.mjs" --dir files --version "$VERSION"
+          node "$SCRIPTS/release-render.mjs" install --manifest files/release-manifest.json --template packages/fx-runner/install.sh --out files/install.sh
+          node "$SCRIPTS/release-render.mjs" formula --manifest files/release-manifest.json --template packaging/homebrew/fx-runner.rb.tmpl --out files/fx-runner.rb
+          node "$SCRIPTS/release-render.mjs" checksums --manifest files/release-manifest.json --out files/SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "v$VERSION" files/* --draft --target "$GITHUB_SHA" --title "fx-runner $VERSION" --notes "Draft. Published only after the signing job succeeds."
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: files
+          if-no-files-found: error
+
+  sign:
+    name: sign and publish
+    needs: draft
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Require the signing secrets and the trusted root
+        env:
+          TUF_TARGETS_KEY: ${{ secrets.TUF_TARGETS_KEY }}
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/release-check.mjs" signing-configured "$TRUSTED_ROOT" TUF_TARGETS_KEY TUF_ONLINE_KEY
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts --filter "@fulcrumaxe/fx-runner..."
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-files
+          path: files
+      - name: Fetch the current metadata and verify it against the trusted root, before signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIRST_RELEASE: ${{ inputs.first_release }}
+        run: |
+          sh "$SCRIPTS/release-metadata.sh" fetch meta "$FIRST_RELEASE"
+          node "$SCRIPTS/release-check.mjs" prepare-metadata meta "$TRUSTED_ROOT"
+          if [ -f meta/timestamp.json ]; then node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT"; fi
+      - name: Sign the release
+        env:
+          TUF_TARGETS_KEY: ${{ secrets.TUF_TARGETS_KEY }}
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/tuf-release.mjs" release --dir meta --trusted-root "$TRUSTED_ROOT" --manifest files/release-manifest.json --targets-key-env TUF_TARGETS_KEY --online-key-env TUF_ONLINE_KEY
+      - name: Check the signed metadata against the built files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p "artifacts/v$VERSION"
+          cp files/fx-runner-* "artifacts/v$VERSION/"
+          node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT" --artifacts artifacts | tee "$RUNNER_TEMP/check.out"
+          node "$SCRIPTS/release-check.mjs" all-checked "$RUNNER_TEMP/check.out" "$VERSION"
+      - name: Require the draft to be exactly what was built and signed for
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: sh "$SCRIPTS/release-verify-draft.sh" "v$VERSION" files "$RUNNER_TEMP/draft-assets"
+      - name: Publish the release, then the metadata (timestamp last)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release edit "v$VERSION" --draft=false
+          sh "$SCRIPTS/release-metadata.sh" publish meta
