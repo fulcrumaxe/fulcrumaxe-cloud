@@ -34,12 +34,13 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
       stage?: string;
       provenance?: 'internal' | 'external';
       createdAt: Date;
+      title?: string | null;
     },
   ): Promise<string> {
     const id = randomUUID();
     await admin.query(
-      `INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage, created_at, updated_at)
-       VALUES ($1, $2, $3, 'feature', $4, $5, $6, $7, $7)`,
+      `INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage, created_at, updated_at, title)
+       VALUES ($1, $2, $3, 'feature', $4, $5, $6, $7, $7, $8)`,
       [
         id,
         refs.accountId,
@@ -48,6 +49,7 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         opts.provenance ?? 'internal',
         opts.stage ?? 'triaged',
         opts.createdAt,
+        opts.title ?? null,
       ],
     );
     return id;
@@ -69,6 +71,7 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         stage: 'in_progress',
         provenance: 'external',
         createdAt,
+        title: 'Add a dark mode toggle',
       });
       const dto = await getWorkItem({ pool: appUserPool, principal: refsA }, id);
       expect(dto).toEqual({
@@ -76,6 +79,7 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         repo_id: refsA.repoId,
         kind: 'feature',
         issue_number: 42,
+        title: 'Add a dark mode toggle',
         stage: 'in_progress',
         provenance: 'external',
         priority: 'normal',
@@ -88,7 +92,7 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
         updated_at: createdAt.toISOString(),
       });
       expect(Object.keys(dto).sort()).toEqual(
-        ['id', 'repo_id', 'kind', 'issue_number', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'own_plan_usage_state', 'own_plan_tokens', 'created_at', 'updated_at'].sort(),
+        ['id', 'repo_id', 'kind', 'issue_number', 'title', 'stage', 'provenance', 'priority', 'queue_rank', 'cost_usd', 'own_plan_api_equivalent_usd', 'own_plan_usage_state', 'own_plan_tokens', 'created_at', 'updated_at'].sort(),
       );
     });
 
@@ -99,6 +103,19 @@ describe('work-items/read (D#31 API-3a, corrected by C10)', () => {
       await insertRunFor(refsA.accountId, id, null);
       const dto = await getWorkItem({ pool: appUserPool, principal: refsA }, id);
       expect(dto.cost_usd).toBe(3.75);
+    });
+
+    it('title is null when the item has none, and is cleaned and cut to 120 characters on every read (get and list)', async () => {
+      const bare = await insertWorkItem(refsA, { createdAt: new Date('2026-01-02T00:00:00.000Z') });
+      const dirty = await insertWorkItem(refsA, { createdAt: new Date('2026-01-03T00:00:00.000Z'), title: `  <b>x</b>\u0001\r\n\t${'é'.repeat(200)}` });
+      expect((await getWorkItem({ pool: appUserPool, principal: refsA }, bare)).title).toBeNull();
+      const got = (await getWorkItem({ pool: appUserPool, principal: refsA }, dirty)).title!;
+      expect(got.startsWith('<b>x</b> é')).toBe(true);
+      expect(Array.from(got)).toHaveLength(120);
+      expect(/[\u0000-\u001f]/.test(got)).toBe(false);
+      const listed = await listWorkItems({ pool: appUserPool, principal: refsA }, { limit: 100 });
+      expect(listed.data.find((d) => d.id === dirty)!.title).toBe(got);
+      expect(listed.data.find((d) => d.id === bare)!.title).toBeNull();
     });
 
     it('a work item with no gh_number DTO-maps issue_number to null', async () => {

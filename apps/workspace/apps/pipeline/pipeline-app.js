@@ -17,6 +17,8 @@ import {
   groupByColumn,
   isUuid,
   loadTimeline,
+  itemHeading,
+  kindLabel,
   verdictFor,
 } from "./pipeline-storage.js";
 import { createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
@@ -103,8 +105,7 @@ function mountApp(contentEl, launchArg) {
   }
 
   function card(item, repos) {
-    const product = repos.get(item.repo_id);
-    const number = Number.isInteger(item.issue_number) ? "#" + item.issue_number : "";
+    const { repo, number, title, kind } = itemHeading(item, repos);
     const verdict = verdictFor(item.stage);
     return h(
       "li",
@@ -112,11 +113,13 @@ function mountApp(contentEl, launchArg) {
       h(
         "button",
         { type: "button", class: "pl-card", "data-testid": "pl-card", "data-id": item.id, onClick: () => open(item) },
-        h("span", { class: "pl-card-head" }, product ? [h("bdi", null, product), number ? " " : null] : null, number),
+        h("span", { class: "pl-card-head", "data-testid": "pl-card-head" }, repo ? [h("bdi", null, repo), number ? " " : null] : null, number),
+        // The title is a GitHub issue's: untrusted text, set as text by h() and nothing else.
+        h("span", { class: "pl-card-title", "data-testid": "pl-card-title" }, h("bdi", null, title)),
         h(
           "span",
           { class: "pl-card-meta" },
-          h("span", null, item.kind),
+          h("span", { class: "pl-tag pl-kind", "data-testid": "pl-kind" }, kind),
           item.provenance === "external" ? h("span", { class: "pl-tag" }, "External") : null,
           item.stage === "merged" || item.stage === "closed_unmerged" || item.stage === "closed"
             ? h("span", { class: "pl-tag pl-tag-done" }, STAGE_LABELS[item.stage])
@@ -201,7 +204,7 @@ function mountApp(contentEl, launchArg) {
       detail.replaceChildren();
       return;
     }
-    const repo = board.getState().repos.get(openItem.repo_id);
+    const { repo, number, title } = itemHeading(openItem, board.getState().repos);
     const hadFocus = detail.contains(document.activeElement) && document.activeElement.dataset.testid === "pl-back";
     let body;
     if (!history || history.status === "loading") body = h("p", { class: "pl-muted" }, "Loading history…");
@@ -227,13 +230,14 @@ function mountApp(contentEl, launchArg) {
     syncApprove();
     detail.replaceChildren(
       h("button", { type: "button", class: "pl-back", "data-testid": "pl-back", onClick: close }, "← Back"),
-      h("h2", { class: "pl-detail-title" }, repo ? [h("bdi", null, repo), " "] : null, Number.isInteger(openItem.issue_number) ? "#" + openItem.issue_number : ""),
+      h("h2", { class: "pl-detail-title", "data-testid": "pl-detail-title" }, repo ? [h("bdi", null, repo), number ? " " : null] : null, number),
+      h("p", { class: "pl-detail-name", "data-testid": "pl-detail-name" }, h("bdi", null, title)),
       h(
         "p",
         { class: "pl-detail-meta" },
         STAGE_LABELS[openItem.stage] || "Another stage",
         " · ",
-        openItem.kind,
+        kindLabel(openItem.kind),
         openItem.provenance === "external" ? " · External" : ""
       ),
       ...(verdictFor(openItem.stage) ? [h("p", { class: "pl-verdict" }, verdictFor(openItem.stage))] : []),

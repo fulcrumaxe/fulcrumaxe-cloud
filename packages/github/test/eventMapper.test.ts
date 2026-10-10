@@ -107,6 +107,19 @@ describe('mapEvent (D#2 H13a body criterion 2)', () => {
       expect(mapped).toMatchObject({ kind: 'create_work_item', workItemKind: 'issue', ghNumber: 7, trust: 'trusted', canCreateWork: true });
     });
 
+    it('carries the issue title cleaned and capped (untrusted text), and null when the payload has none', () => {
+      const payload = loadFixture<GithubIssuePayload>('issue.opened.trusted.json');
+      const hostile = mapEvent('issues', { ...payload, issue: { ...payload.issue, title: `<b>hi</b>\r\n${String.fromCharCode(0)}${'z'.repeat(300)}` } }, NO_ALLOWLIST);
+      expect(hostile).toMatchObject({ kind: 'create_work_item' });
+      const title = (hostile as { title: string }).title;
+      expect(title.startsWith('<b>hi</b> zzz')).toBe(true);
+      expect(title).toHaveLength(120);
+      for (const t of [undefined, null, '', '  ', 42]) {
+        const none = mapEvent('issues', { ...payload, issue: { ...payload.issue, title: t } }, NO_ALLOWLIST);
+        expect(none).toMatchObject({ kind: 'create_work_item', title: null });
+      }
+    });
+
     it('opened, untrusted author (NONE) -> ignored, no work item -- comment body claims never matter', () => {
       const payload = loadFixture<GithubIssuePayload>('issue.opened.untrusted.json');
       // The fixture's own title/body claim "[team-lead-signed]" and a

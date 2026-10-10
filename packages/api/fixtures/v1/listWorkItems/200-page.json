@@ -5,6 +5,7 @@
       "repo_id": "44444444-4444-4444-8444-444444444444",
       "kind": "feature",
       "issue_number": 42,
+      "title": "Add a dark mode toggle",
       "stage": "in_progress",
       "provenance": "internal",
       "priority": "normal",

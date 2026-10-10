@@ -3,6 +3,7 @@
   "repo_id": "44444444-4444-4444-8444-444444444444",
   "kind": "feature",
   "issue_number": 42,
+  "title": null,
   "stage": "changes_requested",
   "provenance": "external",
   "priority": "high",

@@ -9,6 +9,7 @@ import {
 } from '@fx/trust';
 import { classifyAuthor } from '@fx/trust';
 import { recordStage } from '@fx/core/src/work-items/recordStage.js';
+import { cleanWorkItemTitle } from '@fx/core/src/work-items/title.js';
 import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
@@ -126,6 +127,8 @@ export interface CreateWorkItemEvent {
   kind: 'create_work_item';
   workItemKind: 'issue' | 'discussion';
   ghNumber: number;
+  /** The issue's (or discussion's) title, cleaned and cut to 120 characters (untrusted text); null when it had none. */
+  title: string | null;
   trust: AuthorTrust;
   canCreateWork: boolean;
 }
@@ -206,7 +209,7 @@ type Actor = { login: string | null } | null;
  * regex-scanned for a bounded digit reference. */
 export interface GithubIssuePayload {
   action: string;
-  issue: { number: number; user: Actor; author_association: string | null };
+  issue: { number: number; title?: unknown; user: Actor; author_association: string | null };
 }
 export interface GithubIssueCommentPayload {
   action: string;
@@ -215,7 +218,7 @@ export interface GithubIssueCommentPayload {
 }
 export interface GithubDiscussionPayload {
   action: string;
-  discussion: { number: number; user: Actor; author_association?: string | null };
+  discussion: { number: number; title?: unknown; user: Actor; author_association?: string | null };
 }
 export interface GithubDiscussionCommentPayload {
   action: string;
@@ -322,7 +325,7 @@ export function mapEvent(
       if (!allowed) {
         return { kind: 'ignored', reason: 'issue.opened: untrusted author, H07 gate refuses work creation' };
       }
-      return { kind: 'create_work_item', workItemKind: 'issue', ghNumber: p.issue.number, trust, canCreateWork: allowed };
+      return { kind: 'create_work_item', workItemKind: 'issue', ghNumber: p.issue.number, title: cleanWorkItemTitle(p.issue.title), trust, canCreateWork: allowed };
     }
 
     case 'discussion': {
@@ -338,7 +341,7 @@ export function mapEvent(
       if (!allowed) {
         return { kind: 'ignored', reason: 'discussion.created: untrusted author, H07 gate refuses work creation' };
       }
-      return { kind: 'create_work_item', workItemKind: 'discussion', ghNumber: p.discussion.number, trust, canCreateWork: allowed };
+      return { kind: 'create_work_item', workItemKind: 'discussion', ghNumber: p.discussion.number, title: cleanWorkItemTitle(p.discussion.title), trust, canCreateWork: allowed };
     }
 
     case 'issue_comment': {
@@ -560,8 +563,8 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // CWE-1188: derived from mapEvent's own trust decision, never a caller-suppliable default that could fail open.
       const provenance: Provenance = mapped.trust === 'trusted' ? 'internal' : 'external';
       const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO work_items (account_id, repo_id, kind, gh_number, provenance) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [ctx.accountId, ctx.repoId, mapped.workItemKind, mapped.ghNumber, provenance],
+        `INSERT INTO work_items (account_id, repo_id, kind, gh_number, provenance, title) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [ctx.accountId, ctx.repoId, mapped.workItemKind, mapped.ghNumber, provenance, mapped.title],
       );
       return { applied: 'created', workItemId: rows[0]!.id };
     }
