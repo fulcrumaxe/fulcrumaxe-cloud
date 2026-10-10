@@ -35,9 +35,9 @@ function listFiles(dir: string): string[] {
 
 /**
  * What pnpm and node need from the host, by name. The standard proxy variables are among them: inside the runner's sandbox the only way
- * out to the package registry is its proxy, so `pnpm exec` with them scrubbed has no route (and no setting of ours is among them).
+ * out to the package registry is its proxy, so `pnpm exec` with them scrubbed has no route (and no setting of ours is among them). `CI` and the two pnpm store settings keep `pnpm exec` on the same store the install used: without them it sees a different store and tries a reinstall with no TTY.
  */
-const HOST_ENV_NAMES = ["PATH", "HOME", "TMPDIR", "USER", "LANG", "PNPM_HOME", "NODE_PATH", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
+const HOST_ENV_NAMES = ["PATH", "HOME", "TMPDIR", "USER", "LANG", "PNPM_HOME", "NODE_PATH", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "CI", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity"];
 
 describe("source tree: nothing but the proxy route", () => {
   it("has the proxy route and the empty-404 fallback under app/, no pages/, no public/", () => {

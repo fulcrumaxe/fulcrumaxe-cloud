@@ -136,7 +136,8 @@
         # from the public cache: ci-workflow.test.mjs parses ci.yml with
         # PyYAML, and the staging-reset tests drive a pty with python3.
         # pkgs.actionlint: ci-workflow.test.mjs validates every workflow file with it.
-        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint ];
+        # pkgs.dash and pkgs.shellcheck: the runner's installSh test requires both under CI=1 (it runs install.sh under dash and lints it).
+        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint pkgs.dash pkgs.shellcheck ];
         LD_LIBRARY_PATH = sharedLdLibraryPath;
         # The nix-provided browsers, as a derivation attribute (see sharedShellHook).
         PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
@@ -153,6 +154,8 @@
                        # a packages closure and not a bare interpreter.
           sqlite      # .autonomous-team/state.db and friends
           duckdb      # stats.duckdb metrics store (backend/stats_writer.py)
+          dash        # installSh test: runs install.sh under a POSIX sh (required under CI=1)
+          shellcheck  # installSh test: lints install.sh (required under CI=1)
 
           # (git, jq, node, pnpm, postgresql and the Playwright browsers
           # come from sharedPackages, which the ci shell uses too.)
