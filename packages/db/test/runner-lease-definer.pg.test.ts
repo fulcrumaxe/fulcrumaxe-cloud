@@ -26,8 +26,8 @@ const DEFINERS: Record<string, string[]> = {
 
 /** Everything the role holds, exactly (C21 section 11: column grants only on what the bodies read and write). */
 const EXPECTED_PRIVILEGES = [
-  ...['id', 'account_id', 'work_item_id', 'parent_run_id', 'role', 'runtime', 'status', 'head_sha', 'execution_mode', 'dispatch_repo_id', 'dispatch_pr_number', 'spec_version_id', 'resolved_exposure', 'exposure_digest', 'initiated_by', 'approved_by', 'runner_id', 'lease_generation', 'lease_expires_at', 'claimable_after', 'started_at', 'created_at', 'job_signed'].map((c) => `column agent_runs.${c} SELECT`),
-  ...['runner_id', 'lease_generation', 'lease_expires_at', 'updated_at', 'claimable_after', 'approved_by'].map((c) => `column agent_runs.${c} UPDATE`),
+  ...['id', 'account_id', 'work_item_id', 'parent_run_id', 'role', 'runtime', 'status', 'head_sha', 'execution_mode', 'dispatch_repo_id', 'dispatch_pr_number', 'spec_version_id', 'resolved_exposure', 'exposure_digest', 'initiated_by', 'approved_by', 'runner_id', 'lease_generation', 'lease_expires_at', 'claimable_after', 'started_at', 'created_at', 'job_signed', 'model'].map((c) => `column agent_runs.${c} SELECT`),
+  ...['runner_id', 'lease_generation', 'lease_expires_at', 'updated_at', 'claimable_after', 'approved_by', 'model'].map((c) => `column agent_runs.${c} UPDATE`),
   'column runners.id SELECT', 'column runners.account_id SELECT', 'column runners.revoked_at SELECT', 'column runners.last_seen_at UPDATE',
   'column runner_claim_stamps.runner_id SELECT', 'column runner_claim_stamps.account_id SELECT', 'column runner_claim_stamps.last_claim_at SELECT',
   'column runner_claim_stamps.runner_id INSERT', 'column runner_claim_stamps.account_id INSERT', 'column runner_claim_stamps.last_claim_at INSERT',
@@ -322,7 +322,8 @@ describe('migration 0754 gives platform_ops nothing', () => {
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0754-diff-migrations-'));
     // 0762 re-creates runner_follow_up_run (it adds one clause), so it cannot be applied before the 0754 that creates the function; it joins the second run.
     // 0767 grants a role SELECT on agent_runs.claimable_after, a column 0754 adds, so it joins the second run too (it gives platform_ops nothing).
-    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql'];
+    // 0775 replaces agent_run_runner_claim and grants runner_lease_definer a column, so it needs 0754's role and function first.
+    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql', '0775_runner_run_model.sql'];
     for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !NEEDS_0754.includes(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }

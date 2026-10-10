@@ -68,7 +68,12 @@ describe("loadAcceptanceScope [pg]", () => {
   it("loads the pull request text inputs: the run id, its work item's id and the work item's title, tenant-scoped", async () => {
     await h.admin.query("UPDATE work_items SET title = $2 WHERE id = $1", [A.workItemId, "Add the footer"]);
     const text = await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: A.runId }));
-    expect(text).toEqual({ runId: A.runId, workItemId: A.workItemId, workItemTitle: "Add the footer" });
+    expect(text).toEqual({ runId: A.runId, workItemId: A.workItemId, workItemTitle: "Add the footer", issueNumber: null });
+    // The issue number is read from our own work item row; one that cannot be a reference (past 9 digits) reads as none.
+    await h.admin.query("UPDATE work_items SET gh_number = 595 WHERE id = $1", [A.workItemId]);
+    expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: A.runId }))).toMatchObject({ issueNumber: 595 });
+    await h.admin.query("UPDATE work_items SET gh_number = 1234567890 WHERE id = $1", [A.workItemId]);
+    expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: A.runId }))).toMatchObject({ issueNumber: null });
     expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: B.runId }))).toBeNull();
     expect(await withTenant(h.appPool, A.accountId, (client) => loadRunPullRequestText(client, { accountId: A.accountId, runId: randomUUID() }))).toBeNull();
   });

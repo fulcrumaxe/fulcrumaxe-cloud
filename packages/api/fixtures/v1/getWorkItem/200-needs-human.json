@@ -9,6 +9,8 @@
   "queue_rank": null,
   "cost_usd": 4.5,
   "own_plan_api_equivalent_usd": 0,
+  "own_plan_usage_state": "recorded",
+  "own_plan_tokens": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
   "created_at": "2026-09-18T11:00:00.000Z",
   "updated_at": "2026-09-18T12:30:00.000Z"
 }

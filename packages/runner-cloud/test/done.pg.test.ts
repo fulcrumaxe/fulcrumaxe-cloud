@@ -175,6 +175,20 @@ describe("done route [pg]", () => {
       expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch });
     });
 
+    it("the pull request body names the work item's issue (Closes #N) from our own row, so the webhook moves the item at once; an item with no issue gets today's body", async () => {
+      await h.admin.query("UPDATE work_items SET gh_number = 595 WHERE id = $1", [A.workItemId]);
+      try {
+        const s = await scene({ files: [file("src/app.ts")] });
+        expect((await s.call()).status).toBe(200);
+        expect(s.repo.pulls[0]!.body.split("\n")).toContain("Closes #595");
+      } finally {
+        await h.admin.query("UPDATE work_items SET gh_number = NULL WHERE id = $1", [A.workItemId]);
+      }
+      const bare = await scene({ files: [file("src/app.ts")] });
+      await bare.call();
+      expect(bare.repo.pulls[0]!.body).not.toMatch(/Closes #/);
+    });
+
     it("records the fresh run's branch fx/<run>-g<generation> with the pull request number, on a violation too, and no branch where there is no pull request", async () => {
       const g2 = await scene({ gen: 2 });
       await g2.call();

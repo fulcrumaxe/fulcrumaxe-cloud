@@ -21,6 +21,9 @@ export interface WorkItemsReadCtx {
 export const WORK_ITEM_PRIORITIES = ['urgent', 'high', 'normal', 'low'] as const;
 export type WorkItemPriority = (typeof WORK_ITEM_PRIORITIES)[number];
 
+export const OWN_PLAN_USAGE_STATES = ['recorded', 'not_priced', 'not_recorded'] as const;
+export type OwnPlanUsageState = (typeof OWN_PLAN_USAGE_STATES)[number];
+
 /** "The v1 contract" > work item DTO (API-3a criterion 3), corrected by C10: `stage` is D#45's `work_items.stage`, not `work_items.state`. `issue_number` is `work_items.gh_number`. */
 export interface WorkItemDTO {
   id: string;
@@ -32,8 +35,16 @@ export interface WorkItemDTO {
   priority: WorkItemPriority;
   queue_rank: number | null;
   cost_usd: number;
-  /** D#6 R2b-5a: what this item's runner runs would have cost at API prices. Information; NEVER part of `cost_usd` or any spend. */
-  own_plan_api_equivalent_usd: number;
+  /**
+   * D#6 R2b-5a: what this item's runner runs would have cost at API prices. Information; NEVER part of `cost_usd` or any spend.
+   * C42-5: a number only when `own_plan_usage_state` is `recorded` (every finished runner run has a priced row, or the item has none).
+   * `null` otherwise, so "not recorded" and "not priced" are never read as $0.
+   */
+  own_plan_api_equivalent_usd: number | null;
+  /** C42-5: `not_recorded` when a finished runner run has no usage row, else `not_priced` when one has tokens and no price, else `recorded`. */
+  own_plan_usage_state: OwnPlanUsageState;
+  /** C42-5: the tokens the item's runner runs reported (all zero when none did). */
+  own_plan_tokens: { input: number; output: number; cache_read: number; cache_write: number };
   created_at: string;
   updated_at: string;
 }
@@ -49,6 +60,12 @@ interface WorkItemRow {
   queue_rank: string | null; // bigint arrives as text
   cost_usd: string;
   own_plan_api_equivalent_usd: string;
+  own_plan_unrecorded: string;
+  own_plan_unpriced: string;
+  own_plan_input: string;
+  own_plan_output: string;
+  own_plan_cache_read: string;
+  own_plan_cache_write: string;
   created_at: Date;
   updated_at: Date;
   created_at_cursor: string; // fix round 1: see runs/read.ts's RunRow.created_at_cursor
@@ -72,7 +89,17 @@ const WORK_ITEM_SELECT = `
          COALESCE(SUM(ar.usd), 0) AS cost_usd,
          -- D#6 R2b-5a: its own subquery over its own table, so the join above (and cost_usd) is untouched by runner runs.
          COALESCE((SELECT SUM(u.api_equivalent_usd) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id
-                    WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_api_equivalent_usd
+                    WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_api_equivalent_usd,
+         -- C42-5: a claimed runner run that has finished is "recorded" only if it has a usage row, and "priced" only if that row has a figure.
+         (SELECT COUNT(*) FROM agent_runs rr WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id AND rr.runtime = 'runner' AND rr.runner_id IS NOT NULL
+             AND rr.status NOT IN ('pending', 'running')
+             AND NOT EXISTS (SELECT 1 FROM runner_run_usage u WHERE u.account_id = rr.account_id AND u.run_id = rr.id)) AS own_plan_unrecorded,
+         (SELECT COUNT(*) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id
+           WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id AND rr.status NOT IN ('pending', 'running') AND u.api_equivalent_usd IS NULL) AS own_plan_unpriced,
+         COALESCE((SELECT SUM(u.input_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_input,
+         COALESCE((SELECT SUM(u.output_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_output,
+         COALESCE((SELECT SUM(u.cache_read_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_cache_read,
+         COALESCE((SELECT SUM(u.cache_write_tokens) FROM runner_run_usage u JOIN agent_runs rr ON rr.account_id = u.account_id AND rr.id = u.run_id WHERE rr.work_item_id = wi.id AND rr.account_id = wi.account_id), 0) AS own_plan_cache_write
     FROM work_items wi
     LEFT JOIN agent_runs ar ON ar.work_item_id = wi.id AND ar.account_id = wi.account_id
 `;
@@ -81,7 +108,14 @@ function failPriority(value: number): never {
   throw new Error(`work item priority ${value} is out of range`);
 }
 
+/** C42-5: the item's runner usage state, derived from current rows on every read. A missing record outranks a missing price. */
+function ownPlanState(row: WorkItemRow): OwnPlanUsageState {
+  if (Number(row.own_plan_unrecorded) > 0) return 'not_recorded';
+  return Number(row.own_plan_unpriced) > 0 ? 'not_priced' : 'recorded';
+}
+
 function toDTO(row: WorkItemRow): WorkItemDTO {
+  const ownState = ownPlanState(row);
   return {
     id: row.id,
     repo_id: row.repo_id,
@@ -97,7 +131,9 @@ function toDTO(row: WorkItemRow): WorkItemDTO {
     priority: WORK_ITEM_PRIORITIES[row.priority] ?? failPriority(row.priority),
     queue_rank: toQueueRank(row.queue_rank),
     cost_usd: Number(row.cost_usd),
-    own_plan_api_equivalent_usd: Number(row.own_plan_api_equivalent_usd),
+    own_plan_api_equivalent_usd: ownState === 'recorded' ? Number(row.own_plan_api_equivalent_usd) : null,
+    own_plan_usage_state: ownState,
+    own_plan_tokens: { input: Number(row.own_plan_input), output: Number(row.own_plan_output), cache_read: Number(row.own_plan_cache_read), cache_write: Number(row.own_plan_cache_write) },
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   };
