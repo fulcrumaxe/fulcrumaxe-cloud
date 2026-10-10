@@ -7,7 +7,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "../../src/cliError.js";
-import { saveRegistration } from "../../src/config.js";
+import { loadRegistration, saveRegistration } from "../../src/config.js";
+import { writeApiKey } from "../../src/credentials.js";
 import type { CommandContext } from "../../src/context.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
@@ -15,7 +16,7 @@ import { PINNED_JOB_KEYS, keyringFor, originHash } from "../../src/keyring.js";
 import { runCli } from "../../src/cli.js";
 import { pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
 import { readEntries, requestTakeover, takeoverState } from "../../src/watch/layout.js";
-import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
+import { authText, fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { until } from "../helpers/manualClock.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
@@ -533,8 +534,9 @@ describe("the command line wiring", () => {
   it("every code this command adds is on the telemetry allowlist", () => {
     const list = readFileSync(path.join(PACKAGE_DIR, "..", "telemetry", "src", "errorCodes.ts"), "utf8");
     const used = [...readFileSync(path.join(PACKAGE_DIR, "src", "commands", "run.ts"), "utf8").matchAll(/"([a-z_]+): /g)].map((m) => m[1]!);
-    expect(used.sort()).toEqual(["api_key_not_configured", "job_keyring_missing", "ledger_closed", "mirrors_root_overlap"]);
-    for (const code of used) expect(list).toContain(`"${code}"`);
+    expect(used.sort()).toEqual(["job_keyring_missing", "ledger_closed", "mirrors_root_overlap"]);
+    // The key file's own codes are thrown from src/credentials.ts.
+    for (const code of [...used, "api_key_not_configured", "api_key_format", "api_key_unsafe"]) expect(list).toContain(`"${code}"`);
   });
 });
 
@@ -603,5 +605,80 @@ describe("6. the composed daemon with a tmux watch (D#6 R4a-7)", () => {
     expect(existsSync(path.join(stateDir, "tmux"))).toBe(false);
     expect(existsSync(path.join(stateDir, "watch"))).toBe(false);
     expect((await stop(run)).code).toBe(0);
+  }, 60_000);
+});
+
+describe("7. an api_key runner in the composed daemon (D#6 R5b-3)", () => {
+  const KEY = ["sk-ant-", "api03-", "COMPOSEDKEY0123456789abcd"].join(""); // gitleaks:allow
+  const uid = process.getuid!();
+  const apiKeyRegistration = (): void => saveRegistration(stateDir, { ...loadRegistration(stateDir)!, credential_mode: "api_key" });
+  const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+  const seeded = () => signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+  function localRemote(): () => string {
+    const remote = path.join(root, "remote.git");
+    git("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    git("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    git("-C", seed, "add", "README.md");
+    git("-C", seed, "commit", "-m", "first");
+    git("-C", seed, "push", remote, "main");
+    return () => pathToFileURL(remote).href;
+  }
+  /** The fake agent reports an API key as its credential source, as the real one does for ANTHROPIC_API_KEY. */
+  function asApiKeyAgent(): void {
+    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl").replace('"none"', '"ANTHROPIC_API_KEY"'));
+    fake.set("auth.json", authText("auth.api_key.json"));
+  }
+
+  it("with no key file it refuses to start with api_key_not_configured and the set-api-key hint, and claims and starts nothing", async () => {
+    apiKeyRegistration();
+    const result = await start({ ctx: { uid } }).done;
+    expect(result.code).toBe(1);
+    expect(result.message).toContain("api_key_not_configured");
+    expect(result.message).toContain("fx-runner credentials set-api-key");
+    expect(claims()).toBe(0);
+    expect(fake.spawnCount()).toBe(0);
+  });
+
+  it("a key file that is unsafe refuses to start with api_key_unsafe", async () => {
+    apiKeyRegistration();
+    writeApiKey(stateDir, uid, KEY);
+    chmodSync(path.join(stateDir, "credentials", "anthropic-api-key"), 0o644);
+    const result = await start({ ctx: { uid } }).done;
+    expect(result.message).toContain("api_key_unsafe");
+    expect(result.message).not.toContain("COMPOSEDKEY");
+    expect(claims()).toBe(0);
+  });
+
+  it("a job gets the key in the agent's environment only: not in argv, standard input, the tmux calls, the ledger, the logs, the terminal or the cloud", async () => {
+    apiKeyRegistration();
+    writeApiKey(stateDir, uid, KEY);
+    asApiKeyAgent();
+    const tmuxLog = path.join(root, "tmux.log");
+    writeFileSync(path.join(toolbin, "tmux"), `#!/bin/sh\necho "$*" >> '${tmuxLog}'\nexit 0\n`);
+    chmodSync(path.join(toolbin, "tmux"), 0o755);
+    cloud.enqueue(seeded());
+    const run = start({ ctx: { uid }, host: { selfCommand: ["/opt/fx/node", "/opt/fx/fx-runner.mjs"], term: "xterm" }, hooks: { remoteUrl: localRemote() } });
+    await until(() => cloud.seen.some((s) => s.path.endsWith("/done")), 20_000);
+    run.signals.emit("SIGTERM");
+    const ended = await run.done;
+    expect(ended.code).toBe(0);
+    expect(fake.envText().split("\n")).toContain(`ANTHROPIC_API_KEY=${KEY}`);
+    expect(fake.envText().split(KEY)).toHaveLength(2);
+    const everywhereElse = [fake.argv().join("\n"), fake.stdin(), readFileSync(tmuxLog, "utf8"), JSON.stringify(cloud.seen), ...ended.out, ...files(stateDir).filter((f) => !f.includes(`${path.sep}credentials${path.sep}`)).map((f) => readFileSync(f, "utf8"))];
+    expect(files(stateDir).some((f) => f.endsWith("jobs.ledger"))).toBe(true);
+    for (const text of everywhereElse) expect(text).not.toContain("COMPOSEDKEY");
+  }, 60_000);
+
+  it("a subscription runner never hands a stored key file to the agent", async () => {
+    writeApiKey(stateDir, uid, KEY);
+    fake.set("stream.jsonl", fixtureText("stream.subscription.jsonl"));
+    cloud.enqueue(seeded());
+    const run = start({ ctx: { uid }, hooks: { remoteUrl: localRemote() } });
+    await until(() => cloud.seen.some((s) => s.path.endsWith("/done")), 20_000);
+    expect((await stop(run)).code).toBe(0);
+    expect(fake.envText()).not.toContain("COMPOSEDKEY");
+    expect(fake.envText()).not.toContain("ANTHROPIC_API_KEY");
   }, 60_000);
 });

@@ -1,8 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LocalOnlyEvent, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { readyOrCode } from "../../src/commands/run.js";
+import type { CommandContext } from "../../src/context.js";
+import { API_KEY_FILE, CREDENTIALS_DIR, clearApiKey, perJobApiKey, writeApiKey } from "../../src/credentials.js";
 import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import { createJobHandler, MAX_DONE_ATTEMPTS, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import type { JobWatch } from "../../src/daemon/watch.js";
@@ -1061,5 +1064,52 @@ describe("a take-over of a run (D#6 R4a-7)", () => {
     const rig = makeRig();
     const claimed = await rig.claim();
     expect((await rig.handle(claimed)).status).toBe("completed");
+  });
+});
+
+describe("an api_key runner reads its key file at the start of each job (D#6 R5b-3)", () => {
+  const KEY = ["sk-ant-", "api03-", "FIRSTKEY0123456789abcdef"].join("");
+  const NEXT = ["sk-ant-", "api03-", "NEXTKEY9876543210zyxwvu"].join("");
+  const uid = process.getuid!();
+  const wired = () => {
+    const rig = makeRig();
+    const state = path.join(root, "state");
+    writeApiKey(state, uid, KEY);
+    const live = perJobApiKey(state, uid);
+    rig.deps.run.credentials = live.credentials;
+    rig.deps.credentialsReady = () => readyOrCode(() => live.refresh(), { out: () => undefined } as unknown as CommandContext);
+    return { rig, state };
+  };
+
+  it("a key replaced between two jobs is the one the second job starts with, and neither key is anywhere in what is sent to the cloud", async () => {
+    const { rig, state } = wired();
+    expect((await rig.handle(await rig.claim())).status).toBe("completed");
+    writeApiKey(state, uid, NEXT);
+    expect((await rig.handle(await rig.claim())).status).toBe("completed");
+    expect(rig.port.starts.map((start) => start.env.ANTHROPIC_API_KEY)).toEqual([KEY, NEXT]);
+    expect(JSON.stringify(cloud.seen)).not.toMatch(/FIRSTKEY|NEXTKEY/);
+  });
+
+  it("a deleted file ends the job runner_setup / api_key_not_configured before any sandbox, mirror or process is made", async () => {
+    const { rig, state } = wired();
+    clearApiKey(state, uid);
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "api_key_not_configured" });
+    expect(rig.port.calls).toEqual([]);
+    expect(rig.port.starts).toHaveLength(0);
+    expect(rig.runJobCalls()).toBe(0);
+    expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "runner_setup", detail: "api_key_not_configured" });
+    // Putting the key back brings the next job back.
+    writeApiKey(state, uid, NEXT);
+    expect((await rig.handle(await rig.claim())).status).toBe("completed");
+    expect(rig.port.starts[0]!.env.ANTHROPIC_API_KEY).toBe(NEXT);
+  });
+
+  it("a key file that is unsafe ends the job the same way", async () => {
+    const { rig, state } = wired();
+    chmodSync(path.join(state, CREDENTIALS_DIR, API_KEY_FILE), 0o644);
+    const claimed = await rig.claim();
+    expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "api_key_not_configured" });
+    expect(rig.port.calls).toEqual([]);
   });
 });

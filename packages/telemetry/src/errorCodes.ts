@@ -150,6 +150,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ledger_closed",
   "mirrors_root_overlap",
   "api_key_not_configured",
+  // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
+  "api_key_format",
+  "api_key_unsafe",
   // R4a-7 watch and take-over: the person's `fx-runner attach --take-over` was not confirmed, is already under way, was not answered by the
   // daemon in time, or the pane command was started for a run that was not handed over.
   "take_over_cancelled",

@@ -11,6 +11,8 @@ export interface CommandContext {
   bypass?: Bypass | undefined;
   /** The path `FX_RUNNER_PROTECTION_BYPASS_FILE` names, as given (never the content). Only `service install` uses it, to carry the path into the unit. */
   bypassFile?: string | undefined;
+  /** The user id the program runs as, looked up by the caller: the API key file and the directories above it must belong to it. */
+  uid?: number | undefined;
 }
 
 /** The flags a command was given, by name without the leading dashes. A flag with no value is `true`. */

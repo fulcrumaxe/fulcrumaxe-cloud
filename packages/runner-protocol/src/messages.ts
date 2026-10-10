@@ -80,6 +80,8 @@ export const RUNNER_SETUP_DETAILS = [
   "sandbox_stub_committed",
   // D#6 R4d-4 (C33; additive under C8 section 6): the commit a review job names is not on any branch of the runner's copy of the repository. The cloud deploys first.
   "review_sha_not_in_mirror",
+  // D#6 R5b-3 (C38 section 1; additive under C8 section 6): an api_key runner's key file is missing or unusable when a job starts. The cloud deploys first.
+  "api_key_not_configured",
 ] as const;
 export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];

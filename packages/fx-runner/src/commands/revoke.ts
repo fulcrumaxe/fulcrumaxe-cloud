@@ -44,6 +44,7 @@ export async function revokeCommand(flags: Flags, ctx: CommandContext): Promise<
     forget(ctx);
     const failed = typeof body.runs_failed === "number" && Number.isSafeInteger(body.runs_failed) ? body.runs_failed : 0;
     ctx.out(`Revoked runner ${registration.runner_id}. ${failed} running job${failed === 1 ? " was" : "s were"} stopped. The local key is deleted.`);
+    if (registration.credential_mode === "api_key") ctx.out("The stored API key file is left in place; to remove it run: fx-runner credentials clear-api-key");
     return 0;
   }
   // The cloud revoked the runner but could not yet fail its jobs: the key is dead either way, so it goes.

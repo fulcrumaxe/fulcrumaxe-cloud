@@ -1,6 +1,7 @@
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { LocalOnlyEvent, normalizeRepoPath, redactText, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { isInitLine, isKnownKeySource } from "./credentialCheck.js";
 
 const MAX_LINE_CHARS = 4 * 1024 * 1024;
 const TOOL_NAME = /^[A-Za-z0-9_:.-]{1,64}$/;
@@ -33,6 +34,32 @@ export class LineBuffer {
   }
 }
 
+const KEY_SOURCE_FIELD = /"apiKeySource":"([^"\\]*)"/g;
+
+/**
+ * The redactor blanks any value whose key name contains a credential word, and `apiKeySource` is one. Its value is the NAME of where the
+ * binary found its credential (`none`, `ANTHROPIC_API_KEY`), not a credential, and the init line is the record of which one it was. So on the
+ * init line only, and only when the field occurs once and holds a name from the closed set the credential check knows, that one field is kept
+ * and the text on both sides of it is redacted as usual. Any other value, or any other line, is redacted whole. This changes only the
+ * transcript: the engine's credential check reads the parsed line before it is logged.
+ */
+export function redactLogLine(kind: "stdout" | "stderr" | "meta", line: string, secrets: readonly string[]): string {
+  if (kind !== "stdout") return redactText(line, secrets);
+  const matches = [...line.matchAll(KEY_SOURCE_FIELD)];
+  if (matches.length !== 1 || !isKnownKeySource(matches[0]![1])) return redactText(line, secrets);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    // fx-swallow-ok: a line that is not JSON is not an init line; it is redacted whole
+    return redactText(line, secrets);
+  }
+  if (!isRecord(parsed) || !isInitLine(parsed) || parsed.apiKeySource !== matches[0]![1]) return redactText(line, secrets);
+  const start = matches[0]!.index;
+  const end = start + matches[0]![0].length;
+  return redactText(line.slice(0, start), secrets) + matches[0]![0] + redactText(line.slice(end), secrets);
+}
+
 /** The run's raw transcript: `<dir>/<run>.jsonl`, 0600, every line scrubbed before it is written. */
 export function createRunLog(dir: string, runId: string, secrets: readonly string[]): { write(kind: "stdout" | "stderr" | "meta", line: string): void; file: string } {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -43,7 +70,7 @@ export function createRunLog(dir: string, runId: string, secrets: readonly strin
     file,
     write(kind, line) {
       // A stdout line is already JSON, but only the scrubbed text is kept, so a value cannot hide inside an escape.
-      appendFileSync(file, `${JSON.stringify({ kind, line: redactText(line, secrets) })}\n`);
+      appendFileSync(file, `${JSON.stringify({ kind, line: redactLogLine(kind, line, secrets) })}\n`);
     },
   };
 }

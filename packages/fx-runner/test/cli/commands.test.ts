@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { KEY_FILE, REGISTRATION_FILE } from "../../src/config.js";
+import { writeApiKey } from "../../src/credentials.js";
 import { CODE, useRig } from "./harness.js";
 
 const rig = useRig();
@@ -175,6 +176,16 @@ describe("revoke", () => {
     expect([...rig.cloud.runners.values()][0]!.revoked).toBe(true);
     expect(stateFiles()).toEqual([]);
     expect((await rig.run(["status"])).out).toContain("Not registered");
+  });
+
+  it("leaves an API key file for the user to clear, and says so (D#6 R5b-3)", async () => {
+    await rig.register();
+    writeApiKey(rig.dir, process.getuid!(), ["sk-ant-", "api03-", "REVOKEKEY0123456789abcdef"].join("")); // gitleaks:allow
+    const result = await rig.run(["revoke"]);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("The stored API key file is left in place; to remove it run: fx-runner credentials clear-api-key");
+    expect(result.out).not.toContain("REVOKEKEY");
+    expect(stateFiles()).toEqual(["credentials"]);
   });
 
   it("sends an empty message with no reason, and refuses a reason the protocol would refuse before sending", async () => {
