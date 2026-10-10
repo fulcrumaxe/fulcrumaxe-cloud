@@ -14,6 +14,8 @@ import { runnerLimitsFor } from "@fx/spend";
 export interface RunnerLimits {
   /** Runner runs an account may have `running` at once; claim hands out no more. */
   maxConcurrentRunnerJobs: number;
+  /** Of those, how many may be heavy (D#6 C43-2b). Plan data without the figure reads as 1: fail closed, never unlimited. */
+  maxConcurrentHeavyRunnerJobs: number;
   /** How long a runner run may take from its start; a heartbeat past it is told to stop, and the sweeper times the run out. */
   maxRunWallClockMs: number;
 }
@@ -23,10 +25,25 @@ export type RunnerLimitsSource = (accountId: string) => RunnerLimits;
 export const runnerLimits: RunnerLimitsSource = (accountId) => {
   void accountId; // one runner plan for every account today
   try {
-    const { maxConcurrentRunnerJobs, maxRunWallClockMs } = runnerLimitsFor();
-    return { maxConcurrentRunnerJobs, maxRunWallClockMs };
+    const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs, maxRunWallClockMs } = runnerLimitsFor();
+    if (maxConcurrentHeavyRunnerJobs === undefined) warnHeavyFigureMissingOnce();
+    return { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs: maxConcurrentHeavyRunnerJobs ?? MISSING_HEAVY_FIGURE, maxRunWallClockMs };
   } catch {
     // fx-swallow-ok: unavailable plan data is a refusal to hand out work (fail closed), not a crash; the composition root reports it when it loads the data
-    return { maxConcurrentRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS };
+    return { maxConcurrentRunnerJobs: 0, maxConcurrentHeavyRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS };
   }
 };
+
+/** What a plan without `maxConcurrentHeavyRunnerJobs` allows: one heavy run at a time. */
+export const MISSING_HEAVY_FIGURE = 1;
+let warnedHeavyMissing = false;
+/** Says once per process that the plan data has no heavy figure; the claim runs on 1 meanwhile. */
+function warnHeavyFigureMissingOnce(): void {
+  if (warnedHeavyMissing) return;
+  warnedHeavyMissing = true;
+  console.warn("runner plan data has no maxConcurrentHeavyRunnerJobs; the claim allows 1 heavy runner job per account");
+}
+/** Test hook: forget that the warning was given. */
+export function resetHeavyFigureWarning(): void {
+  warnedHeavyMissing = false;
+}

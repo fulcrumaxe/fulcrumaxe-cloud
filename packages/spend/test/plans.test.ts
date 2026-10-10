@@ -68,6 +68,7 @@ describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
     expect(runnerLimitsFor()).toEqual({
       maxRunners: 4,
       maxConcurrentRunnerJobs: 3,
+      maxConcurrentHeavyRunnerJobs: 3,
       runsPerDay: 9,
       maxRunWallClockMs: 3_600_000,
       fullClonesPerRepoPerDay: 5,

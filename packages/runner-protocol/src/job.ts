@@ -62,6 +62,8 @@ export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[n
   "security-reviewer": "light",
   debater: "light",
 };
+/** The runner-eligible roles of the light class; any other role (an unknown one included) is heavy, so the cloud's SQL can say `role = ANY(...)` for light and `NOT` for heavy. */
+export const LIGHT_JOB_ROLES: readonly string[] = RUNNER_ELIGIBLE_ROLES.filter((role) => JOB_CLASS_BY_ROLE[role] === "light");
 /** A role missing from the table counts as heavy, the scarcer slot (fail closed). */
 export const jobClassOfRole = (role: string): JobClass => (Object.hasOwn(JOB_CLASS_BY_ROLE, role) ? JOB_CLASS_BY_ROLE[role as keyof typeof JOB_CLASS_BY_ROLE] : "heavy");
 

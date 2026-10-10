@@ -16,6 +16,8 @@ export const CLAIM_PATH = "/api/runner/claim";
  * An idle runner has no heartbeat, and only a claim or a heartbeat refreshes `last_seen_at`, so the poll is how such a runner stays visible.
  * It passes steps 1 and 2 like any claim, the reason is stored (step 3 is skipped, so no run is leased and no job can leave), and the answer
  * is `retry_after` only. Every ordinary claim clears the stored reason, so a fixed machine needs nothing more than its next poll.
+ * A claim may declare its capacity per job class (D#6 C43-2b): the cloud stores the limits and hands the runner a run only for a class
+ * with a free slot. A claim without one is an older runner and holds one job in total.
  * The reply is parsed against the protocol's schema before it is sent, so a field that should not be there is a 500, not a leak.
  */
 export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
@@ -31,6 +33,9 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
       // The sandbox status (C16 section 1.3) is recorded in the same session, only for a poll that passed the throttle: a named reason is
       // stored, and an ordinary claim clears it. One checkout and one transaction serve both.
       if (waited <= 0) await client.query("SELECT runner_sandbox_status_record($1)", [message.sandbox_unavailable ?? null]);
+      // D#6 C43-2b: the capacity this claim declares is kept for the runner list (limits only; what it holds is counted from the rows). A claim
+      // that declares none is stored as "declared nothing", which reads as one job in total. A status poll takes no job, so it records nothing.
+      if (waited <= 0 && message.sandbox_unavailable === undefined) await client.query("SELECT runner_capacity_record($1::int, $2::int, $3::text)", [message.capacity?.light.limit ?? null, message.capacity?.heavy.limit ?? null, message.capacity?.limited_by ?? null]);
       return waited;
     }),
   );
@@ -44,7 +49,7 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
     return { status: 200, body: ClaimReply.parse({ retry_after: CLAIM_IDLE_RETRY_AFTER_SECONDS }), headers: { "retry-after": String(CLAIM_IDLE_RETRY_AFTER_SECONDS) } };
   }
 
-  const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId }));
+  const result = await asRunner(() => leases.claimRunnerRun({ accountId: runner.accountId, runnerId: runner.runnerId, ...(message.capacity ? { capacity: message.capacity } : {}) }));
   const body =
     result.kind === "claimed"
       ? ClaimReply.parse({ signed_job: result.signedJob, run_id: result.runId, lease_generation: result.leaseGeneration })

@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { COPY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
+import { COPY, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -16,7 +16,7 @@ import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type R
 export const RUNNER_STATES = ["online_idle", "busy", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
-export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_runner_slot", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /** A runner that has made no request for this long is `offline` (criterion 13). */
@@ -28,6 +28,50 @@ export interface RunnerFacts {
   protocolVersion: number | null;
   lastSeenAt: Date | null;
   busy: boolean;
+}
+
+/** The light roles as an SQL array literal. The list is a constant of the protocol (role names), never input, and the pattern below keeps it so. */
+const LIGHT_ROLES_SQL = (() => {
+  if (!LIGHT_JOB_ROLES.every((role) => /^[a-z][a-z-]*$/.test(role))) throw new Error("a light job role is not a plain role name");
+  return `ARRAY[${LIGHT_JOB_ROLES.map((role) => `'${role}'`).join(", ")}]::text[]`;
+})();
+
+/** How many jobs a runner holds with a live lease, per class (derived from the rows, like `busy`). */
+export interface RunnerRunning {
+  light: number;
+  heavy: number;
+}
+
+/**
+ * What a runner can hold, from the last capacity it declared on a claim, kept inside the ceilings (light 8, heavy 4, total 8). `in_use` is
+ * counted from the rows. A runner that claimed without declaring one is an older runner: one job in total (limit 1 in each class, total 1).
+ */
+export interface RunnerCapacity {
+  light: { limit: number; in_use: number };
+  heavy: { limit: number; in_use: number };
+  total_limit: number;
+  /** Why its limit sits low (memory, cpu, disk, paused or ceiling), as the runner said on its last claim; null when it said nothing. */
+  limited_by: LimitedBy | null;
+}
+
+/** A stored cause back to the closed set; anything else (the database holds only the set) reads as no cause. */
+const limitedByOf = (value: string | null | undefined): LimitedBy | null => ((LIMITED_BY as readonly string[]).includes(value ?? "") ? (value as LimitedBy) : null);
+
+/** Pure. The capacity a runner row reads as, or null when it has never claimed (the screen says "capacity unknown"). */
+export function capacityOf(stored: { declared: boolean; light_limit: number | null; heavy_limit: number | null; limited_by?: string | null } | null, running: RunnerRunning): RunnerCapacity | null {
+  if (stored === null) return null;
+  if (!stored.declared || stored.light_limit === null || stored.heavy_limit === null) {
+    return { light: { limit: 1, in_use: running.light }, heavy: { limit: 1, in_use: running.heavy }, total_limit: 1, limited_by: null };
+  }
+  const light = Math.min(stored.light_limit, MAX_LIGHT_CAPACITY);
+  const heavy = Math.min(stored.heavy_limit, MAX_HEAVY_CAPACITY);
+  return { light: { limit: light, in_use: running.light }, heavy: { limit: heavy, in_use: running.heavy }, total_limit: Math.min(light + heavy, MAX_TOTAL_CAPACITY), limited_by: limitedByOf(stored.limited_by) };
+}
+
+/** Pure. The words a busy runner shows: "Busy · 2 of 4", or "Busy · capacity unknown" before its first claim. Other states show none. */
+export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: RunnerCapacity | null): string | null {
+  if (state !== "busy") return null;
+  return capacity === null ? "Busy · capacity unknown" : `Busy · ${running.light + running.heavy} of ${capacity.total_limit}`;
 }
 
 /**
@@ -59,6 +103,12 @@ export interface RunnerRow {
    * consent row: off when none exists, and off for a revoked runner (its consent stops counting). `changed_at` is when that row was written.
    */
   plan_consent: { granted: boolean; changed_at: string | null };
+  /** D#6 C43-2b: jobs it holds with a live lease, per class. Zero for a revoked or quiet runner's expired leases. */
+  running: RunnerRunning;
+  /** D#6 C43-2b: what it can hold, from its last claim; null before its first claim. */
+  capacity: RunnerCapacity | null;
+  /** D#6 C43-2b: "Busy · 2 of 4" while busy, else null. */
+  load_label: string | null;
   /** True only on the caller's own live runner: the one person who may turn its consent on or off. Always false in a read with no user. */
   can_change_plan_consent: boolean;
   /**
@@ -84,6 +134,12 @@ interface RawRunner {
   consent_changed_at: Date | null;
   allowed_repo_ids: string[];
   busy: boolean;
+  running_light: string;
+  running_heavy: string;
+  cap_declared: boolean | null;
+  cap_light_limit: number | null;
+  cap_heavy_limit: number | null;
+  cap_limited_by: string | null;
 }
 
 /** A repo's display name, the same text the approvals list uses: "owner/name", else a fixed fallback, never null or an id. */
@@ -99,8 +155,13 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
                 r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, s.reason AS sandbox_unavailable,
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
-                         WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy
+                         WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
+                live.light AS running_light, live.heavy AS running_heavy,
+                cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by
            FROM runners r LEFT JOIN users u ON u.id = r.registered_by
+                LEFT JOIN runner_capacity cap ON cap.runner_id = r.id AND cap.account_id = r.account_id
+                CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
+                                      FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
                 LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
                 LEFT JOIN LATERAL (SELECT c.granted, c.created_at FROM runner_plan_consents c
                                     WHERE c.account_id = r.account_id AND c.runner_id = r.id ORDER BY c.version DESC LIMIT 1) pc ON true
@@ -128,7 +189,12 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
           if (role === null || role === undefined) throw new RunnerHttpError(403, "forbidden", "you are not a member of this account");
           return read(client);
         });
-  return rows.map((r) => ({
+  return rows.map((r) => {
+    // A revoked runner takes no work, so it shows neither a load nor a capacity.
+    const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
+    const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
+    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current);
+    return {
     id: r.id,
     credential_mode: r.credential_mode,
     registered_by: { id: r.registered_by, name: r.registered_by_name },
@@ -136,7 +202,10 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     last_seen_at: r.last_seen_at === null ? null : r.last_seen_at.toISOString(),
     // A revoked runner polls no more, so a stale reason is not shown for it.
     sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
-    state: classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current),
+    state,
+    running,
+    capacity,
+    load_label: loadLabel(state, running, capacity),
     plan_consent: { granted: r.revoked_at === null && r.consent_granted === true, changed_at: r.consent_changed_at === null ? null : r.consent_changed_at.toISOString() },
     can_change_plan_consent: userId !== null && r.revoked_at === null && r.registered_by === userId,
     repos:
@@ -146,7 +215,8 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
             .filter((id) => repos.has(id))
             .map((id) => ({ id, name: repos.get(id)! }))
             .sort((x, y) => x.name.localeCompare(y.name) || x.id.localeCompare(y.id)),
-  }));
+    };
+  });
 }
 
 /** Each of the account's runners (revoked ones included, so the list can say so) with its one state. */
@@ -171,6 +241,10 @@ export interface RawRun {
   runnable_without_approval: boolean;
   needs_approval_possible: boolean;
   runner_online: boolean;
+  /** D#6 C43-2b: some live runner covering the run's repo has a free slot in the run's class, or has not declared a capacity yet (so it cannot be called full). */
+  runner_slot_free: boolean;
+  /** The cause a covering live runner gave for its low limit (paused before memory, cpu, disk, ceiling), or null when none gave one. Only read when no runner has a free slot. */
+  slot_limited_by: string | null;
 }
 
 /**
@@ -197,7 +271,24 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
                     AND r.credential_mode = 'subscription') AS needs_approval_possible,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
-                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online
+                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online,
+         -- A covering live runner with room for this run's class. Mirrors the claim's own arithmetic (capacityFreeSlots in runner-protocol) on the
+         -- rows: an older runner (declared nothing) holds one job in total; a declared one has its class limit and the total ceiling, less what it
+         -- holds. A runner with no row has not claimed yet, so nothing says it is full.
+         EXISTS (SELECT 1 FROM runners r
+                   LEFT JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
+                   CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE x.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
+                                         FROM agent_runs x WHERE x.account_id = r.account_id AND x.runner_id = r.id AND x.status = 'running') held
+                  WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
+                    AND (c.runner_id IS NULL
+                         OR (NOT c.declared AND held.light + held.heavy < 1)
+                         OR (c.declared AND ${MAX_TOTAL_CAPACITY} - held.light - held.heavy > 0
+                             AND CASE WHEN a.role = ANY(${LIGHT_ROLES_SQL}) THEN LEAST(c.light_limit, ${MAX_LIGHT_CAPACITY}) - held.light ELSE LEAST(c.heavy_limit, ${MAX_HEAVY_CAPACITY}) - held.heavy END > 0))) AS runner_slot_free,
+         (SELECT c.limited_by FROM runners r JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
+           WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+             AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL
+           ORDER BY array_position(ARRAY['paused', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by
     FROM agent_runs a WHERE a.account_id = $1 AND ${filter} ${tail}`;
 
 /** Pure. The one wait reason of a run's facts, or null. See `getRunWaitReason` for each. */
@@ -210,6 +301,7 @@ export function waitReasonOf(row: RawRun, now: Date): RunWaitReason | null {
   if (row.parent_reason === "runner_lost") return "runner_lost_retrying";
   if (row.approved_by === null && !row.runnable_without_approval && row.needs_approval_possible) return "waiting_for_approval";
   if (!row.runner_online) return "waiting_for_runner";
+  if (!row.runner_slot_free) return "waiting_for_runner_slot";
   return null;
 }
 
@@ -227,6 +319,9 @@ export function waitReasonOf(row: RawRun, now: Date): RunWaitReason | null {
  *    `api_key` runner, when its registrant started or approved the run, or when the claim would approve the run for it at claim time:
  *    the registrant's consent on that runner is on and the repo's dial for runner runs is not `ask` (C31 section 2.2). A run whose
  *    starter was never recorded (`initiated_by` NULL, which is every pipeline run) reads this way too;
+ *  - `waiting_for_runner_slot` (D#6 C43-2b): pending, and a live runner covers the run's repo, but every such runner has no free slot in the
+ *    run's class: its declared limit for the class, or its total, is used up (an older runner holds one job in total). Worked out from the
+ *    current rows, never stored. A runner that has not claimed yet has declared nothing, so it is not called full;
  *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, heard from within 120 seconds, and with the
  *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
  *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as
@@ -240,6 +335,20 @@ export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId:
     return rows[0];
   });
   return row ? waitReasonOf(row, now) : null;
+}
+
+/**
+ * D#6 C43-2b: the wait reason with its cause. For `waiting_for_runner_slot` the cause is the one the covering runners gave on their last
+ * claim (`limited_by`); with none given it is null and the screen says only that the run waits for a slot. Every other reason has no cause.
+ */
+export async function getRunWait(deps: ReadDeps, accountId: string, runId: string): Promise<{ reason: RunWaitReason | null; limited_by: LimitedBy | null }> {
+  const now = (deps.now ?? (() => new Date()))();
+  const row = await withTenant(deps.appUserPool, accountId, async (client) => {
+    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, runId]);
+    return rows[0];
+  });
+  const reason = row ? waitReasonOf(row, now) : null;
+  return { reason, limited_by: reason === "waiting_for_runner_slot" ? limitedByOf(row!.slot_limited_by) : null };
 }
 
 /** The pending, unapproved runner runs of the account, newest first, with their facts. Run on a client already inside the caller's tenant. */
