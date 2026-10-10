@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { JOB_MODES, REVIEW_JOB_ROLES, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
+import { JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 describe("job schema", () => {
@@ -137,6 +137,17 @@ describe("job.review (D#6 R4d-4a, C33)", () => {
   const reviewJob = (review: unknown, role = "code-reviewer"): unknown => sampleJob({ role, task: { ...(sampleJob() as { task: object }).task, kind: "review" }, review });
   const SHA40 = "0123456789abcdef0123456789abcdef01234567";
   const SHA64 = "0123456789abcdef".repeat(4);
+
+  it("C43-2a: JOB_CLASS_BY_ROLE maps exactly the runner-eligible roles", () => {
+    expect(Object.keys(JOB_CLASS_BY_ROLE).sort()).toEqual([...RUNNER_ELIGIBLE_ROLES].sort());
+  });
+
+  it("C43-2a: executor and acceptance-tester are heavy, the other eleven are light, an unknown role is heavy", () => {
+    const heavy = RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "heavy");
+    expect([...heavy].sort()).toEqual(["acceptance-tester", "executor"]);
+    expect(RUNNER_ELIGIBLE_ROLES.filter((r) => jobClassOfRole(r) === "light")).toHaveLength(11);
+    for (const role of ["", "made-up", "toString", "__proto__", "constructor"]) expect(jobClassOfRole(role), role).toBe("heavy");
+  });
 
   it("REVIEW_JOB_ROLES is the four review roles, all runner eligible", () => {
     expect([...REVIEW_JOB_ROLES]).toEqual(["code-reviewer", "security-reviewer", "acceptance-tester", "debater"]);

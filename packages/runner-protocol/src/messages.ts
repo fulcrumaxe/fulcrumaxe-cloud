@@ -182,7 +182,18 @@ export type SandboxUnavailableReason = z.infer<typeof SandboxUnavailableReason>;
  * status poll of a runner whose sandbox does not work (C16 section 1.3): it names the reason, takes no job, and the cloud answers it with
  * `retry_after` only. Absent means the sandbox works.
  */
-export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional() }).strict();
+/**
+ * D#6 C43-2a (with the resource-aware addendum): what a runner declares on a claim, per job class. `limit` is the live capacity it
+ * works out from its free resources, bounded by its safety ceilings; `in_use` is the jobs it holds now. Whole numbers; light 0..8,
+ * heavy 0..4. `in_use` may exceed `limit` (the limit was lowered while jobs ran). Optional: absent is today's behaviour.
+ */
+export const MAX_LIGHT_CAPACITY = 8;
+export const MAX_HEAVY_CAPACITY = 4;
+const classLoad = (max: number) => z.object({ limit: z.number().int().min(0).max(max), in_use: z.number().int().min(0).max(max) }).strict();
+export const ClaimCapacity = z.object({ light: classLoad(MAX_LIGHT_CAPACITY), heavy: classLoad(MAX_HEAVY_CAPACITY) }).strict();
+export type ClaimCapacity = z.infer<typeof ClaimCapacity>;
+
+export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional() }).strict();
 
 export const HeartbeatMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
 
