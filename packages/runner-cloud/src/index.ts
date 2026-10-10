@@ -30,6 +30,7 @@ export { RUNNER_OFFLINE_AFTER_SECONDS, RUNNER_STATES, RUN_WAIT_REASONS, capacity
 export { approveRun } from "./approvals.js";
 export { APPROVALS_LIMIT, listApprovals, type ApprovalEntry } from "./approvalsList.js";
 export { setPlanConsent } from "./planConsent.js";
+export { PLACEMENTS, auditPlacementChange, cancelPendingRunsOnLeftSide, type Placement } from "./itemPlacement.js";
 export { getPlanApprovalDial, setPlanApprovalDial } from "./planApprovalDial.js";
 export {
   CHANGE_TYPES,

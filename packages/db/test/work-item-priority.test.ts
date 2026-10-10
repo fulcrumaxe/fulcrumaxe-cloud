@@ -196,5 +196,5 @@ describe('migration 0670: work item priority (D#2 H26a)', () => {
   });
 });
 
-/** The columns app_user cannot UPDATE on work_items: 0613 closes provenance, parent_id never had a column grant, and 0778 opened title (the issue read fills a NULL title). */
-const PRE_0670_CLOSED = ['parent_id', 'provenance'];
+/** The columns app_user cannot UPDATE on work_items: 0613 closes provenance, parent_id never had a column grant, 0778 opened title (the issue read fills a NULL title), and 0781 adds placement closed (only its definers write it). */
+const PRE_0670_CLOSED = ['parent_id', 'placement', 'provenance'];

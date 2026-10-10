@@ -81,6 +81,8 @@ export type FailureReason =
   | "runner_setup_failed"
   /** D#6 R2b (C24 section 2): a repo left `runner_local`, and its queued runner runs were cancelled with it (the user's own change ended them). */
   | "execution_mode_changed"
+  /** D#599 PL-1: an item's placement was changed, and its queued runs on the side it left were cancelled (the owner's own change ended them). */
+  | "placement_changed"
   /** D#6 R4a-3b (C25 section 1.4): a fix round's push was rejected because the pull request's branch moved while the agent worked. A retry runs on the new head, so no follow-up. */
   | "push_rejected"
   /** D#6 R4a-7: the owner took the run over by hand on the runner machine (`fx-runner attach --take-over`). The run ends with no result and no push, so it never counts toward a merge gate. */

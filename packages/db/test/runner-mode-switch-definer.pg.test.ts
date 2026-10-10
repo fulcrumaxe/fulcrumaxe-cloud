@@ -229,7 +229,7 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
 
     describe('the audit definer', () => {
       const audit = (repoId: string, from: string, to: string, off: boolean, n: number) => admin.query('SELECT repo_execution_mode_switch_audit($1, $2, $3, $4, $5)', [repoId, from, to, off, n]);
-      const rows = async (repoId: string) => (await admin.query("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'repo.execution_mode.changed' AND payload ->> 'repo_id' = $2", [f.accountId, repoId])).rows;
+      const rows = async (repoId: string) => (await admin.query("SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'repo.execution_mode.changed' AND payload ->> 'repo_id' = $2 ORDER BY created_at, id", [f.accountId, repoId])).rows;
 
       it('writes one row with the count, stamped with the caller as actor', async () => {
         const id = await repo(f.accountId, 'sandbox');
