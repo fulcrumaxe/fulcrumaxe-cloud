@@ -148,10 +148,12 @@ describe(`migration 0757: ${ROLE} and its row policies (D#6 R2b-3 part ii, C21 s
       expect(own).toContain(other.repoId);
     });
 
-    it('may write approved_by on a pending runner_local runner run, and on no other kind of run', async () => {
-      const ok = await newRun();
-      expect(await asRole(f.a1, async () => (await admin.query('UPDATE agent_runs SET approved_by = $2 WHERE id = $1', [ok, f.a1])).rowCount)).toBe(1);
-      for (const [status, mode, runtime] of [['running', 'runner_local', 'runner'], ['succeeded', 'runner_local', 'runner'], ['pending', 'sandbox', 'runner']] as const) {
+    it('may write approved_by on a pending runner run of either runner mode (0774 widened runner_local to runner_verified), and on no other kind of run', async () => {
+      for (const mode of ['runner_local', 'runner_verified']) {
+        const ok = await newRun('pending', mode);
+        expect(await asRole(f.a1, async () => (await admin.query('UPDATE agent_runs SET approved_by = $2 WHERE id = $1', [ok, f.a1])).rowCount), mode).toBe(1);
+      }
+      for (const [status, mode, runtime] of [['running', 'runner_local', 'runner'], ['succeeded', 'runner_local', 'runner'], ['running', 'runner_verified', 'runner'], ['succeeded', 'runner_verified', 'runner'], ['pending', 'sandbox', 'runner']] as const) {
         const id = await newRun(status, mode, runtime);
         expect(await asRole(f.a1, async () => (await admin.query('UPDATE agent_runs SET approved_by = $2 WHERE id = $1', [id, f.a1])).rowCount), `${status}/${mode}/${runtime}`).toBe(0);
       }
@@ -228,7 +230,7 @@ describe('migration 0757 gives platform_ops nothing', () => {
     pool = createPool(pg.url);
     guard = guardPoolTeardown(pool, 'platformOpsDiff0757Pool');
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0757-diff-migrations-'));
-    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && name !== '0771_runner_verified_repo_mode.sql' /* replaces 0757's notice lister */)) {
+    for (const file of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && name !== '0771_runner_verified_repo_mode.sql' /* replaces 0757's notice lister */ && name !== '0774_runner_verified_approvals.sql' /* replaces 0757's approve definer and its row policy */)) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), path.join(beforeDir, file));
     }
     await runMigrations(pool, beforeDir);

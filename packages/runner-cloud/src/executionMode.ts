@@ -16,10 +16,13 @@ export const LOCAL_AUTO_MERGE_COPY_SHA256 = createHash("sha256").update(COPY.loc
 /** What a repo's visibility read can say. Anything that is not a clear "private" is not enough to put a repo on a runner. */
 export type RepoVisibilityAnswer = "private" | "public" | "unknown";
 
-export const SETTABLE_MODES = ["sandbox", "runner_local"] as const;
+/** The sha256 of the cloud-verified string the server ships; sent back by a client that showed it (D#6 R5b-2b-ii). */
+export const CLOUD_VERIFIED_COPY_SHA256 = createHash("sha256").update(COPY.cloudVerified, "utf8").digest("hex");
+
+export const SETTABLE_MODES = ["sandbox", "runner_local", "runner_verified"] as const;
 type SettableMode = (typeof SETTABLE_MODES)[number];
 
-type Parsed = { kind: "mode"; mode: SettableMode; confirmRepo: unknown } | { kind: "auto_merge_on"; confirmRepo: unknown; copySha256: unknown } | { kind: "auto_merge_off" };
+type Parsed = { kind: "mode"; mode: SettableMode; confirmRepo: unknown; copySha256: unknown } | { kind: "auto_merge_on"; confirmRepo: unknown; copySha256: unknown } | { kind: "auto_merge_off" };
 
 function parseBody(body: unknown): Parsed {
   const bad = (): never => {
@@ -29,10 +32,11 @@ function parseBody(body: unknown): Parsed {
   const b = body as Record<string, unknown>;
   const keys = Object.keys(b).sort().join(",");
   if ("mode" in b) {
-    if (keys !== "confirm_repo,mode" && keys !== "mode") return bad();
-    if (b.mode === "runner_verified") throw new RunnerHttpError(400, "mode_not_available", "that mode is not available yet");
-    if (b.mode !== "sandbox" && b.mode !== "runner_local") return bad();
-    return { kind: "mode", mode: b.mode, confirmRepo: b.confirm_repo };
+    // Only the cloud-verified opt-in carries the wording's hash; on any other mode the key is unknown (400).
+    const allowed = b.mode === "runner_verified" ? ["confirm_repo,copy_sha256,mode", "confirm_repo,mode", "mode"] : ["confirm_repo,mode", "mode"];
+    if (!allowed.includes(keys)) return bad();
+    if (b.mode !== "sandbox" && b.mode !== "runner_local" && b.mode !== "runner_verified") return bad();
+    return { kind: "mode", mode: b.mode, confirmRepo: b.confirm_repo, copySha256: b.copy_sha256 };
   }
   if (b.auto_merge === true) {
     if (keys !== "auto_merge,confirm_repo,copy_sha256" && keys !== "auto_merge" && keys !== "auto_merge,confirm_repo" && keys !== "auto_merge,copy_sha256") return bad();
@@ -77,6 +81,12 @@ async function requireOwnerOrAdmin(client: PoolClient): Promise<void> {
   if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");
 }
 
+/** The cloud-verified opt-in needs a model key to review with: a connection that is not broken, read in the gate's order (ok, unvalidated, broken). */
+async function requireUsableKey(client: PoolClient, accountId: string): Promise<void> {
+  const key = (await client.query<{ status: string }>("SELECT status FROM model_connections WHERE account_id = $1 ORDER BY CASE status WHEN 'ok' THEN 0 WHEN 'unvalidated' THEN 1 ELSE 2 END LIMIT 1", [accountId])).rows[0];
+  if (key === undefined || key.status === "broken") throw new RunnerHttpError(409, "api_key_required", "connect a model API key to use cloud-verified review");
+}
+
 const state = (repo: { execution_mode: string }, autoMerge: boolean): RunnerHttpResponse["body"] => ({ execution_mode: repo.execution_mode, auto_merge: autoMerge });
 
 /** The reason a queued runner run is cancelled with when its repo leaves `runner_local` (a member of `FailureReason`). */
@@ -88,7 +98,9 @@ const CANCEL_REASON: FailureReason = "execution_mode_changed";
  * Three bodies, strict (an unknown key is 400):
  *  - `{ mode, confirm_repo }`: move the repo between `sandbox` and `runner_local`. It changes where the code goes, so
  *    the repo's own full name must be typed back and matches exactly (400 `confirmation_mismatch`, nothing written).
- *    `runner_verified` is refused until it exists. A public repo, or one whose visibility cannot be read, is never put
+ *    `runner_verified` (D#6 R5b-2b-ii) also needs `copy_sha256`, the hash of the cloud-verified wording this server ships (409
+ *    `copy_changed`, checked after the name), and a usable connected model key (409 `api_key_required`: a `model_connections` row
+ *    whose status is not `broken`, the gate's own reading). A public repo, or one whose visibility cannot be read, is never put
  *    on a runner (409). Leaving `runner_local` turns the auto-merge opt-in off in the same transaction (the opt-in's
  *    foreign key requires it), so a repo that comes back starts with it off. It sets the repo's approved sandbox allowances aside too (R7a),
  *    for the same reason. It also cancels every pending runner run of the
@@ -149,9 +161,13 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
     const first = await run(async (client) => {
       const repo = await loadRepo(client, repoId);
       confirmed(repo, parsed.confirmRepo);
+      // Checked after the name, so a wrong name is always the first thing reported. Only a real change needs the wording shown back.
+      if (parsed.mode === "runner_verified" && repo.execution_mode !== "runner_verified" && parsed.copySha256 !== CLOUD_VERIFIED_COPY_SHA256) {
+        throw new RunnerHttpError(409, "copy_changed", "the wording changed; reload and confirm again");
+      }
       return repo;
     });
-    if (parsed.mode === "runner_local" && first.execution_mode !== "runner_local") {
+    if (parsed.mode !== "sandbox" && first.execution_mode !== parsed.mode) {
       const seen = await readVisibility(deps, principal.accountId, repoId);
       if (seen === "public") throw new RunnerHttpError(409, "public_repo", "a public repository cannot run on a runner");
       if (seen !== "private") throw new RunnerHttpError(409, "repo_visibility_unknown", "the repository's visibility could not be read");
@@ -161,6 +177,7 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         const repo = await loadRepo(client, repoId);
         confirmed(repo, parsed.confirmRepo);
         if (repo.execution_mode === parsed.mode) return { repo, autoMerge: repo.auto_merge, changed: false };
+        if (parsed.mode === "runner_verified") await requireUsableKey(client, principal.accountId);
         let autoMergeOff = false;
         if (repo.execution_mode === "runner_local") {
           autoMergeOff = (await client.query<{ changed: boolean }>("SELECT repo_local_review_optin_set($1, false) AS changed", [repoId])).rows[0]?.changed === true;

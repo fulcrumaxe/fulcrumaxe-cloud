@@ -322,7 +322,7 @@ describe('migration 0754 gives platform_ops nothing', () => {
     beforeDir = mkdtempSync(path.join(tmpdir(), 'fx-0754-diff-migrations-'));
     // 0762 re-creates runner_follow_up_run (it adds one clause), so it cannot be applied before the 0754 that creates the function; it joins the second run.
     // 0767 grants a role SELECT on agent_runs.claimable_after, a column 0754 adds, so it joins the second run too (it gives platform_ops nothing).
-    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql'];
+    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql'];
     for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !NEEDS_0754.includes(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }
