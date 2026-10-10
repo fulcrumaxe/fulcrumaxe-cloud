@@ -89,3 +89,8 @@
 .repos-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .repos-dialog-body { padding: 14px; }
 .repos-error:empty { display: none; }
+.repos-mode { margin: 0 0 10px; padding: 0; border: 0; min-width: 0; }
+.repos-mode legend { padding: 0; }
+.repos-mode input[type="radio"]:focus-visible, .repos-mode .repos-allow-name:focus-visible, .repos-mode [tabindex="-1"]:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.repos-mode .repos-confirm { overflow-wrap: anywhere; }
+.repos-mode .repos-btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }

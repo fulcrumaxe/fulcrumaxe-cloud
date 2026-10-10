@@ -50,5 +50,6 @@ export {
   type RunPullRequestText,
 } from "./runPullRequest.js";
 export { MAX_ENTRY_PATTERNS, MAX_SCOPE_ENTRIES, MAX_SCOPE_PATTERNS, loadAcceptanceScope, parseAcceptanceScope, pathInScope, pathsOutsideScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
+export { getRepoMode } from "./repoMode.js";
 export { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, SETTABLE_MODES, setExecutionMode, type RepoVisibilityAnswer } from "./executionMode.js";
 export { getSandboxAllowances, setAsideSandboxAllowances, setSandboxAllowances } from "./sandboxAllowances.js";
