@@ -49,7 +49,7 @@ interface World {
   tier: string;
   debaterEnabled: boolean;
   /** (role) -> the verdict the reviewer run ends with. A function of the head the run is for. */
-  verdict: (role: string, head: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean };
+  verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean };
   /** The decision the worker's round returns, per call. */
   rounds: Array<{ decision: string; round?: number; nextRound?: number | null }>;
   /** The fix start. */
@@ -88,7 +88,7 @@ function fresh(over: Partial<World> = {}): World {
 }
 
 function setup(w: World, item: AdvanceItem = AT_PR) {
-  const runs = new Map<string, { role: string; head: string }>();
+  const runs = new Map<string, { role: string; head: string; step: string }>();
   const started: AdvanceRunRequest[] = [];
   const rounds = [...w.rounds];
   const gates = [...w.gates];
@@ -106,14 +106,14 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
       started.push(req);
       if (w.refuseStart.has(req.role)) return { ok: false as const, reason: "no_model" };
       const id = `run-${++n}-${req.role}`;
-      runs.set(id, { role: req.role, head: req.headSha ?? "" });
+      runs.set(id, { role: req.role, head: req.headSha ?? "", step: req.step });
       return { ok: true as const, runId: id };
     }),
     advanceRunOutcome: vi.fn(async (_acct: string, runId: string): Promise<AdvanceRunOutcome> => {
       if (runId.startsWith("fix-")) return w.fixOutcome;
       const r = runs.get(runId);
       if (!r) return { status: "missing", done: true, envelope: null };
-      const v = w.verdict(r.role, r.head);
+      const v = w.verdict(r.role, r.head, r.step);
       return { status: v.status ?? "succeeded", done: v.done ?? true, envelope: v.envelope === undefined ? { verdict: "pass", findings: [], summary: "fine" } : v.envelope };
     }),
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
@@ -614,14 +614,107 @@ describe("fix rounds", () => {
     expect(events()).toContain("advance.fixed");
   });
 
-  it("a fix that left the head unchanged pushed nothing: it stops, records that, and never reviews the same commit again", async () => {
-    const w = fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixPushes: null });
-    const t = setup(w);
-    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_pushed_nothing" });
-    expect(t.started).toHaveLength(2);
-    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(1);
-    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
-    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", headSha: H1, prNumber: 41, runId: "fix-1" }));
+  describe("D#6 C44-7: a fix that proves no change is needed re-runs the reviewers that asked for it", () => {
+    const noChangeSandbox: AdvanceRunOutcome = { status: "succeeded", done: true, envelope: { summary: "tests pass, no change" } };
+    const noChangeRunner: AdvanceRunOutcome = { status: "failed", done: true, envelope: null, runtime: "runner", failureReason: "no_commit" };
+    const asksFirst = (role: string, head: string, step: string) => (head === H1 && role === "code-reviewer" && !step.includes(":rr") ? needsFix(role, head) : needsFix("none", head));
+    const stepsOf = (started: AdvanceRunRequest[]) => started.map((s) => s.step);
+
+    it.each([
+      ["sandbox: the run succeeded and the head did not move", noChangeSandbox, "sandbox"],
+      ["runner_local: the run ended failed no_commit and the head did not move", noChangeRunner, "runner_local"],
+    ] as const)("%s: only the failing role looks again, on the same head, and the gate follows", async (_n, fixOutcome, mode) => {
+      const w = fresh({
+        verdict: asksFirst,
+        rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }],
+        fixPushes: null,
+        fixOutcome,
+        mode,
+        recorded: mode === "runner_local" ? { number: 41, branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" } : null,
+      });
+      const t = setup(w, { ...AT_PR, executionMode: mode });
+      const out = await workItemAdvanceWorkflow(ARGS);
+      expect(out.status).toBe("merged");
+      // Round one: both roles. Then ONE more run: the code reviewer, same head, a step of its own.
+      const roundOne = stepsOf(t.started).slice(0, -1).sort();
+      expect(roundOne).toEqual(expect.arrayContaining([`review:${H1}:code-reviewer`, `review:${H1}:acceptance-tester`]));
+      expect(stepsOf(t.started).at(-1)).toBe(`review:${H1}:code-reviewer:rr1`);
+      expect(stepsOf(t.started).filter((x) => x.includes(":rr"))).toHaveLength(1);
+      expect(t.started.every((s) => s.headSha === H1)).toBe(true);
+      expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+      // The second record carries only what was re-run; the first round's pass is not recorded twice.
+      const second = t.worker.advanceRecordRound.mock.calls[1]![1];
+      expect(second.headSha).toBe(H1);
+      expect(second.requiredRoles).toEqual(["code-reviewer"]);
+      expect(second.verdicts.map((v: { role: string }) => v.role)).toEqual(["code-reviewer"]);
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", code: "rereview", headSha: H1, runId: "fix-1" }));
+      expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+      expect(events()).toContain("advance.fix_no_change");
+    });
+
+    it("replay safety: running the same workflow again over the same facts starts exactly the same keyed runs, so a replayed step finds the runs it already started", async () => {
+      const make = () => setup(fresh({ verdict: (role, head) => needsFix(role, head), rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "fix", round: 1, nextRound: 2 }], fixPushes: null, fixOutcome: noChangeSandbox }));
+      const one = make();
+      await workItemAdvanceWorkflow(ARGS);
+      const two = make();
+      await workItemAdvanceWorkflow(ARGS);
+      expect(stepsOf(two.started)).toEqual(stepsOf(one.started));
+      expect(two.worker.advanceStartFix.mock.calls.map((c) => [c[1].round, c[1].retry, c[1].headSha, c[1].actionId])).toEqual(one.worker.advanceStartFix.mock.calls.map((c) => [c[1].round, c[1].retry, c[1].headSha, c[1].actionId]));
+      expect(new Set(stepsOf(one.started)).size).toBe(stepsOf(one.started).length);
+    });
+
+    it("a fix run that failed for any other reason is still a failed fix, even with the head unmoved", async () => {
+      const t = setup(fresh({ verdict: asksFirst, rounds: [{ decision: "fix", round: 0, nextRound: 1 }], fixPushes: null, fixOutcome: { status: "failed", done: true, envelope: null, runtime: "runner", failureReason: "internal_error" } }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "fix_failed", detail: "failed" });
+      expect(t.started).toHaveLength(2);
+    });
+
+    it("the re-review still asking for changes starts a further fix on the same head as its own run; a second no change on that head goes to a person with a fixed code", async () => {
+      const t = setup(fresh({ verdict: (role, head) => needsFix(role, head), rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "fix", round: 1, nextRound: 2 }], fixPushes: null, fixOutcome: noChangeSandbox }));
+      const out = await workItemAdvanceWorkflow(ARGS);
+      expect(out).toEqual({ status: "needs_human", detail: "fix_no_change_repeated" });
+      expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(2);
+      expect(t.worker.advanceStartFix.mock.calls[0]![1].retry).toBeUndefined();
+      expect(t.worker.advanceStartFix.mock.calls[1]![1].retry).toBe(1);
+      expect(t.worker.advanceStartFix.mock.calls[1]![1].round).toBe(2);
+      // One re-review only: the first round's two, then the one, never a second re-review.
+      expect(stepsOf(t.started).filter((x) => x.includes(":rr"))).toEqual([`review:${H1}:code-reviewer:rr1`]);
+      expect(stepsOf(t.started)).toHaveLength(3);
+      expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(2);
+      expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "escalated", code: "fix_no_change_repeated", headSha: H1 }));
+      expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "fix_pushed_nothing", code: "fix_no_change_repeated" }));
+    });
+
+    it("the fix-round cap still bounds it: a re-review the round decision escalates stops there, with no further fix", async () => {
+      const t = setup(fresh({ verdict: (role, head) => needsFix(role, head), rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "escalated", round: maxFixRounds() }], fixPushes: null, fixOutcome: noChangeSandbox }));
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "escalated", detail: "max_fix_rounds" });
+      expect(t.worker.advanceStartFix).toHaveBeenCalledTimes(1);
+    });
+
+    it("a real fix commit after a re-review still gets the full review of the new head", async () => {
+      const w = fresh({ verdict: (role, head) => needsFix(role, head), rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "fix", round: 1, nextRound: 2 }, { decision: "all_passed", round: 2 }], fixPushes: null, fixOutcome: noChangeSandbox });
+      const t = setup(w);
+      t.worker.advanceStartFix.mockImplementation(async (_who: unknown, req: AdvanceFixRequest) => {
+        if (req.retry === 1) w.head = H2;
+        return { ok: true as const, runId: `fix-${req.round}` };
+      });
+      expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+      expect(stepsOf(t.started).filter((s) => s.includes(H2)).sort()).toEqual([`review:${H2}:acceptance-tester`, `review:${H2}:code-reviewer`]);
+      expect(t.worker.advanceRecordRound.mock.calls[2]![1].requiredRoles.sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    });
+
+    it("a push that lands between the no-change fix and its re-review makes it a new head: the full review, not the narrow one", async () => {
+      const w = fresh({ verdict: asksFirst, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }], fixPushes: null, fixOutcome: noChangeSandbox });
+      const t = setup(w);
+      t.worker.advanceRecordEvent.mockImplementation(async (_who: unknown, e: { kind: string }) => {
+        if (e.kind === "fix_pushed_nothing") w.head = H3;
+        return { recorded: true };
+      });
+      expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+      expect(stepsOf(t.started).filter((s) => s.includes(H3)).sort()).toEqual([`review:${H3}:acceptance-tester`, `review:${H3}:code-reviewer`]);
+      expect(stepsOf(t.started).some((s) => s.includes(":rr"))).toBe(false);
+    });
   });
 
   it("a fix round the worker refuses (a second concurrent resume, no session, a spend limit) stops and says why", async () => {

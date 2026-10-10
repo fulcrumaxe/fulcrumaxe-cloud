@@ -17,9 +17,10 @@ import type { PoolClient } from 'pg';
  *   review_verdicts       the verdicts of one review round. reasons: `<role>_<verdict>` per role (code_reviewer_pass).
  *   fix_round_started     an executor fix round began (round, run_id).
  *   fix_round_refused     a fix round could not start. code: the reason.
- *   fix_pushed_nothing    a fix run left the PR head unchanged; the driver stopped.
+ *   fix_pushed_nothing    a fix run left the PR head unchanged. code: rereview (the reviewers that asked for the fix look again at the same head, once per head)
+ *                         | fix_no_change_repeated (a second such fix on that head; the driver stopped, with an `escalated` event of the same code).
  *   fix_round_failed      the fix run ended without success. code: the run status.
- *   escalated             handed to a person. code: max_fix_rounds | reviewer_fail.
+ *   escalated             handed to a person. code: max_fix_rounds | reviewer_fail | fix_no_change_repeated.
  *   review_status         the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
  *   merge_gate            the merge gate's outcome. code: its outcome; reasons: its block codes.
  *   merged_by_gate        the gate itself merged the pull request (a merge by a person has no such row).

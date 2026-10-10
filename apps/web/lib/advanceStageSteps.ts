@@ -83,13 +83,15 @@ export interface BuildRunOutcome {
    * cancel when the wait runs out, and the one a failure is recorded against. The id asked about when the run is gone.
    */
   tailRunId: string;
+  /** The fixed reason a failed RUNNER run carries (`no_commit`: it ended with the agent done and nothing pushed). Absent for any other run. */
+  failureReason?: string | null;
 }
 
 export async function buildOutcomeBody(worker: AdvanceWorker | null, accountId: string, runId: string): Promise<BuildRunOutcome> {
   if (!worker) return { status: "missing", done: true, hasSummary: false, queuedOnRunner: false, tailRunId: runId };
   const out: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
   const summary = out.envelope?.summary;
-  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId };
+  return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}) };
 }
 
 /** The item's stage now, or null (gone, or no worker). */
