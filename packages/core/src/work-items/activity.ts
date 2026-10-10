@@ -1,7 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
-import { PROGRESS_EVENT_KINDS, buildFeed } from '../onboarding/previewProgress.js';
+import { PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYPES, RUNNER_WAITING_KIND, buildFeed } from '../onboarding/previewProgress.js';
+import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from '../runs/runnerUsage.js';
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
 import { redactText } from '@fx/runtime/src/redact.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
@@ -35,10 +36,25 @@ export const ACTIVITY_LIMITS = {
   maxReasons: 10,
 } as const;
 
+/** What a `run_ended` line says about why, as the runner sent it (closed codes only). The API route replaces `text` with the runner protocol's sentence and drops this. */
+export interface RunEndedWhy {
+  reason: string;
+  detail: string | null;
+  size_mb: number | null;
+}
 export interface ActivityLine {
   at: string;
   text: string;
+  /** Present only on a `run_ended` line of a runner run; never leaves the API. */
+  ended?: RunEndedWhy;
 }
+
+/**
+ * D#6 C42-3: how long a runner's lease lasts, in seconds. This is `RUNNER_LEASE_SECONDS` of the runner protocol, which @fx/core does not depend
+ * on; a test in @fx/api pins the two equal. A live runner run's lease is renewed by every request the runner makes, so `lease_expires_at` minus
+ * this is when the runner last checked in.
+ */
+export const RUNNER_LEASE_SECONDS_READ = 90;
 export interface ActivityRun {
   id: string;
   role: string;
@@ -48,6 +64,16 @@ export interface ActivityRun {
   /** The `summary` of the run's AGENT_OUTPUT envelope when it has one (plain text), else null. */
   summary: string | null;
   lines: ActivityLine[];
+  /** D#6 C42-3: where the run ran (`runner` for a run on a person's machine). */
+  runtime: string;
+  /** A runner run only: what it would have cost at API prices (information, never spend), or null when it reported none. Absent for any other run. */
+  runner_usage?: RunnerUsage | null;
+  /** A runner run only: `recorded`, `not_priced` or `not_recorded` once it has ended (never a silent 0), null while it is still going. */
+  runner_usage_state?: RunnerUsageState | null;
+  /** A runner run only: the sentence that explains `not_priced` or `not_recorded`, else null. */
+  runner_usage_note?: string | null;
+  /** A runner run only: when the runner last checked in while the run is live (its lease expiry less the lease length), else null. */
+  runner_checked_in_at?: string | null;
 }
 export interface ActivityComment {
   role: string | null;
@@ -152,6 +178,29 @@ const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 /** A shell command line as stored: printable, one line, no control characters. */
 const COMMAND_RE = /^[^\u0000-\u001f\u007f]{1,200}$/;
 
+/**
+ * D#6 C42-3 (gap G9): the pull request number the cloud's `done` recorded for a runner executor run, on the `run.status_changed` event the verdict move
+ * writes (`viaRunnerDone`, `prNumber`). The cloud opened that pull request itself, so it outranks the agent's own envelope. Only a runner run has one;
+ * for any other run this is NULL and the old rule stands. A SELECT-list item for a query over `agent_runs` (unaliased).
+ */
+export const RUNNER_VERDICT_PR_SQL = `(SELECT CASE WHEN e.payload->>'prNumber' ~ '^[0-9]{1,9}$' THEN e.payload->>'prNumber' END
+    FROM run_events e WHERE agent_runs.runtime = 'runner' AND agent_runs.role = 'executor' AND e.run_id = agent_runs.id
+     AND e.kind = 'run.status_changed' AND e.payload->>'viaRunnerDone' = 'true' AND e.payload ? 'prNumber'
+    ORDER BY e.seq DESC LIMIT 1)`;
+
+/** The fields a runner run adds to its row (none for any other run, so a sandbox run reads exactly as before). */
+export function runnerFields(r: { runtime: string; status: string; lease_expires_at: Date | null; runner_usage_json: unknown }): Pick<ActivityRun, 'runner_usage' | 'runner_usage_state' | 'runner_usage_note' | 'runner_checked_in_at'> {
+  const usage = toRunnerUsage(r.runtime, r.runner_usage_json);
+  const state = runnerUsageStateOf(r.runtime, r.status, usage);
+  if (usage === undefined || state === null) return {};
+  return { runner_usage: usage, runner_usage_state: state.state, runner_usage_note: state.note, runner_checked_in_at: runnerCheckedInAt(r.status, r.lease_expires_at) };
+}
+
+/** When the runner last checked in, for a live runner run: its lease expiry less the lease length. Null once the run has ended (or before a runner holds it). */
+export function runnerCheckedInAt(status: string, leaseExpiresAt: Date | null): string | null {
+  return status === 'running' && leaseExpiresAt !== null ? new Date(leaseExpiresAt.getTime() - RUNNER_LEASE_SECONDS_READ * 1000).toISOString() : null;
+}
+
 /** `text` cut to `max` characters, ending in an ellipsis when it was cut. */
 /**
  * Model text leaving the API: credential shapes are redacted (CWE-532/200: a run's summary or a PM's reason can quote a
@@ -197,6 +246,7 @@ export async function readRunLines(
   // One bounded query for every run's recorded events (newest per run), only the fields the feed reads.
   const eventsByRun = new Map<string, Array<{ seq: number; kind: string; at: Date; fields: Record<string, string | null> }>>();
   const commandBySeq = new Map<string, string>();
+  const endedBySeq = new Map<string, RunEndedWhy>();
   const ev = await client.query<{
     run_id: string;
     seq: string;
@@ -208,21 +258,37 @@ export async function readRunLines(
     stage: string | null;
     to: string | null;
     command: string | null;
+    type: string | null;
+    reason: string | null;
+    detail: string | null;
+    size_mb: string | null;
+    reset_at: string | null;
   }>(
-    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command
+    // D#6 C42-3: besides the progress kinds, a runner run's own states: the `runner.waiting` notice and the three `runner.event` types that say
+    // where the run stands. A `runner.event` of any other type (a tool use can be 2,000 per run) is not selected, so it cannot crowd the newest rows out.
+    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command, e.type, e.reason, e.detail, e.size_mb, e.reset_at
        FROM unnest($1::uuid[]) AS r(id)
       CROSS JOIN LATERAL (
         SELECT run_id, seq, kind, created_at,
                left(payload->>'tool', 32) AS tool, left(payload->>'path', 200) AS path, left(payload->>'pattern', 200) AS pattern,
-               left(payload->>'stage', 32) AS stage, left(payload->>'to', 32) AS "to", left(payload->>'command', 201) AS command
-          FROM run_events WHERE run_id = r.id AND kind = ANY($2::text[])
+               left(payload->>'stage', 32) AS stage, left(payload->>'to', 32) AS "to", left(payload->>'command', 201) AS command,
+               CASE WHEN kind = $5::text THEN left(payload->>'type', 32) END AS type, CASE WHEN kind = $5::text THEN left(payload->>'reason', 64) END AS reason,
+               CASE WHEN kind = $5::text THEN left(payload->>'detail', 64) END AS detail, CASE WHEN kind = $5::text THEN left(payload->>'size_mb', 6) END AS size_mb,
+               CASE WHEN kind = $5::text THEN left(payload->>'reset_at', 40) END AS reset_at
+          FROM run_events
+         WHERE run_id = r.id
+           AND (kind = ANY($2::text[]) OR kind = $4::text OR (kind = $5::text AND payload->>'type' = ANY($6::text[])))
          ORDER BY seq DESC LIMIT $3::int
       ) e`,
-    [runIds, [...PROGRESS_EVENT_KINDS], ACTIVITY_LIMITS.maxEventsPerRun],
+    [runIds, [...PROGRESS_EVENT_KINDS], ACTIVITY_LIMITS.maxEventsPerRun, RUNNER_WAITING_KIND, RUNNER_EVENT_KIND, [...RUNNER_STATE_TYPES]],
   );
   for (const e of ev.rows) {
     const list = eventsByRun.get(e.run_id) ?? [];
-    list.push({ seq: Number(e.seq), kind: e.kind, at: e.created_at, fields: { tool: e.tool, path: e.path, pattern: e.pattern, stage: e.stage, to: e.to } });
+    list.push({ seq: Number(e.seq), kind: e.kind, at: e.created_at, fields: { tool: e.tool, path: e.path, pattern: e.pattern, stage: e.stage, to: e.to, type: e.type, reason: e.reason, detail: e.detail, size_mb: e.size_mb, reset_at: e.reset_at } });
+    if (e.kind === RUNNER_EVENT_KIND && e.type === 'run_ended' && e.reason !== null && CODE_RE.test(e.reason)) {
+      const size = e.size_mb !== null && /^[0-9]{1,6}$/.test(e.size_mb) ? Number(e.size_mb) : null;
+      endedBySeq.set(`${e.run_id}:${Number(e.seq)}`, { reason: e.reason, detail: e.detail !== null && CODE_RE.test(e.detail) ? e.detail : null, size_mb: size });
+    }
     eventsByRun.set(e.run_id, list);
     if (e.command !== null && e.kind === 'agent.activity' && COMMAND_RE.test(e.command) && commandIsClean(e.command)) {
       commandBySeq.set(`${e.run_id}:${Number(e.seq)}`, `${e.tool === 'test' ? 'Ran tests' : 'Ran'}: ${e.command}`);
@@ -231,7 +297,13 @@ export async function readRunLines(
   for (const id of runIds) {
     const evs = eventsByRun.get(id) ?? [];
     if (evs.length >= ACTIVITY_LIMITS.maxEventsPerRun) capped.add(id);
-    linesByRun.set(id, buildFeed(evs, null).map((l) => ({ at: l.at, text: commandBySeq.get(`${id}:${l.seq}`) ?? l.text })));
+    linesByRun.set(
+      id,
+      buildFeed(evs, null).map((l) => {
+        const ended = endedBySeq.get(`${id}:${l.seq}`);
+        return { at: l.at, text: commandBySeq.get(`${id}:${l.seq}`) ?? l.text, ...(ended ? { ended } : {}) };
+      }),
+    );
   }
   return { linesByRun, capped };
 }
@@ -323,9 +395,21 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     ).rows[0];
 
     const runRows = (
-      await client.query<{ id: string; role: string; status: string; usd: string | null; created_at: Date; summary: string | null; pr_number: string | null }>(
-        `SELECT id, role, status, usd, created_at, left(envelope->>'summary', $2::int) AS summary,
+      await client.query<{
+        id: string;
+        role: string;
+        status: string;
+        usd: string | null;
+        created_at: Date;
+        summary: string | null;
+        pr_number: string | null;
+        runtime: string;
+        lease_expires_at: Date | null;
+        runner_usage_json: unknown;
+      }>(
+        `SELECT id, role, status, usd, created_at, left(envelope->>'summary', $2::int) AS summary, runtime, lease_expires_at, ${RUNNER_USAGE_COLUMN},
                 COALESCE(CASE WHEN role <> 'executor' THEN dispatch_pr_number::text END,
+                         ${RUNNER_VERDICT_PR_SQL},
                          CASE WHEN envelope->>'pr_number' ~ '^[0-9]{1,9}$' THEN envelope->>'pr_number' END) AS pr_number
            FROM agent_runs WHERE work_item_id = $1::uuid ORDER BY created_at DESC, id DESC LIMIT $3::int`,
         [workItemId, ACTIVITY_LIMITS.maxSummaryChars + 1, ACTIVITY_LIMITS.maxRuns + 1],
@@ -441,6 +525,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
           created_at: r.created_at.toISOString(),
           summary: r.summary ? safeModelText(r.summary, ACTIVITY_LIMITS.maxSummaryChars) : null,
           lines: linesByRun.get(r.id) ?? [],
+          runtime: r.runtime,
+          ...runnerFields(r),
         })),
       runs_truncated: runsTruncated,
       steps: stepRows

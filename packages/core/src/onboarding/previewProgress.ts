@@ -46,7 +46,16 @@ export const OUTPUT_KIND = 'agent.output';
 export const PROGRESS_EVENT_KINDS = [ACTIVITY_KIND, STAGE_KIND, STATUS_KIND] as const;
 export const PROGRESS_EVENT_FIELDS = ['tool', 'path', 'pattern', 'stage', 'to', 'failureReason'] as const;
 
-export type EventFields = Partial<Record<(typeof PROGRESS_EVENT_FIELDS)[number], string | null>>;
+/**
+ * D#6 C42-3: the runner's own states, read by `readRunLines` for a run on a person's machine. `runner.waiting` is a row of its own; the other
+ * three are `runner.event` rows told apart by their payload `type`. Only the fields in `RUNNER_STATE_FIELDS` leave the database for them.
+ */
+export const RUNNER_WAITING_KIND = 'runner.waiting';
+export const RUNNER_EVENT_KIND = 'runner.event';
+export const RUNNER_STATE_TYPES = ['run_ended', 'taken_over', 'usage_limit_reached'] as const;
+export const RUNNER_STATE_FIELDS = ['type', 'reason', 'detail', 'size_mb', 'reset_at'] as const;
+
+export type EventFields = Partial<Record<(typeof PROGRESS_EVENT_FIELDS)[number] | (typeof RUNNER_STATE_FIELDS)[number], string | null>>;
 export interface ProgressEvent {
   seq: number;
   kind: string;
@@ -124,7 +133,24 @@ export function lineFor(kind: string, f: EventFields): string | null {
     return null;
   }
   if (kind === STATUS_KIND) return f.to === 'running' ? 'The run started' : null;
+  if (kind === RUNNER_WAITING_KIND) return 'Waiting for your runner to come online';
+  if (kind === RUNNER_EVENT_KIND) {
+    if (f.type === 'taken_over') return 'Taken over on the runner machine';
+    if (f.type === 'usage_limit_reached') {
+      const at = resetClock(f.reset_at);
+      return at ? `Plan usage limit reached; resumes at ${at} UTC` : 'Plan usage limit reached';
+    }
+    // The words of a run's end come from the runner protocol's COPY (the API route puts them in); this is the plain form for a reason that has none.
+    if (f.type === 'run_ended') return f.reason && REASON_RE.test(f.reason) ? `The run ended (${f.reason.replace(/_/g, ' ')})` : 'The run ended';
+  }
   return null;
+}
+
+/** HH:MM (UTC) of a reset time the runner sent, or null when it is not an ISO time. */
+function resetClock(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT/.test(value)) return null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(11, 16) : null;
 }
 
 /** The newest `maxLines` lines, oldest first. `firstOutput` is the first recorded agent message (counted, never read). */

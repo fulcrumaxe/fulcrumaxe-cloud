@@ -2,7 +2,7 @@ import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { resolveRunLimits } from '../run-limits/resolve.js';
 import type { RunLimits } from '../run-limits/types.js';
-import { ACTIVITY_LIMITS, capText, readRunLines, type ActivityLine } from '../work-items/activity.js';
+import { ACTIVITY_LIMITS, RUNNER_VERDICT_PR_SQL, capText, readRunLines, runnerCheckedInAt, type ActivityLine } from '../work-items/activity.js';
 import type { RunsReadCtx } from './read.js';
 import { RUNNER_USAGE_COLUMN, toRunnerUsage, type RunnerUsage } from './runnerUsage.js';
 
@@ -80,6 +80,8 @@ export interface RunInsight {
   outside_meter: { state: 'pending' | 'matches' | 'higher' | 'unavailable' | 'off'; reason: string | null; added_usd: number | null };
   /** D#6 R2b-5a: a runner run only (absent on any other): what it would have cost at API prices. Information; never part of `cost`, which stays spend. */
   runner_usage?: RunnerUsage | null;
+  /** D#6 C42-3: a runner run only (absent on any other): when the runner last checked in, while the run is live (its lease expiry less the lease length); null once it has ended. */
+  runner_checked_in_at?: string | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -116,6 +118,7 @@ interface RunRow {
   om_reason: string | null;
   om_true_up_usd: string | null;
   runner_usage_json: unknown;
+  lease_expires_at: Date | null;
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -145,8 +148,10 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
                 left(envelope->>'summary', $2::int) AS summary,
                 left(envelope->>'verdict', 25) AS verdict,
                 left(envelope->>'branch', 201) AS branch,
-                CASE WHEN envelope->>'pr_number' ~ '^[0-9]{1,9}$' THEN envelope->>'pr_number'
-                     WHEN envelope->>'pr' ~ '^[0-9]{1,9}$' THEN envelope->>'pr' END AS env_pr,
+                -- A runner executor's pull request is the one the cloud's own done recorded (gap G9); the agent's envelope is the fallback.
+                COALESCE(${RUNNER_VERDICT_PR_SQL},
+                         CASE WHEN envelope->>'pr_number' ~ '^[0-9]{1,9}$' THEN envelope->>'pr_number'
+                              WHEN envelope->>'pr' ~ '^[0-9]{1,9}$' THEN envelope->>'pr' END) AS env_pr,
                 -- Only the first findings, each one a string or the text of an object, cut here so a huge envelope costs nothing.
                 CASE WHEN jsonb_typeof(envelope->'findings') = 'array' THEN (
                   SELECT jsonb_agg(CASE WHEN jsonb_typeof(f) = 'string' THEN left(f #>> '{}', $3::int)
@@ -154,7 +159,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
                                    END)
                     FROM (SELECT f FROM jsonb_array_elements(envelope->'findings') AS f LIMIT $4::int) s
                 ) END AS findings,
-                om_state, om_reason, om_true_up_usd, ${RUNNER_USAGE_COLUMN}
+                om_state, om_reason, om_true_up_usd, lease_expires_at, ${RUNNER_USAGE_COLUMN}
            FROM agent_runs WHERE id = $1::uuid`,
         [id, ACTIVITY_LIMITS.maxSummaryChars + 1, INSIGHT_LIMITS.maxFindingChars + 1, INSIGHT_LIMITS.maxFindings + 1],
       )
@@ -262,7 +267,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       escalated_from: escalatedFrom,
       children,
       outside_meter: outsideMeterOf(r),
-      ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage }),
+      ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage, runner_checked_in_at: runnerCheckedInAt(r.status, r.lease_expires_at) }),
     };
   });
 }

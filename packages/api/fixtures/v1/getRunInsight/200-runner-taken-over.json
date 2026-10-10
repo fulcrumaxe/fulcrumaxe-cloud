@@ -1,0 +1,71 @@
+{
+  "server_time": "2026-10-03T12:00:00.000Z",
+  "run": {
+    "id": "00000000-0000-4000-8000-200000000014",
+    "role": "executor",
+    "status": "failed",
+    "runtime": "runner",
+    "execution_mode": "runner_local",
+    "model": null,
+    "head_sha": null,
+    "created_at": "2026-10-03T10:00:00.000Z",
+    "started_at": null,
+    "ended_at": "2026-10-03T10:01:00.000Z"
+  },
+  "work_item": {
+    "id": "00000000-0000-4000-8000-100000000014",
+    "stage": "in_progress",
+    "issue_number": 595,
+    "repo": {
+      "owner": "acme",
+      "name": "docs"
+    }
+  },
+  "pr_number": null,
+  "failure_reason": "taken_over",
+  "outcome": null,
+  "cost": {
+    "model": {
+      "usd": null,
+      "source": null,
+      "tokens_in": null,
+      "tokens_out": null
+    },
+    "compute": {
+      "usd": null,
+      "source": null
+    }
+  },
+  "lines": [
+    {
+      "at": "2026-10-03T10:00:01.000Z",
+      "text": "The run started"
+    },
+    {
+      "at": "2026-10-03T10:00:02.000Z",
+      "text": "Taken over on the runner machine"
+    }
+  ],
+  "lines_truncated": false,
+  "limits": {
+    "max_run_minutes": 60,
+    "max_model_calls": 300,
+    "per_run_usd": 40,
+    "max_turns": 100,
+    "silence_minutes": 15,
+    "max_extensions": 2,
+    "max_resumes": 2,
+    "auto_resume": true
+  },
+  "parent": null,
+  "escalated_from": null,
+  "children": [],
+  "outside_meter": {
+    "state": "off",
+    "reason": null,
+    "added_usd": null,
+    "text": "Outside check off"
+  },
+  "runner_usage": null,
+  "runner_checked_in_at": null
+}

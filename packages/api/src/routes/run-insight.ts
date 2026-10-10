@@ -3,6 +3,7 @@ import { getRunInsight } from "@fx/core/src/runs/insight.js";
 import { outsideMeterLabel, type EndReason } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
+import { withRunnerWords } from "./runnerLineWords.js";
 
 const linkedRun = z.object({ id: z.string().uuid(), role: z.string(), status: z.string(), created_at: z.string() });
 const costSource = z.enum(["operator_subscription", "customer_gateway", "customer_anthropic", "sandbox", "workflow"]);
@@ -64,6 +65,8 @@ export const runInsightResponseSchema = z.object({
   }),
   // D#6 R2b-5a: a runner run only. API-equivalent usage, as information; `cost` above stays the spend.
   runner_usage: runnerUsageSchema.nullable().optional(),
+  // D#6 C42-3: a runner run only: when the runner last checked in while the run is live, else null.
+  runner_checked_in_at: z.string().nullable().optional(),
 });
 
 export const runInsightRoutes: RouteEntry[] = [
@@ -88,7 +91,7 @@ export const runInsightRoutes: RouteEntry[] = [
           : om.state === "unavailable" ? { state: "unavailable", reason: (om.reason ?? "unknown") as EndReason, addedUsd: om.added_usd ?? undefined }
           : { state: om.state },
       );
-      return { ...insight, outside_meter: { ...om, text } };
+      return { ...insight, lines: withRunnerWords(insight.lines), outside_meter: { ...om, text } };
     },
   },
 ];

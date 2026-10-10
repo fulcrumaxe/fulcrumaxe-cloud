@@ -1,0 +1,57 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 595,
+  "pr_number": 123,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [
+    {
+      "id": "00000000-0000-4000-8000-200000000006",
+      "role": "executor",
+      "status": "succeeded",
+      "usd": null,
+      "created_at": "2026-10-03T10:00:00.000Z",
+      "summary": "Built it.",
+      "lines": [
+        {
+          "at": "2026-10-03T10:00:01.000Z",
+          "text": "The run started"
+        },
+        {
+          "at": "2026-10-03T10:00:02.000Z",
+          "text": "Reading src/a.ts"
+        },
+        {
+          "at": "2026-10-03T10:00:03.000Z",
+          "text": "Writing up the result"
+        }
+      ],
+      "runtime": "runner",
+      "runner_usage": {
+        "credential_mode": "subscription",
+        "model": "sonnet-5",
+        "tokens_in": 1000,
+        "tokens_out": 200,
+        "cache_read_tokens": 5000,
+        "cache_write_tokens": 300,
+        "api_equivalent_usd": 0.0147,
+        "price_table_version": "2026-10-01"
+      },
+      "runner_usage_state": "recorded",
+      "runner_usage_note": null,
+      "runner_checked_in_at": null
+    }
+  ],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [],
+  "close_on_github": false
+}

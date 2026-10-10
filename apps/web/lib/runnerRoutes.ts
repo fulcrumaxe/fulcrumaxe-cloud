@@ -47,9 +47,15 @@ async function requireWorker() {
 let visibilityPort: ReturnType<typeof createAppRepoVisibility> | undefined;
 const liveVisibility = (): ReturnType<typeof createAppRepoVisibility> => (visibilityPort ??= createAppRepoVisibility());
 
+/** The caps the claim refuses against (the worker's `runnerLimits`: a missing heavy figure reads as 1), so a waiting run can be told an account cap holds it. */
+function accountRunnerCaps(): { total: number; heavy: number } {
+  const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs } = runnerLimitsFor();
+  return { total: maxConcurrentRunnerJobs, heavy: maxConcurrentHeavyRunnerJobs ?? 1 };
+}
+
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: () => runnerLimitsFor().maxRunners, accountRunnerCaps: accountRunnerCaps, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

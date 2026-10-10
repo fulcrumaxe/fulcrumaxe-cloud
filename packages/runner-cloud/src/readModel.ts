@@ -16,7 +16,7 @@ import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type R
 export const RUNNER_STATES = ["online_idle", "busy", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
-export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_runner_slot", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /** A runner that has made no request for this long is `offline` (criterion 13). */
@@ -87,7 +87,7 @@ export function classifyRunner(facts: RunnerFacts, now: Date, current: number = 
   return facts.busy ? "busy" : "online_idle";
 }
 
-type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "currentProtocolVersion">;
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "currentProtocolVersion" | "accountRunnerCaps">;
 
 export interface RunnerRow {
   id: string;
@@ -245,6 +245,15 @@ export interface RawRun {
   runner_slot_free: boolean;
   /** The cause a covering live runner gave for its low limit (paused before memory, cpu, disk, ceiling), or null when none gave one. Only read when no runner has a free slot. */
   slot_limited_by: string | null;
+  /** D#6 C42-3: runner runs the whole account has `running` now, and how many of those are heavy: the counts the claim measures the account's caps against. Absent in a hand-built row, which reads as no cap held. */
+  account_running_total?: number | string;
+  account_running_heavy?: number | string;
+}
+
+/** The most runner runs an account may have running at once, in all and of the heavy class: the figures the claim refuses against (`at_limit`, `heavy_limit`). */
+export interface AccountRunnerCaps {
+  total: number;
+  heavy: number;
 }
 
 /**
@@ -288,11 +297,32 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
          (SELECT c.limited_by FROM runners r JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
            WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
              AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL
-           ORDER BY array_position(ARRAY['paused', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by
+           ORDER BY array_position(ARRAY['paused', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by,
+         -- What the claim counts under its account lock: runner runs 'running' in all (no lease test: the claim has none), and the heavy ones.
+         (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running') AS account_running_total,
+         (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running' AND NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS account_running_heavy
     FROM agent_runs a WHERE a.account_id = $1 AND ${filter} ${tail}`;
 
-/** Pure. The one wait reason of a run's facts, or null. See `getRunWaitReason` for each. */
-export function waitReasonOf(row: RawRun, now: Date): RunWaitReason | null {
+/** Pure. Whether the account's own caps hold this run: the claim refuses it when the account is at its total, or (for a heavy run) at its heavy figure. */
+function heldByAccountCap(row: RawRun, caps: AccountRunnerCaps | null | undefined): boolean {
+  if (!caps || row.account_running_total === undefined) return false;
+  if (Number(row.account_running_total) >= caps.total) return true;
+  const heavyRun = !(LIGHT_JOB_ROLES as readonly string[]).includes(row.role);
+  return heavyRun && row.account_running_heavy !== undefined && Number(row.account_running_heavy) >= caps.heavy;
+}
+
+/** The caps now in force for an account, or null when they cannot be read (plan data missing, or none given): then no cap is claimed, and the wait is told as the runners' own. */
+function capsOf(deps: ReadDeps, accountId: string): AccountRunnerCaps | null {
+  try {
+    return deps.accountRunnerCaps?.(accountId) ?? null;
+  } catch {
+    // fx-swallow-ok: unreadable plan data means the cap is unknown here, not that the run is held by one
+    return null;
+  }
+}
+
+/** Pure. The one wait reason of a run's facts, or null. See `getRunWaitReason` for each. `caps` are the account's own limits, when known. */
+export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | null): RunWaitReason | null {
   if (row.runtime !== "runner") return null;
   if (row.status === "timed_out") return row.own_reason === "queue_ttl" ? "timed_out_waiting" : null;
   if (row.status !== "pending") return null;
@@ -301,6 +331,8 @@ export function waitReasonOf(row: RawRun, now: Date): RunWaitReason | null {
   if (row.parent_reason === "runner_lost") return "runner_lost_retrying";
   if (row.approved_by === null && !row.runnable_without_approval && row.needs_approval_possible) return "waiting_for_approval";
   if (!row.runner_online) return "waiting_for_runner";
+  // The claim checks the account's caps before the runner's own slots, so a held account is told first: a free slot on the runner does not help.
+  if (heldByAccountCap(row, caps)) return "waiting_for_account_cap";
   if (!row.runner_slot_free) return "waiting_for_runner_slot";
   return null;
 }
@@ -322,6 +354,10 @@ export function waitReasonOf(row: RawRun, now: Date): RunWaitReason | null {
  *  - `waiting_for_runner_slot` (D#6 C43-2b): pending, and a live runner covers the run's repo, but every such runner has no free slot in the
  *    run's class: its declared limit for the class, or its total, is used up (an older runner holds one job in total). Worked out from the
  *    current rows, never stored. A runner that has not claimed yet has declared nothing, so it is not called full;
+ *  - `waiting_for_account_cap` (D#6 C42-3): pending, a live runner covers the repo, and the ACCOUNT is at a cap the claim refuses against: its
+ *    runner runs running in all have reached the plan's total, or this is a heavy run and its heavy runs have reached the heavy figure. A free slot
+ *    on a runner does not help: the claim answers `at_limit` / `heavy_limit` before it looks at the runner. The caps come from `deps.accountRunnerCaps`
+ *    (plan data); without them, or when they cannot be read, this reason is never given;
  *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, heard from within 120 seconds, and with the
  *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
  *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as
@@ -334,7 +370,7 @@ export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId:
     const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, runId]);
     return rows[0];
   });
-  return row ? waitReasonOf(row, now) : null;
+  return row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
 }
 
 /**
@@ -347,7 +383,7 @@ export async function getRunWait(deps: ReadDeps, accountId: string, runId: strin
     const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, runId]);
     return rows[0];
   });
-  const reason = row ? waitReasonOf(row, now) : null;
+  const reason = row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
   return { reason, limited_by: reason === "waiting_for_runner_slot" ? limitedByOf(row!.slot_limited_by) : null };
 }
 
