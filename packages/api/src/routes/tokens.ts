@@ -16,7 +16,7 @@ import { displayHint, generateToken } from "../tokens/format.js";
 import { hashToken } from "../tokens/resolve.js";
 import { TOKEN_GA_BLOCKERS } from "../tokens/ga-blockers.js";
 
-const scopeSchema = z.enum(["read", "runs:cancel", "audit:read", "work_items:write", "discussions:write"]);
+const scopeSchema = z.enum(["read", "runs:cancel", "audit:read", "work_items:write", "discussions:write", "corrections:write"]);
 
 /**
  * D#31 C20 criterion 3. 1-64 Unicode CODE POINTS (not UTF-16 units). The
