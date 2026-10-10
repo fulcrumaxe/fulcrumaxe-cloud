@@ -201,3 +201,36 @@ describe("two jobs on different repos", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 });
+
+describe("waiting for a mirror turn is abortable (D#6 C43-4)", () => {
+  const withSignal = (signal: AbortSignal): Mirrors =>
+    createMirrors({ git: createGit({ capture }), mirrorsRoot: path.join(root, "cache", "fx-runner", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: (repo) => remotes.get(repo.id) as string, signal });
+
+  it("a job whose signal aborts while it waits gives up at once; the fetch in progress and the jobs behind keep their order", async () => {
+    const stop = new AbortController();
+    const patient = mirrorsFor();
+    const impatient = withSignal(stop.signal);
+    await patient.sync(repoA);
+    events.length = 0;
+    const running = patient.sync(repoA);
+    await sleep(60);
+    const waiting = impatient.sync(repoA);
+    const after = patient.sync(repoA);
+    await sleep(60);
+    stop.abort();
+    const abortedAt = Date.now();
+    await expect(waiting).rejects.toMatchObject({ code: "mirror_failed" });
+    expect(Date.now() - abortedAt).toBeLessThan(FETCH_PAUSE_MS);
+    await running;
+    await after;
+    // Two fetches ran (the one in progress and the one behind the aborted wait), one after the other; the aborted job never started one.
+    expect(events.map((event) => event.split(" ")[0])).toEqual(["start", "end", "start", "end"]);
+  });
+
+  it("an already-aborted signal never takes a turn", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    await expect(withSignal(stop.signal).sync(repoA)).rejects.toMatchObject({ code: "mirror_failed" });
+    expect(events).toEqual([]);
+  });
+});

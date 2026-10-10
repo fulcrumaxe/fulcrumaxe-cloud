@@ -5,7 +5,7 @@
  */
 import {
   ClaimMessage, ClaimRateLimitedReply, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
-  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
+  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type ClaimCapacity, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -51,7 +51,7 @@ export interface RunnerClient {
    * Asks for a run. With `sandboxUnavailable` it is the status poll of a runner that cannot sandbox a job (C16 section 1.3): the reply is
    * `retry_after` only, and a reply that carries a job is an error, never a claim, so nothing a misbehaving cloud sends can be run.
    */
-  claim(sandboxUnavailable?: SandboxUnavailableReason): Promise<ClaimResult>;
+  claim(sandboxUnavailable?: SandboxUnavailableReason, capacity?: ClaimCapacity): Promise<ClaimResult>;
   heartbeat(runId: string, leaseGeneration: number): Promise<HeartbeatResult>;
   events(runId: string, leaseGeneration: number, events: readonly LocalOnlyEvent[]): Promise<EventsResult>;
   done(input: DoneInput): Promise<DoneResult>;
@@ -83,8 +83,9 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
   };
 
   return {
-    async claim(sandboxUnavailable) {
-      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable === undefined ? {} : { sandbox_unavailable: sandboxUnavailable }));
+    async claim(sandboxUnavailable, capacity) {
+      // A status poll (closed sandbox) takes no job, so it declares no capacity; every other claim says what the runner could take now (D#6 C43-4).
+      const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : capacity === undefined ? {} : { capacity }));
       if (reply?.status === 200) {
         const parsed = ClaimReply.safeParse(reply.body);
         if (!parsed.success) return fail(reply, "invalid_reply");

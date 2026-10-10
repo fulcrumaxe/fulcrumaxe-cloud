@@ -71,6 +71,8 @@ export interface NixShellDeps {
   capture: GitCapture;
   /** The runner's own directory for this step (the cache of results). Created 0700. Never inside a job's reach and never inside the nix client's view. */
   dataDir: string;
+  /** The daemon's stop signal: a job waiting for another job's build of the same key stops waiting when it aborts (D#6 C43-4). */
+  signal?: AbortSignal;
   /** Names of the user the daemon runs as and the groups it is in, as the `id` command reports them. */
   identity: () => Promise<{ user: string; groups: readonly string[] } | undefined>;
   timeoutMs?: number;
@@ -261,7 +263,7 @@ export function createNixShell(deps: NixShellDeps): NixShellStep {
 
       // One build per cache key at a time (D#6 C43-3): a second job on the same key waits for the first build and takes its result, success or skip,
       // instead of running its own `print-dev-env` (up to 15 minutes). A job that arrives after it ends finds the cache file.
-      const flight = await singleFlight(file, () => build(lock, file));
+      const flight = await singleFlight(file, () => build(lock, file), deps.signal);
       return flight.shared && flight.value.ok ? { ...flight.value, cached: true } : flight.value;
     } catch {
       // fx-swallow-ok: the failure is returned as a closed code; the error text could hold a path

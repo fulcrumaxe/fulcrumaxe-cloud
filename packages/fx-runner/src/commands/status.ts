@@ -5,6 +5,7 @@
 import { KEY_MAX_AGE_DAYS, loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { loadRunnerKey } from "../keys.js";
+import { isPaused, loadSettings } from "../runnerSettings.js";
 
 const DAY_MS = 86_400_000;
 
@@ -34,5 +35,7 @@ export async function statusCommand(ctx: CommandContext): Promise<number> {
     return 1;
   }
   ctx.out(`Key:             ok, ${ageDays} days old (re-register before ${KEY_MAX_AGE_DAYS})`);
+  const settings = loadSettings(ctx.stateDir);
+  ctx.out(`Claiming:        ${isPaused(ctx.stateDir) ? "paused by you; run: fx-runner resume" : "on"} (at most ${settings.ceilingTotal} jobs, ${settings.ceilingHeavy} heavy)`);
   return 0;
 }

@@ -24,6 +24,10 @@ import { requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
+import { createAdmission } from "../daemon/admission.js";
+import { createFootprintStore } from "../daemon/footprints.js";
+import { realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
+import { isPaused, loadSettings } from "../runnerSettings.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
@@ -96,6 +100,8 @@ export interface RunHooks {
   remoteUrl?: (repo: RepoRef) => string;
   /** The release client for self-update (default: the build's). */
   updateTuf?: UpdateHooks["tuf"];
+  /** What the machine has free (default: the real one). */
+  probe?: ResourceProbe;
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -158,6 +164,7 @@ function describePoll(event: PollEvent): string | undefined {
   if (event.event === "idle" || event.event === "rate_limited") return undefined;
   if (event.event === "sandbox_unavailable") return undefined;
   if (event.event === "error") return `cloud error ${event.status}${event.code === undefined ? "" : ` ${event.code}`}`;
+  if (event.event === "refused") return `refused ${event.runId} (${event.reason})`;
   return event.event === "claimed" || event.event === "discarded" ? `${event.event} ${event.runId}` : event.event;
 }
 
@@ -210,9 +217,9 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const relay = createEventRelay();
     const stopped = new AbortController();
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
-    const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+    const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
-    const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
+    const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const sandbox = createHostSandbox({
       credentials,
       envOptions,
@@ -238,7 +245,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const nix =
       host.engine.captureLarge === undefined
         ? undefined
-        : createNixShell({ nixBin: findNix(searchPath), bwrapBin: findTool("bwrap", searchPath), ...(findTool("git", searchPath) === undefined ? {} : { gitBin: findTool("git", searchPath) }), capture: host.engine.captureLarge, dataDir: path.join(path.dirname(mirrorsRoot), "nix-shell"), identity: identityVia(host.engine.capture) });
+        : createNixShell({ nixBin: findNix(searchPath), bwrapBin: findTool("bwrap", searchPath), ...(findTool("git", searchPath) === undefined ? {} : { gitBin: findTool("git", searchPath) }), capture: host.engine.captureLarge, dataDir: path.join(path.dirname(mirrorsRoot), "nix-shell"), identity: identityVia(host.engine.capture), signal: stopped.signal });
     const handle = createJobHandler({
       ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`), onNixDetail: (detail: string) => ctx.out(`fx-runner: Nix dev shell for this job (${detail})`) }),
       ...(watch === undefined ? {} : { watch, interrupt: (job) => sandbox.interrupt(job) }),
@@ -272,6 +279,18 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
     const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobs.any(), now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
+    // macOS only: libuv's free-memory figure counts free pages alone, so the latest `vm_stat` (run through the engine's process start) gives the usable memory.
+    let vmStat: string | undefined;
+    const refreshVmStat = async (): Promise<void> => {
+      try {
+        const result = await host.engine.capture("/usr/bin/vm_stat", [], {}, 2000);
+        if (result.code === 0) vmStat = result.stdout;
+      } catch {
+        // fx-swallow-ok: without a reading the probe uses the operating system's free-page count, which is lower, so admission errs on the careful side
+      }
+    };
+    const vmStatTimer = host.platform === "darwin" && hooks.probe === undefined ? setInterval(() => void refreshVmStat(), 5000) : undefined;
+    vmStatTimer?.unref();
     try {
       // A previous run that stopped between staging and switching left a partial version directory: gone before anything else.
       await updater?.cleanup().catch(() => undefined);
@@ -279,6 +298,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       const described = describeToolchain(toolchain);
       ctx.out(`fx-runner: toolchain: ${described.line}`);
       for (const warning of described.warnings) ctx.out(`fx-runner: ${warning}`);
+      if (vmStatTimer !== undefined) await refreshVmStat();
       const first = await gate.check();
       if (!first.open) ctx.out(`fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
       lastReason = first.open ? undefined : first.reason;
@@ -287,6 +307,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         clock,
         gate,
         signal: stopped.signal,
+        // Several runs at once while the machine has room (D#6 C43-4). Settings and the pause are read again before every claim.
+        admission: createAdmission({
+          probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }),
+          footprints: createFootprintStore(stateDir),
+          settings: () => loadSettings(stateDir),
+          paused: () => isPaused(stateDir),
+          now: () => clock.now().getTime(),
+        }),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         ...(autoUpdate === undefined || updateHost === undefined
           ? {}
@@ -315,6 +343,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       if (end === "unauthorized") throw new CliError("the cloud no longer accepts this runner's key; run: fx-runner revoke --local, then register again");
       return 0;
     } finally {
+      if (vmStatTimer !== undefined) clearInterval(vmStatTimer);
       detach();
     }
   } finally {

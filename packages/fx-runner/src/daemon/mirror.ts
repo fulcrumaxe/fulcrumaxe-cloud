@@ -11,7 +11,7 @@
 import { chmodSync, lstatSync, mkdirSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { segmentUnder } from "../job/plainSegment.js";
-import { withKeyLock } from "./keyedLock.js";
+import { WaitAborted, withKeyLock } from "./keyedLock.js";
 import { CREDENTIAL_FLOOR, pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { GitPathError, type Git } from "./git.js";
 import { continuesBranch, pushPlan, type PushContinues, type PushLease } from "./push.js";
@@ -77,6 +77,8 @@ export interface MirrorDeps {
   keepClear?: readonly string[];
   /** The address of a repo's remote. Default: GitHub over https. Replaceable so a test can point at a local repository. */
   remoteUrl?: (repo: RepoRef) => string;
+  /** The daemon's stop signal: a job waiting for another job's turn on a mirror stops waiting when it aborts (D#6 C43-4). */
+  signal?: AbortSignal;
 }
 
 export interface Mirrors {
@@ -199,7 +201,11 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
    * One queue per mirror directory, shared by every `createMirrors` in the process (path A makes one per job): the key is the mirror's own
    * path. A lock covers a whole operation, and only the `Unlocked` functions are called from inside one, so a lock is never taken twice.
    */
-  const locked = <T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> => withKeyLock(dir(repo), fn);
+  const locked = <T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> =>
+    withKeyLock(dir(repo), fn, deps.signal).catch((error: unknown) => {
+      // fx-swallow-ok: an abort while waiting becomes the closed git-path code; any other failure is the operation's own and passes through
+      throw error instanceof WaitAborted ? new GitPathError("mirror_failed") : error;
+    });
 
   async function prepareUnlocked(repo: RepoRef, lease: PushLease, workspace: string, continues: PushContinues | null, review: ReviewTarget | null): Promise<{ base: string }> {
     if (review !== null) {

@@ -44,11 +44,11 @@ export interface GitPath {
   nixSource?(job: GitJob, sha: string): Promise<NixSource>;
 }
 
-export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl"> {}
+export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl" | "signal"> {}
 
 export function createGitPath(deps: GitPathDeps): GitPath {
   const git = createGit(deps);
-  const mirrors: Mirrors = createMirrors({ git, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }), ...(deps.remoteUrl === undefined ? {} : { remoteUrl: deps.remoteUrl }) });
+  const mirrors: Mirrors = createMirrors({ git, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.signal === undefined ? {} : { signal: deps.signal }), ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }), ...(deps.remoteUrl === undefined ? {} : { remoteUrl: deps.remoteUrl }) });
   // Where a push's snapshot of the workspace's git files is made: the runner's private state, which the agent's sandbox never reaches.
   const snapshotsRoot = path.join(deps.stateDir, "git-snapshots");
   sweepSnapshots(snapshotsRoot); // a daemon that stopped mid-push left its snapshot behind

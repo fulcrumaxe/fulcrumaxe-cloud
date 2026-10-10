@@ -50,7 +50,7 @@ echo "$@" >> "${dir}/calls.log"
 env > "${dir}/last-env.txt"
 case "$*" in
   *"config show trusted-users"*) cat "${dir}/trusted"; exit 0;;
-  *print-dev-env*) [ -f "${dir}/delay" ] && sleep "$(cat "${dir}/delay")"; [ -f "${dir}/fail" ] && exit 3; cat "${dir}/devenv.json"; exit 0;;
+  *print-dev-env*) mkdir -p "${dir}/running"; touch "${dir}/running/$$"; ls "${dir}/running" | wc -l >> "${dir}/seen-running.log"; [ -f "${dir}/delay" ] && sleep "$(cat "${dir}/delay")"; rm -f "${dir}/running/$$"; [ -f "${dir}/fail" ] && exit 3; cat "${dir}/devenv.json"; exit 0;;
 esac
 exit 9
 `,
@@ -86,8 +86,8 @@ const flake = (lock: string | null = GOOD_LOCK): NixSource => ({ kind: "flake", 
 const calls = (): string[] => (existsSync(path.join(dir, "calls.log")) ? readFileSync(path.join(dir, "calls.log"), "utf8").trim().split("\n") : []);
 const devCalls = (): string[] => calls().filter((line) => line.includes("print-dev-env"));
 const bwrapCalls = (): string[] => (existsSync(path.join(dir, "bwrap.log")) ? readFileSync(path.join(dir, "bwrap.log"), "utf8").trim().split("\n") : []);
-const step = (over: { storeExists?: (entry: string) => boolean; user?: string; groups?: string[]; timeoutMs?: number; nixBin?: string | undefined; bwrapBin?: string | undefined; viewFs?: NixViewFs } = {}) =>
-  createNixShell({ nixBin: "nixBin" in over ? over.nixBin : nixBin, bwrapBin: "bwrapBin" in over ? over.bwrapBin : bwrapBin, viewFs: over.viewFs ?? viewFs, capture, dataDir: data, storeExists: over.storeExists ?? (() => true), identity: async () => ({ user: over.user ?? "runner", groups: over.groups ?? ["users"] }), ...(over.timeoutMs === undefined ? {} : { timeoutMs: over.timeoutMs }) });
+const step = (over: { storeExists?: (entry: string) => boolean; user?: string; groups?: string[]; timeoutMs?: number; nixBin?: string | undefined; bwrapBin?: string | undefined; viewFs?: NixViewFs; signal?: AbortSignal } = {}) =>
+  createNixShell({ nixBin: "nixBin" in over ? over.nixBin : nixBin, bwrapBin: "bwrapBin" in over ? over.bwrapBin : bwrapBin, viewFs: over.viewFs ?? viewFs, capture, dataDir: data, storeExists: over.storeExists ?? (() => true), identity: async () => ({ user: over.user ?? "runner", groups: over.groups ?? ["users"] }), ...(over.timeoutMs === undefined ? {} : { timeoutMs: over.timeoutMs }), ...(over.signal === undefined ? {} : { signal: over.signal }) });
 
 describe("the gate and the default-branch rule", () => {
   it("control: an approved job on a default-branch commit with a pinned lock gets the filtered shell", async () => {
@@ -441,12 +441,37 @@ describe("several jobs at once (D#6 C43-3)", () => {
 
   it("jobs on different keys build at the same time", async () => {
     writeFileSync(path.join(dir, "delay"), "1");
-    const started = Date.now();
     const [one, two] = await Promise.all([step().prepare({ approved: true, sha: SHA, source: flake() }), step().prepare({ approved: true, sha: OTHER_SHA, source: flake() })]);
     expect(one).toMatchObject({ ok: true, cached: false });
     expect(two).toMatchObject({ ok: true, cached: false });
     expect(devCalls()).toHaveLength(2);
-    expect(Date.now() - started).toBeLessThan(1900);
+    // Counted, not timed: the fake nix writes how many builds were running as it started. Each counts itself, so a 2 means the other was running at the same time.
+    const seen = readFileSync(path.join(dir, "seen-running.log"), "utf8").trim().split("\n").map(Number);
+    expect(seen).toHaveLength(2);
+    expect(Math.max(...seen)).toBe(2);
+  });
+
+  it("a job waiting for another job's build of its key stops waiting when its signal aborts; the build and the other waiters go on", async () => {
+    writeFileSync(path.join(dir, "delay"), "3");
+    const input = { approved: true, sha: SHA, source: flake() };
+    const stop = new AbortController();
+    const first = step().prepare(input);
+    const patient = step().prepare(input);
+    const impatient = step({ signal: stop.signal }).prepare(input);
+    // The build has started and the others have had time to reach the flight; the build still has seconds to run.
+    // All three have passed the trusted-user check (the step just before the flight) and the build has started.
+    const deadline = Date.now() + 10_000;
+    while ((devCalls().length === 0 || calls().filter((line) => line.includes("trusted-users")).length < 3) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    stop.abort();
+    const abortedAt = Date.now();
+    expect(await impatient).toEqual({ ok: false, skip: "nix_failed" });
+    expect(Date.now() - abortedAt).toBeLessThan(500);
+    // Which of the two patient jobs reached the flight first is not fixed: one built it, the other shared it.
+    const both = [await first, await patient];
+    expect(both.every((result) => result.ok)).toBe(true);
+    expect(both.filter((result) => result.ok && result.cached)).toHaveLength(1);
+    expect(devCalls()).toHaveLength(1);
   });
 
   it("a failed build is shared by the jobs that waited for it, and the next job tries again", async () => {
