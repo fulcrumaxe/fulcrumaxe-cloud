@@ -7,6 +7,8 @@ import { CliError } from "./cliError.js";
 import { stateDirFor } from "./config.js";
 import type { CommandContext, Flags } from "./context.js";
 import { attachCommand } from "./commands/attach.js";
+import { claimingCommand, runnerSettingCommand, runnerUnsetCommand } from "./commands/claiming.js";
+import { SETTING_KEYS } from "./runnerSettings.js";
 import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { credentialsCommand } from "./commands/credentials.js";
@@ -74,6 +76,11 @@ Commands:
                      --check shows the current and the available version. --pin holds a version (installing it now, older ones included). --rollback returns to the kept previous version.
   config set auto-update on|off
                      Turn automatic updates, which happen between jobs only, on or off.
+  config set concurrency.total <1-8> | concurrency.heavy <1-4> | reserve-gb <1-256|auto>
+  config unset concurrency.total | concurrency.heavy | reserve-gb
+                     Return a setting to its automatic default.
+                     Lower the most jobs held at once, or set the memory kept free for your own work. A change applies from the next claim; running jobs are never stopped.
+  pause | resume     Stop claiming new jobs (running ones finish), or start again. The runner stays registered and keeps its place.
 `;
 
 /** Which flags each command takes, and which of them are switches. */
@@ -91,6 +98,8 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   service: { flags: [], switches: [], positionals: 1 },
   update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
   config: { flags: [], switches: [], positionals: 3 },
+  pause: { flags: [], switches: [] },
+  resume: { flags: [], switches: [] },
   credentials: { flags: [], switches: [] },
 };
 
@@ -170,6 +179,9 @@ export async function runCli(io: CliIo): Promise<number> {
       if (io.doctorHost === undefined) throw new CliError("doctor is only available from the fx-runner program");
       return await doctorCommand(ctx, io.doctorHost, { sandboxOnly: flags.has("sandbox-only") });
     }
+    if (command === "pause" || command === "resume") return claimingCommand(command, ctx);
+    if (command === "config" && positionals[0] === "unset" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerUnsetCommand(positionals[1], ctx);
+    if (command === "config" && positionals[0] === "set" && positionals[1] !== undefined && SETTING_KEYS.includes(positionals[1])) return runnerSettingCommand(positionals[1], positionals[2], ctx);
     if (command === "update" || command === "config") {
       if (io.updateHost === undefined) throw new CliError(`${command} is only available from the fx-runner program`);
       return command === "update" ? await updateCommand(flags, ctx, io.updateHost) : configCommand(positionals, ctx, io.updateHost);

@@ -1,21 +1,22 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { pathToFileURL } from "node:url";
 import { saveRegistration } from "../../src/config.js";
 import type { CommandContext } from "../../src/context.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { originHash } from "../../src/keyring.js";
-import { EXIT_RESTART_FOR_UPDATE, runCommand, type RunHost } from "../../src/commands/run.js";
+import { EXIT_RESTART_FOR_UPDATE, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
 import { updatesLine } from "../../src/commands/update.js";
 import { linkedVersion, loadUpdateState, saveUpdateState } from "../../src/update/versions.js";
 import { fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
 import { fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { until } from "../helpers/manualClock.js";
-import { KEYRING } from "../helpers/signedJob.js";
+import { KEYRING, signedJob } from "../helpers/signedJob.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 import { program, updateWorld, type UpdateWorld } from "../helpers/updateWorld.js";
 
@@ -59,12 +60,12 @@ afterEach(async () => {
 const claims = (): number => cloud.seen.filter((s) => s.path === "/api/runner/claim").length;
 const T = (v: string): string => `v${v}/fx-runner-linux-x64`;
 
-function start(hostOver: Partial<UpdateWorld["host"]> = {}) {
+function start(hostOver: Partial<UpdateWorld["host"]> = {}, hooks: Partial<RunHooks> = {}) {
   const signals = new EventEmitter() as unknown as RunHost["signals"] & EventEmitter;
   const out: string[] = [];
   const ctx: CommandContext = { stateDir: w.stateDir, out: (l) => out.push(l), err: (l) => out.push(l), now: () => new Date(), fetchFn: fetch };
   const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() };
-  const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, updateTuf: w.tuf }, { ...w.host, ...hostOver });
+  const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, updateTuf: w.tuf, ...hooks }, { ...w.host, ...hostOver });
   return { signals, out, done };
 }
 
@@ -146,4 +147,48 @@ describe("self-update in the claim loop", () => {
     run.signals.emit("SIGTERM");
     expect(await run.done).toBe(0);
   });
+});
+
+describe("several jobs in hand in the composed daemon (D#6 C43-4)", () => {
+  const roomy = { read: () => ({ totalMemBytes: 64 * 1024 ** 3, availMemBytes: 60 * 1024 ** 3, load1: 0, cores: 32, freeDiskBytes: 500 * 1024 ** 3 }) };
+  const vcs = (...args: string[]): string =>
+    execFileSync("git", args, { env: { PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+  it("self-update waits for every job: one job ending does not clear the others, and it applies once the last has ended", async () => {
+    const remote = path.join(w.root, "remote.git");
+    vcs("init", "--bare", "-b", "main", remote);
+    const seed = path.join(w.root, "seed");
+    vcs("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    vcs("-C", seed, "add", "README.md");
+    vcs("-C", seed, "commit", "-m", "first");
+    vcs("-C", seed, "push", remote, "main");
+    fake.set("hang", "");
+    const fresh = { issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() };
+    const one = signedJob(fresh);
+    const two = signedJob(fresh);
+    cloud.enqueue(one);
+    cloud.enqueue(two);
+
+    const run = start({}, { probe: roomy, remoteUrl: () => pathToFileURL(remote).href });
+    // Both runs are claimed back to back and held at once. The loop's first pass found no update and recorded the check.
+    await until(() => cloud.runs.size === 2, 20_000);
+    expect(loadUpdateState(w.stateDir).lastCheck).toBeDefined();
+    // An update appears, and the check is due again.
+    w.tuf.add(T("1.1.0"), program("1.1.0"));
+    saveUpdateState(w.stateDir, { ...loadUpdateState(w.stateDir), lastCheck: "2020-01-01T00:00:00.000Z" });
+
+    // One job ends; the other is still in hand, so nothing is checked or applied however often the loop passes.
+    cloud.stopRun(one.job.run_id, "run_terminal");
+    await new Promise((resolve) => setTimeout(resolve, 9000));
+    expect(w.tuf.listCalls).toBe(1);
+    expect(linkedVersion(w.stateDir)).toBe("1.0.0");
+
+    // The last one ends: the update is applied with no job in hand.
+    cloud.stopRun(two.job.run_id, "run_terminal");
+    await until(() => linkedVersion(w.stateDir) === "1.1.0", 40_000);
+    expect(w.tuf.fetchCalls).toEqual([T("1.1.0")]);
+    run.signals.emit("SIGTERM");
+    expect(await run.done).toBe(0);
+  }, 90_000);
 });

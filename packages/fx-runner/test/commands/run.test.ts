@@ -14,6 +14,7 @@ import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { PINNED_JOB_KEYS, keyringFor, originHash } from "../../src/keyring.js";
 import { runCli } from "../../src/cli.js";
+import type { ResourceProbe } from "../../src/daemon/resources.js";
 import { pidIsAlive, runCommand, type RunHooks, type RunHost } from "../../src/commands/run.js";
 import { readEntries, requestTakeover, takeoverState } from "../../src/watch/layout.js";
 import { authText, fixtureText, makeFake, type Fake } from "../engines/claude/harness.js";
@@ -80,6 +81,10 @@ const newSignals = (): Signals => new EventEmitter() as unknown as Signals;
 /** What the program's entry point hands `run`: the real pid, the real kill and the real process start. */
 const hostWith = (signals: RunHost["signals"]): RunHost => ({ home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() });
 
+/** A machine with room for everything: the composed-daemon tests are about other things than this machine's free memory. */
+const GB = 1024 ** 3;
+const ROOMY: ResourceProbe = { read: () => ({ totalMemBytes: 64 * GB, availMemBytes: 60 * GB, load1: 0, cores: 32, freeDiskBytes: 500 * GB }) };
+
 const claims = (): number => cloud.seen.filter((s) => s.path === "/api/runner/claim").length;
 
 function ctxOf(over: Partial<CommandContext> = {}): { ctx: CommandContext; out: string[] } {
@@ -89,6 +94,8 @@ function ctxOf(over: Partial<CommandContext> = {}): { ctx: CommandContext; out: 
 
 interface Started {
   signals: Signals;
+  /** Every line the command printed so far. */
+  out: string[];
   done: Promise<{ code: number; message: string; out: string[] }>;
 }
 
@@ -97,7 +104,7 @@ function start(over: { host?: Partial<RunHost>; hooks?: RunHooks; ctx?: Partial<
   const signals = newSignals();
   const { ctx, out } = ctxOf(over.ctx);
   const host: RunHost = { ...hostWith(signals), ...over.host };
-  const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, ...over.hooks };
+  const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, ...over.hooks };
   const done = runCommand(ctx, host, hooks).then(
     (code) => ({ code, message: "", out }),
     (error: unknown) => {
@@ -105,7 +112,7 @@ function start(over: { host?: Partial<RunHost>; hooks?: RunHooks; ctx?: Partial<
       return { code: error.exitCode, message: error.message, out };
     },
   );
-  return { signals, done };
+  return { signals, done, out };
 }
 
 async function stop(run: Started): Promise<{ code: number; message: string }> {
@@ -394,7 +401,7 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
     expect(before).toEqual([Number(new URL(cloud.origin).port)]);
 
     const { ctx, out } = ctxOf();
-    const finished = runCommand(ctx, hostWith(process), { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, remoteUrl: () => pathToFileURL(remote).href });
+    const finished = runCommand(ctx, hostWith(process), { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, remoteUrl: () => pathToFileURL(remote).href });
     await until(() => existsSync(path.join(fake.dir, "argv.txt")), 20_000);
     expect(listeningPorts()).toEqual(before);
 
@@ -488,8 +495,23 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     fake.set("hang", "");
     const run = start({ host: { sandbox } });
     await until(() => cloud.runs.has(job.job.run_id), 20_000);
-    expect(claimBodies()[0]).toEqual({});
+    // An ordinary claim: no sandbox reason, and the capacity this machine could take (D#6 C43-4).
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 8, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null } });
     expect(sandbox.calls).toHaveLength(1);
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("a machine whose free memory is below its reserve declares only the floor (one light slot) and refuses a heavy job a misbehaving cloud hands over (D#6 C43-4)", async () => {
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    const tight: ResourceProbe = { read: () => ({ ...ROOMY.read(), availMemBytes: 3 * GB }) };
+    const run = start({ hooks: { probe: tight } });
+    await until(() => run.out.some((line) => line.includes(`refused ${job.job.run_id}`)), 20_000);
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 1, in_use: 0 }, heavy: { limit: 0, in_use: 0 }, limited_by: null } });
+    // The agent never started and the run was never held: no heartbeat, no events.
+    expect(existsSync(path.join(fake.dir, "argv.txt"))).toBe(false);
+    expect(cloud.seen.some((s) => s.path.endsWith("/heartbeat") || s.path.endsWith("/events"))).toBe(false);
     expect((await stop(run)).code).toBe(0);
   });
 

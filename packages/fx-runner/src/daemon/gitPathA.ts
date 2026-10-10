@@ -28,7 +28,7 @@ export const TICKET_REUSE_MS = 240_000;
 /** Linux `statfs` types of memory-backed file systems: tmpfs and ramfs. */
 export const MEMORY_FS_TYPES: ReadonlySet<number> = new Set([0x01021994, 0x858458f6]);
 
-export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear"> {
+export interface GitPathADeps extends Omit<GitDeps, "mapHttp">, Pick<GitPathDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "signal"> {
   /** The cloud address this runner is registered with (its pinned proxy is looked up by it). */
   cloudOrigin: string;
   /** Asks the cloud for a ticket for this run: the signed client's `gitTicket`. */
@@ -66,7 +66,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
   const platform = deps.platform;
   const snapshotsRoot = path.join(deps.stateDir, "git-snapshots");
   // The mirrors are the same directory path B uses; this path only changes what it fetches from and pushes to.
-  const forObjects = createMirrors({ git, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }) });
+  const forObjects = createMirrors({ git, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.signal === undefined ? {} : { signal: deps.signal }), ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }) });
 
   /** Proxy address of a repo: the pinned origin plus the GitHub path, with the owner and name checked again. */
   const proxyUrl = (origin: string, repo: RepoRef): string => `${origin}/api/gh-proxy${new URL(githubUrl(repo)).pathname}`;
@@ -103,7 +103,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       },
     };
     const url = proxyUrl(current.origin, job.repo);
-    const mirrors = createMirrors({ git: ticketed, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }), remoteUrl: () => url });
+    const mirrors = createMirrors({ git: ticketed, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.signal === undefined ? {} : { signal: deps.signal }), ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }), remoteUrl: () => url });
     return { git: ticketed, url, mirrors };
   }
 
