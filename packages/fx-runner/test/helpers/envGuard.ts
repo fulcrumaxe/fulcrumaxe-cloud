@@ -69,6 +69,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/commands/run.ts": ["path"], // the composition root: the runner's own directory layout; the process start and the pid check arrive through its host argument
   "src/engines/claude/kit.ts": ["path"], // the engine's file layout under the state directory
   "src/daemon/push.ts": ["path"], // the workspace's git directory is `<workspace>/.git`, resolved from an absolute path
+  "src/daemon/workspaceExclude.ts": ["fs", "path"], // D#6 C44-3: no-follow append to the workspace's own `.git/info/exclude`
   "src/daemon/workspaceGit.ts": ["fs", "path"], // lstat of the agent-written `.git`: nothing in it is followed
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
