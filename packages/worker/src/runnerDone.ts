@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { MAX_ENVELOPE_INPUT_BYTES, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, redactDeep, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -180,6 +180,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
           });
           // Held under the row lock, so this is a defence: the run was running a statement ago.
           if (!moved.updated) return { kind: "fenced", reason: "run_terminal" };
+          await noteRunnerActivityCap(client, { accountId: input.accountId, runId: input.runId });
           return { kind: "recorded", verdict };
         });
       }),

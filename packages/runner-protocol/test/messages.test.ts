@@ -120,7 +120,7 @@ describe("LocalOnlyEvent", () => {
   });
 
   it("has only the Spec's fields, and reset_at (D#6 R2b-3, comment 27 item 7)", () => {
-    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "size_mb", "tool_name", "ts", "type", "usage"]);
+    expect(Object.keys(LocalOnlyEvent.innerType().shape).sort()).toEqual(["activity", "detail", "duration_ms", "engine_version", "exit_code", "file_path", "reason", "reset_at", "seq", "size_mb", "stage", "tool_name", "ts", "type", "usage"]);
   });
 
   it("takes a reset time on usage_limit_reached only, as an ISO timestamp", () => {
@@ -358,5 +358,42 @@ describe("usage event cache counts (D#6 R2b-5a E7, additive under C8 section 6)"
       expect(LocalOnlyEvent.safeParse(usageEvent(bad)).success, JSON.stringify(bad)).toBe(false);
     }
     expect(LocalOnlyEvent.safeParse(usageEvent({ cache_read: 1_000_000_000_000 })).success).toBe(true);
+  });
+});
+
+describe("activity and stage fields (D#6 C42-1, additive under C8 section 6)", () => {
+  const base = { seq: 4, ts: "2026-10-04T12:00:00.000Z" };
+  const use = (activity: unknown) => ({ ...base, type: "tool_use", tool_name: "Bash", activity });
+  const ok = (e: unknown) => LocalOnlyEvent.safeParse(e).success;
+
+  it("a tool_use takes every activity shape, and an older runner's tool_use without one still parses", () => {
+    for (const activity of [{ tool: "read", path: "src/a.ts" }, { tool: "list" }, { tool: "list", path: "src" }, { tool: "search", pattern: "createServer" }, { tool: "test", command: "pnpm test" }, { tool: "command", command: "git status" }, { tool: "command" }]) {
+      expect(ok(use(activity)), JSON.stringify(activity)).toBe(true);
+    }
+    expect(ok({ ...base, type: "tool_use", tool_name: "Bash" })).toBe(true);
+  });
+
+  it("refuses an unknown activity tool or key, a command with a control character or over 200 characters, and an over-long path or pattern", () => {
+    for (const bad of [{ tool: "write" }, { tool: "command", env: "X" }, { tool: "command", command: "ls\nrm -rf /" }, { tool: "command", command: "a\u0000b" }, { tool: "command", command: "x".repeat(201) }, { tool: "command", command: "" }, { tool: "read", path: "p".repeat(91) }, { tool: "search", pattern: "q".repeat(41) }, {}]) {
+      expect(ok(use(bad)), JSON.stringify(bad)).toBe(false);
+    }
+    expect(ok(use({ tool: "command", command: "x".repeat(200) }))).toBe(true);
+  });
+
+  it("activity belongs to tool_use only", () => {
+    for (const type of ["file_changed", "usage_limit_reached", "taken_over", "stage"]) expect(ok({ ...base, type, activity: { tool: "list" } }), type).toBe(false);
+  });
+
+  it("a stage event names one of the three stages, carries nothing else, and no other type may carry stage", () => {
+    for (const stage of ["workspace_ready", "cloned", "writing_result"]) expect(ok({ ...base, type: "stage", stage }), stage).toBe(true);
+    for (const bad of [{ stage: "sandbox_ready" }, {}, { stage: "cloned", tool_name: "Bash" }, { stage: "cloned", file_path: "a.ts" }, { stage: "cloned", usage: { input: 1 } }]) {
+      expect(ok({ ...base, type: "stage", ...bad }), JSON.stringify(bad)).toBe(false);
+    }
+    for (const type of ["tool_use", "file_changed", "usage", "taken_over", "run_ended"]) expect(ok({ ...base, type, stage: "cloned" }), type).toBe(false);
+  });
+
+  it("taken_over stays bare", () => {
+    expect(ok({ ...base, type: "taken_over" })).toBe(true);
+    expect(ok({ ...base, type: "taken_over", stage: "cloned" })).toBe(false);
   });
 });
