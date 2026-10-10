@@ -128,6 +128,16 @@ describe("heartbeat", () => {
     expect(cloud.seen.at(-1)).toMatchObject({ path: "/api/runner/heartbeat", body: { run_id: runId, lease_generation: leaseGeneration } });
   });
 
+  it("D#599 HO-1: a reply that carries a handoff request is still ok on this runner, and is not an invalid reply", async () => {
+    const { runId, leaseGeneration } = await claimOne();
+    const lease_expires_at = new Date(Date.now() + 90_000).toISOString();
+    cloud.force.heartbeat.push({ status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at, handoff: { requested: true, deadline: new Date(Date.now() + 300_000).toISOString() } }) });
+    expect(await client.heartbeat(runId, leaseGeneration)).toEqual({ kind: "ok", leaseExpiresAt: lease_expires_at });
+    // Any other key beside handoff is still refused.
+    cloud.force.heartbeat.push({ status: 200, body: { continue: true, lease_expires_at, handoff: { requested: true, deadline: lease_expires_at, note: "x" } } });
+    expect(await client.heartbeat(runId, leaseGeneration)).toMatchObject({ kind: "error", code: "invalid_reply" });
+  });
+
   it("the generation is sent back as claimed: a stale one is a stop", async () => {
     const { runId, leaseGeneration } = await claimOne();
     expect(await client.heartbeat(runId, leaseGeneration + 1)).toEqual({ kind: "stop", reason: "stale_generation" });

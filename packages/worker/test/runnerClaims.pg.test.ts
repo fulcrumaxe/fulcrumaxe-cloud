@@ -439,6 +439,19 @@ describe("runner claim, heartbeat and events [pg]", () => {
         });
       }
 
+      // D#599 HO-1: the cloud accepts `handed_off` before any runner sends it, and until HO-2b it ends nothing.
+      for (const detail of ["pushed", "push_failed", "deadline"]) {
+        it(`handed_off (${detail}) is stored as the closed code and ends nothing: the run keeps running, with no status change and no child`, async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          expect(await send(id, g, [ended(0, "handed_off", detail)])).toMatchObject({ outcome: "accepted", stored: 1, ended: null });
+          expect((await row(id)).status).toBe("running");
+          expect((await statusEvents(id)).map((e) => e.payload)).toEqual([{ from: "pending", to: "running" }]);
+          expect(await children(id)).toEqual([]);
+          expect((await events(id, "runner.event"))[0]!.payload).toMatchObject({ type: "run_ended", reason: "handed_off", detail });
+        });
+      }
+
       it("G9: the stored review details are the ones the Needs-human notice has a line for", async () => {
         for (const [reason, detail, line] of [
           ["runner_setup", "review_sha_not_in_mirror", runnerSetupText("review_sha_not_in_mirror")],

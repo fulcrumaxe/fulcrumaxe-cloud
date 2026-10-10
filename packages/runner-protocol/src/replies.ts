@@ -64,8 +64,22 @@ export type ClaimReply = z.infer<typeof ClaimReply>;
 export const ClaimRateLimitedReply = z.object({ retry_after: retryAfter(CLAIM_MIN_INTERVAL_SECONDS) }).strict();
 export type ClaimRateLimitedReply = z.infer<typeof ClaimRateLimitedReply>;
 
-/** 200 from heartbeat: the lease now ends at `lease_expires_at`. */
-export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp }).strict();
+/**
+ * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): the one cloud-to-runner signal for moving a run to the other side.
+ * It rides on the 200 heartbeat reply, never on a 409 `StopReason`, because the checkpoint turn needs a live lease. It reaches the
+ * runner's daemon and never the agent session (D#597). `requested` is only ever `true`: absence means no request. `deadline` is the
+ * moment after which the cloud takes the run's last pushed commit instead; a UTC instant of at most 30 characters. No free text.
+ */
+export const HANDOFF_DEADLINE_MAX_LENGTH = 30;
+export const HandoffSignal = z.object({ requested: z.literal(true), deadline: utcTimestamp.max(HANDOFF_DEADLINE_MAX_LENGTH) }).strict();
+export type HandoffSignal = z.infer<typeof HandoffSignal>;
+
+/**
+ * 200 from heartbeat: the lease now ends at `lease_expires_at`. `handoff` is optional: a cloud that has no request leaves it out, so a
+ * reply from a cloud older than D#599 parses unchanged. The schema stays strict, so a runner built before `handoff` existed refuses a
+ * reply that carries it; the cloud therefore sends it only to a run whose runner can read it (D#599 HO-2a).
+ */
+export const HeartbeatReply = z.object({ continue: z.literal(true), lease_expires_at: utcTimestamp, handoff: HandoffSignal.optional() }).strict();
 export type HeartbeatReply = z.infer<typeof HeartbeatReply>;
 
 /** 200 from events: `accepted` rows were newly written, `duplicates` were dropped by the database guard. */
