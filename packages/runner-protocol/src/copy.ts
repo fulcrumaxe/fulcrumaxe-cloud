@@ -64,6 +64,20 @@ export const COPY = {
   /** The reason on a queued runner run that was cancelled because its repo left `runner_local` (failure reason `execution_mode_changed`). */
   executionModeChanged: "Cancelled because this repository was moved off your runner. Retry to run it under the new setting.",
   paused: "Paused: Claude usage limit reached.",
+  /**
+   * D#6 C42-3b: why a queued runner run is not running yet, one plain sentence for each wait reason and each cause of a full runner. Fixed text with no
+   * name or time in it. The reasons `timed_out_waiting` and `paused_usage_limit` use `timedOut` and `paused` above, so each sentence is written once.
+   */
+  waitForRunner: "Waiting for your runner to come online",
+  waitForSlot: "Waiting for a free slot on your runner",
+  waitForSlotMemory: "Waiting for a free slot on your runner (memory is short)",
+  waitForSlotCpu: "Waiting for a free slot on your runner (CPU is busy)",
+  waitForSlotDisk: "Waiting for a free slot on your runner (disk is low)",
+  waitRunnerPaused: "Your runner is paused",
+  waitRunnerAtLimit: "Waiting: your runner is at its job limit",
+  waitAccountCap: "Waiting: your account's runner job limit is reached",
+  waitApproval: "Waiting for approval before this run starts on a Claude plan",
+  waitRunnerLost: "Your runner lost contact. Retrying from the last pushed commit",
   /** D#6 R4a-7: shown on a run its owner took over by hand on the runner machine (failure reason `taken_over`). `{time}` is the time of the `taken_over` event. */
   takenOver: "Taken over on the runner machine at {time}",
   /** D#6 R4a-2 (C24 section 1): `{detail}` is the closed code the runner sent, shown as it is; nothing else the runner says is shown. */

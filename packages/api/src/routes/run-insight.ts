@@ -4,6 +4,7 @@ import { outsideMeterLabel, type EndReason } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
 import { withRunnerWords } from "./runnerLineWords.js";
+import { runWaitField, runWaitSchema } from "./runWait.js";
 
 const linkedRun = z.object({ id: z.string().uuid(), role: z.string(), status: z.string(), created_at: z.string() });
 const costSource = z.enum(["operator_subscription", "customer_gateway", "customer_anthropic", "sandbox", "workflow"]);
@@ -67,6 +68,10 @@ export const runInsightResponseSchema = z.object({
   runner_usage: runnerUsageSchema.nullable().optional(),
   // D#6 C42-3: a runner run only: when the runner last checked in while the run is live, else null.
   runner_checked_in_at: z.string().nullable().optional(),
+  // D#6 C42-3b: a runner run only: its cost as a state (never a silent 0) and the sentence for a state with no figure, and why a queued run is not running yet (null when it is not waiting).
+  runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
+  runner_usage_note: z.string().nullable().optional(),
+  wait: runWaitSchema.optional(),
 });
 
 export const runInsightRoutes: RouteEntry[] = [
@@ -91,7 +96,7 @@ export const runInsightRoutes: RouteEntry[] = [
           : om.state === "unavailable" ? { state: "unavailable", reason: (om.reason ?? "unknown") as EndReason, addedUsd: om.added_usd ?? undefined }
           : { state: om.state },
       );
-      return { ...insight, lines: withRunnerWords(insight.lines), outside_meter: { ...om, text } };
+      return { ...insight, lines: withRunnerWords(insight.lines), outside_meter: { ...om, text }, ...(await runWaitField(ctx.pool, ctx.principal.accountId, insight.run)) };
     },
   },
 ];

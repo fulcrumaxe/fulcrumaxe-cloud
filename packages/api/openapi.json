@@ -3703,6 +3703,56 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "wait": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "reason": {
+                                    "type": "string",
+                                    "enum": [
+                                      "waiting_for_runner",
+                                      "waiting_for_account_cap",
+                                      "waiting_for_runner_slot",
+                                      "waiting_for_approval",
+                                      "runner_lost_retrying",
+                                      "timed_out_waiting",
+                                      "paused_usage_limit"
+                                    ]
+                                  },
+                                  "limited_by": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string",
+                                        "enum": [
+                                          "memory",
+                                          "cpu",
+                                          "disk",
+                                          "paused",
+                                          "ceiling"
+                                        ]
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "reason",
+                                  "limited_by",
+                                  "text"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -5136,6 +5186,77 @@
                       "type": [
                         "string",
                         "null"
+                      ]
+                    },
+                    "runner_usage_state": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "recorded",
+                            "not_priced",
+                            "not_recorded"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runner_usage_note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "wait": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "reason": {
+                              "type": "string",
+                              "enum": [
+                                "waiting_for_runner",
+                                "waiting_for_account_cap",
+                                "waiting_for_runner_slot",
+                                "waiting_for_approval",
+                                "runner_lost_retrying",
+                                "timed_out_waiting",
+                                "paused_usage_limit"
+                              ]
+                            },
+                            "limited_by": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "enum": [
+                                    "memory",
+                                    "cpu",
+                                    "disk",
+                                    "paused",
+                                    "ceiling"
+                                  ]
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "text": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "reason",
+                            "limited_by",
+                            "text"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
                     }
                   },

@@ -5,6 +5,7 @@ import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
 import { withRunnerWords } from "./runnerLineWords.js";
+import { runWaitField, runWaitSchema } from "./runWait.js";
 
 /**
  * D#483 P4: `GET /api/v1/work-items/{id}/activity`, what the pipeline is doing for one work item. Read only, session
@@ -36,6 +37,8 @@ export const activityResponseSchema = z.object({
       runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
       runner_usage_note: z.string().nullable().optional(),
       runner_checked_in_at: z.string().nullable().optional(),
+      // D#6 C42-3b: a runner run only: why a queued run is not running yet (null when it is not waiting).
+      wait: runWaitSchema.optional(),
     }),
   ),
   runs_truncated: z.boolean(),
@@ -71,8 +74,9 @@ export const workItemActivityRoutes: RouteEntry[] = [
     responseSchema: activityResponseSchema,
     async handler(ctx, input) {
       const read = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
-      // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows.
-      const activity = { ...read, runs: read.runs.map((r) => ({ ...r, lines: withRunnerWords(r.lines) })) };
+      // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows; a queued runner run also says why it waits.
+      const runs = await Promise.all(read.runs.map(async (r) => ({ ...r, lines: withRunnerWords(r.lines), ...(await runWaitField(ctx.pool, ctx.principal.accountId, r)) })));
+      const activity = { ...read, runs };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };

@@ -46,7 +46,8 @@
       },
       "runner_usage_state": "recorded",
       "runner_usage_note": null,
-      "runner_checked_in_at": null
+      "runner_checked_in_at": null,
+      "wait": null
     }
   ],
   "runs_truncated": false,

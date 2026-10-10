@@ -79,5 +79,8 @@
     "text": "Outside check off"
   },
   "runner_usage": null,
-  "runner_checked_in_at": "2026-10-03T10:03:30.000Z"
+  "runner_checked_in_at": "2026-10-03T10:03:30.000Z",
+  "runner_usage_state": null,
+  "runner_usage_note": null,
+  "wait": null
 }

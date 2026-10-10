@@ -86,5 +86,8 @@
     "api_equivalent_usd": 0.0147,
     "price_table_version": "2026-10-01"
   },
-  "runner_checked_in_at": null
+  "runner_checked_in_at": null,
+  "runner_usage_state": "recorded",
+  "runner_usage_note": null,
+  "wait": null
 }
