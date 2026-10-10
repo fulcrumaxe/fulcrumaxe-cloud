@@ -92,6 +92,35 @@ describe("triageIssueItem [pg]", () => {
     expect((await item(w.workItemId)).stage).toBe("triaged");
   });
 
+  const titleOf = async (id: string) => (await h.admin.query(`SELECT title FROM work_items WHERE id = $1`, [id])).rows[0].title as string | null;
+
+  it("the issue read backfills a NULL title on the webhook's row: cleaned and capped, with no GitHub call of its own", async () => {
+    const w = await world();
+    expect(await titleOf(w.workItemId)).toBeNull();
+    const raw = `<b>Fix</b>\r\n${String.fromCharCode(0x1b)}${"é".repeat(200)}`;
+    await triageIssueItem(h.runWriterPool, w.accountId, w.input({ title: raw }));
+    const got = (await titleOf(w.workItemId))!;
+    expect(got.startsWith("<b>Fix</b> éé")).toBe(true);
+    expect(Array.from(got)).toHaveLength(120);
+  });
+
+  it("the backfill happens even when triage parks the issue (junk category), so the card it keeps has its title", async () => {
+    const w = await world();
+    const out = await triageIssueItem(h.runWriterPool, w.accountId, w.input({ title: "Needs a look", category: "urgent" }));
+    expect(out.status).toBe("unclassified");
+    expect(await titleOf(w.workItemId)).toBe("Needs a look");
+  });
+
+  it("a title already on the row is never overwritten, and a title with nothing printable leaves NULL as it is", async () => {
+    const w = await world();
+    await h.admin.query(`UPDATE work_items SET title = 'Set at intake' WHERE id = $1`, [w.workItemId]);
+    await triageIssueItem(h.runWriterPool, w.accountId, w.input({ title: "Edited later on GitHub" }));
+    expect(await titleOf(w.workItemId)).toBe("Set at intake");
+    const blank = await world();
+    await triageIssueItem(h.runWriterPool, blank.accountId, blank.input({ title: "  \n\t " }));
+    expect(await titleOf(blank.workItemId)).toBeNull();
+  });
+
   it("an empty login is untrusted: refused, nothing written", async () => {
     const w = await world();
     const out = await triageIssueItem(h.runWriterPool, w.accountId, w.input({ login: "" }));

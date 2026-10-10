@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
+import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { runTriageStep } from "../plan/step.js";
 
 /**
@@ -49,7 +50,22 @@ export interface IssueTriageResult {
 
 export const SUPERSEDED_REF_PREFIX = "superseded:";
 
+/**
+ * The driver has just read the issue, so this is the one place a title is free to fill in: the webhook's row for an issue
+ * that predates title capture has none. Only a NULL title is written (a title already there, from intake or from an
+ * earlier read, is never overwritten), and it is the cleaned, capped one. No GitHub call is made for this.
+ */
+async function backfillTitle(pool: Pool, accountId: string, workItemId: string, rawTitle: string): Promise<void> {
+  const title = cleanWorkItemTitle(rawTitle);
+  if (title === null) return;
+  await withTenant(pool, accountId, async (client) => {
+    await client.query("UPDATE work_items SET title = $2 WHERE id = $1 AND account_id = $3 AND title IS NULL", [workItemId, title, accountId]);
+  });
+}
+
 export async function triageIssueItem(pool: Pool, accountId: string, input: IssueTriageInput): Promise<IssueTriageResult> {
+  // Before the triage, so an issue that triage refuses or parks still shows its title on the card it keeps.
+  await backfillTitle(pool, accountId, input.workItemId, input.title);
   const out = await runTriageStep(
     { pool, accountId, classifier: { complete: async () => input.category } },
     {

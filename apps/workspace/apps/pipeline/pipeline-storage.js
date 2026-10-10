@@ -62,13 +62,28 @@ export const kindLabel = (kind) => (typeof kind === "string" && Object.hasOwn(KI
 
 const TITLE_SHOWN = 160; // the server cuts to 120; this is only a bound on what a wrong reply can put on a card
 
+/**
+ * Control characters, the line/paragraph separators, zero-width and bidi marks, and the byte-order mark. The same rule as
+ * the server's (packages/core/src/work-items/title.ts); the app cannot import that file, so test/pipeline-storage.test.mjs
+ * checks the two agree on every code point.
+ */
+const isInvisible = (c) =>
+  c <= 0x1f ||
+  (c >= 0x7f && c <= 0x9f) ||
+  c === 0x2028 ||
+  c === 0x2029 ||
+  (c >= 0x200b && c <= 0x200f) ||
+  (c >= 0x202a && c <= 0x202e) ||
+  (c >= 0x2066 && c <= 0x2069) ||
+  c === 0xfeff;
+
 /** The title as one clean line, or null: control characters become spaces, whitespace collapses, and a very long one is cut. */
-function cleanTitle(raw) {
+export function cleanTitle(raw) {
   if (typeof raw !== "string") return null;
   let flat = "";
   for (const ch of raw) {
     const c = ch.codePointAt(0);
-    flat += c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+    flat += isInvisible(c) ? " " : ch;
   }
   flat = flat.replace(/\s+/g, " ").trim();
   if (flat === "") return null;
@@ -89,7 +104,7 @@ export function itemHeading(item, repos) {
   return { repo, number, title, kind };
 }
 
-const COLUMN_OF =new Map(COLUMNS.flatMap((c) => c.stages.map((s) => [s, c.id])));
+const COLUMN_OF = new Map(COLUMNS.flatMap((c) => c.stages.map((s) => [s, c.id])));
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PAGES = 40;
 
