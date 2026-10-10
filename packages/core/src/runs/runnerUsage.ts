@@ -63,3 +63,26 @@ export async function runnerApiEquivalentUsd(client: PoolClient, input: { from: 
   );
   return Math.round(Number(rows[0]?.sum ?? 0) * 10000) / 10000;
 }
+
+/**
+ * D#6 C42-3 (the run-level twin of C42-5's item states): what a finished runner run's cost figure is, so a screen never draws a missing figure
+ * as $0. `recorded`: tokens and a price. `not_priced`: tokens, but no API price for the run's model. `not_recorded`: the run ended and reported no
+ * usage. A run still going has no state yet (null): its usage may still arrive.
+ */
+export type RunnerUsageState = 'recorded' | 'not_priced' | 'not_recorded';
+
+/** The words every screen shows beside a state that has no dollar figure, written once so the Pipeline and the Runs app cannot differ. */
+export const RUNNER_USAGE_NOTE: Readonly<Record<Exclude<RunnerUsageState, 'recorded'>, string>> = Object.freeze({
+  not_recorded: 'This run ended without reporting how many tokens it used, so there is no cost estimate. That is not the same as $0.',
+  not_priced: "The tokens were recorded, but there is no API price for this run's model, so no dollar estimate is shown. That is not the same as $0.",
+});
+
+/** Still going: the same test the work item's own figure applies (`NOT IN ('pending', 'running')` in work-items/read.ts), so a run is never finished here and live there. */
+const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['pending', 'running']);
+
+/** Pure. The state and note of a runner run from its status and its usage object (`toRunnerUsage`'s answer), or null for a run that is not a runner run. */
+export function runnerUsageStateOf(runtime: string, status: string, usage: RunnerUsage | null | undefined): { state: RunnerUsageState | null; note: string | null } | null {
+  if (runtime !== 'runner') return null;
+  if (usage) return usage.api_equivalent_usd === null ? { state: 'not_priced', note: RUNNER_USAGE_NOTE.not_priced } : { state: 'recorded', note: null };
+  return LIVE_RUN_STATUSES.has(status) ? { state: null, note: null } : { state: 'not_recorded', note: RUNNER_USAGE_NOTE.not_recorded };
+}

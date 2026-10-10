@@ -40,6 +40,22 @@ describe("waitReasonOf with a full runner (pure)", () => {
     expect(waitReasonOf(row({ runner_slot_free: false }), NOW)).toBe("waiting_for_runner_slot");
     expect(waitReasonOf(row({ runner_slot_free: false, runner_online: false }), NOW)).toBe("waiting_for_runner");
   });
+  it("is waiting_for_account_cap when the account is at its total, or (heavy run only) at its heavy figure, even with a free runner slot (C42-3)", () => {
+    const caps = { total: 3, heavy: 1 };
+    expect(waitReasonOf(row({ account_running_total: 2, account_running_heavy: 0 }), NOW, caps)).toBeNull();
+    expect(waitReasonOf(row({ account_running_total: "3", account_running_heavy: 0 }), NOW, caps)).toBe("waiting_for_account_cap");
+    expect(waitReasonOf(row({ account_running_total: 1, account_running_heavy: 1 }), NOW, caps)).toBe("waiting_for_account_cap");
+    expect(waitReasonOf(row({ role: "code-reviewer", account_running_total: 1, account_running_heavy: 1 }), NOW, caps)).toBeNull();
+    // The claim looks at the account before the runner, so a cap outranks a full runner; no runner online outranks both.
+    expect(waitReasonOf(row({ account_running_total: 3, runner_slot_free: false }), NOW, caps)).toBe("waiting_for_account_cap");
+    expect(waitReasonOf(row({ account_running_total: 3, runner_online: false }), NOW, caps)).toBe("waiting_for_runner");
+    // Caps unknown (none given, or plan data unreadable) or counts absent: never claimed.
+    expect(waitReasonOf(row({ account_running_total: 99 }), NOW, null)).toBeNull();
+    expect(waitReasonOf(row({ account_running_total: 99 }), NOW)).toBeNull();
+    expect(waitReasonOf(row(), NOW, caps)).toBeNull();
+    // Not a pending run: no cap reason.
+    expect(waitReasonOf(row({ status: "running", account_running_total: 9 }), NOW, caps)).toBeNull();
+  });
 });
 
 describe("the runner list and wait reason with capacity [pg]", () => {
@@ -207,6 +223,68 @@ describe("the runner list and wait reason with capacity [pg]", () => {
       expect(await reason(f, pending)).toBe("waiting_for_runner_slot");
       await h.admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [held]);
       expect(await reason(f, pending)).toBeNull();
+    });
+  });
+
+  describe("waiting_for_account_cap (D#6 C42-3)", () => {
+    const withCaps = (caps: { total: number; heavy: number } | (() => never) | undefined) =>
+      h.deps({ now: () => NOW, ...(caps === undefined ? {} : { accountRunnerCaps: typeof caps === "function" ? caps : () => caps }) });
+
+    it("a run waits for the account's cap while a runner has a free slot, and the claim's own figures decide it", async () => {
+      const f = await seedF2(h.admin);
+      const r = await repo(f);
+      // Two runners with plenty of room, so no slot is ever the reason.
+      const a = await runner(f, r, { light: 4, heavy: 2 });
+      const b = await runner(f, r, { light: 4, heavy: 2 });
+      await run(f, r, { role: "executor", runnerId: a });
+      await run(f, r, { role: "code-reviewer", runnerId: b });
+      const heavy = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
+      const light = await run(f, r, { role: "code-reviewer", status: "pending", runnerId: null, lease: null });
+      // Total 2: both held. Both pending runs wait for the account.
+      expect(await getRunWait(withCaps({ total: 2, heavy: 2 }), f.accountId, heavy)).toEqual({ reason: "waiting_for_account_cap", limited_by: null });
+      expect((await getRunWait(withCaps({ total: 2, heavy: 2 }), f.accountId, light)).reason).toBe("waiting_for_account_cap");
+      // Total 3, heavy 1: the one running executor fills the heavy figure, so only the heavy run waits.
+      expect((await getRunWait(withCaps({ total: 3, heavy: 1 }), f.accountId, heavy)).reason).toBe("waiting_for_account_cap");
+      expect((await getRunWait(withCaps({ total: 3, heavy: 1 }), f.accountId, light)).reason).toBeNull();
+      // Room under both: nothing holds either run.
+      expect((await getRunWait(withCaps({ total: 3, heavy: 2 }), f.accountId, heavy)).reason).toBeNull();
+    });
+
+    it("is derived: when a held run ends the wait is gone, and a run that is not waiting never reads as capped", async () => {
+      const f = await seedF2(h.admin);
+      const r = await repo(f);
+      const id = await runner(f, r, { light: 4, heavy: 2 });
+      const held = await run(f, r, { role: "executor", runnerId: id });
+      const pending = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
+      expect(await getRunWaitReason(withCaps({ total: 1, heavy: 1 }), f.accountId, pending)).toBe("waiting_for_account_cap");
+      expect(await getRunWaitReason(withCaps({ total: 1, heavy: 1 }), f.accountId, held)).toBeNull();
+      await h.admin.query("UPDATE agent_runs SET status = 'succeeded' WHERE id = $1", [held]);
+      expect(await getRunWaitReason(withCaps({ total: 1, heavy: 1 }), f.accountId, pending)).toBeNull();
+    });
+
+    it("another account's runs do not count toward this account's cap", async () => {
+      const f = await seedF2(h.admin);
+      const other = await seedF2(h.admin);
+      const r = await repo(f);
+      const o = await repo(other);
+      await runner(f, r, { light: 4, heavy: 2 });
+      const otherRunner = await runner(other, o, { light: 4, heavy: 2 });
+      await run(other, o, { role: "executor", runnerId: otherRunner });
+      const pending = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
+      expect(await getRunWaitReason(withCaps({ total: 1, heavy: 1 }), f.accountId, pending)).toBeNull();
+    });
+
+    it("names no cap when the caps are not given or cannot be read (plan data unavailable), and falls back to the runner's own reasons", async () => {
+      const f = await seedF2(h.admin);
+      const r = await repo(f);
+      const id = await runner(f, r, { light: 1, heavy: 1 });
+      await run(f, r, { role: "executor", runnerId: id });
+      const pending = await run(f, r, { role: "executor", status: "pending", runnerId: null, lease: null });
+      expect(await getRunWaitReason(withCaps(undefined), f.accountId, pending)).toBe("waiting_for_runner_slot");
+      const unavailable = (): never => {
+        throw new Error("the plan data has no runner plan");
+      };
+      expect(await getRunWaitReason(withCaps(unavailable), f.accountId, pending)).toBe("waiting_for_runner_slot");
     });
   });
 });

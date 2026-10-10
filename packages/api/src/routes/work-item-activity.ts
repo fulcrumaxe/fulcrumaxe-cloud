@@ -3,6 +3,8 @@ import { COPY } from "@fulcrumaxe/runner-protocol";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
+import { runnerUsageSchema } from "./runs.js";
+import { withRunnerWords } from "./runnerLineWords.js";
 
 /**
  * D#483 P4: `GET /api/v1/work-items/{id}/activity`, what the pipeline is doing for one work item. Read only, session
@@ -28,6 +30,12 @@ export const activityResponseSchema = z.object({
       created_at: z.string(),
       summary: z.string().nullable(),
       lines: z.array(z.object({ at: z.string(), text: z.string() })),
+      // D#6 C42-3: where the run ran, and for a run on the person's machine its cost as a state (never a silent 0), a sentence for the states with no figure, and when the runner last checked in.
+      runtime: z.string().optional(),
+      runner_usage: runnerUsageSchema.nullable().optional(),
+      runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
+      runner_usage_note: z.string().nullable().optional(),
+      runner_checked_in_at: z.string().nullable().optional(),
     }),
   ),
   runs_truncated: z.boolean(),
@@ -62,7 +70,9 @@ export const workItemActivityRoutes: RouteEntry[] = [
     paramsSchema: z.object({ id: z.string() }),
     responseSchema: activityResponseSchema,
     async handler(ctx, input) {
-      const activity = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      const read = await getWorkItemActivity({ pool: ctx.pool, principal: ctx.principal }, input.params.id!);
+      // A runner run's end is worded here, from the protocol's copy, the same words the Runs detail shows.
+      const activity = { ...read, runs: read.runs.map((r) => ({ ...r, lines: withRunnerWords(r.lines) })) };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && (n.kind === "no_file_list" || n.kind === "respec_failed")) return { ...activity, notice: { kind: n.kind, reason: COPY[FILE_LIST_NOTICE_COPY_KEY[n.kind]] } };

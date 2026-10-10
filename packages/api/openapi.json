@@ -3589,6 +3589,96 @@
                               ],
                               "additionalProperties": false
                             }
+                          },
+                          "runtime": {
+                            "type": "string"
+                          },
+                          "runner_usage": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "credential_mode": {
+                                    "type": "string",
+                                    "enum": [
+                                      "subscription",
+                                      "api_key"
+                                    ]
+                                  },
+                                  "model": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "tokens_in": {
+                                    "type": "number"
+                                  },
+                                  "tokens_out": {
+                                    "type": "number"
+                                  },
+                                  "cache_read_tokens": {
+                                    "type": "number"
+                                  },
+                                  "cache_write_tokens": {
+                                    "type": "number"
+                                  },
+                                  "api_equivalent_usd": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "price_table_version": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "credential_mode",
+                                  "model",
+                                  "tokens_in",
+                                  "tokens_out",
+                                  "cache_read_tokens",
+                                  "cache_write_tokens",
+                                  "api_equivalent_usd",
+                                  "price_table_version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "runner_usage_state": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "recorded",
+                                  "not_priced",
+                                  "not_recorded"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "runner_usage_note": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "runner_checked_in_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           }
                         },
                         "required": [
@@ -5016,6 +5106,12 @@
                         {
                           "type": "null"
                         }
+                      ]
+                    },
+                    "runner_checked_in_at": {
+                      "type": [
+                        "string",
+                        "null"
                       ]
                     }
                   },

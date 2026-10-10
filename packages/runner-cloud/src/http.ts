@@ -99,6 +99,11 @@ export interface RunnerCloudDeps {
    */
   maxRunners?: () => number;
   /**
+   * D#6 C42-3: the most runner runs an account may have running at once, in all and of the heavy class (plan data; the figures the claim refuses
+   * against). Read only to tell a waiting run that an account cap holds it. Absent, or throwing while the plan data is unavailable, it names no cap.
+   */
+  accountRunnerCaps?: (accountId: string) => { total: number; heavy: number };
+  /**
    * Whether a repository is private, asked of GitHub (apps/web supplies it). Anything but "private" keeps a repo off a
    * runner. Absent is "unknown".
    */
