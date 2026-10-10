@@ -121,6 +121,10 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Cloud runner notices (D#6 R2b-3h): a notice that could not be written for a run, and a tick whose list came back full.
   "runner_notice_failed",
   "runner_notice_backlog",
+  // Platform invariant sweep (D#597 CC-8): one code per rule, reported once per new alert.
+  "invariant_stage_not_moved",
+  "invariant_no_activity",
+  "invariant_usage_not_recorded",
   // Runner prompt variant (D#6 R4d-1): a run was started for a repository whose execution mode changed since the prompt was built.
   "execution_mode_changed",
   // Runner review workspace (D#6 R4d-4a): the job issuer refused a review job with no valid stored head, or whose prompt names another commit.

@@ -6,6 +6,7 @@ auth/test/callback/route.ts
 branding/route.ts
 cron/api-sweep/route.ts
 cron/compute-settle-sweep/route.ts
+cron/invariant-sweep/route.ts
 cron/reconcile/route.ts
 cron/run-action-sweep/route.ts
 cron/runner-sweeper/route.ts

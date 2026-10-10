@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { redactEventPayload } from "@fx/core/src/events/redact.js";
 // A relative import: @fx/features is not a dependency of this package and this
 // change may not touch the lockfile.
@@ -742,6 +743,8 @@ export async function writeRunStatusOn(client: PoolClient, params: WriteRunStatu
       });
     }
     await emitRunStatusDomainEvent(client, params);
+    // D#597 CC-8: a run that just ended wakes the invariant sweep for the next few minutes (its gate is this marker; nothing else keeps it awake).
+    if (params.to === "succeeded" || params.to === "failed" || params.to === "timed_out") void markWorkPending("invariant-sweep");
     return { updated: true };
   }
   const { rows } = await client.query<{ status: RunStatus }>(

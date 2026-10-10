@@ -2036,6 +2036,75 @@ check_runner_notice_lister_role_shape() {
   fi
 }
 
+# D#597 CC-8 (0776): the four SECURITY DEFINER functions owned by invariant_sweep_definer. Prints their oids when each is exactly one of the four
+# signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer and nobody else but
+# the owner (no PUBLIC, no platform_ops, no app_user), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not.
+check_invariant_sweep_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY (ARRAY['public.platform_invariant_stage_not_moved(integer,integer,integer)'::regprocedure::oid,
+                                        'public.platform_invariant_no_activity(integer,integer,integer)'::regprocedure::oid,
+                                        'public.platform_invariant_usage_not_recorded(integer,integer,integer)'::regprocedure::oid,
+                                        'public.platform_invariant_alert_counts(integer)'::regprocedure::oid])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['agent_run_writer']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'invariant_sweep_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'invariant-sweep-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by invariant_sweep_definer fail the exception shape (not one of its four signatures, a loose search_path, EXECUTE for anyone but agent_run_writer and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#597 CC-8 (0776): role shape of invariant_sweep_definer. A no-op when the role does not exist. NOLOGIN and unprivileged, no member but the migration
+# role and no live membership for it, a member of no role, exactly the 30 privileges 0776 grants (column SELECT/INSERT on five tables, SELECT and INSERT on
+# platform_invariant_alerts, USAGE on public; no other table-wide grant), owning exactly its four functions and nothing else, no CREATE on public.
+check_invariant_sweep_role_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'invariant_sweep_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'invariant_sweep_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 30
+              OR EXISTS (SELECT 1 FROM held WHERE x LIKE 'table %' AND x NOT IN ('table platform_invariant_alerts SELECT', 'table platform_invariant_alerts INSERT'))
+              OR EXISTS (SELECT 1 FROM held WHERE x LIKE 'column %' AND x NOT LIKE '% SELECT' AND x NOT LIKE 'column work_item_driver_events.% INSERT') THEN 'privileges are not exactly the 30 granted by 0776' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 4
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.platform_invariant_stage_not_moved(integer,integer,integer)'::regprocedure::oid,
+                         'public.platform_invariant_no_activity(integer,integer,integer)'::regprocedure::oid,
+                         'public.platform_invariant_usage_not_recorded(integer,integer,integer)'::regprocedure::oid,
+                         'public.platform_invariant_alert_counts(integer)'::regprocedure::oid]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its four functions and nothing else' END,
+      CASE WHEN has_schema_privilege('invariant_sweep_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'invariant_sweep_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): invariant_sweep_definer role shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#6 R4a-6 (0763): the one SECURITY DEFINER function owned by runner_sandbox_status_definer, which sets or clears a runner's sandbox reason.
 # Prints its oid when it is exactly 'runner_sandbox_status_record(text)' (matched by regprocedure), pinned to search_path=pg_catalog,
 # public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant option;
@@ -2400,6 +2469,15 @@ if [ -n "$RUNNER_NOTICE_RESULT" ] && ! [[ "$RUNNER_NOTICE_RESULT" =~ ^[0-9]+(,\ 
   echo "neon-shape: internal error -- runner_notice_lister exempt function oid was not numeric: $RUNNER_NOTICE_RESULT" >&2
   exit 1
 fi
+INVARIANT_SWEEP_RESULT="$(check_invariant_sweep_exception_shape fx_neon)"
+if [[ "$INVARIANT_SWEEP_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${INVARIANT_SWEEP_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$INVARIANT_SWEEP_RESULT" ] && ! [[ "$INVARIANT_SWEEP_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- invariant_sweep_definer exempt function oids were not numeric: $INVARIANT_SWEEP_RESULT" >&2
+  exit 1
+fi
 RUNNER_SANDBOX_STATUS_RESULT="$(check_runner_sandbox_status_exception_shape fx_neon)"
 if [[ "$RUNNER_SANDBOX_STATUS_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${RUNNER_SANDBOX_STATUS_RESULT#SHAPE_FAIL:}" >&2
@@ -2463,7 +2541,7 @@ if [ -n "$RUNNER_ALLOWANCE_RESULT" ] && ! [[ "$RUNNER_ALLOWANCE_RESULT" =~ ^[0-9
   echo "neon-shape: internal error -- runner_allowance_definer exempt function oid was not numeric: $RUNNER_ALLOWANCE_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2500,6 +2578,7 @@ check_runner_git_definer_role_shape fx_neon
 check_runner_git_bytes_definer_role_shape fx_neon
 check_runner_usage_definer_role_shape fx_neon
 check_runner_notice_lister_role_shape fx_neon
+check_invariant_sweep_role_shape fx_neon
 check_runner_mode_switch_definer_role_shape fx_neon
 check_runner_sandbox_status_role_shape fx_neon
 check_runner_sandbox_status_table_shape fx_neon
@@ -2646,8 +2725,9 @@ fi
 # sandbox_reaps table and its sandbox_reap_done definer. A migration cannot run before the one it extends, so it is held back with it.
 # D#2 (0761): the lock, idle rule and cap extend 0731 (sandbox_reaps, sandbox_reap_ex_state) and 0760, so it is held back with them.
 # D#6 R2b-5a (0768): the usage definer reads agent_runs.model, a column 0010 adds, so it is held back with 0010 (a migration cannot run before the one it extends).
+# D#597 CC-8 (0776): the invariant sweep reads runner_run_usage (0768) and agent_runs.envelope/role (0010 era), so it is held back with 0768.
 # D#6 C42-5 (0775): it grants a role agent_runs.model, a column 0010 adds, so it is held back with 0010 as 0768 is.
-HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql 0761_sandbox_reap_lock.sql 0768_runner_run_usage.sql 0775_runner_run_model.sql)
+HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql 0761_sandbox_reap_lock.sql 0768_runner_run_usage.sql 0775_runner_run_model.sql 0776_platform_invariant_sweep.sql)
 
 AUDIT_WRITE_FUNCTION_PATTERN='FUNCTION[[:space:]]+("?public"?[[:space:]]*\.[[:space:]]*)?"?audit_write(_system)?"?([^A-Za-z0-9_]|$)'
 

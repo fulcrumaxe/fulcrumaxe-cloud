@@ -195,6 +195,7 @@ describe("the schedule", () => {
       { path: "/api/cron/run-action-sweep", schedule: "*/5 * * * *" },
       { path: "/api/cron/compute-settle-sweep", schedule: "*/10 * * * *" },
       { path: "/api/cron/runner-sweeper", schedule: "*/5 * * * *" },
+      { path: "/api/cron/invariant-sweep", schedule: "* * * * *" },
       { path: "/api/cron/reconcile", schedule: "7,22,37,52 * * * *" },
     ]);
   });
