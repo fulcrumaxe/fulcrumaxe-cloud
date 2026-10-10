@@ -808,6 +808,13 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
       }
       return { ctx: next, found: again };
     }
+    if (gate.state === "round_cap" || gate.state === "compute_cap") {
+      // D#6 R5b-2b-i: no reviewer is started. The gate's outcome is "ready, a person merges" with the cap as its reason, and the stop is recorded so the gate line shows.
+      const code = gate.state === "round_cap" ? "review_round_cap" : "review_compute_cap";
+      await advanceEventStep(accountId, userId, workItemId, { kind: "merge_gate", dedupeKey: `${found.headSha}:ready_human_merges:${code}`, code: "ready_human_merges", reasons: [code], headSha: found.headSha, prNumber: found.number });
+      await stopped(args, "review", code, { head: found.headSha, pr: found.number });
+      return { end: { status: "ready_human_merges", detail: code } };
+    }
     if (gate.state === "key_missing") {
       await stopped(args, "review", "review_key_missing", { head: found.headSha, pr: found.number });
       return { end: { status: "needs_human", detail: "review_key_missing" } };

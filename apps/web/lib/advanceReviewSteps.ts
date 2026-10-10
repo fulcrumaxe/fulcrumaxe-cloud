@@ -114,7 +114,7 @@ export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "re
 
 export interface VerifiedGateOut {
   /** `dispatch`: start the reviewers. `wait`: the quiet period has not ended. `key_missing`: no usable model key. `not_verified`: the repository left the mode. `refused`: a fixed `reason`. */
-  state: "dispatch" | "wait" | "key_missing" | "not_verified" | "refused";
+  state: "dispatch" | "wait" | "key_missing" | "round_cap" | "compute_cap" | "not_verified" | "refused";
   waitMs: number;
   /** The repository's mode right now (`not_verified` only). */
   executionMode: string | null;
