@@ -45,3 +45,9 @@ export async function confirmAction(message) {
   if (typeof window.fulcConfirm !== "function") return false;
   return (await window.fulcConfirm(message)) === true;
 }
+
+/** "10:03:30 UTC" for an ISO time, or null when it is not one. UTC, like the other times the runner screens word (a reset time). */
+export function clockText(iso) {
+  const t = typeof iso === "string" ? Date.parse(iso) : NaN;
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(11, 19) + " UTC" : null;
+}

@@ -6,7 +6,7 @@
 // h() as a string child, which makes a text node: nothing here builds markup from it.
 //
 // One file for both halves because the Runs app has a per-app boot-file ceiling (build/budget.mjs).
-import { h, timeNode } from "../_lib/dom.js";
+import { clockText, h, timeNode } from "../_lib/dom.js";
 import { crossesBoundary, displayText, nextCarry } from "./runs-display-filter.js";
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -85,14 +85,15 @@ export function runnerUsageLine(u) {
  * `runnerUsage` is the insight's `runner_usage`: undefined for a sandbox run (its output is unchanged), null for a run on the
  * person's machine that recorded no usage yet, else the object.
  */
-export function costRows(cost, status, runnerUsage) {
+export function costRows(cost, status, runnerUsage, usageNote) {
   const m = isObj(cost) && isObj(cost.model) ? cost.model : {};
   const c = isObj(cost) && isObj(cost.compute) ? cost.compute : {};
   const live = status === "pending" || status === "running";
   if (runnerUsage !== undefined) {
     const u = isObj(runnerUsage) ? runnerUsage : null;
     return [
-      { key: "model", label: "Model usage", value: u ? runnerUsageLine(u) : live ? "Counting…" : "Not recorded", bill: null, detail: u ? "Estimate, priced at this run's model" : null },
+      // C42-3b: the sentence the server gives a state with no figure ("That is not the same as $0") is shown under it, so a missing figure is never read as a zero.
+      { key: "model", label: "Model usage", value: u ? runnerUsageLine(u) : live ? "Counting…" : "Not recorded", bill: null, detail: typeof usageNote === "string" && usageNote !== "" ? usageNote : u ? "Estimate, priced at this run's model" : null },
       { key: "compute", label: "Compute", value: "Ran on your machine: no sandbox compute", bill: null, detail: null },
     ];
   }
@@ -125,6 +126,7 @@ const SETUP_LINES = {
   head_not_from_base: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
   sandbox_stub_committed: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
 };
+const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", writing_result: "Writing up the result" };
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const num = (v) => (Number.isFinite(v) ? v : null);
 
@@ -147,8 +149,17 @@ export function runnerEventLine(p) {
   const file = typeof e.file_path === "string" && e.file_path !== "" ? e.file_path : null;
   let line;
   switch (e.type) {
-    case "tool_use":
-      line = "Used " + (tool || "a tool") + (file ? " · " + file : "");
+    case "tool_use": {
+      // C42-4: a runner that sends the activity of a tool use (a command's first line, a kind) is drawn as the sandbox's lines are.
+      const a = isObj(e.activity) ? e.activity : null;
+      const cmd = a && typeof a.command === "string" && a.command !== "" ? a.command : null;
+      if (a && a.tool === "test") line = cmd ? "Ran tests: " + cmd : "Running the tests";
+      else if (a && a.tool === "command") line = cmd ? "Ran: " + cmd : "Running a command";
+      else line = "Used " + (tool || "a tool") + (file ? " · " + file : "");
+      break;
+    }
+    case "stage":
+      line = STAGE_LINES[e.stage] || "Runner step";
       break;
     case "file_changed":
       line = "Changed " + (file || "a file");
@@ -204,6 +215,10 @@ export function factRows(insight) {
   const rows = [];
   if (r.model) rows.push(["Model", r.model]);
   if (r.execution_mode) rows.push(["Runs in", word(r.execution_mode)]);
+  // C42-4: where a runner run is, and (live only) when its runner last checked in.
+  if (r.runtime === "runner") rows.push(["Runs on", "Your runner"]);
+  const seen = clockText(insight.runner_checked_in_at);
+  if (r.runtime === "runner" && seen) rows.push(["Runner last checked in", seen, insight.runner_checked_in_at]);
   if (r.head_sha) rows.push(["Head commit", r.head_sha.slice(0, 7), r.head_sha]);
   const lim = isObj(insight.limits) ? insight.limits : {};
   const limits = Object.keys(LIMIT_LABELS).filter((k) => k in lim).map((k) => LIMIT_LABELS[k][0] + " " + LIMIT_LABELS[k][1](lim[k]));
@@ -342,6 +357,37 @@ export function headMeta(insight) {
   return bits.length ? h("p", { class: "runs-muted runs-head-meta", "data-testid": "runs-head-meta" }, bits.join(" · ")) : null;
 }
 
+const isRunner = (insight) => insight.run.runtime === "runner";
+const isLive = (insight) => insight.run.status === "pending" || insight.run.status === "running";
+
+/**
+ * C42-4: the lines that say where a run on the person's machine stands, under the header: why it has not started (the server's sentence, a pending run
+ * only), when its runner last checked in (a running one only), and the one hint that the machine has its own live view. A sandbox run has none.
+ */
+export function runnerNotes(insight) {
+  if (!isRunner(insight) || !isLive(insight)) return [];
+  const notes = [];
+  const wait = isObj(insight.wait) && typeof insight.wait.text === "string" && insight.wait.text !== "" ? insight.wait.text : null;
+  if (insight.run.status === "pending" && wait) notes.push(h("p", { class: "runs-muted runs-head-meta", role: "status", "data-testid": "runs-wait", "data-reason": String(insight.wait.reason) }, wait));
+  const seen = clockText(insight.runner_checked_in_at);
+  if (insight.run.status === "running" && seen) notes.push(h("p", { class: "runs-muted runs-head-meta", "data-testid": "runs-checkin" }, "Runner last checked in " + seen));
+  notes.push(h("p", { class: "runs-muted runs-head-meta", "data-testid": "runs-attach-hint" }, "You can also watch this run on the runner machine with ", h("code", null, "fx-runner attach"), "."));
+  return notes;
+}
+
+/** What a run with no activity lines says: "No activity recorded." only once it is over; while it is live, that nothing is recorded yet. */
+export function emptyActivityText(insight) {
+  if (!isLive(insight)) return "No activity recorded.";
+  if (!isRunner(insight)) return "Nothing recorded yet.";
+  return insight.run.status === "running" ? "Your runner has started; nothing recorded yet" : "Not started yet; nothing recorded yet.";
+}
+
+/** The activity lines, and for a run whose runner was lost one plain line saying so (the run ended because its runner stopped checking in). */
+export function activityLines(insight) {
+  const lost = isRunner(insight) && insight.failure_reason === "runner_lost";
+  return lost ? [...insight.lines, { at: insight.run.ended_at || "", text: "Your runner stopped checking in, so this run was ended. Build again to retry." }] : insight.lines;
+}
+
 function outcomeSection(insight) {
   const why = failureText(insight);
   const body = outcomeBody(insight, insight.outcome, insight.run.role);
@@ -382,7 +428,7 @@ function outcomeBody(insight, o, role) {
 const runnerUsageOf = (insight) => (insight.run.runtime === "runner" ? (isObj(insight.runner_usage) ? insight.runner_usage : null) : undefined);
 
 function costSection(insight) {
-  const rows = costRows(insight.cost, insight.run.status, runnerUsageOf(insight)).map((r) =>
+  const rows = costRows(insight.cost, insight.run.status, runnerUsageOf(insight), insight.runner_usage_note).map((r) =>
     h(
       "div",
       { class: "runs-cost-row", "data-testid": "runs-cost-" + r.key },
@@ -394,8 +440,8 @@ function costSection(insight) {
 }
 
 function activitySection(insight, ui) {
-  const lines = insight.lines;
-  if (lines.length === 0) return section("runs-activity", "Activity", h("p", { class: "runs-muted", "data-testid": "runs-no-activity" }, "No activity recorded."));
+  const lines = activityLines(insight);
+  if (lines.length === 0) return section("runs-activity", "Activity", h("p", { class: "runs-muted", "data-testid": "runs-no-activity" }, emptyActivityText(insight)));
   const item = (l) => h("li", { class: "runs-act", "data-testid": "runs-act" }, validTime(l.at) ? h("span", { class: "runs-ev-time" }, timeNode(l.at, true)) : null, h("span", { class: "runs-act-text" }, l.text));
   const head = lines.slice(0, LINES_OPEN);
   const rest = lines.slice(LINES_OPEN);

@@ -9,7 +9,7 @@ import { h, timeNode } from "../_lib/dom.js";
 import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
-import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, runnerEventLine, titleOf } from "./runs-detail.js";
+import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, runnerEventLine, runnerNotes, titleOf } from "./runs-detail.js";
 import {
   EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, loadRun, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
@@ -122,6 +122,8 @@ function approvalBlock(run, a, approve) {
   if (!line && !note && !button) return null;
   return h("div", { class: "runs-approval", "data-testid": "runs-approval" }, line ? h("p", { class: "runs-head-meta", "data-testid": "runs-approval-line" }, line) : null, note ? h("p", { class: "runs-muted", role: "status", "data-testid": "runs-approval-note" }, displayText(note)) : null, button);
 }
+// C42-4: a run on the person's machine spends nothing here, and its cost is the estimate in the detail; a bare "$0.00" would read as "free", so the row says whose plan it is on.
+const runUsd = (run) => (run && run.runtime === "runner" ? "Your plan" : formatUsd(run.usd));
 const UNAVAILABLE = "This run isn't available right now.";
 const CAPPED = "This run has more events than the window shows.";
 const INSIGHT_UNAVAILABLE = "What this run did isn't available right now. Its events are below.";
@@ -171,7 +173,7 @@ function mountApp(contentEl) {
         { type: "button", class: "runs-row", "data-testid": "runs-row", "data-id": run.id, onClick: () => open(run.id) },
         h("span", { class: "runs-row-name" }, roleName(run.role)),
         statusChip(run.status),
-        h("span", { class: "runs-row-usd", "data-testid": "runs-usd" }, formatUsd(run.usd)),
+        h("span", { class: "runs-row-usd", "data-testid": "runs-usd" }, runUsd(run)),
         validTime(run.created_at) ? h("span", { class: "runs-row-time" }, timeNode(run.created_at, true)) : null
       )
     );
@@ -261,10 +263,11 @@ function mountApp(contentEl) {
           { class: "runs-head", "data-testid": "runs-head" },
           h("h3", { class: "runs-head-name" }, ins ? titleOf(ins.run.role) : roleName(run.role)),
           statusChip(run.status),
-          h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, formatUsd(run.usd))
+          h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, runUsd(run))
         ),
         approvalBlock(run, detail.approval, () => approve(detail)),
         ins ? headMeta(ins) : null,
+        ...(ins ? runnerNotes(ins) : []),
         ins ? headLinks(ins, { openPipeline: () => window.FULCWM && window.FULCWM.open("pipeline", { workItemId: ins.work_item.id }) }) : null,
         insight,
         foldBox(

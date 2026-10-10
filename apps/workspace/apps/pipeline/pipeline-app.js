@@ -274,7 +274,7 @@ function mountApp(contentEl, launchArg) {
     panel = runs = createRunsPanel({
       itemId: item.id,
       repoId: item.repo_id,
-      ownPlanUsd: () => (openItem && openItem.id === item.id ? openItem.own_plan_api_equivalent_usd : null),
+      ownPlan: () => (openItem && openItem.id === item.id ? openItem : null),
       onChange: () => {
         paint();
         syncApprove();
