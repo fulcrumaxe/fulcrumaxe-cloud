@@ -437,7 +437,7 @@ describe('api_tokens hardening (D#31 API-3f)', () => {
     });
   });
 
-  describe('API-15: the scopes CHECK admits exactly the five mintable scopes', () => {
+  describe('API-15 and D#597: the scopes CHECK admits exactly the six mintable scopes', () => {
     async function insertWithScopes(scopes: string[]): Promise<void> {
       await admin.query(
         `INSERT INTO api_tokens (account_id, created_by, token_hash, display_hint, scopes, expires_at)
@@ -446,7 +446,7 @@ describe('api_tokens hardening (D#31 API-3f)', () => {
       );
     }
 
-    it.each(['work_items:write', 'discussions:write'])('%s inserts, alone and beside read', async (scope) => {
+    it.each(['work_items:write', 'discussions:write', 'corrections:write'])('%s inserts, alone and beside read', async (scope) => {
       await expect(insertWithScopes([scope])).resolves.toBeUndefined();
       await expect(insertWithScopes(['read', scope])).resolves.toBeUndefined();
     });

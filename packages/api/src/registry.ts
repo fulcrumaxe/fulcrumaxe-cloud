@@ -9,10 +9,10 @@ export type MembershipRole = "owner" | "admin" | "member";
 export type IdempotencyMode = "required" | "optional" | "never";
 
 /** "Scopes that can be minted in v1" (API-1 only *declares* the shape; API-3b mints them). */
-export type Scope = "read" | "runs:cancel" | "audit:read" | "work_items:write" | "discussions:write";
+export type Scope = "read" | "runs:cancel" | "audit:read" | "work_items:write" | "discussions:write" | "corrections:write";
 
 /** Runtime companion to `Scope` -- the mintable scopes as values, read by tokens/service.ts and token-inventory.test.ts. */
-export const SCOPES: readonly Scope[] = ["read", "runs:cancel", "audit:read", "work_items:write", "discussions:write"];
+export const SCOPES: readonly Scope[] = ["read", "runs:cancel", "audit:read", "work_items:write", "discussions:write", "corrections:write"];
 
 /** Shared role ranking -- single source of truth for handler.ts's minRole gate and tokens/service.ts's scope-vs-role check. */
 export const ROLE_RANK: Record<MembershipRole, number> = { member: 0, admin: 1, owner: 2 };

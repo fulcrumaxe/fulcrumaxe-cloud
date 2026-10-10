@@ -158,6 +158,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
         'postComment:discussions:write', 'editComment:discussions:write',
         'createDiscussion:discussions:write', 'patchDiscussion:discussions:write', 'reviseDiscussion:discussions:write',
         'setWorkItemPriority:work_items:write',
+        'listCorrections:read', 'createCorrection:corrections:write',
       ].sort(),
     );
   });

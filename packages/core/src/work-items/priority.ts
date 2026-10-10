@@ -20,6 +20,8 @@ export interface SetWorkItemPriorityInput {
   /** 0 urgent, 1 high, 2 normal, 3 low. */
   priority?: number;
   move?: PriorityMove;
+  /** Set when a decided correction caused the change (D#597): the audit row then names it and says how it was decided. */
+  attribution?: { correctionId: string; via: 'assistant' | 'workspace' | 'terminal' };
 }
 
 export interface SetWorkItemPriorityCtx {
@@ -160,7 +162,22 @@ export async function setWorkItemPriority(
   validate(input);
   if (!UUID_RE.test(input.workItemId)) throw new NotFoundError(`work item ${input.workItemId} not found`);
 
-  return withTenant(ctx.pool, accountId, userId, async (client: PoolClient) => {
+  return withTenant(ctx.pool, accountId, userId, (client: PoolClient) => setWorkItemPriorityIn(client, ctx.principal, input));
+}
+
+/**
+ * The body of setWorkItemPriority on a transaction the caller already holds (withTenant for this account AND this user: the
+ * floor checks read both). A decided correction uses it so the decision, the change and the applied stamp commit together.
+ */
+export async function setWorkItemPriorityIn(
+  client: PoolClient,
+  principal: { accountId: string; userId: string },
+  input: SetWorkItemPriorityInput,
+): Promise<SetWorkItemPriorityResult> {
+  const { accountId, userId } = principal;
+  validate(input);
+  if (!UUID_RE.test(input.workItemId)) throw new NotFoundError(`work item ${input.workItemId} not found`);
+  {
     await assertActiveMembership(client, accountId, userId);
     const { rows: memberRows } = await client.query<{ role: MembershipRole }>(
       'SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2',
@@ -233,6 +250,7 @@ export async function setWorkItemPriority(
         before: { priority: target.priority, queue_rank: target.queueRank },
         after: { priority: after.priority, queue_rank: after.queueRank },
         renumbered: renumbered.length,
+        ...(input.attribution ? { correction_id: input.attribution.correctionId, via: input.attribution.via } : {}),
       }),
     ]);
     await emitDomainEvent(client, {
@@ -243,5 +261,5 @@ export async function setWorkItemPriority(
     });
 
     return { workItemId: target.id, priority: after.priority, queueRank: after.queueRank, changed: true };
-  });
+  }
 }

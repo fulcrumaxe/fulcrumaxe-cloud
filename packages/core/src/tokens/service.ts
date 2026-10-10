@@ -4,7 +4,7 @@ import { AccountNotActiveError, ForbiddenError } from '../tenancy/errors.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
 
 /** Local copy of packages/api/src/registry.ts's Scope (C7: every domain module keeps its own copy rather than sharing one type). */
-export type Scope = 'read' | 'runs:cancel' | 'audit:read' | 'work_items:write' | 'discussions:write';
+export type Scope = 'read' | 'runs:cancel' | 'audit:read' | 'work_items:write' | 'discussions:write' | 'corrections:write';
 export type MembershipRole = 'owner' | 'admin' | 'member';
 
 /**
@@ -26,6 +26,7 @@ const SCOPE_MIN_ROLE: Record<Scope, MembershipRole> = {
   'audit:read': 'admin',
   'work_items:write': 'admin',
   'discussions:write': 'member',
+  'corrections:write': 'member',
 };
 
 const DEFAULT_EXPIRES_IN_DAYS = 90;
