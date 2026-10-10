@@ -2355,6 +2355,61 @@ check_runner_capacity_table_shape() {
   fi
 }
 
+# D#605 FL-1 (0783): the two roles that write runner_facts and runner_settings, what each may hold and own (see the migration header), the exact
+# signature, search_path and ACL of the one SECURITY DEFINER function each owns, and the shape of the two tables. Each check is a no-op when its role or table does not exist.
+RUNNER_FACTS_DEFINER_FUNCTIONS="'runner_facts_record'"
+RUNNER_FACTS_DEFINER_PRIVILEGES="'column runner_facts.runner_id SELECT','column runner_facts.account_id SELECT','column runner_facts.os SELECT','column runner_facts.arch SELECT','column runner_facts.mem_gb_bucket SELECT','column runner_facts.cpus SELECT','column runner_facts.sandbox_engine SELECT','column runner_facts.reported_at SELECT','column runner_facts.runner_id INSERT','column runner_facts.account_id INSERT','column runner_facts.os INSERT','column runner_facts.arch INSERT','column runner_facts.mem_gb_bucket INSERT','column runner_facts.cpus INSERT','column runner_facts.sandbox_engine INSERT','column runner_facts.reported_at INSERT','column runner_facts.os UPDATE','column runner_facts.arch UPDATE','column runner_facts.mem_gb_bucket UPDATE','column runner_facts.cpus UPDATE','column runner_facts.sandbox_engine UPDATE','column runner_facts.reported_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+RUNNER_SETTINGS_DEFINER_FUNCTIONS="'runner_settings_apply'"
+RUNNER_SETTINGS_DEFINER_PRIVILEGES="'column runner_settings.runner_id SELECT','column runner_settings.account_id SELECT','column runner_settings.name SELECT','column runner_settings.labels SELECT','column runner_settings.rank SELECT','column runner_settings.paused_at SELECT','column runner_settings.paused_by SELECT','column runner_settings.draining SELECT','column runner_settings.drained_by SELECT','column runner_settings.updated_by SELECT','column runner_settings.updated_at SELECT','column runner_settings.runner_id INSERT','column runner_settings.account_id INSERT','column runner_settings.updated_by INSERT','column runner_settings.name UPDATE','column runner_settings.labels UPDATE','column runner_settings.rank UPDATE','column runner_settings.paused_at UPDATE','column runner_settings.paused_by UPDATE','column runner_settings.draining UPDATE','column runner_settings.drained_by UPDATE','column runner_settings.updated_by UPDATE','column runner_settings.updated_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.revoked_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+
+# Prints the oid of the function <role> owns when it is exactly <signature> (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp,
+# with an ACL that holds app_user and nobody else but the owner, no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
+check_runner_fleet_exception_shape() {
+  local dbname="$1" role="$2" signature="$3" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = to_regprocedure('$signature')
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check '$role-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by $role fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# runner_facts and runner_settings: row security enabled and forced; platform_ops, partner_user and agent_run_writer hold nothing on them; app_user
+# reads and cannot write; runners has no column for any of it.
+check_runner_fleet_table_shape() {
+  local dbname="$1" table="$2" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN NOT (c.relrowsecurity AND c.relforcerowsecurity) THEN 'row security is not enabled and forced' END,
+      CASE WHEN has_any_column_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_table_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN 'platform_ops holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_any_column_privilege('agent_run_writer', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user or agent_run_writer holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = 'public.runners'::regclass AND t.attname IN ('labels', 'rank', 'paused_at', 'draining', 'sandbox_engine', 'mem_gb_bucket') AND NOT t.attisdropped) THEN 'runners has a column for it' END)
+    FROM pg_class c WHERE c.oid = to_regclass('public.$table');" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check '$table-table-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): $table table shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#6 R7a (0770, C35 section 3.4): the one SECURITY DEFINER function owned by runner_allowance_definer, which appends a repo's sandbox allowance
 # approval or sets it aside. Prints its oid when it is exactly 'repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text)' (matched by
 # regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no
@@ -2820,7 +2875,19 @@ if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" 
   echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}"
+RUNNER_FACTS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_facts_definer 'public.runner_facts_record(text,text,integer,integer,text)')"
+RUNNER_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_settings_definer 'public.runner_settings_apply(uuid,text,text,text[],integer)')"
+for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT"; do
+  if [[ "$fleet_result" == SHAPE_FAIL:* ]]; then
+    echo "neon-shape: ${fleet_result#SHAPE_FAIL:}" >&2
+    exit 1
+  fi
+  if [ -n "$fleet_result" ] && ! [[ "$fleet_result" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+    echo "neon-shape: internal error -- runner fleet definer exempt function oid was not numeric: $fleet_result" >&2
+    exit 1
+  fi
+done
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2868,6 +2935,10 @@ check_runner_capacity_role_shape fx_neon
 check_runner_capacity_table_shape fx_neon
 check_work_item_correction_role_shape fx_neon
 check_work_item_correction_table_shape fx_neon
+check_sandbox_net_role_shape fx_neon runner_facts_definer RUNNER_FACTS_DEFINER
+check_sandbox_net_role_shape fx_neon runner_settings_definer RUNNER_SETTINGS_DEFINER
+check_runner_fleet_table_shape fx_neon runner_facts
+check_runner_fleet_table_shape fx_neon runner_settings
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
