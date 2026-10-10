@@ -171,36 +171,42 @@ export async function probeSandbox(input: SandboxProbeInput, host: SandboxHost):
   const settings = probeSettings(input);
   // Only the search path goes into the test: no credential, no token, nothing else of this shell.
   const env: Record<string, string> = { PATH: input.searchPath ?? cleanEnv({ mode: "subscription" }).PATH ?? "", LC_ALL: "C" };
-  const command = ["/bin/sh", "-c", `printf %s ${PROBE_MARKER}`];
-  let tool: string;
-  let args: string[];
-  let kind: "bubblewrap" | "seatbelt";
-  if (input.platform === "darwin") {
-    tool = "/usr/bin/sandbox-exec";
-    kind = "seatbelt";
-    args = ["-p", seatbeltProfile(settings), ...command];
-    if (!host.isFile(tool)) return failure("probe_failed_other", "sandbox-exec is not at /usr/bin/sandbox-exec");
-  } else {
-    kind = "bubblewrap";
-    try {
-      // Absolute paths found on the search path, and a refusal for a missing tool, exactly as the tier check gives them.
-      const tools = resolveSandboxTools(env.PATH ?? "", { platform: input.platform });
-      if (tools === undefined) return failure("probe_failed_other", "no sandbox tool is needed here");
-      tool = tools.bwrap;
-    } catch (error) {
-      if (!(error instanceof SandboxRefused)) throw error;
-      if (error.code === "bubblewrap_missing") return failure("bwrap_missing");
-      if (error.code === "socat_missing") return failure("socat_missing");
-      return failure("probe_failed_other", `this platform is not supported (${error.code})`);
-    }
-    args = [...bwrapArgs(settings, (target) => host.isDir(target)), "--", ...command];
-  }
-  const outcome = await host.run(tool, args, env, PROBE_TIMEOUT_MS);
+  const launch = sandboxLaunch(input, settings, env.PATH ?? "", ["/bin/sh", "-c", `printf %s ${PROBE_MARKER}`], host);
+  if (!launch.ok) return launch.result;
+  const outcome = await host.run(launch.tool, launch.args, env, PROBE_TIMEOUT_MS);
   if (outcome.timedOut) return failure("probe_failed_other", "the test command did not finish in 10 seconds");
-  if (outcome.code === 0 && outcome.stdout.trim() === PROBE_MARKER) return { ok: true, tool: kind };
+  if (outcome.code === 0 && outcome.stdout.trim() === PROBE_MARKER) return { ok: true, tool: launch.kind };
   if (input.platform === "darwin") return failure("probe_failed_other", firstLine(outcome.stderr) || "Seatbelt could not run the test command");
   if (outcome.code === null) return failure("probe_failed_other", "the sandbox tool could not be started");
-  return await classify(host, outcome.stderr, tool);
+  return await classify(host, outcome.stderr, launch.tool);
+}
+
+/** How to start a command under this platform's sandbox tool, or the probe failure that says it cannot be done. */
+export type SandboxLaunch = { ok: true; tool: string; args: string[]; kind: "bubblewrap" | "seatbelt" } | { ok: false; result: SandboxProbeResult };
+
+/**
+ * The tool and arguments that run `command` under the rules `probeSettings` builds. `readFiles` are single files laid back read-only over the hidden
+ * home directory (the shell start-up files, D#6 C44-2), nothing else. Starts no process.
+ */
+export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string, unknown>, searchPath: string, command: readonly string[], host: SandboxHost, readFiles: readonly string[] = []): SandboxLaunch {
+  if (input.platform === "darwin") {
+    const tool = "/usr/bin/sandbox-exec";
+    if (!host.isFile(tool)) return { ok: false, result: failure("probe_failed_other", "sandbox-exec is not at /usr/bin/sandbox-exec") };
+    const extra = readFiles.filter((file) => host.isFile(file)).map((file) => `(allow file-read* (literal ${quoted(file)}))`);
+    return { ok: true, tool, kind: "seatbelt", args: ["-p", seatbeltProfile(settings) + extra.join(""), ...command] };
+  }
+  try {
+    // Absolute paths found on the search path, and a refusal for a missing tool, exactly as the tier check gives them.
+    const tools = resolveSandboxTools(searchPath, { platform: input.platform });
+    if (tools === undefined) return { ok: false, result: failure("probe_failed_other", "no sandbox tool is needed here") };
+    const binds = readFiles.flatMap((file) => ["--ro-bind-try", file, file]);
+    return { ok: true, tool: tools.bwrap, kind: "bubblewrap", args: [...bwrapArgs(settings, (target) => host.isDir(target)), ...binds, "--", ...command] };
+  } catch (error) {
+    if (!(error instanceof SandboxRefused)) throw error;
+    if (error.code === "bubblewrap_missing") return { ok: false, result: failure("bwrap_missing") };
+    if (error.code === "socat_missing") return { ok: false, result: failure("socat_missing") };
+    return { ok: false, result: failure("probe_failed_other", `this platform is not supported (${error.code})`) };
+  }
 }
 
 /** What `doctor` knows about the machine; the probe's own input is made from it. */

@@ -169,11 +169,11 @@ export function describeToolchain(toolchain: Toolchain): { line: string; warning
  * What `doctor` prints: the level, the `toolchain:` line and its warnings, or undefined when the home directory is not known (the sandbox check
  * already fails for that). Missing node, or a tool left out for safety, is a warning and never a failure: not every repository needs node.
  */
-export function toolchainReport(searchPath: string, input: { home: string | undefined; stateDir: string; binaryPath: string | undefined; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { level: "INFO" | "WARN"; line: string; warnings: string[] } | undefined {
+export function toolchainReport(searchPath: string, input: { home: string | undefined; stateDir: string; binaryPath: string | undefined; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { level: "INFO" | "WARN"; line: string; warnings: string[]; hasNode: boolean } | undefined {
   if (input.home === undefined || !path.isAbsolute(input.home)) return undefined;
   const binaryDir = input.binaryPath === undefined ? path.join(input.stateDir, "engine") : path.dirname(input.binaryPath);
   const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome });
   const toolchain = resolveToolchain(searchPath, { home: input.home, stateDir: input.stateDir, binaryDir, jobAreas: [mirrorsRoot, workspaceRoot, tempRoot] });
   const described = describeToolchain(toolchain);
-  return { level: toolchain.missing.includes("node") || toolchain.refused.length > 0 ? "WARN" : "INFO", ...described };
+  return { level: toolchain.missing.includes("node") || toolchain.refused.length > 0 ? "WARN" : "INFO", ...described, hasNode: toolchain.tools.some((tool) => tool.name === "node") };
 }

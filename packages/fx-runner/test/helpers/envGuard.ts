@@ -84,6 +84,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/platform.ts": ["os"],
   "src/sandbox/select.ts": ["fs", "path"],
   "src/sandbox/probe.ts": ["path"], // the sandbox probe (`doctor`): paths for the probe's rules; the machine itself is reached only through its host argument
+  "src/sandbox/jobShellProbe.ts": ["path"], // D#6 C44-2: paths for the login-shell probe's rules and the start-up files it re-binds; the machine itself is reached only through its host argument
   "src/sandbox/probeHost.ts": ["fs"], // the real machine behind the probe: stat and a bounded read of a few small files; the process start is the engine kit's
   "src/sandbox/allowances.ts": ["fs", "path"], // D#6 R7b: realpath of an allowed path, and the target of a dangling link (lstat, readlink), before the floor is checked on where it really lands
   "src/sandbox/jobEnvFile.ts": ["fs", "path"], // D#6 C44-1: the per-job env file: lstat of the temp dir, an exclusive no-follow create (0600)

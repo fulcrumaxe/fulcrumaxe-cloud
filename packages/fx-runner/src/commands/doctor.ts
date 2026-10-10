@@ -22,6 +22,7 @@ import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
 import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
+import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
 import { updatesLine } from "./update.js";
 
@@ -39,6 +40,8 @@ export interface DoctorHost {
   /** The user's home directory, looked up by name by the caller. Without it the sandbox probe cannot be set up and says so. */
   home: string | undefined;
   xdgCacheHome?: string | undefined;
+  /** The user's login shell (an absolute path, from the SHELL variable): what the agent CLI starts its Bash tool through. Without it the job-shell check says it was not run. */
+  shell?: string | undefined;
   /** The machine behind the sandbox probe: the process start and the file reads. */
   sandbox: SandboxHost;
   /** The kernel release string; the machine's own when left out. Tests set it. */
@@ -50,13 +53,13 @@ export interface DoctorHost {
 type Level = "PASS" | "WARN" | "FAIL" | "INFO";
 
 /** The sandbox line, and under a failure the fix for this machine. A probe that cannot be set up is a failure too: there is no unsandboxed way to run. */
-async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: string | undefined, line: (level: Level, label: string, detail: string) => void): Promise<boolean> {
   try {
     detectPlatform({ platform: host.platform, osrelease: host.osrelease });
   } catch (error) {
     if (!(error instanceof SandboxRefused)) throw error;
     line("FAIL", "Sandbox", `${error.code}: ${error.message.slice(error.code.length + 2)}`);
-    return;
+    return false;
   }
   let result;
   try {
@@ -64,15 +67,16 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
   } catch {
     // fx-swallow-ok: a probe that cannot even be set up is reported as the failed check it is; the error text is not shown
     line("FAIL", "Sandbox", "probe_failed_other: the sandbox test could not be set up on this machine");
-    return;
+    return false;
   }
   if (result.ok) {
     line("PASS", "Sandbox", `a test command ran inside the job's sandbox rules (${result.tool})`);
-    return;
+    return true;
   }
   line("FAIL", "Sandbox", `${result.reason}: ${result.detail}`);
   const distro = detectDistro({ platform: host.platform, osRelease: host.sandbox.readText(OS_RELEASE), nixosMarker: host.sandbox.isFile(NIXOS_MARKER) });
   for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
+  return false;
 }
 
 /** The API key file (D#6 R5b-3): whether it is there and safe, never its value. A subscription runner does not use it. */
@@ -211,13 +215,18 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
 
   apiKeyCheck(ctx, mode, line);
 
-  await sandboxCheck(ctx, host, binaryPath, line);
+  const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
 
-  // What a job's agent can run for a project's own tests (D#6 R4d-3). Missing node is a warning, not a failure: not every repository needs it.
+  // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.
+  // What the job's login shell finds is the next check (D#6 C44-2), and it only means something when the runner's PATH has node and the sandbox runs.
   const toolchain = toolchainReport(cleanEnv({ mode: "subscription" }).PATH ?? "", { home: host.home, stateDir: ctx.stateDir, binaryPath, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
   if (toolchain !== undefined) {
-    line(toolchain.level, "Toolchain", toolchain.line);
-    for (const warning of toolchain.warnings) line("WARN", "Toolchain", warning);
+    line(toolchain.level, "Runner PATH", toolchain.line);
+    for (const warning of toolchain.warnings) line("WARN", "Runner PATH", warning);
+  }
+  if (sandboxOk) {
+    if (toolchain?.hasNode === true) await checkJobShell({ platform: host.platform, home: host.home, shell: host.shell, stateDir: ctx.stateDir, binaryPath, xdgCacheHome: host.xdgCacheHome }, host.sandbox, line);
+    else line("INFO", "Job shell", "not checked: node is not on the runner PATH");
   }
 
   if (mode === "subscription") {
