@@ -7,7 +7,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ACTIVE_STAGES, COLUMNS, KIND_LABELS, POLL_MS, columnOf, createBoard, getAllPages, groupByColumn, isUuid, itemHeading, kindLabel, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
+import { ACTIVE_STAGES, COLUMNS, KIND_LABELS, POLL_MS, cleanTitle, columnOf, createBoard, getAllPages, groupByColumn, isUuid, itemHeading, kindLabel, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
+
+// The server's rule is read as text, not imported: the app declares no dependency on @fx/core, and the rule is a plain predicate.
+const SERVER_TITLE_SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "core", "src", "work-items", "title.ts"), "utf8");
+const serverBody = /function isInvisible\(code: number\): boolean \{([\s\S]*?)\n\}/.exec(SERVER_TITLE_SRC);
+const serverInvisible = serverBody ? new Function("code", serverBody[1]) : null;
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
 const fx = (...p) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
@@ -148,6 +153,20 @@ describe("loading", () => {
       expect(itemHeading({ ...base, title: null, kind: "small" }, repos).title).toBe("Small change #595");
       expect(itemHeading({ ...base, title: null, kind: "feature", issue_number: null }, repos)).toMatchObject({ title: "Feature", number: "" });
       expect(itemHeading({ repo_id: null, kind: null, issue_number: null, title: null }, repos).title).toBe("Work item");
+    });
+    it("strips exactly the characters the server's title cleaner strips (every code point up to U+FFFF, and a supplementary one)", () => {
+      const probe = (c) => "a" + String.fromCodePoint(c) + "b";
+      expect(serverInvisible).toBeTypeOf("function"); // the server's predicate was found in its source
+      const bad = [];
+      const codes = [...Array.from({ length: 0x10000 }, (_, i) => i).filter((c) => c < 0xd800 || c > 0xdfff), 0x1f600, 0xe0001];
+      for (const c of codes) {
+        // What the server's predicate says is removed becomes a space; whitespace then collapses, as on both sides.
+        const expected = ("a" + (serverInvisible(c) ? " " : String.fromCodePoint(c)) + "b").replace(/\s+/g, " ").trim();
+        if (cleanTitle(probe(c)) !== expected) bad.push(c.toString(16));
+      }
+      expect(bad).toEqual([]);
+      // Bidi and zero-width marks are really removed (the card is never given an override).
+      for (const c of [0x200b, 0x200e, 0x202e, 0x2066, 0x2069, 0xfeff, 0x2028]) expect(cleanTitle(probe(c))).toBe("a b");
     });
     it("names every kind the pipeline uses and an unknown or inherited one as Work item", () => {
       expect(Object.keys(KIND_LABELS)).toEqual(expect.arrayContaining(["feature", "critical", "small", "bug", "doc", "process", "review", "other", "issue", "discussion"]));
