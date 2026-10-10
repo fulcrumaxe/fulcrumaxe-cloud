@@ -90,7 +90,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,

@@ -93,12 +93,12 @@ describe("the toolchain line (D#6 R4d-3)", () => {
     chmodSync(path.join(nodeDir, "node"), 0o755);
     vi.stubEnv("PATH", `${toolbin}:${nodeDir}:${HOST_PATH}`);
     const found = await doctor();
-    expect(levelOf(found.out, "Toolchain")).toBe("INFO");
-    expect(found.out).toMatch(/Toolchain:\s+found node/);
+    expect(levelOf(found.out, "Runner PATH")).toBe("INFO");
+    expect(found.out).toMatch(/Runner PATH:\s+found node/);
     expect(found.code).toBe(0);
     vi.stubEnv("PATH", toolbin);
     const none = await doctor();
-    expect(levelOf(none.out, "Toolchain")).toBe("WARN");
+    expect(levelOf(none.out, "Runner PATH")).toBe("WARN");
     expect(none.out).toContain("node not found: projects that need it cannot run their tests");
   });
 });
