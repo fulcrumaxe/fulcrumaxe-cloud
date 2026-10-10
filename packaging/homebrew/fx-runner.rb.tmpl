@@ -1,0 +1,38 @@
+# Rendered by packages/fx-runner/scripts/release-render.mjs from release-manifest.json: the version, and the SHA-256 and file name of
+# each platform's executable. A rendered copy has no placeholder left. Publishing it to a tap is the owner's step.
+class FxRunner < Formula
+  desc "The fulcrumaxe local runner"
+  homepage "https://github.com/fulcrumaxe/fulcrumaxe-cloud"
+  version "@FX_VERSION@"
+  license :cannot_represent
+
+  on_macos do
+    on_arm do
+      url "https://github.com/fulcrumaxe/fulcrumaxe-cloud/releases/download/v@FX_VERSION@/@FX_FILE_DARWIN_ARM64@"
+      sha256 "@FX_SHA256_DARWIN_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/fulcrumaxe/fulcrumaxe-cloud/releases/download/v@FX_VERSION@/@FX_FILE_DARWIN_X64@"
+      sha256 "@FX_SHA256_DARWIN_X64@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/fulcrumaxe/fulcrumaxe-cloud/releases/download/v@FX_VERSION@/@FX_FILE_LINUX_ARM64@"
+      sha256 "@FX_SHA256_LINUX_ARM64@"
+    end
+    on_intel do
+      url "https://github.com/fulcrumaxe/fulcrumaxe-cloud/releases/download/v@FX_VERSION@/@FX_FILE_LINUX_X64@"
+      sha256 "@FX_SHA256_LINUX_X64@"
+    end
+  end
+
+  def install
+    bin.install Dir["fx-runner-*"].first => "fx-runner"
+  end
+
+  test do
+    assert_match "fx-runner #{version}", shell_output("#{bin}/fx-runner --version")
+  end
+end

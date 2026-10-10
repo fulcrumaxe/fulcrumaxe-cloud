@@ -173,6 +173,25 @@ name the file in `FX_RUNNER_PROTECTION_BYPASS_FILE`:
 - Vercel's protection answer is recognised by a 401 whose JSON body says `protection.vercel_auth_enabled` is true or whose
   `error.message` is "Protected deployment". The cloud's own refusals (for example `runner_revoked`) are never taken for it.
 
+## Install
+
+Each release has `install.sh` with the SHA-256 of every executable written into it, the four executables, `release-manifest.json`,
+`SHA256SUMS` and a Homebrew formula (`fx-runner.rb`). `sh install.sh` downloads the executable for your machine over HTTPS from
+the release page, checks it against the hash in the script, installs it under `~/.fx-runner` (or `FX_RUNNER_HOME` if you set it) and runs `doctor --sandbox-only`.
+Later updates are verified through the signed update metadata, not by the script. The formula is rendered from the same manifest
+(`packaging/homebrew/fx-runner.rb.tmpl`); putting it in a tap is the owner's step.
+
+The program is a Node single-executable, so it honours `NODE_OPTIONS` and `NODE_PATH` like any Node program. `install.sh` clears both
+for the binary it has just downloaded and not yet verified; set them yourself only on purpose.
+
+### Releasing
+
+`.github/workflows/runner-release.yml` (started by hand, hosted runners only) builds each platform twice into fresh directories and
+fails on any difference, runs the built program, requires `test/release/seaReal.test.ts` to have run on Linux x64, uploads a draft
+release, and signs in the `release` environment (the owner approves each release). `.github/workflows/tuf-timestamp.yml` re-signs the
+timestamp weekly. With no secrets set, signing fails with "release signing not configured" and the release stays a draft. The
+logic is in `scripts/release-*.{mjs,sh}`; the keys are in `docs/release-keys.md`.
+
 ## Updates (the TUF client)
 
 `src/update/tuf.ts` is the client that checks a release before anything installs it. It uses `tuf-js` (exact version in the
@@ -213,6 +232,12 @@ runs the link, so a switch takes effect at the next start.
   "A newer version is available: run brew upgrade fx-runner".
 - `doctor` has an `Updates` line: the version, pinned or not, automatic updates on or off, the last check, and "updates paused:
   {reason}" when they are.
+
+## Third-party components
+
+Claude Code is not part of this release. You install it yourself from Anthropic, under Anthropic's terms, and the runner only
+checks that it is there. The executable embeds the Node runtime (an official nodejs.org release, checked against its published
+SHA-256) and bundles this package's own dependencies. The licence notices for third-party code are in `THIRD-PARTY-NOTICES` at the root of the source repository; they are not among the release files, and the build strips legal comments from the bundle.
 
 ## Boundaries
 

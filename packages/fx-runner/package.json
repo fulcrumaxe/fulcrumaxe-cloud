@@ -27,6 +27,7 @@
     "@tufjs/models": "5.0.0",
     "@types/node": "^24.19.0",
     "esbuild": "0.28.2",
+    "js-yaml": "^4.3.2",
     "postject": "1.0.0-alpha.6",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -8,7 +8,7 @@
  */
 export const COPY = {
   localOnly:
-    "The agent runs on your machine, signed in with your own Claude login or API key, and pushes with your own git credentials. Our cloud never receives your source files, diffs or Claude credentials. It sees pull-request titles and descriptions, commit messages, the paths of changed files, and run status. You can check this: the runner is open source, and every message it can send is defined in its public protocol package. Reviews run on your machine. A person on your team merges every PR, unless a repo admin turns on auto-merge for this repo.",
+    "The agent runs on your machine, signed in with your own Claude login or API key, and pushes with your own git credentials. Our cloud never receives your source files, diffs or Claude credentials. It sees pull-request titles and descriptions, commit messages, the paths of changed files, and run status. You can check this: the runner's source is published for anyone to read, and every message it can send is defined in its protocol package. Reviews run on your machine. A person on your team merges every PR, unless a repo admin turns on auto-merge for this repo.",
   /** Shown where an owner or admin turns auto-merge on for one repo. */
   localAutoMerge:
     "Reviews for this repo run on your machine, through your runner and your own Claude plan. With auto-merge on, a pull request that passes those reviews, your CI and your branch protection merges without a person.",
@@ -85,7 +85,7 @@ export const COPY = {
   /** D#6 R2b-3f: `pr_rejected` when no HTTP status exists, because an open pull request on the run's branch was not opened by fulcrumaxe and was left untouched. */
   prRejectedForeign:
     "GitHub already has an open pull request for this branch that fulcrumaxe did not open, so it was left alone. The branch is kept so you can open the PR yourself.",
-  pricingLine: "The runner is free and open source. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
+  pricingLine: "The runner is free to use. The $49 plan pays for the cloud side: dispatch, verification, the dashboard and review compute.",
 } as const;
 
 export type CopyKey = keyof typeof COPY;
