@@ -253,6 +253,32 @@ describe("the other messages", () => {
     }
   });
 
+  it("C43-2a: capacity is optional, and a claim without it parses exactly as before", () => {
+    const old = RUNNER_MESSAGES.claim.safeParse({});
+    expect(old.success).toBe(true);
+    expect(old.success && old.data).toEqual({});
+    expect(old.success && "capacity" in old.data).toBe(false);
+    const withReason = RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: "bwrap_missing" });
+    expect(withReason.success && withReason.data).toEqual({ sandbox_unavailable: "bwrap_missing" });
+  });
+
+  it("C43-2a: capacity reports limit and in_use per class as whole numbers (light 0..8, heavy 0..4), and refuses anything else", () => {
+    const c = (l: [number, number], h: [number, number]) => ({ light: { limit: l[0], in_use: l[1] }, heavy: { limit: h[0], in_use: h[1] } });
+    for (const ok of [c([0, 0], [0, 0]), c([8, 8], [4, 4]), c([3, 2], [1, 0]), c([2, 3], [0, 1])]) {
+      const r = RUNNER_MESSAGES.claim.safeParse({ capacity: ok });
+      expect(r.success && r.data).toEqual({ capacity: ok });
+    }
+    const good = c([3, 1], [1, 0]);
+    const bad: unknown[] = [
+      c([9, 0], [1, 0]), c([3, 9], [1, 0]), c([3, 0], [5, 0]), c([3, 0], [1, 5]), c([-1, 0], [1, 0]), c([3, -1], [1, 0]), c([1.5, 0], [1, 0]), c([3, 0.5], [1, 0]),
+      { ...good, light: { limit: "3", in_use: 0 } }, { ...good, light: { limit: null, in_use: 0 } }, { ...good, light: { limit: Number.NaN, in_use: 0 } },
+      { ...good, light: { limit: 3 } }, { ...good, heavy: { in_use: 0 } }, { ...good, light: { ...good.light, extra: 1 } }, { ...good, total: 2 },
+      { light: good.light }, { heavy: good.heavy }, { light: 3, heavy: 1 }, {}, null, 3, "1", [],
+    ];
+    for (const capacity of bad) expect(RUNNER_MESSAGES.claim.safeParse({ capacity }).success, JSON.stringify(capacity)).toBe(false);
+    expect(RUNNER_MESSAGES.claim.safeParse({ capacity: good, extra: 1 }).success).toBe(false);
+  });
+
   it("claim is empty, or names one closed sandbox reason (C16 section 1.3), and revoke's reason is short, printable text", () => {
     expect(RUNNER_MESSAGES.claim.safeParse({}).success).toBe(true);
     for (const reason of SANDBOX_UNAVAILABLE_REASONS) expect(RUNNER_MESSAGES.claim.safeParse({ sandbox_unavailable: reason }).success, reason).toBe(true);

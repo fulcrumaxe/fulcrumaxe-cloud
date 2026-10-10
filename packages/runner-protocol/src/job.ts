@@ -41,6 +41,30 @@ export const REVIEW_JOB_ROLES = ["code-reviewer", "security-reviewer", "acceptan
 export type ReviewJobRole = (typeof REVIEW_JOB_ROLES)[number];
 export const isReviewJobRole = (role: string): role is ReviewJobRole => (REVIEW_JOB_ROLES as readonly string[]).includes(role);
 
+/**
+ * D#6 C43-2a: the slot class of a job. The class comes from the job's signed role, so no new signed field exists. The runner and
+ * the cloud both read this one table. Heavy jobs build and run full test suites; every other runner-eligible role is light.
+ */
+export const JOB_CLASSES = ["light", "heavy"] as const;
+export type JobClass = (typeof JOB_CLASSES)[number];
+export const JOB_CLASS_BY_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], JobClass>> = {
+  executor: "heavy",
+  "acceptance-tester": "heavy",
+  "project-manager": "light",
+  "technical-architect": "light",
+  "product-owner": "light",
+  "cost-analyst": "light",
+  "performance-expert": "light",
+  "security-expert": "light",
+  "docs-writer": "light",
+  "accessibility-reviewer": "light",
+  "code-reviewer": "light",
+  "security-reviewer": "light",
+  debater: "light",
+};
+/** A role missing from the table counts as heavy, the scarcer slot (fail closed). */
+export const jobClassOfRole = (role: string): JobClass => (Object.hasOwn(JOB_CLASS_BY_ROLE, role) ? JOB_CLASS_BY_ROLE[role as keyof typeof JOB_CLASS_BY_ROLE] : "heavy");
+
 export const JOB_MODES =["local", "verified"] as const;
 
 /** What the run is for. Closed. The runner picks its tools from the role, never from this. */
