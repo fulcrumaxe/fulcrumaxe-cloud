@@ -23,6 +23,11 @@
       "url": "https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-x86_64-unknown-linux-musl.tar.gz",
       "sha256": "306865417d4ee7a927785852910a527f41e1e159add390ac5ae3accb67d44a13"
     },
+    "pnpm": {
+      "version": "11.27.0",
+      "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-linux-x64.tar.gz",
+      "sha256": "14ed04e631e4563abf3570dda1a365316683149a482b741a2db37e495f6b9cdb"
+    },
     "opencode": {
       "version": "1.18.34",
       "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.34/opencode-linux-x64-baseline.tar.gz",

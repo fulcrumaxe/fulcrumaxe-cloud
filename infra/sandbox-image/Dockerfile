@@ -14,15 +14,20 @@ ARG CODEX_URL
 ARG CODEX_SHA256
 ARG OPENCODE_URL
 ARG OPENCODE_SHA256
+ARG PNPM_URL
+ARG PNPM_SHA256
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
-    : "${NODE_URL:?}" "${NODE_SHA256:?}" "${CLAUDE_URL:?}" "${CLAUDE_SHA256:?}" "${CODEX_URL:?}" "${CODEX_SHA256:?}" "${OPENCODE_URL:?}" "${OPENCODE_SHA256:?}"; \
+    : "${NODE_URL:?}" "${NODE_SHA256:?}" "${CLAUDE_URL:?}" "${CLAUDE_SHA256:?}" "${CODEX_URL:?}" "${CODEX_SHA256:?}" "${OPENCODE_URL:?}" "${OPENCODE_SHA256:?}" "${PNPM_URL:?}" "${PNPM_SHA256:?}"; \
     install -d -m 0755 /opt/fx /opt/fx/bin /tmp/dl; \
     curl -fsSL --retry 3 -o /tmp/dl/node.tar.xz "$NODE_URL"; \
     echo "$NODE_SHA256  /tmp/dl/node.tar.xz" | sha256sum -c -; \
     tar -xJf /tmp/dl/node.tar.xz --wildcards --strip-components=2 -C /opt/fx/bin '*/bin/node'; \
+    tar -xJf /tmp/dl/node.tar.xz --wildcards --strip-components=1 -C /opt/fx '*/lib/node_modules/npm'; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /opt/fx/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /opt/fx/bin/npx; \
     curl -fsSL --retry 3 -o /opt/fx/bin/claude "$CLAUDE_URL"; \
     echo "$CLAUDE_SHA256  /opt/fx/bin/claude" | sha256sum -c -; \
     curl -fsSL --retry 3 -o /tmp/dl/codex.tar.gz "$CODEX_URL"; \
@@ -32,6 +37,11 @@ RUN set -eu; \
     curl -fsSL --retry 3 -o /tmp/dl/opencode.tar.gz "$OPENCODE_URL"; \
     echo "$OPENCODE_SHA256  /tmp/dl/opencode.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/dl/opencode.tar.gz -C /opt/fx/bin opencode; \
+    curl -fsSL --retry 3 -o /tmp/dl/pnpm.tar.gz "$PNPM_URL"; \
+    echo "$PNPM_SHA256  /tmp/dl/pnpm.tar.gz" | sha256sum -c -; \
+    install -d -m 0755 /opt/fx/pnpm; \
+    tar -xzf /tmp/dl/pnpm.tar.gz -C /opt/fx/pnpm; \
+    ln -s ../pnpm/pnpm /opt/fx/bin/pnpm; \
     chmod 0755 /opt/fx/bin/node /opt/fx/bin/claude /opt/fx/bin/codex /opt/fx/bin/opencode; \
     chown -R root:root /opt/fx
 
@@ -39,9 +49,10 @@ RUN set -eu; \
 FROM docker.io/library/ubuntu@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78
 ENV LANG=C.UTF-8
 ARG DEBIAN_FRONTEND=noninteractive
+# libatomic1: the pnpm release binary links it dynamically (found by running the built image).
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates sudo git \
+    && apt-get install -y --no-install-recommends ca-certificates sudo git libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 RUN printf '%s\n' \
       'Defaults always_set_home' \
