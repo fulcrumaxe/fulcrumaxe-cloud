@@ -182,14 +182,20 @@ const RUN_ENDED_ENDINGS = {
   runner_shutdown: { to: "failed", reason: "runner_lost", followUp: true },
   // D#6 R4a-3b (C25 section 1.4): the fix round's branch moved while the agent worked. A retry runs on the new head, so no automatic follow-up.
   push_rejected: { to: "failed", reason: "push_rejected", followUp: false },
-} as const satisfies Record<RunEndedReason, Ending>;
+} as const satisfies Record<Exclude<RunEndedReason, "handed_off">, Ending>;
+/**
+ * D#599 HO-1: `handed_off` is deliberately not in the table. The cloud must accept the event before any runner sends it (the cloud
+ * deploys first), but it ends nothing until the handoff completion (HO-2b) makes the parent terminal and the child run in one
+ * transaction. Until then the event is stored and the run stays as it is.
+ */
+const RUN_ENDED_ENDINGS_BY_REASON: Readonly<Partial<Record<RunEndedReason, Ending>>> = RUN_ENDED_ENDINGS;
 
 /** The ending a stored event causes, or null for an event that ends nothing. */
 function endingOf(event: LocalOnlyEvent): Ending | null {
   if (event.type === "usage_limit_reached") return { to: "failed", reason: ENDING_EVENTS.usage_limit_reached, followUp: true };
   if (event.type === "credential_mismatch") return { to: "failed", reason: ENDING_EVENTS.credential_mismatch, followUp: false };
   // Own-property lookup: a reason that is not a key of the table (such as "constructor") ends nothing, whatever parsed the event.
-  if (event.type === "run_ended" && event.reason !== undefined && Object.hasOwn(RUN_ENDED_ENDINGS, event.reason)) return RUN_ENDED_ENDINGS[event.reason];
+  if (event.type === "run_ended" && event.reason !== undefined && Object.hasOwn(RUN_ENDED_ENDINGS_BY_REASON, event.reason)) return RUN_ENDED_ENDINGS_BY_REASON[event.reason] ?? null;
   return null;
 }
 

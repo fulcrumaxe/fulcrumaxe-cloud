@@ -62,7 +62,7 @@ export type RunnerStage = z.infer<typeof RunnerStage>;
  * closed set, and the only thing a `run_ended` event says: no job content, no error text. Each reason has a closed `detail` set
  * where C24 gives one, and none otherwise (`DETAILS_OF_RUN_ENDED` maps a reason to its set; an empty set means "no detail").
  */
-export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected"] as const;
+export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected", "handed_off"] as const;
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
@@ -106,7 +106,14 @@ export const RUNNER_SETUP_DETAILS = [
   // D#6 R5b-3 (C38 section 1; additive under C8 section 6): an api_key runner's key file is missing or unusable when a job starts. The cloud deploys first.
   "api_key_not_configured",
 ] as const;
-export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS] as const;
+/**
+ * D#599 HO-1 (additive under C8 section 6; the cloud deploys first): how a handed-off run ended its side of the move. `pushed`: the
+ * checkpoint's commit reached the run branch. `push_failed`: it did not, and the cloud continues from the branch head it reads itself.
+ * `deadline`: the checkpoint did not finish in time. Fixed words only; the note travels in the existing checkpoint event, not here.
+ */
+export const HANDED_OFF_DETAILS = ["pushed", "push_failed", "deadline"] as const;
+// `push_failed` is already a runner_setup code; the event's detail enum lists each word once.
+export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS, "pushed", "deadline"] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];
 
 /** D#6 R5a-2b (C27 section 4.5): the size of the largest commit, in whole MB, rounded up. Over the proxy's 4 MB push limit, so it starts at 5. */
@@ -121,9 +128,14 @@ export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetai
   runner_shutdown: [],
   // D#6 R4a-3b (C25 section 1.4): the push to a fix round's branch was rejected because the branch moved while the agent worked. No detail.
   push_rejected: [],
+  // D#599 HO-1: the run stopped at a checkpoint so the other side can continue it. See `HANDED_OFF_DETAILS`.
+  handed_off: HANDED_OFF_DETAILS,
 };
 
 const TAKEN_OVER_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb", "activity", "stage"] as const;
+
+// D#599 HO-1: a handed-off `run_ended` is a reason and one fixed word, as `taken_over` is a timestamp. Every other event field is refused on it.
+const HANDED_OFF_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "size_mb", "activity", "stage"] as const;
 
 const STAGE_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb"] as const;
 
@@ -185,6 +197,9 @@ export const LocalOnlyEvent = z
     }
     if (event.reason === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "run_ended names its reason", path: ["reason"] });
     else if (event.detail !== undefined && !DETAILS_OF_RUN_ENDED[event.reason].includes(event.detail)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "detail is not one of this reason's codes", path: ["detail"] });
+    if (event.reason === "handed_off") {
+      for (const field of HANDED_OFF_FORBIDDEN) if (event[field] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a handed_off run_ended carries no field but seq, ts, reason and detail", path: [field] });
+    }
   });
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 

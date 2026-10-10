@@ -135,17 +135,18 @@ describe("LocalOnlyEvent", () => {
 
   describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
     const ended = { ...EVENT, type: "run_ended" };
-    it("is a local-only event type, with exactly the seven reasons", () => {
+    it("is a local-only event type, with exactly the eight reasons", () => {
       expect(LOCAL_ONLY_EVENT_TYPES).toContain("run_ended");
-      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
+      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "handed_off", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
     });
 
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
-      for (const reason of Object.keys(DETAILS_OF_RUN_ENDED)) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
+      for (const reason of Object.keys(DETAILS_OF_RUN_ENDED).filter((r) => r !== "handed_off")) expect(LocalOnlyEvent.safeParse({ ...ended, reason }).success, reason).toBe(true);
+      // A handed_off run_ended carries no tool_name or file_path (see handoff.test.ts), so it is checked there on a bare event.
       expect(DETAILS_OF_RUN_ENDED.job_refused).toEqual(["job_signature_invalid", "run_id_mismatch", "duplicate_job", "unknown_role", "task_prompt_hash_mismatch", "role_card_hash_mismatch", "role_tools_mismatch", "continues_wrong_role", "review_sha_missing", "review_wrong_role", "sandbox_allowance_forbidden"]);
       expect(DETAILS_OF_RUN_ENDED.runner_setup).toEqual(["sandbox_unavailable", "claude_binary_missing", "claude_version_unsupported", "claude_flags_unsupported", "auth_missing", "bad_start_options", "no_init_line", "permission_mode_forced", "continuation_branch_missing", "other", "git_proxy_unpinned", "git_ticket_refused", "path_a_no_mirror", "clone_limited", "push_too_large", "push_incomplete", "model_unsupported", "push_ref_refused", "snapshot_refused", "push_failed", "mirror_failed", "mirror_dir_insecure", "git_version_unsupported", "workspace_failed", "workspace_git_refused", "head_not_from_base", "sandbox_stub_committed", "review_sha_not_in_mirror", "api_key_not_configured"]);
       for (const [reason, details] of Object.entries(DETAILS_OF_RUN_ENDED)) {
-        for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, reason, detail }).success, `${reason}/${detail}`).toBe(true);
+        for (const detail of details) expect(LocalOnlyEvent.safeParse({ ...ended, ...(reason === "handed_off" ? { tool_name: undefined, file_path: undefined } : {}), reason, detail }).success, `${reason}/${detail}`).toBe(true);
       }
     });
 
