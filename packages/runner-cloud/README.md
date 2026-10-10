@@ -136,10 +136,14 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
 ## Execution mode, auto-merge and the waiting notices (R2b)
 
 - `POST /api/runners/repos/:id/execution-mode` (owner or admin; a member gets 403) takes one of three strict bodies. A mode
-  change (`sandbox` or `runner_local`; `runner_verified` is refused until it exists) and turning auto-merge on both need the
+  change (`sandbox`, `runner_local` or `runner_verified`) and turning auto-merge on both need the
   repository's full name typed back, compared exactly on the server (400 `confirmation_mismatch`, nothing written). Turning
   it on also needs the sha256 of the Local auto-merge wording this server ships (409 `copy_changed`). Turning it off needs
-  neither. A public repo, or one whose visibility cannot be read, is never put on a runner (409). Leaving `runner_local`
+  neither. Moving a repo onto `runner_verified` (cloud-verified review, D#6 R5b-2b-ii) takes `{ mode, confirm_repo, copy_sha256 }`:
+  the hash of the cloud-verified wording (409 `copy_changed`, after the name) and a usable connected model key, read in the
+  gate's order (409 `api_key_required` when there is none or only a broken one). Leaving to `sandbox` cancels the queued runner
+  runs; moving between `runner_local` and `runner_verified` cancels none. Migration 0774 widens the two approval definers
+  (`agent_run_approve`, `agent_run_runner_auto_approve`) and their row policies to both runner modes. A public repo, or one whose visibility cannot be read, is never put on a runner (409). Leaving `runner_local`
   turns the opt-in off in the same transaction; the audit rows come from definers (`repo_local_review_optin_set`,
   `repo_execution_mode_switch_audit`), since the web tier cannot write the audit log.
 - Leaving `runner_local` also cancels every pending runner run of the repo in that same transaction (correction C24 section 2):

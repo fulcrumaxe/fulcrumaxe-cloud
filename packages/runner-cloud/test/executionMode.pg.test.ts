@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
-import { LOCAL_AUTO_MERGE_COPY_SHA256, setExecutionMode } from "../src/index.js";
+import { CLOUD_VERIFIED_COPY_SHA256, LOCAL_AUTO_MERGE_COPY_SHA256, SETTABLE_MODES, setExecutionMode } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 const NAME = "Acme/widgets";
@@ -179,11 +179,12 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       expect(await row(id)).toBe("sandbox");
     });
 
-    it("refuses runner_verified and unknown modes before touching anything", async () => {
+    it("refuses unknown modes, and a copy hash on a mode that takes none, before touching anything", async () => {
       const f = await fresh();
       const id = await repo(f, "sandbox");
-      expect(code(await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME }))).toBe("mode_not_available");
       expect((await call(f, f.o1, id, { mode: "container", confirm_repo: NAME })).status).toBe(400);
+      expect((await call(f, f.o1, id, { mode: "runner_local", confirm_repo: NAME, copy_sha256: CLOUD_VERIFIED_COPY_SHA256 })).status).toBe(400);
+      expect((await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME, copy_sha256: CLOUD_VERIFIED_COPY_SHA256, extra: 1 })).status).toBe(400);
       expect(await row(id)).toBe("sandbox");
     });
 
@@ -239,6 +240,139 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       }
       expect(await row(id)).toBe("runner_local");
       expect(await optedIn(id)).toBe(true);
+    });
+  });
+
+  // D#6 R5b-2b-ii (C38 R5b.2, C40): the cloud-verified opt-in. Over real rows; the key is a model_connections row of the account.
+  describe("the cloud-verified opt-in", () => {
+    const VERIFIED = (name: unknown = NAME, sha: unknown = CLOUD_VERIFIED_COPY_SHA256) => ({ mode: "runner_verified", confirm_repo: name, copy_sha256: sha });
+    async function key(f: F2Fixture, status?: string): Promise<void> {
+      await h.admin.query("INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status) VALUES ($1, 'anthropic', $2, $3, $4, 1, $5, COALESCE($6, 'unvalidated'))", [
+        f.accountId,
+        Buffer.from("c"),
+        Buffer.from("n"),
+        Buffer.from("w"),
+        `fp-${randomUUID()}`,
+        status ?? null,
+      ]);
+    }
+    const modeAudits = async (f: F2Fixture) => (await audits(f)).filter((r) => r.action === "repo.execution_mode.changed");
+
+    it("pins the hash to the wording the server ships, and the mode is settable", () => {
+      expect(CLOUD_VERIFIED_COPY_SHA256).toBe(createHash("sha256").update(COPY.cloudVerified).digest("hex"));
+      expect(CLOUD_VERIFIED_COPY_SHA256).not.toBe(LOCAL_AUTO_MERGE_COPY_SHA256);
+      expect([...SETTABLE_MODES]).toEqual(["sandbox", "runner_local", "runner_verified"]);
+    });
+
+    it("with a connected key, the exact name and the shipped hash: the repo is on runner_verified, with one audit row naming the old and new mode", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await key(f, "ok");
+      expect(await call(f, f.o1, id, VERIFIED())).toMatchObject({ status: 200, body: { execution_mode: "runner_verified", changed: true, cancelled_runs: 0 } });
+      expect(await row(id)).toBe("runner_verified");
+      expect((await modeAudits(f)).map((r) => r.payload)).toEqual([{ repo_id: id, from: "runner_local", to: "runner_verified", auto_merge_turned_off: false, cancelled_runs: 0 }]);
+      expect(asked.at(-1)).toBe(id);
+    });
+
+    it("no connection, or only a broken one: 409 api_key_required, nothing written (a usable one is found whatever the row order)", async () => {
+      const f = await fresh();
+      const id = await repo(f, "sandbox");
+      for (const setup of [async () => undefined, () => key(f, "broken")]) {
+        await setup();
+        const res = await call(f, f.o1, id, VERIFIED());
+        expect(res.status).toBe(409);
+        expect(code(res)).toBe("api_key_required");
+        expect(await row(id)).toBe("sandbox");
+        expect(await audits(f)).toEqual([]);
+      }
+      await key(f, "unvalidated");
+      expect((await call(f, f.o1, id, VERIFIED())).status).toBe(200);
+    });
+
+    it("a wrong name is 400 confirmation_mismatch and a stale or missing hash 409 copy_changed, both before the key is looked at; nothing is written", async () => {
+      const f = await fresh();
+      const id = await repo(f, "sandbox");
+      expect(code(await call(f, f.o1, id, VERIFIED("Acme/gadgets", "stale")))).toBe("confirmation_mismatch");
+      expect(code(await call(f, f.o1, id, { mode: "runner_verified" }))).toBe("confirmation_mismatch");
+      for (const sha of [createHash("sha256").update("older wording").digest("hex"), "abc", 7, LOCAL_AUTO_MERGE_COPY_SHA256, CLOUD_VERIFIED_COPY_SHA256.toUpperCase()]) {
+        const res = await call(f, f.o1, id, VERIFIED(NAME, sha));
+        expect(res.status).toBe(409);
+        expect(code(res)).toBe("copy_changed");
+      }
+      expect(code(await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME }))).toBe("copy_changed");
+      expect(await row(id)).toBe("sandbox");
+      expect(await audits(f)).toEqual([]);
+    });
+
+    it("a member and a stranger get 403, even with the right name, hash and a key", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const id = await repo(f, "sandbox");
+      await key(f, "ok");
+      expect((await call(f, f.m1, id, VERIFIED())).status).toBe(403);
+      expect((await call(f, g.o1, id, VERIFIED())).status).toBe(403);
+      expect(await row(id)).toBe("sandbox");
+      expect(await audits(f)).toEqual([]);
+    });
+
+    it("a public repo, or one whose visibility cannot be read, is never put on it: 409, nothing written", async () => {
+      const f = await fresh();
+      const id = await repo(f, "sandbox");
+      await key(f, "ok");
+      for (const [seen, want] of [["public", "public_repo"], ["unknown", "repo_visibility_unknown"], ["throw", "repo_visibility_unknown"]] as const) {
+        const res = await call(f, f.o1, id, VERIFIED(), seen);
+        expect(res.status).toBe(409);
+        expect(code(res)).toBe(want);
+      }
+      expect(await row(id)).toBe("sandbox");
+      expect(await audits(f)).toEqual([]);
+    });
+
+    it("coming from runner_local with the opt-in on turns the auto-merge opt-in off in the same transaction, as every move away from runner_local does", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await key(f, "ok");
+      await call(f, f.o1, id, ON());
+      expect(await optedIn(id)).toBe(true);
+      expect(await call(f, f.o1, id, VERIFIED())).toMatchObject({ status: 200, body: { execution_mode: "runner_verified", auto_merge: false, changed: true } });
+      expect(await optedIn(id)).toBe(false);
+      expect((await modeAudits(f)).map((r) => r.payload)).toEqual([{ repo_id: id, from: "runner_local", to: "runner_verified", auto_merge_turned_off: true, cancelled_runs: 0 }]);
+    });
+
+    it("already there: nothing changes, nothing is audited, and neither the hash nor the key is needed to say so", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_verified");
+      expect(await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME })).toMatchObject({ status: 200, body: { execution_mode: "runner_verified", changed: false } });
+      expect(await audits(f)).toEqual([]);
+    });
+
+    it("leaving to sandbox cancels the pending runner runs (both modes' runs), and leaving to runner_local cancels none and needs no key", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_verified");
+      const queued = await h.admin.query<{ id: string }>(
+        `INSERT INTO agent_runs (account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, 'executor', 'runner', 'pending', 'runner_verified', $2), ($1, 'executor', 'runner', 'pending', 'runner_local', $2) RETURNING id`,
+        [f.accountId, id],
+      );
+      const states = async () => (await h.admin.query("SELECT status FROM agent_runs WHERE dispatch_repo_id = $1 ORDER BY execution_mode", [id])).rows.map((r) => r.status);
+      expect(await call(f, f.o1, id, { mode: "runner_local", confirm_repo: NAME })).toMatchObject({ body: { execution_mode: "runner_local", cancelled_runs: 0 } });
+      expect(await states()).toEqual(["pending", "pending"]);
+      // and back: this direction needs the wording and a key
+      expect(code(await call(f, f.o1, id, VERIFIED()))).toBe("api_key_required");
+      await key(f, "ok");
+      expect((await call(f, f.o1, id, VERIFIED())).status).toBe(200);
+      expect(await states()).toEqual(["pending", "pending"]);
+      expect(await call(f, f.o1, id, { mode: "sandbox", confirm_repo: NAME })).toMatchObject({ status: 200, body: { execution_mode: "sandbox", changed: true, cancelled_runs: 2 } });
+      expect(await states()).toEqual(["cancelled", "cancelled"]);
+      expect(queued.rowCount).toBe(2);
+      expect((await modeAudits(f)).map((r) => [r.payload.from, r.payload.to, r.payload.cancelled_runs])).toEqual([["runner_verified", "runner_local", 0], ["runner_local", "runner_verified", 0], ["runner_verified", "sandbox", 2]]);
+    });
+
+    it("a stranger's key does not count: another account's connection never opens the opt-in", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const id = await repo(f, "sandbox");
+      await key(g, "ok");
+      expect(code(await call(f, f.o1, id, VERIFIED()))).toBe("api_key_required");
     });
   });
 
@@ -332,13 +466,13 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       expect(log.map((r) => r.payload)).toEqual([{ repo_id: id, from: "runner_verified", to: "sandbox", auto_merge_turned_off: false, cancelled_runs: 2 }]);
     });
 
-    it("a refused switch (wrong name, a member, runner_verified) cancels nothing", async () => {
+    it("a refused switch (wrong name, a member, a stale cloud-verified hash) cancels nothing", async () => {
       const f = await fresh();
       const id = await repo(f);
       const queued = await run(f, id);
       expect(code(await call(f, f.o1, id, { mode: "sandbox", confirm_repo: "Acme/gadgets" }))).toBe("confirmation_mismatch");
       expect((await call(f, f.m1, id, { mode: "sandbox", confirm_repo: NAME })).status).toBe(403);
-      expect(code(await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME }))).toBe("mode_not_available");
+      expect(code(await call(f, f.o1, id, { mode: "runner_verified", confirm_repo: NAME }))).toBe("copy_changed");
       expect(await status(queued)).toBe("pending");
       expect(await row(id)).toBe("runner_local");
     });

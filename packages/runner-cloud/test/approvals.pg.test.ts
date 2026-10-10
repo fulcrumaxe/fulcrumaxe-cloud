@@ -60,6 +60,47 @@ describe("approving a run [pg] (criterion 2)", () => {
     expect(await audits(f)).toEqual([]);
   });
 
+  // D#6 R5b-2b-ii (migration 0774): a run of a cloud-verified repository is approved by the same people under the same rules.
+  describe("a cloud-verified run (execution_mode runner_verified)", () => {
+    it("is approved by an eligible approver (the registrant of a live subscription runner), once, with one audit row; the approval lands on the other member's run", async () => {
+      const f = await fresh();
+      await runner(f, f.a1);
+      const id = await run(f, { mode: "runner_verified", initiatedBy: f.m1 });
+      expect(await approve(f, f.a1, id)).toMatchObject({ status: 200, body: { approved: true, changed: true } });
+      expect(await approvedBy(id)).toBe(f.a1);
+      expect(await audits(f)).toEqual([{ actor: f.a1, payload: { run_id: id } }]);
+      expect(await approve(f, f.a1, id)).toMatchObject({ status: 200, body: { approved: true, changed: false } });
+      expect(await audits(f)).toHaveLength(1);
+    });
+
+    it("is still 403 for everyone who is not an eligible approver (a member, an owner without a runner, an api_key registrant, a revoked runner's registrant)", async () => {
+      const f = await fresh();
+      await runner(f, f.a1);
+      await runner(f, f.a2, "api_key");
+      const revoked = await runner(f, f.o2);
+      await h.admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [revoked]);
+      const id = await run(f, { mode: "runner_verified" });
+      for (const user of [f.m1, f.o1, f.a2, f.o2]) expect((await approve(f, user, id)).status, user).toBe(403);
+      expect(await approvedBy(id)).toBeNull();
+      expect(await audits(f)).toEqual([]);
+    });
+
+    it("is still 409 in the wrong state (not pending, a second approver, a production-runtime row), and nothing changes", async () => {
+      const f = await fresh();
+      await runner(f, f.a1);
+      await runner(f, f.a2);
+      for (const over of [{ status: "running" }, { status: "succeeded" }, { status: "cancelled" }, { runtime: "production", mode: "sandbox" }]) {
+        const id = await run(f, { ...over, ...(over.mode ? {} : { mode: "runner_verified" }) });
+        expect((await approve(f, f.a1, id)).status, JSON.stringify(over)).toBe(409);
+        expect(await approvedBy(id)).toBeNull();
+      }
+      const id = await run(f, { mode: "runner_verified" });
+      expect((await approve(f, f.a1, id)).status).toBe(200);
+      expect((await approve(f, f.a2, id)).status).toBe(409);
+      expect(await approvedBy(id)).toBe(f.a1);
+    });
+  });
+
   it("refuses a user outside the account, and does not see another account's run", async () => {
     const f = await fresh();
     const g = await fresh();

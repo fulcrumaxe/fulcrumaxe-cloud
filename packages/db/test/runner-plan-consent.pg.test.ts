@@ -311,6 +311,21 @@ describe('migration 0767: runner plan consent [pg]', () => {
       ]);
     });
 
+    it('approves a pending cloud-verified run exactly as a runner_local one (0774): the audit row, the receipt and the approver are the same', async () => {
+      await dial('act');
+      const run = await pendingRun({ mode: 'runner_verified' });
+      expect(await approve(run)).toBe(true);
+      expect(await approvedBy(run)).toBe(registrant);
+      expect(await audit('runner.run_auto_approved')).toEqual([{ actor: registrant, payload: { run_id: run, runner_id: runner, consent_version: 1, dial_version: 1, disposition: 'act' } }]);
+      expect((await admin.query('SELECT 1 FROM decision_receipts WHERE run_id = $1', [run])).rowCount).toBe(1);
+      // the same conditions still hold it back: a run that is not pending, or already approved, or claimable later
+      for (const o of [{ status: 'running' }, { approvedBy: member }, { claimableAfter: new Date(Date.now() + 3600_000) }]) {
+        const held = await pendingRun({ mode: 'runner_verified', ...o });
+        expect(await approve(held), JSON.stringify(o)).toBe(false);
+        expect(await approvedBy(held), JSON.stringify(o)).toBe(o.approvedBy ?? null);
+      }
+    });
+
     it('with no dial row it approves under the default, and the receipt has no dial version', async () => {
       const run = await pendingRun();
       expect(await approve(run)).toBe(true);
@@ -322,7 +337,7 @@ describe('migration 0767: runner plan consent [pg]', () => {
     it('writes nothing when any condition fails: dial ask, no consent, other state of the run, an approver already there, a future claimable_after', async () => {
       const cases: Array<[string, () => Promise<string>]> = [
         ['not pending', () => pendingRun({ status: 'running' })],
-        ['not runner_local', () => pendingRun({ mode: 'sandbox' })],
+        ['not a runner mode', () => pendingRun({ mode: 'sandbox' })],
         ['already approved by someone', () => pendingRun({ approvedBy: member })],
         ['claimable later', () => pendingRun({ claimableAfter: new Date(Date.now() + 3600_000) })],
       ];
