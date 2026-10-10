@@ -11,7 +11,7 @@ import type { Job } from "@fulcrumaxe/runner-protocol";
 import path from "node:path";
 import { assertGitVersion, createGit, GitPathError, type GitDeps } from "./git.js";
 import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
-import type { NixSource } from "./nixShell.js";
+import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { sweepSnapshots } from "./snapshot.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
@@ -38,8 +38,8 @@ export interface GitPath {
   /** The paths the job's sandbox may read besides its workspace: exactly the repo mirror's `objects` directory, which the workspace borrows from. */
   readGrants(job: GitJob): string[];
   /**
-   * D#6 R7c: what the repo's Nix dev shell may be built from at `sha`. Only a commit that is in the history of the mirror's default branch counts
-   * (the mirror's HEAD follows it): a pull request, fix-round or run-branch commit answers `not_default_branch`. Optional: a path without a mirror gives none.
+   * D#6 R7c: what the repo's Nix dev shell may be built from at `sha`. A commit in the history of the mirror's default branch (the mirror's HEAD
+   * follows it) is used as it is. Any other commit is replaced by its merge-base with that HEAD (`fromDefault`); with no merge-base the answer is `not_default_branch`. Optional: a path without a mirror gives none.
    */
   nixSource?(job: GitJob, sha: string): Promise<NixSource>;
 }
@@ -78,27 +78,40 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     async nixSource(job, sha) {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return { kind: "not_default_branch" };
       const dir = mirrors.dir(job.repo);
-      try {
-        await git.run("mirror_failed", ["-C", dir, "merge-base", "--is-ancestor", sha, "HEAD"]);
-      } catch {
-        // fx-swallow-ok: git answers "not an ancestor" with an exit code; the closed answer is "not the default branch"
-        return { kind: "not_default_branch" };
+      // A commit outside the default branch (a review, fix round or run branch) is built from its merge-base with the mirror's HEAD, which is on the default
+      // branch. The commit's own flake is never evaluated; only its two flake paths are compared by name, so no file of it is read.
+      let rev = sha;
+      let fromDefault: NixFromDefault | undefined;
+      const onDefault = await git.run("mirror_failed", ["-C", dir, "merge-base", "--is-ancestor", sha, "HEAD"]).then(() => true, () => false);
+      if (!onDefault) {
+        let base: string;
+        let changed: string;
+        try {
+          base = (await git.run("mirror_failed", ["-C", dir, "merge-base", sha, "HEAD"])).trim();
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base)) return { kind: "not_default_branch" };
+          changed = await git.run("mirror_failed", ["-C", dir, "diff-tree", "-r", "--name-only", "--no-renames", base, sha, "--", "flake.nix", "flake.lock"]);
+        } catch {
+          // fx-swallow-ok: git answers "no common ancestor" with an exit code; unrelated history (or a comparison that cannot be made) keeps the closed skip
+          return { kind: "not_default_branch" };
+        }
+        rev = base;
+        fromDefault = { rev: base, flakeChanged: changed.trim() !== "" };
       }
       try {
-        await git.run("mirror_failed", ["-C", dir, "cat-file", "-e", `${sha}:flake.nix`]);
+        await git.run("mirror_failed", ["-C", dir, "cat-file", "-e", `${rev}:flake.nix`]);
       } catch {
         // fx-swallow-ok: no flake.nix at this commit is the closed answer "no flake"
         return { kind: "no_flake" };
       }
       // A repo with submodules never gets a dev shell: a flake that sets `inputs.self.submodules` would make nix fetch the urls in `.gitmodules`, which can be
       // `file://` or local paths. Refusing the file itself is simpler and safer than reading the flake to see whether it asks for them.
-      const hasSubmodules = await git.run("mirror_failed", ["-C", dir, "cat-file", "-e", `${sha}:.gitmodules`]).then(() => true, () => false);
+      const hasSubmodules = await git.run("mirror_failed", ["-C", dir, "cat-file", "-e", `${rev}:.gitmodules`]).then(() => true, () => false);
       if (hasSubmodules) return { kind: "submodules" };
       try {
-        return { kind: "flake", mirrorDir: dir, lock: await git.run("mirror_failed", ["-C", dir, "show", `${sha}:flake.lock`]) };
+        return { kind: "flake", mirrorDir: dir, lock: await git.run("mirror_failed", ["-C", dir, "show", `${rev}:flake.lock`]), ...(fromDefault === undefined ? {} : { fromDefault }) };
       } catch {
         // fx-swallow-ok: no flake.lock at this commit is the closed answer "lock missing"
-        return { kind: "flake", mirrorDir: dir, lock: null };
+        return { kind: "flake", mirrorDir: dir, lock: null, ...(fromDefault === undefined ? {} : { fromDefault }) };
       }
     },
     publish: async (job, lease, workspace, base, stopped) =>

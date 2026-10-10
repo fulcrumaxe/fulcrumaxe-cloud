@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, constants, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { accessSync, constants, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -52,10 +53,18 @@ let root: string;
 let mirrorsRoot: string;
 let head: string;
 let branchTip: string;
+let canaryTip: string;
+const CANARY_NAME = `fxc431-canary-${randomBytes(8).toString("hex")}`;
+/** Whether the Nix store holds an entry made by the canary flake: it appears only if that flake was evaluated. */
+const canaryInStore = (): boolean => readdirSync("/nix/store").some((entry) => entry.endsWith(`-${CANARY_NAME}`));
 let devStderr = "";
+const devArgv: string[] = [];
 const capture = async (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => {
   const out = await runCapture(spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 4096);
-  if (args.includes("print-dev-env")) devStderr = out.stderr ?? "";
+  if (args.includes("print-dev-env")) {
+    devStderr = out.stderr ?? "";
+    devArgv.push(args.join(" "));
+  }
   return out;
 };
 
@@ -85,6 +94,12 @@ describe.skipIf(!usable)("R7c with the real nix", () => {
     git(origin, "add", "extra.txt");
     git(origin, "commit", "-q", "-m", "side");
     branchTip = git(origin, "rev-parse", "HEAD");
+    // a pull-request head whose flake, if it were ever evaluated, writes a file into the Nix store (a derivation attribute made with builtins.toFile)
+    git(origin, "checkout", "-q", "-b", "fx/canary", head);
+    writeFileSync(path.join(origin, "flake.nix"), FLAKE.replace('CC = "gcc";', `CC = "gcc"; canary = builtins.toFile "${CANARY_NAME}" "evaluated";`));
+    git(origin, "add", "flake.nix");
+    git(origin, "commit", "-q", "-m", "flake with a canary");
+    canaryTip = git(origin, "rev-parse", "HEAD");
     git(origin, "checkout", "-q", "main");
     mirrorsRoot = path.join(root, "mirrors");
   });
@@ -101,7 +116,7 @@ describe.skipIf(!usable)("R7c with the real nix", () => {
     expect(prepared.base).toBe(head);
     const source = await gitPath.nixSource!(job, head);
     expect(source).toMatchObject({ kind: "flake", lock: LOCK });
-    expect(await gitPath.nixSource!(job, branchTip)).toEqual({ kind: "not_default_branch" });
+    expect(await gitPath.nixSource!(job, branchTip)).toMatchObject({ kind: "flake", fromDefault: { rev: head, flakeChanged: false } });
 
     const nixBin = realpathSync(NIX!);
     const step = createNixShell({ nixBin, bwrapBin: BWRAP, gitBin: GIT, capture, dataDir: path.join(root, "nix-data"), identity: identityVia(capture) });
@@ -118,5 +133,35 @@ describe.skipIf(!usable)("R7c with the real nix", () => {
     expect(result.env["PATH"]!.split(":").every((entry) => entry.startsWith("/nix/store/"))).toBe(true);
     expect(Object.keys(result.env).every((name) => name === "PATH")).toBe(true);
     expect(await step.prepare({ approved: true, sha: head, source })).toMatchObject({ ok: true, cached: true });
+  }, 300_000);
+
+  it("a pull-request head whose flake has a side effect is never evaluated: the shell is built from the merge-base, and the side effect never happens", async () => {
+    const stateDir = path.join(root, "state-canary");
+    mkdirSync(stateDir, { recursive: true });
+    const gitPath = createGitPath({ capture, mirrorsRoot: path.join(root, "mirrors-canary"), stateDir, remoteUrl: () => path.join(root, "origin") });
+    const job = { repo: { id: "44444444-4444-4444-8444-444444444444", owner: "acme", name: "widgets" }, continues: null, branch_prefix: "fx/", role: "code-reviewer" } as unknown as Parameters<typeof gitPath.prepare>[0];
+    await gitPath.prepare(job, { runId: "11111111-1111-4111-8111-111111111111", leaseGeneration: 1 }, path.join(root, "workspace-canary"));
+    const source = await gitPath.nixSource!(job, canaryTip);
+    expect(source).toMatchObject({ kind: "flake", fromDefault: { rev: head, flakeChanged: true } });
+    const rev = (source as { fromDefault: { rev: string } }).fromDefault.rev;
+
+    const nixBin = realpathSync(NIX!);
+    const step = createNixShell({ nixBin, bwrapBin: BWRAP, gitBin: GIT, capture, dataDir: path.join(root, "nix-data-canary"), identity: identityVia(capture) });
+    devArgv.length = 0;
+    const result = await step.prepare({ approved: true, sha: rev, source });
+    const refused = !result.ok && result.skip === "nix_trusted_user";
+    if (!refused) {
+      expect(devArgv).toHaveLength(1);
+      expect(devArgv[0]).toContain(`?rev=${head}`);
+      expect(devArgv[0]).not.toContain(canaryTip);
+      // the environment is the default branch's own: the same outcome as building the default branch's commit directly
+      expect(result).toEqual(await step.prepare({ approved: true, sha: head, source: await gitPath.nixSource!(job, head) }));
+    }
+    expect(canaryInStore()).toBe(false);
+
+    // control: the canary does fire when that flake is evaluated, so the absence above means something
+    const control = spawnSync(NIX!, ["--extra-experimental-features", "nix-command flakes", "eval", "--raw", `git+file://${path.join(root, "origin")}?rev=${canaryTip}#devShells.x86_64-linux.default.drvPath`], { encoding: "utf8" });
+    expect(control.status).toBe(0);
+    expect(canaryInStore()).toBe(true);
   }, 300_000);
 });
