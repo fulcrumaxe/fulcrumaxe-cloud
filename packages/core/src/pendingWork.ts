@@ -19,7 +19,7 @@
  * the cron routes authenticate before they read one.
  */
 
-export const SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper"] as const;
+export const SWEEP_NAMES = ["api-sweep", "run-action-sweep", "compute-settle-sweep", "reconcile", "runner-sweeper", "invariant-sweep"] as const;
 export type SweepName = (typeof SWEEP_NAMES)[number];
 
 /** The longest a tick may go without connecting, whatever the marker says. */

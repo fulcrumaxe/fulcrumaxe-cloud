@@ -26,6 +26,8 @@ import type { PoolClient } from 'pg';
  *   stopped               the driver stopped for a reason that is none of the above. code: the reason.
  *   pr_head_pushed        the pull request's head moved to this commit (head_sha, pr_number). A person's push seen as pull_request.synchronize, or one the
  *                         driver itself saw (code: observed). Its created_at, the database clock, starts the quiet period of a cloud-verified review.
+ *   platform_check        the invariant sweep found a platform defect on this item's run (D#597 CC-8; migration 0776). code: stage_not_moved | no_activity |
+ *                         usage_not_recorded; run_id: the run. Written by the sweep alone, never by the driver.
  */
 export const DRIVER_EVENT_KINDS = [
   'build_refused',
@@ -42,6 +44,7 @@ export const DRIVER_EVENT_KINDS = [
   'merged_by_gate',
   'stopped',
   'pr_head_pushed',
+  'platform_check',
 ] as const;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 

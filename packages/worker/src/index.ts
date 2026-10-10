@@ -8,6 +8,7 @@ export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";
 export type { RunnerLeaseSweeper, RunnerLeaseSweepResult } from "./runnerLeaseSweep.js";
 export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
 export type { RunnerNoticeSweeper, RunnerNoticeResult } from "./runnerNotices.js";
+export type { InvariantSweeper, InvariantSweepResult } from "./invariantSweep.js";
 export { RunActionInputError, RunActionUnavailableError, RunActionForbiddenError, RunActionRefusedError } from "./runActions.js";
 export { productionVercelCredentials, VercelCredentialsUnavailableError } from "./vercelCredentials.js";
 export { StartupGuardError, type StartupRule } from "./pools.js";

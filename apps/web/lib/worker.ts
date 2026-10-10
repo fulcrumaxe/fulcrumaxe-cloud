@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
+import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type InvariantSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
 import type { SandboxReapWorker } from "@fx/reconcile";
 import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, publishRespec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
@@ -39,8 +39,11 @@ export type RunnerQueueSweepWorker = RunnerQueueSweeper & RunnerNoticeSweeper;
 /** What the runner sweeper tick asks of the worker: the queue time (R2b-2), the lease and wall-clock work (R2b-3) and the waiting notices. */
 export type RunnerSweepWorker = RunnerQueueSweeper & RunnerLeaseSweeper & RunnerNoticeSweeper;
 
+/** What the invariant sweep cron asks of the worker (D#597 CC-8). */
+export type InvariantSweepWorker = InvariantSweeper;
+
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerSweepWorker & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerSweepWorker & InvariantSweepWorker & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

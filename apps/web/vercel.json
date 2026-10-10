@@ -22,6 +22,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/invariant-sweep",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/reconcile",
       "schedule": "7,22,37,52 * * * *"
     }
