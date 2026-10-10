@@ -24,6 +24,7 @@ import { requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
+import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
 import type { EngineKit } from "../daemon/engineKit.js";
@@ -266,10 +267,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       },
     });
     let lastReason: string | undefined;
-    // Self-update (D#6 R6-2b): checked at the top of the claim loop, where no job is in hand, and never while one is.
-    let jobInHand = false;
+    // Self-update (D#6 R6-2b): checked at the top of the claim loop, and never while any job is in hand. A count, so one job ending does not clear the others (C43-3).
+    const jobs = createJobsInHand();
     const updater = updateHost === undefined ? undefined : createUpdater(ctx, updateHost, hooks.updateTuf === undefined ? {} : { tuf: hooks.updateTuf });
-    const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobInHand, now: ctx.now });
+    const autoUpdate = updater === undefined ? undefined : createAutoUpdate({ updater, hasLease: () => jobs.any(), now: ctx.now });
     const detach = abortOnSignals(stopped, host.signals);
     try {
       // A previous run that stopped between staging and switching left a partial version directory: gone before anything else.
@@ -286,14 +287,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         clock,
         gate,
         signal: stopped.signal,
-        onClaimed: async (claimed) => {
-          jobInHand = true;
-          try {
-            return await handle(claimed);
-          } finally {
-            jobInHand = false;
-          }
-        },
+        onClaimed: (claimed) => jobs.track(() => handle(claimed)),
         ...(autoUpdate === undefined || updateHost === undefined
           ? {}
           : {

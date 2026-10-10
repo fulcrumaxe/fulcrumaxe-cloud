@@ -402,7 +402,7 @@ export class Updater {
 /** What the daemon asks between jobs. */
 export interface AutoUpdateDeps {
   updater: Updater;
-  /** True while a job is in hand. */
+  /** True while any job is in hand (a count above zero, not a flag one job's end could clear). */
   hasLease: () => boolean;
   now: () => Date;
   intervalMs?: number;

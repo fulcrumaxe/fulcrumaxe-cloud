@@ -11,6 +11,7 @@
 import { chmodSync, lstatSync, mkdirSync, rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import { segmentUnder } from "../job/plainSegment.js";
+import { withKeyLock } from "./keyedLock.js";
 import { CREDENTIAL_FLOOR, pathsOverlap } from "../sandbox/sandboxSettings.js";
 import { GitPathError, type Git } from "./git.js";
 import { continuesBranch, pushPlan, type PushContinues, type PushLease } from "./push.js";
@@ -92,6 +93,10 @@ export interface Mirrors {
    * for this lease; a fix round is on the existing `continues.branch` at its tip, and nothing is made if the mirror has no such branch.
    * A review job (`review`, D#6 R4d-4) is on a detached HEAD at exactly `review.head_sha`, with no local branch, and nothing is made
    * unless the mirror holds that commit on at least one of its branches (`review_sha_not_in_mirror`).
+   *
+   * Jobs on one repo take turns on its mirror (D#6 C43-3): `sync`, `continuationTip` and `prepareWorkspace` hold the repo's lock, so two
+   * fetches never run in one bare repository at once and a workspace is never cloned while a pruning fetch is rewriting refs. Jobs on
+   * different repos overlap.
    */
   prepareWorkspace(repo: RepoRef, lease: PushLease, workspace: string, continues?: PushContinues | null, review?: ReviewTarget | null): Promise<{ base: string }>;
   /** Brings the mirror up to date and returns the tip of `continues.branch`, or throws `continuation_branch_missing`. */
@@ -160,7 +165,7 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     await deps.git.run("mirror_failed", ["-C", mirror, "symbolic-ref", "HEAD", `refs/heads/${named}`]);
   }
 
-  async function sync(repo: RepoRef): Promise<{ dir: string; base: string }> {
+  async function syncUnlocked(repo: RepoRef): Promise<{ dir: string; base: string }> {
     ensureRoot();
     const mirror = dir(repo);
     const remote = url(repo);
@@ -183,44 +188,52 @@ export function createMirrors(deps: MirrorDeps): Mirrors {
     return { dir: mirror, base };
   }
 
-  async function continuationTip(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }> {
+  async function continuationTipUnlocked(repo: RepoRef, continues: PushContinues): Promise<{ dir: string; tip: string }> {
     const branch = continuesBranch(continues);
-    const { dir: mirror } = await sync(repo);
+    const { dir: mirror } = await syncUnlocked(repo);
     const tip = (await deps.git.run("continuation_branch_missing", ["-C", mirror, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`])).trim();
     return { dir: mirror, tip };
+  }
+
+  /**
+   * One queue per mirror directory, shared by every `createMirrors` in the process (path A makes one per job): the key is the mirror's own
+   * path. A lock covers a whole operation, and only the `Unlocked` functions are called from inside one, so a lock is never taken twice.
+   */
+  const locked = <T>(repo: RepoRef, fn: () => Promise<T>): Promise<T> => withKeyLock(dir(repo), fn);
+
+  async function prepareUnlocked(repo: RepoRef, lease: PushLease, workspace: string, continues: PushContinues | null, review: ReviewTarget | null): Promise<{ base: string }> {
+    if (review !== null) {
+      // D#6 R4d-4 (C33 section 1.3): review exactly this commit and no other. The sync has just fetched, so there is no second fetch and no wait.
+      if (!REVIEW_SHA.test(review.head_sha)) throw new GitPathError("review_sha_not_in_mirror");
+      const { dir: mirror } = await syncUnlocked(repo);
+      const sha = review.head_sha;
+      await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "cat-file", "-e", `${sha}^{commit}`]);
+      // A commit that is in the mirror's objects but on no branch (a superseded head after a force-push, or a fork's pull ref) is not reviewed.
+      const holders = await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads/"]);
+      if (holders.trim() === "") throw new GitPathError("review_sha_not_in_mirror");
+      await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
+      await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "--detach", sha]);
+      return { base: sha };
+    }
+    const plan = pushPlan(lease, continues);
+    if (continues !== null) {
+      const { dir: mirror, tip } = await continuationTipUnlocked(repo, continues);
+      await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
+      await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-B", plan.branch, tip]);
+      return { base: tip };
+    }
+    const { dir: mirror, base } = await syncUnlocked(repo);
+    await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
+    await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-b", plan.branch]);
+    return { base };
   }
 
   return {
     url,
     dir,
     objects: (repo) => path.join(dir(repo), "objects"),
-    sync,
-    continuationTip,
-    async prepareWorkspace(repo, lease, workspace, continues = null, review = null) {
-      if (review !== null) {
-        // D#6 R4d-4 (C33 section 1.3): review exactly this commit and no other. The sync has just fetched, so there is no second fetch and no wait.
-        if (!REVIEW_SHA.test(review.head_sha)) throw new GitPathError("review_sha_not_in_mirror");
-        const { dir: mirror } = await sync(repo);
-        const sha = review.head_sha;
-        await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "cat-file", "-e", `${sha}^{commit}`]);
-        // A commit that is in the mirror's objects but on no branch (a superseded head after a force-push, or a fork's pull ref) is not reviewed.
-        const holders = await deps.git.run("review_sha_not_in_mirror", ["-C", mirror, "for-each-ref", "--contains", sha, "--format=%(refname)", "refs/heads/"]);
-        if (holders.trim() === "") throw new GitPathError("review_sha_not_in_mirror");
-        await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
-        await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "--detach", sha]);
-        return { base: sha };
-      }
-      const plan = pushPlan(lease, continues);
-      if (continues !== null) {
-        const { dir: mirror, tip } = await continuationTip(repo, continues);
-        await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
-        await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-B", plan.branch, tip]);
-        return { base: tip };
-      }
-      const { dir: mirror, base } = await sync(repo);
-      await deps.git.run("workspace_failed", ["clone", "--reference", mirror, "--no-local", "--", mirror, workspace]);
-      await deps.git.run("workspace_failed", ["-C", workspace, "checkout", "-b", plan.branch]);
-      return { base };
-    },
+    sync: (repo) => locked(repo, () => syncUnlocked(repo)),
+    continuationTip: (repo, continues) => locked(repo, () => continuationTipUnlocked(repo, continues)),
+    prepareWorkspace: (repo, lease, workspace, continues = null, review = null) => locked(repo, () => prepareUnlocked(repo, lease, workspace, continues, review)),
   };
 }
