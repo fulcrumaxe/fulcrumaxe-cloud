@@ -13,7 +13,7 @@ export type RunWait = z.infer<typeof runWaitSchema>;
 
 /** The account's runner caps, as the claim reads them. Plan data that cannot be read names no cap (the wait is then told as the runners' own). */
 function accountRunnerCaps(): { total: number; heavy: number } {
-  const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs } = runnerLimitsFor();
+  const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs } = runnerLimitsFor('runner');
   return { total: maxConcurrentRunnerJobs, heavy: maxConcurrentHeavyRunnerJobs ?? 1 };
 }
 

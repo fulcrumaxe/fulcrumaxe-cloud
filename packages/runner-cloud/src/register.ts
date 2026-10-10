@@ -5,13 +5,10 @@ import { hashRegistrationCode } from "./registrationCodes.js";
 import { verifySelfSignedRequest } from "./verifyRunnerRequest.js";
 
 export const REGISTER_PATH = "/api/runner/register";
-/** `accounts.plan` for the runner tier. The limit that goes with it is plan data, read through `deps.maxRunners`. */
-const RUNNER_PLAN = "runner";
-
-/** The limit for an account on the runner plan, or 503 when the plan data cannot say. A missing figure is never a default. */
-function maxRunnersOf(deps: RunnerCloudDeps): number {
+/** The limit for an account on this plan, or 503 when the plan data cannot say. A missing figure is never a default, and never unlimited. */
+function maxRunnersOf(deps: RunnerCloudDeps, plan: string | undefined): number {
   try {
-    const max = deps.maxRunners?.();
+    const max = plan === undefined ? undefined : deps.maxRunners?.(plan);
     if (typeof max === "number" && Number.isInteger(max) && max >= 0) return max;
   } catch {
     // fx-swallow-ok: unavailable plan data is the same refusal as no figure; the 503 below is the report
@@ -22,7 +19,7 @@ function maxRunnersOf(deps: RunnerCloudDeps): number {
 /**
  * POST /api/runner/register. The runner proves it holds the key by signing with it. Account, registrant, credential mode
  * and repos all come from the code's own row, through `runner_register` (0712, 0757), which also enforces single use, the
- * expiry, the minter still being an owner or admin, and the runner-plan limit (the plan data's, passed in). A replay is 409 `key_registered` (README).
+ * expiry, the minter still being an owner or admin, and the plan's runner limit (the plan data's, passed in). A replay is 409 `key_registered` (README).
  * The 201 reply is `RegisterResponse`: the runner id, the account and the credential mode, the last two read from the stored row.
  */
 export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
@@ -43,9 +40,9 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
   try {
     // The mode comes back from the stored row (the code's own mode, copied by `runner_register`), in the same transaction.
     const body = await withTenant(deps.appUserPool, accountId, async (client) => {
-      // An account on the runner plan has the plan data's limit; any other account has none (D#6 R2b criterion 12).
+      // Every plan has the plan data's limit (D#6 R2b criterion 12, D#605 FL-12a); plan data that cannot give one refuses the registration.
       const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
-      const maxRunners = plan === RUNNER_PLAN ? maxRunnersOf(deps) : null;
+      const maxRunners = maxRunnersOf(deps, plan);
       const result = await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
       const id = result.rows[0]!.id;
       const row = await client.query<{ credential_mode: string }>("SELECT credential_mode FROM runners WHERE id = $1 AND account_id = $2", [id, accountId]);

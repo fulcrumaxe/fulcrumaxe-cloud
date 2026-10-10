@@ -1539,12 +1539,12 @@ check_runner_git_definer_exception_shape() {
 
 # D#6 R5a-2a (0765, C27 section 3.5): role shape of runner_git_definer. A no-op when the role does not exist. Every problem is named:
 # NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
-# the 28 granted by 0765 (column SELECT on agent_runs, runners, repos and installations, SELECT/INSERT/UPDATE/DELETE on
+# the 30 granted by 0765 and 0784 (column SELECT on agent_runs, runners, repos and installations, SELECT/INSERT/UPDATE/DELETE on
 # runner_git_full_clones, USAGE on public; no other table-wide grant), owning exactly its one function and nothing else (the table
 # runner_git_full_clones is the migration role's).
 check_runner_git_definer_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.runner_id SELECT','column agent_runs.lease_generation SELECT','column agent_runs.lease_expires_at SELECT','column agent_runs.status SELECT','column agent_runs.runtime SELECT','column agent_runs.execution_mode SELECT','column agent_runs.role SELECT','column agent_runs.dispatch_repo_id SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column repos.id SELECT','column repos.account_id SELECT','column repos.gh_owner SELECT','column repos.gh_name SELECT','column repos.installation_id SELECT','column repos.product SELECT','column installations.id SELECT','column installations.account_id SELECT','column installations.gh_installation_id SELECT','column installations.app_kind SELECT','table runner_git_full_clones SELECT','table runner_git_full_clones INSERT','table runner_git_full_clones UPDATE','table runner_git_full_clones DELETE','schema public USAGE'"
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.runner_id SELECT','column agent_runs.lease_generation SELECT','column agent_runs.lease_expires_at SELECT','column agent_runs.status SELECT','column agent_runs.runtime SELECT','column agent_runs.execution_mode SELECT','column agent_runs.role SELECT','column agent_runs.dispatch_repo_id SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column repos.id SELECT','column repos.account_id SELECT','column repos.gh_owner SELECT','column repos.gh_name SELECT','column repos.installation_id SELECT','column repos.product SELECT','column installations.id SELECT','column installations.account_id SELECT','column installations.gh_installation_id SELECT','column installations.app_kind SELECT','table runner_git_full_clones SELECT','table runner_git_full_clones INSERT','table runner_git_full_clones UPDATE','table runner_git_full_clones DELETE','table runner_git_first_clones SELECT','table runner_git_first_clones INSERT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_git_definer'),
     held AS (
@@ -1559,7 +1559,7 @@ check_runner_git_definer_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_git_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 28 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 28 granted by 0765' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 30 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 30 granted by 0765 and 0784' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 1
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.resolve_runner_git_request(uuid,uuid,uuid,integer,uuid,boolean)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
@@ -2419,6 +2419,69 @@ check_runner_allowance_role_shape() {
   fi
 }
 
+# D#605 FL-12a (0784): the one SECURITY DEFINER function owned by runner_concurrency_definer, which sets the account's runner concurrency. Prints its oid when it is exactly 'account_runner_concurrency_set(integer,integer,boolean)' (matched by
+# regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no
+# platform_ops), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
+check_runner_concurrency_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.account_runner_concurrency_set(integer,integer,boolean)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'runner_concurrency_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'runner-allowance-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_concurrency_definer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#605 FL-12a (0784): role shape of runner_concurrency_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no
+# member but the migration role and no live membership for it, a member of no role, privileges exactly the 25 granted by 0784 (column grants on the
+# concurrency table, account_members, accounts and audit_log, USAGE on public; nothing table-wide), owning exactly its one function and nothing else.
+check_runner_concurrency_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column account_runner_concurrency.account_id SELECT','column account_runner_concurrency.total_jobs SELECT','column account_runner_concurrency.per_repo_jobs SELECT','column account_runner_concurrency.updated_by SELECT','column account_runner_concurrency.updated_at SELECT','column account_runner_concurrency.account_id INSERT','column account_runner_concurrency.total_jobs INSERT','column account_runner_concurrency.per_repo_jobs INSERT','column account_runner_concurrency.updated_by INSERT','column account_runner_concurrency.updated_at INSERT','column account_runner_concurrency.total_jobs UPDATE','column account_runner_concurrency.per_repo_jobs UPDATE','column account_runner_concurrency.updated_by UPDATE','column account_runner_concurrency.updated_at UPDATE','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_concurrency_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'runner_concurrency_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 25 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 25 granted by 0784' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 1
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.account_runner_concurrency_set(integer,integer,boolean)'::regprocedure::oid)
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+      CASE WHEN has_schema_privilege('runner_concurrency_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'runner_concurrency_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): runner_concurrency_definer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#6 R7a (0770): the shape of repo_runner_sandbox_allowances. Row security enabled and forced; platform_ops and partner_user hold nothing on it;
 # app_user holds exactly the nine-column SELECT and no write; the definer cannot update or delete a row (the table is append-only). A no-op when
 # the table does not exist.
@@ -2802,6 +2865,15 @@ if [ -n "$RUNNER_ALLOWANCE_RESULT" ] && ! [[ "$RUNNER_ALLOWANCE_RESULT" =~ ^[0-9
   echo "neon-shape: internal error -- runner_allowance_definer exempt function oid was not numeric: $RUNNER_ALLOWANCE_RESULT" >&2
   exit 1
 fi
+RUNNER_CONCURRENCY_RESULT="$(check_runner_concurrency_exception_shape fx_neon)"
+if [[ "$RUNNER_CONCURRENCY_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${RUNNER_CONCURRENCY_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$RUNNER_CONCURRENCY_RESULT" ] && ! [[ "$RUNNER_CONCURRENCY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- runner_concurrency_definer exempt function oid was not numeric: $RUNNER_CONCURRENCY_RESULT" >&2
+  exit 1
+fi
 RUNNER_CAPACITY_RESULT="$(check_runner_capacity_exception_shape fx_neon)"
 if [[ "$RUNNER_CAPACITY_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${RUNNER_CAPACITY_RESULT#SHAPE_FAIL:}" >&2
@@ -2820,7 +2892,7 @@ if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" 
   echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2864,6 +2936,7 @@ check_runner_sandbox_status_role_shape fx_neon
 check_runner_sandbox_status_table_shape fx_neon
 check_runner_allowance_role_shape fx_neon
 check_runner_allowance_table_shape fx_neon
+check_runner_concurrency_role_shape fx_neon
 check_runner_capacity_role_shape fx_neon
 check_runner_capacity_table_shape fx_neon
 check_work_item_correction_role_shape fx_neon

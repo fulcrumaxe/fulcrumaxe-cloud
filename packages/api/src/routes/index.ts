@@ -15,6 +15,7 @@ import { roleRoutes } from "./roles.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
+import { runnerConcurrencyRoutes } from "./runner-concurrency.js";
 import { auditLogRoutes } from "./audit-log.js";
 import { runActionRoutes } from "./run-actions.js";
 import { workItemActionRoutes } from "./work-item-actions.js";
@@ -63,6 +64,7 @@ export const ROUTES: RouteEntry[] = [
   ...githubRoutes,
   ...billingRoutes,
   ...runLimitRoutes,
+  ...runnerConcurrencyRoutes,
   ...auditLogRoutes,
   ...runActionRoutes,
   ...onboardingRoutes,

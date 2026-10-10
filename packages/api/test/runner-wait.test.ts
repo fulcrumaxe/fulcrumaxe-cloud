@@ -53,7 +53,7 @@ const CASES: Case[] = [
     setup: async (c) => {
       const r = await c.runner({ credential: 'api_key', online: true, cap: { light: 8, heavy: 4 } });
       // The account's own heavy figure is used up by running executors, whatever the runner has free.
-      for (let i = 0; i < runnerLimitsFor().maxConcurrentHeavyRunnerJobs!; i++) await c.run({ role: 'executor', status: 'running', runnerId: r, starter: true });
+      for (let i = 0; i < runnerLimitsFor('runner').maxConcurrentHeavyRunnerJobs!; i++) await c.run({ role: 'executor', status: 'running', runnerId: r, starter: true });
       await c.run({ role: 'executor', status: 'pending', starter: true, item: 1 });
     },
   },
@@ -174,7 +174,7 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
   const seeded = new Map<string, { me: { accountId: string; userId: string }; runId: string }>();
   CASES.forEach((c, i) => {
     it(`${c.name}: both reads carry the wait, match their pinned fixture and their schema`, async () => {
-      expect(runnerLimitsFor().maxConcurrentRunnerJobs).toBeGreaterThan(1);
+      expect(runnerLimitsFor('runner').maxConcurrentRunnerJobs).toBeGreaterThan(1);
       const s = await seedCase(i + 1, c);
       seeded.set(c.name, s);
       const activity = (await getJson(`/api/v1/work-items/${s.itemId}/activity`, s.me)) as { runs: Array<{ wait?: Wait | null }> };

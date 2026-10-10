@@ -24,6 +24,7 @@ const EXPECTED_PRIVILEGES = [
   ...['id', 'account_id', 'gh_owner', 'gh_name', 'installation_id', 'product'].map((c) => `column repos.${c} SELECT`),
   ...['id', 'account_id', 'gh_installation_id', 'app_kind'].map((c) => `column installations.${c} SELECT`),
   'table runner_git_full_clones SELECT', 'table runner_git_full_clones INSERT', 'table runner_git_full_clones UPDATE', 'table runner_git_full_clones DELETE',
+  'table runner_git_first_clones SELECT', 'table runner_git_first_clones INSERT', // 0784: the first-clone exemption stamp
   'schema public USAGE',
 ].sort();
 
@@ -75,7 +76,7 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
   }
 
   /** An account with a repo that has a GitHub name and an installation, a runner, and a live 'runner_verified' run leased to it. */
-  async function world(o: { mode?: string | null; runtime?: string; status?: string; lease?: string; repo?: boolean; generation?: number } = {}): Promise<World> {
+  async function world(o: { mode?: string | null; runtime?: string; status?: string; lease?: string; repo?: boolean; generation?: number; unspent?: boolean } = {}): Promise<World> {
     const refs = await seedAccount(admin, randomUUID());
     const owner = `acme-${randomUUID().slice(0, 8)}`;
     const name = `widgets-${randomUUID().slice(0, 8)}`;
@@ -89,6 +90,9 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
        VALUES ($1, $2, 'executor', $3, $4, $5, $6, $7, ${o.lease ?? "now() + interval '10 minutes'"}, $8)`,
       [run, refs.accountId, o.runtime ?? 'runner', o.status ?? 'running', o.mode === undefined ? 'runner_verified' : o.mode, runner, o.generation ?? 1, o.repo === false ? null : refs.repoId],
     );
+    // 0784: a runner's first full clone of a repo is exempt from the count. The tests of the count want a runner that has had it; the
+    // exemption's own tests ask for an `unspent` one.
+    if (!o.unspent && o.repo !== false) await admin.query(`INSERT INTO runner_git_first_clones (account_id, runner_id, repo_id, utc_day) VALUES ($1, $2, $3, (now() AT TIME ZONE 'UTC')::date - 30)`, [refs.accountId, runner, refs.repoId]);
     return { refs, runner, run, owner, name, ghInstallationId };
   }
 
@@ -292,6 +296,91 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
       expect(await todayRows(w)).toEqual([{ full_clones: 3 }]);
     });
 
+    describe('the first-clone exemption (0784)', () => {
+      const exemptRows = async (w: World) => (await admin.query(`SELECT 1 FROM runner_git_first_clones WHERE repo_id = $1`, [w.refs.repoId])).rowCount;
+      /** A second runner of the same account, leased the same repo through its own run, so it can ask for a clone too. */
+      async function addRunner(w: World): Promise<World> {
+        const runner = await insertRunner(admin, w.refs.accountId, w.refs.userId);
+        const run = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, runner_id, lease_generation, lease_expires_at, dispatch_repo_id)
+           VALUES ($1, $2, 'executor', 'runner', 'running', 'runner_verified', $3, 1, now() + interval '10 minutes', $4)`,
+          [run, w.refs.accountId, runner, w.refs.repoId],
+        );
+        return { ...w, runner, run };
+      }
+
+      it('a runner\'s first full clone of a repo counts for nothing, and its second is counted', async () => {
+        const w = await world({ unspent: true });
+        expect((await resolve(w, { fullClone: true })).verdict).toBe('ok');
+        expect(await todayRows(w)).toEqual([]);
+        expect(await exemptRows(w)).toBe(1);
+        expect((await resolve(w, { fullClone: true })).verdict).toBe('ok');
+        expect(await todayRows(w)).toEqual([{ full_clones: 1 }]);
+        expect(await exemptRows(w)).toBe(1);
+      });
+
+      it('runners 1 to 5 each get their first clone of the repo on one day; the account\'s runner count is the day\'s cap', async () => {
+        let w = await world({ unspent: true });
+        const runners = [w];
+        for (let i = 1; i < 5; i++) runners.push(await addRunner(w));
+        for (const r of runners) expect((await resolve(r, { fullClone: true })).verdict).toBe('ok');
+        expect(await exemptRows(w)).toBe(5);
+        expect(await todayRows(w)).toEqual([]);
+        // A sixth runner (the account holds no more than its limit, so one is removed first) is not exempt: its clone is counted.
+        await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [runners[0]!.runner]);
+        w = await addRunner(w);
+        expect((await resolve(w, { fullClone: true })).verdict).toBe('ok');
+        expect(await exemptRows(w)).toBe(5);
+        expect(await todayRows(w)).toEqual([{ full_clones: 1 }]);
+      });
+
+      it('removing a runner and registering another, again and again, gets no more exempt clones and ends at clone_limited', async () => {
+        const first = await world({ unspent: true });
+        expect((await resolve(first, { fullClone: true })).verdict).toBe('ok'); // the one live runner's exemption
+        let current = first;
+        const verdicts: string[] = [];
+        for (let i = 0; i < 5; i++) {
+          await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [current.runner]);
+          current = await addRunner(first);
+          verdicts.push((await resolve(current, { fullClone: true })).verdict);
+        }
+        expect(verdicts).toEqual(['ok', 'ok', 'ok', 'clone_limited', 'clone_limited']);
+        expect(await exemptRows(first)).toBe(1);
+        expect(await todayRows(first)).toEqual([{ full_clones: 3 }]);
+      });
+
+      it('is per repository, and a refused request spends no exemption', async () => {
+        const w = await world({ unspent: true });
+        await resolve(w, { generation: 9, fullClone: true });
+        await resolve(w, { fullClone: false });
+        expect(await exemptRows(w)).toBe(0);
+        const spare = randomUUID();
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 3, 'team', 'acme', 'other')`, [spare, w.refs.accountId, w.refs.installationId]);
+        const spareRun = randomUUID();
+        await admin.query(
+          `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, runner_id, lease_generation, lease_expires_at, dispatch_repo_id)
+           VALUES ($1, $2, 'executor', 'runner', 'running', 'runner_verified', $3, 1, now() + interval '10 minutes', $4)`,
+          [spareRun, w.refs.accountId, w.runner, spare],
+        );
+        expect((await resolve(w, { run: spareRun, repo: spare, fullClone: true })).verdict).toBe('ok');
+        expect((await resolve(w, { fullClone: true })).verdict).toBe('ok');
+        expect(await exemptRows(w)).toBe(1);
+        expect((await admin.query(`SELECT 1 FROM runner_git_first_clones WHERE repo_id = $1`, [spare])).rowCount).toBe(1);
+        expect(await todayRows(w)).toEqual([]);
+      });
+
+      it('concurrent first clones of one repo never pass the day\'s cap', async () => {
+        const w = await world({ unspent: true });
+        const second = await addRunner(w);
+        const third = await addRunner(w);
+        await admin.query(`UPDATE runners SET revoked_at = now() WHERE id = $1`, [third.runner]);
+        const answers = await Promise.all([resolve(w, { fullClone: true }), resolve(second, { fullClone: true }), resolve(w, { fullClone: true }), resolve(second, { fullClone: true })]);
+        expect(answers.every((a) => a.verdict === 'ok')).toBe(true);
+        expect(await exemptRows(w)).toBe(2);
+      });
+    });
+
     it('is bounded by the table itself, and deleting the repository removes its rows', async () => {
       const w = await world();
       await resolve(w, { fullClone: true });
@@ -358,6 +447,8 @@ describe(`migration 0765: ${ROLE}, resolve_runner_git_request and the clone coun
         'agent_runs SELECT',
         'installations SELECT',
         'repos SELECT',
+        'runner_git_first_clones INSERT',
+        'runner_git_first_clones SELECT',
         'runner_git_full_clones DELETE',
         'runner_git_full_clones INSERT',
         'runner_git_full_clones SELECT',
