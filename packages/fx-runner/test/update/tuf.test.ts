@@ -467,10 +467,13 @@ describe("acceptance 7: without a root, no network call", () => {
     expect(existsSync(tufDir(stateDir))).toBe(false);
   });
 
-  it("is what the shipped build says: no root is committed", async () => {
+  it("is what the shipped build says: the trusted root is compiled in, the locations are not chosen, so updates stay off", async () => {
     const { TUF_BUILD } = await import("../../src/update/buildConfig.js");
-    expect(TUF_BUILD).toEqual({ root: undefined, metadataBaseUrl: undefined, targetBaseUrl: undefined });
+    const { TRUSTED_ROOT_TEXT } = await import("../../src/update/trustedRoot.js");
+    const { tufConfigured } = await import("../../src/update/tuf.js");
+    expect(TUF_BUILD).toEqual({ root: TRUSTED_ROOT_TEXT, metadataBaseUrl: undefined, targetBaseUrl: undefined });
     expect(Object.isFrozen(TUF_BUILD)).toBe(true);
+    expect(tufConfigured(TUF_BUILD)).toBe(false);
   });
 
   it("ignores a root.json that sits in the state directory when the build has none", async () => {
