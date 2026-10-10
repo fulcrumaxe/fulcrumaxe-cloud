@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,6 +40,22 @@ function rig(): { home: string; sh(args: string[]): { code: number | null; stdou
   };
 }
 
+/** True when a process this test starts, under a name no other process has, is found by `pgrep -f` as the same user. The process is killed before this returns. */
+function processesVisible(): boolean {
+  const name = `fx-visibility-${randomBytes(8).toString("hex")}`;
+  const child = spawn("bash", ["-c", "sleep 300; :", name], { stdio: "ignore", detached: true });
+  try {
+    spawnSync("sleep", ["0.3"]);
+    return spawnSync("pgrep", ["-u", String(process.getuid?.() ?? 0), "-f", name]).status === 0;
+  } finally {
+    try {
+      process.kill(-child.pid!, "SIGKILL"); // the whole group: the shell and its sleep
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
 interface Report { step: string; summary: { fail: number }; checks: { id: string; result: string; detail: string }[] }
 const result = (text: string, id: string): string | undefined => (JSON.parse(text) as Report).checks.find((check) => check.id === id)?.result;
 
@@ -68,7 +85,12 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     const logFile = path.join(home, "run.log");
     writeFileSync(logFile, run.stdout);
     const verified = sh(["verify", logFile]);
-    expect([result(verified.stdout, "absent_home"), result(verified.stdout, "leftover_sentinel")]).toEqual(["fail", "fail"]);
+    // Whether this process can see its own user's processes with pgrep is decided here, by the test and not by the probe, so a probe regression cannot widen the expectation.
+    // Where they are visible (a developer machine, hosted CI) the decoy must be started and must be left. Only where they are not (a hardened service unit: a DynamicUser with
+    // ProtectProc=invisible and PrivateUsers, as on the self-hosted CI runner) is "gone" the honest answer.
+    const visible = processesVisible();
+    if (!visible) console.log("[restricted] pgrep cannot see this user's own processes here: expecting the decoy not to be found");
+    expect([result(run.stdout, "sentinel_started"), result(verified.stdout, "absent_home"), result(verified.stdout, "leftover_sentinel")]).toEqual(visible ? ["pass", "fail", "fail"] : ["inconclusive", "fail", "pass"]);
     expect([result(verified.stdout, "canary_intact_1"), result(verified.stdout, "log_run_log")]).toEqual(["pass", "pass"]);
 
     expect(sh(["unplant"]).code).toBe(0);
