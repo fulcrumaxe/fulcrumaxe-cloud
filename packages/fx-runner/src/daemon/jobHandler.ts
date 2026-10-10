@@ -16,7 +16,10 @@
  */
 import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
-import { NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
+import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
+import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
+import type { DepsInstaller } from "./depsInstall.js";
+import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
@@ -73,6 +76,12 @@ export interface JobHandlerDeps {
   onNixSkip?: (skip: NixSkip) => void;
   /** Told the closed detail when the dev shell came from the default branch's merge-base instead of the job's own commit. */
   onNixDetail?: (detail: NixDetail) => void;
+  /** D#6 C44-4: told the closed detail when the repo has a lockfile and the job allows no npm registry host. The job still runs. */
+  onDepsDetail?: (detail: DepsDetail) => void;
+  /** D#6 C44-4 (G-C44-7): the host-side dependency install, run before the agent's sandbox starts for a test-running role with an allowed npm registry. Absent: no install is done. */
+  depsInstall?: DepsInstaller;
+  /** The directory of the per-repo package stores (the host sandbox's `packageStoreRoot`); the install uses the job's own store in it. Absent: no install is done. */
+  packageStoreRoot?: string;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
   heartbeatMs?: number;
@@ -174,6 +183,37 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     }
   }
 
+  /**
+   * D#6 C44-4. A test-running role in a repo with a lockfile: with no npm registry host in the job's domains the job still runs with one fixed line (the install
+   * cannot download); with one, the runner installs on the host before the agent starts (`depsInstall.ts`, no repo code), marks `deps_installed` or
+   * `deps_install_failed`, and the agent gets one fixed line. Neither outcome fails the run.
+   */
+  async function prepareDeps(job: Job, workspace: string, notes: string[], signal: AbortSignal, mark: (stage: "deps_installed" | "deps_install_failed") => void): Promise<void> {
+    const domains = (job.sandbox_allowances?.entries ?? []).filter((entry) => entry.kind === "domain").map((entry) => entry.value);
+    const registryHost = registryHostOf(domains);
+    if (registryHost === undefined) {
+      const detail = depsDetail({ role: job.role, workspace, domains });
+      if (detail === undefined) return;
+      deps.onDepsDetail?.(detail);
+      notes.push(DEPS_REGISTRY_NOTE);
+      return;
+    }
+    if (deps.depsInstall === undefined || deps.packageStoreRoot === undefined || !TEST_ROLES.has(job.role)) return;
+    let storeDir: string;
+    try {
+      storeDir = segmentUnder(deps.packageStoreRoot, storeKeyOf(job.repo));
+    } catch (error) {
+      // The sandbox refuses a job whose repo id is not one plain segment (`sandbox_allowance_forbidden`); nothing is installed for it.
+      if (error instanceof NotAPlainSegment) return;
+      throw error;
+    }
+    const outcome = await deps.depsInstall.run({ workspace, registryHost, storeDir, signal });
+    if (outcome.kind === "none") return;
+    if (outcome.kind === "refused") deps.onDepsDetail?.("deps_lockfile_refused");
+    mark(outcome.kind === "installed" ? "deps_installed" : "deps_install_failed");
+    notes.push(outcome.kind === "installed" ? DEPS_INSTALLED_NOTE : DEPS_FAILED_NOTE);
+  }
+
   /** A refusal made before anything is held: the one event is the only thing this run sends. */
   async function refuse(claimed: Claimed, reason: JobRefusal): Promise<JobResult> {
     await sendRunEndedAlone(deps.client, deps.clock, claimed, endOfRefusal(reason), deps.shutdown ?? never);
@@ -218,7 +258,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
     const next = (): number => (lease.highestSeq() ?? -1) + 1;
     const detach = deps.events.attach(claimed.runId, (event) => lease.push({ ...event, seq: next() }));
-    const mark = (stage: "workspace_ready" | "cloned"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
+    const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
     const held: HeldSandbox = {};
     const ran = new AbortController();
@@ -261,6 +301,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               started.base = resumed.base;
               mark("workspace_ready");
               mark("cloned");
+              await prepareDeps(job, wanted.workspace, promptNotes, stopRun, mark);
             }
             else {
               const fresh = { kind: "fresh", branch: job.continues.branch } as const;
@@ -275,6 +316,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             mark("cloned");
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
+            await prepareDeps(job, workspace, promptNotes, stopRun, mark);
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const allowed = grant === undefined ? granted : withAllowances(granted, grant);

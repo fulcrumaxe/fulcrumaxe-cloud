@@ -54,6 +54,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
   "src/runnerSettings.ts": ["fs", "path"], // D#6 C43-4: the concurrency settings file and the claiming-pause marker in the state directory: lstat, a bounded read, the private-file writer and one removal
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
+  "src/job/depsRegistry.ts": ["fs", "path"], // D#6 C44-4: one lstat of the workspace's lockfile names, never followed, to tell whether the repo has a lockfile
+  "src/daemon/depsInstall.ts": ["fs", "path"], // D#6 C44-4: the host-side install: lstat and a no-follow read of the lockfile and two settings files, removal of node_modules trees (no link followed), the 0700 scratch directories; the package manager runs through the injected install capture
+  "src/job/lockfileCheck.ts": ["path"], // D#6 C44-4: normalising a repo-relative link target
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id
   "src/daemon/nixShell.ts": ["crypto", "fs", "path"], // D#6 R7c: the dev shell step's own 0700 data directory and its cache files, a SHA-256 of the lock file, and the search for the nix binary; nix itself runs through the injected capture
   "src/daemon/gitPathA.ts": ["fs", "os", "path"], // cloud-verified path: realpath and statfs of the mirrors directory (must not be a temp directory or memory-backed), and the temp directory's location
@@ -190,7 +193,7 @@ function spawnValueProblem(node: ts.Identifier, file: string): boolean {
       ts.isCallExpression(parent.parent) &&
       parent.parent.arguments[0] === parent &&
       ts.isIdentifier(parent.parent.expression) &&
-      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground");
+      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground" || parent.parent.expression.text === "runInstall");
     return !(seamLeft || runCaptureArg);
   }
   return true;

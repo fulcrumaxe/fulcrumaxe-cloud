@@ -386,7 +386,7 @@ describe("activity and stage fields (D#6 C42-1, additive under C8 section 6)", (
   });
 
   it("a stage event names one of the three stages, carries nothing else, and no other type may carry stage", () => {
-    for (const stage of ["workspace_ready", "cloned", "writing_result"]) expect(ok({ ...base, type: "stage", stage }), stage).toBe(true);
+    for (const stage of ["workspace_ready", "cloned", "deps_installed", "deps_install_failed", "writing_result"]) expect(ok({ ...base, type: "stage", stage }), stage).toBe(true);
     for (const bad of [{ stage: "sandbox_ready" }, {}, { stage: "cloned", tool_name: "Bash" }, { stage: "cloned", file_path: "a.ts" }, { stage: "cloned", usage: { input: 1 } }]) {
       expect(ok({ ...base, type: "stage", ...bad }), JSON.stringify(bad)).toBe(false);
     }

@@ -603,6 +603,9 @@ importers:
       '@fulcrumaxe/runner-protocol':
         specifier: workspace:*
         version: link:../runner-protocol
+      js-yaml:
+        specifier: 4.3.2
+        version: 4.3.2
       tuf-js:
         specifier: 6.0.0
         version: 6.0.0(supports-color@10.2.2)
@@ -622,9 +625,6 @@ importers:
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
-      js-yaml:
-        specifier: ^4.3.2
-        version: 4.3.2
       postject:
         specifier: 1.0.0-alpha.6
         version: 1.0.0-alpha.6

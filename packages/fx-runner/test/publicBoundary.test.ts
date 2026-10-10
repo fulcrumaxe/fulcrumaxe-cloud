@@ -52,9 +52,10 @@ describe("boundary: what the source may import, and every workspace import is de
     expect(found).toEqual(["@scope/pkg"]);
   });
 
-  // The one third-party library the runner may import: the TUF client its updater is built on (D#6 R6-2a, correction C38 section 2).
+  // The third-party libraries the runner may import: the TUF client its updater is built on (D#6 R6-2a, correction C38 section 2), and js-yaml (D#6 C44-4), which
+  // parses a repo's lockfile and workspace file for the host-side install's pre-check (exact version, in dependencies).
   // It is declared exactly in package.json (a test below pins that), and no other third-party import is allowed.
-  const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js"]);
+  const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js", "js-yaml"]);
 
   it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
     const violations: string[] = [];
@@ -80,6 +81,10 @@ describe("boundary: what the source may import, and every workspace import is de
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it("js-yaml is declared as an exact version, in dependencies", () => {
+    expect(manifest.dependencies?.["js-yaml"]).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("the TUF client is declared as an exact version, in dependencies", () => {

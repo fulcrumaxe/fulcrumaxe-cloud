@@ -52,8 +52,8 @@ export const ActivityField = z
   .strict();
 export type ActivityField = z.infer<typeof ActivityField>;
 
-/** D#6 C42-1: the stages a runner marks, once each per run. `workspace_ready` is stored as the sandbox runs' `sandbox_ready`. */
-export const RUNNER_STAGES = ["workspace_ready", "cloned", "writing_result"] as const;
+/** D#6 C42-1: the stages a runner marks, once each per run. `workspace_ready` is stored as the sandbox runs' `sandbox_ready`. D#6 C44-4: `deps_installed` and `deps_install_failed` are the closed outcomes of the host-side dependency install, at most one of them per run. */
+export const RUNNER_STAGES = ["workspace_ready", "cloned", "deps_installed", "deps_install_failed", "writing_result"] as const;
 export const RunnerStage = z.enum(RUNNER_STAGES);
 export type RunnerStage = z.infer<typeof RunnerStage>;
 

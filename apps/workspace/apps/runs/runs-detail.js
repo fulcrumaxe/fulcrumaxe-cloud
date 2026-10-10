@@ -126,7 +126,7 @@ const SETUP_LINES = {
   head_not_from_base: "The agent's work did not start from this run's starting point, so the runner did not publish it. Build again.",
   sandbox_stub_committed: "The agent committed empty placeholder files the sandbox makes, so the runner did not publish it. Build again.",
 };
-const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", writing_result: "Writing up the result" };
+const STAGE_LINES = { workspace_ready: "The secure sandbox is ready", cloned: "Repository cloned", deps_installed: "Dependencies installed", deps_install_failed: "Dependencies did not install", writing_result: "Writing up the result" };
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const num = (v) => (Number.isFinite(v) ? v : null);
 

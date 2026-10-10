@@ -141,3 +141,27 @@ export function gitEnv(options: CleanEnvOptions = {}): Record<string, string> {
   Object.assign(env, GIT_FIXED_ENV);
   return env;
 }
+
+/**
+ * Host variables the dependency install may see (D#6 C44-4): the language and terminal basics, and the names that point a program at the machine's CA
+ * certificates (on NixOS the certificate store is only found through these). No home directory, no config location, no token, no proxy: `HOME` and
+ * the temp and cache directories are the install's own scratch, set by the caller.
+ */
+export const INSTALL_ENV_ALLOWLIST: readonly string[] = Object.freeze(["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]);
+
+/**
+ * The environment a host-side dependency install starts from, built from scratch: the allowlist above, the tool directories at the end of PATH, and the
+ * settings in `fixed` (the caller's pins and scratch directories). Never holds the subscription token, an API key, a git token or any connection secret.
+ */
+export function installEnv(options: CleanEnvOptions, fixed: Readonly<Record<string, string>>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of INSTALL_ENV_ALLOWLIST) {
+    const value = process.env[name];
+    if (typeof value === "string" && value !== "") env[name] = value;
+  }
+  const widened = withDirs(env.PATH, options.extraPathDirs ?? []);
+  if (widened !== undefined) env.PATH = widened;
+  else delete env.PATH;
+  Object.assign(env, fixed);
+  return env;
+}
