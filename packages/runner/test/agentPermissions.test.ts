@@ -7,11 +7,10 @@ import { EXECUTOR_TOOLS, FX_AGENT_SETTINGS, OTHER_ROLE_TOOLS, REVIEWER_TOOLS, ag
  * change to a list shows up here as a deliberate edit that a reviewer reads.
  */
 const READ = ["Read", "Glob", "Grep", "LS"];
-const TEST = ["Bash(git:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(pnpm:*)", "Bash(yarn:*)"];
-const HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(date:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(diff:*)", "Bash(test:*)"];
 
-const EXECUTOR = [...READ, "Edit", "MultiEdit", "Write", "NotebookEdit", ...TEST, ...HELPERS, "Bash(curl:*)", "Bash(mkdir:*)", "Bash(rm:*)", "Bash(mv:*)", "Bash(cp:*)", "Bash(touch:*)"];
-const REVIEWER = [...READ, ...TEST, "Bash(mkdir:*)", ...HELPERS];
+// R-C44-1 (owner, 2026-10-10): these roles hold plain Bash; the OS sandbox / VM is the boundary.
+const EXECUTOR = [...READ, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"];
+const REVIEWER = [...READ, "Bash"];
 const OTHER = [...READ, "Bash(curl:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(pwd)"];
 
 /** The manifest's other roles (packages/roles/src/manifest.ts); packages/worker agentRolesParity.test.ts pins the manifest to these lists. */
@@ -24,17 +23,18 @@ const ALL_ROLE_NAMES = ["executor", "code-reviewer", "security-reviewer", "accep
 const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 
 describe("per-role tool permissions", () => {
-  it("the executor may read, edit and write, run git, node and the package managers, curl, and do basic file operations", () => {
+  it("the executor may read, edit and write, and use plain Bash (no Bash prefix entries)", () => {
     expect([...toolsForRole("executor")]).toEqual(EXECUTOR);
     expect([...EXECUTOR_TOOLS]).toEqual(EXECUTOR);
-    for (const t of ["Edit", "Write", "Bash(git:*)", "Bash(node:*)", "Bash(pnpm:*)", "Bash(npm:*)", "Bash(curl:*)", "Bash(rm:*)"]) expect(toolsForRole("executor")).toContain(t);
+    for (const t of ["Edit", "Write", "Bash"]) expect(toolsForRole("executor")).toContain(t);
+    expect(toolsForRole("executor").filter((t) => t.startsWith("Bash("))).toEqual([]);
   });
 
-  it.each(["code-reviewer", "security-reviewer", "acceptance-tester", "debater"])("%s may read, run git, node and the test runners, and has NO edit or write tool and no curl", (role) => {
+  it.each(["code-reviewer", "security-reviewer", "acceptance-tester", "debater"])("%s may read and use plain Bash, and has NO edit or write tool", (role) => {
     expect([...toolsForRole(role)]).toEqual(REVIEWER);
     for (const t of EDIT_TOOLS) expect(toolsForRole(role)).not.toContain(t);
-    expect(toolsForRole(role)).not.toContain("Bash(curl:*)");
-    expect(toolsForRole(role)).not.toContain("Bash(rm:*)");
+    expect(toolsForRole(role)).toContain("Bash");
+    expect(toolsForRole(role).filter((t) => t.startsWith("Bash("))).toEqual([]);
     expect([...REVIEWER_TOOLS]).toEqual(REVIEWER);
   });
 
@@ -65,10 +65,10 @@ describe("per-role tool permissions", () => {
     }
   });
 
-  it("no list allows a bare tool that would widen it: no wildcard, no unrestricted Bash, no WebFetch or WebSearch, no MCP tool", () => {
+  it("no list allows a wildcard, WebFetch, WebSearch or an MCP tool, and only the executor and reviewer lists hold plain Bash", () => {
+    expect(OTHER_ROLE_TOOLS).not.toContain("Bash");
     for (const list of [EXECUTOR_TOOLS, REVIEWER_TOOLS, OTHER_ROLE_TOOLS]) {
       for (const t of list) {
-        expect(t).not.toBe("Bash");
         expect(t).not.toBe("*");
         expect(t).not.toMatch(/^(WebFetch|WebSearch|mcp__)/);
         if (t.startsWith("Bash(")) expect(t).toMatch(/^Bash\([a-z]+(:\*)?\)$/);
