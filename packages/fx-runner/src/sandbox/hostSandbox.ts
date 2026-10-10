@@ -4,6 +4,7 @@ import type { AgentHandle, AgentRuntime, NormalizedEvent } from "@fulcrumaxe/run
 import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../job/cleanEnv.js";
 import { checkedAllowances, grantsOf, jobEnvFor, type AllowanceGrants } from "./allowances.js";
 import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } from "./writeScratch.js";
+import { JobEnvFileRefused, makeJobEnvDir, writeJobEnvFile } from "./jobEnvFile.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { applyNixView } from "./nixView.js";
 import {
@@ -58,7 +59,7 @@ export interface HostSandboxConfig {
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -83,6 +84,8 @@ function failureOf(outcome: unknown): string | undefined {
 
 interface Entry {
   tempDir: string;
+  /** D#6 C44-1: the runner-owned directory of this job's env file, under the state directory and outside every path the job may write. */
+  envDir: string;
   /** The write directories of this job's allowances that the runner made (removed with the sandbox). */
   scratch: ScratchDirs;
   timeoutMs: number;
@@ -197,15 +200,29 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
     let jobEnv: Record<string, string> | undefined;
     let runtime: InterruptibleRuntime;
     try {
+      // Every job (D#6 C44-1) gets TMPDIR = its own temp directory, the only temp place the sandbox lets it write, and an env file that restores
+      // PATH and TMPDIR inside the Bash tool's login shell. An allowance job adds its own names below.
+      jobEnv = { TMPDIR: entry.tempDir.replace(/\/+$/, "") };
       if (allowances !== undefined && grants !== undefined) {
         claimScratch(entry.scratch, grants.writePaths);
         // The dev shell's variables (D#6 R7c) come first, so the job's own per-job names can never be replaced by them.
-        jobEnv = { ...(allowances.nixEnv ?? {}), ...jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS }) };
+        jobEnv = { ...(allowances.nixEnv ?? {}), ...jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS }), ...jobEnv };
         mkdirSync(jobEnv.XDG_CACHE_HOME!, { recursive: true, mode: 0o700 });
         if (storeDir !== undefined && config.packageStoreRoot !== undefined) {
           mkdirSync(config.packageStoreRoot, { recursive: true, mode: 0o700 });
           mkdirSync(storeDir, { mode: 0o700, recursive: true });
         }
+      }
+      // The file holds the PATH the clean environment builds for this very job (host entries, the toolchain, the dev shell's), so the shell's copy
+      // can never differ from the engine's. A value it cannot quote safely refuses the job before the file exists.
+      try {
+        const wanted = cleanEnv(config.credentials, { ...config.envOptions, jobEnv });
+        makeJobEnvDir(path.join(config.stateDir, "job-env"), entry.envDir);
+        jobEnv.CLAUDE_ENV_FILE = writeJobEnvFile(entry.envDir, { PATH: wanted.PATH, TMPDIR: wanted.TMPDIR });
+      } catch (error) {
+        // A TypeError here is cleanEnv refusing a per-job value (a dev shell variable, say): the same closed reason, no value in it.
+        if (error instanceof JobEnvFileRefused || error instanceof TypeError) throw new HostSandboxRefused("job_env_unsafe");
+        throw error;
       }
       runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }), jobEnv);
     } catch (error) {
@@ -282,7 +299,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       // A live sandbox of that name keeps its entry: a second create would orphan its timer and agent, and share its temp directory.
       if (sandboxes.has(opts.sandboxName)) throw new HostSandboxRefused("sandbox_exists");
       mkdirSync(tempDir, { recursive: true, mode: 0o700 });
-      sandboxes.set(opts.sandboxName, { tempDir, scratch: new Map(), timeoutMs: opts.timeoutMs, expired: false, running: false });
+      sandboxes.set(opts.sandboxName, { tempDir, envDir: path.join(config.stateDir, "job-env", opts.sandboxName), scratch: new Map(), timeoutMs: opts.timeoutMs, expired: false, running: false });
       return { runId: "", sandboxName: opts.sandboxName, sessionId: `host-${opts.sandboxName}` };
     },
     startDetached: (handle, opts) => launch(handle, opts, undefined),
@@ -304,7 +321,11 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       clearTimeout(entry.timer);
       sandboxes.delete(handle.sandboxName);
       try {
-        rmSync(entry.tempDir, { recursive: true, force: true });
+        try {
+          rmSync(entry.tempDir, { recursive: true, force: true });
+        } finally {
+          rmSync(entry.envDir, { recursive: true, force: true });
+        }
       } finally {
         // The job's write directories go with it, whether the job ended well or not (this runs in the job runner's finally).
         releaseScratch(entry.scratch);

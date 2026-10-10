@@ -37,7 +37,7 @@ describe("a second engine runs through the same runJob and the same host tier, w
       credentials: { mode: "subscription" },
       makeRuntime: otherEngine(seen),
       home: "/home/jane",
-      stateDir: "/home/jane/.fx-runner",
+      stateDir: path.join(root, "state"),
       binaryDir: "/opt/other-engine/bin",
       tempRoot: path.join(root, "tmp"),
       workspaceRoot: path.join(root, "workspaces"),

@@ -56,7 +56,7 @@ export interface CleanEnvOptions {
 }
 
 /** The only names a job's own environment may set. A repo's Nix dev shell (D#6 R7c) adds only the names in `NIX_ENV_NAMES`, each value checked again. */
-export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["XDG_CACHE_HOME", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
+export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["TMPDIR", "CLAUDE_ENV_FILE", "XDG_CACHE_HOME", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
 
 /** True for a PATH entry that is an absolute directory with no NUL byte. */
 function isAbsoluteEntry(entry: string): boolean {

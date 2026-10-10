@@ -58,4 +58,13 @@ describe("R7b: a job with allowances reaches the engine", () => {
     for (const name of ["BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "pnpm_config_store_dir", "XDG_CACHE_HOME", "pnpm_config_verify_store_integrity"]) expect(env, name).not.toContain(`${name}=`);
     expect(settings.sandbox.network.allowedDomains).toEqual(["api.anthropic.com"]);
   });
+
+  it("D#6 C44-1: a job without allowances still starts with TMPDIR = its temp directory and the env file named in CLAUDE_ENV_FILE", async () => {
+    const { out, env, rig } = await runWith(false);
+    expect(out).toMatchObject({ status: "done" });
+    const tmp = path.join(rig.root, "tmp");
+    const state = path.join(rig.root, "state").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(env).toMatch(new RegExp(`(^|\\n)TMPDIR=${tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/rn-[^/\\n]+\\n`));
+    expect(env).toMatch(new RegExp(`(^|\\n)CLAUDE_ENV_FILE=${state}/job-env/rn-[^/\\n]+/claude-env\\.sh\\n`));
+  });
 });

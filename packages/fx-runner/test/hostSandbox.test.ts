@@ -9,6 +9,8 @@ import type { NetworkRule, StartDetachedOptions } from "../src/sandbox/port.js";
 
 type Block = { filesystem: { allowWrite: string[]; denyWrite: string[] }; network: { allowedDomains: string[] } } & Record<string, unknown>;
 const HOME = "/home/jane";
+/** The runner state directory must be writable: the per-job env file is made under it (D#6 C44-1). */
+const STATE = mkdtempSync(path.join(tmpdir(), "r4b13_state-"));
 
 function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
   const blocks: Block[] = [];
@@ -38,7 +40,7 @@ function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOpti
       return runtime;
     },
     home: HOME,
-    stateDir: `${HOME}/.fx-runner`,
+    stateDir: STATE,
     binaryDir: `${HOME}/.local/bin`,
     registries: ["registry.npmjs.org"],
     ...(over.mirrorsRoot === undefined ? {} : { mirrorsRoot: over.mirrorsRoot }),
@@ -112,7 +114,7 @@ describe("hostSandbox: the sandbox block comes from the one builder, for this jo
     const block = t.blocks[0]!;
     expect(block).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false });
     expect(block.filesystem.allowWrite).toEqual([t.workdir, path.join(t.tempRoot, "rn-1")]);
-    expect(block.filesystem.denyWrite).toEqual([`${HOME}/.fx-runner`, `${HOME}/.local/bin`]);
+    expect(block.filesystem.denyWrite).toEqual([STATE, `${HOME}/.local/bin`]);
     expect(block.network.allowedDomains).toEqual(["api.anthropic.com", "registry.npmjs.org"]);
   });
 
