@@ -1,0 +1,149 @@
+name: macOS sandbox check
+
+# The read-deny canary matrix for the macOS Seatbelt sandbox, on free GitHub-hosted runners (D#587 B-10). It starts the
+# agent CLI the way a runner job does (the settings file and argument list come from the runner's own builders) against
+# a scripted loopback model API, probes every planted secret on every channel, and records whether a job can reach its
+# init line with securityd denied (macOS), and runs the same matrix on Linux. Start it by hand (Actions tab, or `gh workflow run macos-sandbox-check.yml`).
+#
+# No secrets, no inputs, a read-only token and a dummy key: the hosted runner never holds a Claude credential. Each job
+# also requires a public repository, so the private plane never spends macOS minutes. To undo, delete this file and
+# packages/fx-runner/test/canary/.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.11.0
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Install the runner package
+        run: pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Install the agent CLI at the runner's minimum version
+        run: |
+          VERSION="$(sed -n 's/^export const MIN_CLAUDE_VERSION = "\(.*\)";$/\1/p' packages/fx-runner/src/engines/claude/pin.ts)"
+          test -n "$VERSION"
+          npm install --global "@anthropic-ai/claude-code@${VERSION}"
+          claude --version
+      - name: Run the canary matrix and the securityd check
+        env:
+          FX_B10: "1"
+          FX_B10_CHECK: "1"
+          FX_B10_OUT: ${{ runner.temp }}/b10-macos-15
+        run: pnpm --filter "@fulcrumaxe/fx-runner" exec vitest run test/canary --no-file-parallelism
+      - name: Job summary
+        if: always()
+        env:
+          OUT: ${{ runner.temp }}/b10-macos-15
+        run: |
+          for f in summary.md securityd.md; do
+            if [ -f "$OUT/$f" ]; then cat "$OUT/$f" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+      - name: Upload the logs and results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: b10-macos-15
+          path: ${{ runner.temp }}/b10-macos-15
+          if-no-files-found: warn
+
+  macos-intel:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.11.0
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Install the runner package
+        run: pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Install the agent CLI at the runner's minimum version
+        run: |
+          VERSION="$(sed -n 's/^export const MIN_CLAUDE_VERSION = "\(.*\)";$/\1/p' packages/fx-runner/src/engines/claude/pin.ts)"
+          test -n "$VERSION"
+          npm install --global "@anthropic-ai/claude-code@${VERSION}"
+          claude --version
+      - name: Run the canary matrix and the securityd check
+        env:
+          FX_B10: "1"
+          FX_B10_CHECK: "1"
+          FX_B10_OUT: ${{ runner.temp }}/b10-macos-15-intel
+        run: pnpm --filter "@fulcrumaxe/fx-runner" exec vitest run test/canary --no-file-parallelism
+      - name: Job summary
+        if: always()
+        env:
+          OUT: ${{ runner.temp }}/b10-macos-15-intel
+        run: |
+          for f in summary.md securityd.md; do
+            if [ -f "$OUT/$f" ]; then cat "$OUT/$f" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+      - name: Upload the logs and results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: b10-macos-15-intel
+          path: ${{ runner.temp }}/b10-macos-15-intel
+          if-no-files-found: warn
+
+  # The same matrix on Linux (the agent CLI's own bubblewrap sandbox), so the file-tool channels are proven on every OS.
+  linux:
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.11.0
+      - name: Install the sandbox helpers and allow unprivileged user namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Install the runner package
+        run: pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Install the agent CLI at the runner's minimum version
+        run: |
+          VERSION="$(sed -n 's/^export const MIN_CLAUDE_VERSION = "\(.*\)";$/\1/p' packages/fx-runner/src/engines/claude/pin.ts)"
+          test -n "$VERSION"
+          npm install --global "@anthropic-ai/claude-code@${VERSION}"
+          claude --version
+      - name: Run the canary matrix
+        env:
+          FX_B10: "1"
+          FX_B10_CHECK: "1"
+          FX_B10_OUT: ${{ runner.temp }}/b10-linux
+        run: pnpm --filter "@fulcrumaxe/fx-runner" exec vitest run test/canary --no-file-parallelism
+      - name: Job summary
+        if: always()
+        env:
+          OUT: ${{ runner.temp }}/b10-linux
+        run: |
+          if [ -f "$OUT/summary.md" ]; then cat "$OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Upload the logs and results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: b10-linux
+          path: ${{ runner.temp }}/b10-linux
+          if-no-files-found: warn
