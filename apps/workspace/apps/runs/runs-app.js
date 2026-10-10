@@ -308,7 +308,7 @@ function mountApp(contentEl) {
     onStatus: (id) => loadRun(id, undefined, liveAc.signal).then((run) => {
       if (listState === "ready" && run && run.id === id) { rows = upsertRow(rows, run); paintList(); }
       // The open run changed (claimed, cancelled ...): its approval is read again from the fresh run.
-      if (run && run.id === id && id === openId && detail && detail.status === "ready") { detail.run = { ...detail.run, ...run }; loadApproval(detail); }
+      if (run && run.id === id && id === openId && detail && detail.status === "ready") { detail.run = { ...detail.run, ...run }; loadApproval(detail); if (detail.reinsight) detail.reinsight(); }
     }, () => {}),
     onRefresh: refresh,
   });

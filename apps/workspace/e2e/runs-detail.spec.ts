@@ -201,7 +201,9 @@ test.describe("D#483 P5: the run detail (mocked API)", () => {
     await expect(tid(page, "runs-no-outcome")).toHaveText("No result yet. The agent reports one when it finishes.");
     await expect(tid(page, "runs-cost-model")).toContainText("Counting…");
     await expect(tid(page, "runs-cost-compute")).toContainText("Settled when the run ends");
-    await expect(tid(page, "runs-no-activity")).toBeVisible();
+    // "No activity recorded." is for a finished run; one still going has recorded nothing yet (D#6 C42-4).
+    await expect(tid(page, "runs-nothing-yet")).toHaveText("Nothing recorded yet.");
+    await expect(tid(page, "runs-no-activity")).toHaveCount(0);
     await expect(tid(page, "runs-open-item")).toHaveCount(0);
     await expect(tid(page, "runs-gh")).toHaveCount(0);
     await expect(tid(page, "run-event")).toHaveCount(9);

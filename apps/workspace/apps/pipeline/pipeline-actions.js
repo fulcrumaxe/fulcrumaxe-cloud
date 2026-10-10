@@ -72,8 +72,19 @@ export function runnerUsageText(run) {
   return "On your Claude plan \u00b7 " + (price ? "API-equivalent " + price : "no API price for this model") + " \u00b7 " + toks;
 }
 
-/** The work item's separate total, shown only when its runs on the person's machine have one. */
-export const ownPlanText = (usd) => (Number.isFinite(usd) && usd > 0 ? "On your own plan (API-equivalent): " + apiUsd(usd) : null);
+/**
+ * The work item's separate total for its runs on the person's machine (D#6 C42-5 states). `recorded` (or an older server that sends no state) shows the
+ * figure when there is one; `not_priced` shows the tokens and says there is no price; `not_recorded` says no usage was reported. Neither of those is
+ * ever drawn as $0: the item's figure is null then, and a real zero shows nothing at all.
+ */
+export function ownPlanText(usd, state, tokens) {
+  if (state === "not_priced") {
+    const t = isObj(tokens) ? tok(tokens.input) + " in / " + tok(tokens.output) + " out tokens" : "tokens";
+    return "On your own plan: " + t + " recorded, but no API price for the model yet (that is not $0)";
+  }
+  if (state === "not_recorded") return "On your own plan: a finished run reported no usage, so there is no estimate (that is not $0)";
+  return Number.isFinite(usd) && usd > 0 ? "On your own plan (API-equivalent): " + apiUsd(usd) : null;
+}
 
 const validRun = (r) => r && typeof r === "object" && typeof r.id === "string" && typeof r.role === "string" && typeof r.status === "string";
 
@@ -277,7 +288,7 @@ export function createActions({ itemId, repoId, call = api, uuid = () => crypto.
 }
 
 /** The Runs section: `el` goes into the detail; label() is the pending text for the card. */
-export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlanUsd = () => null }) {
+export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlan = () => null }) {
   let lastLabel = null;
   let lastLive = false;
   let dlg = null;
@@ -379,7 +390,8 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       : st.list === "error" ? h("p", { class: "pl-muted", "data-testid": "pl-runs-error" }, "Runs aren't available right now.")
       : st.runs.length === 0 ? h("p", { class: "pl-muted" }, "No runs yet.")
       : h("ul", { class: "pl-runlist" }, st.runs.map(row), st.more ? h("li", { class: "pl-muted" }, "Older runs are in the Runs app.") : null);
-    const own = st.list === "ready" ? ownPlanText(ownPlanUsd()) : null;
+    const item = st.list === "ready" ? ownPlan() : null;
+    const own = item ? ownPlanText(item.own_plan_api_equivalent_usd, item.own_plan_usage_state, item.own_plan_tokens) : null;
     // Rebuilding the rows must not drop keyboard focus: put it back on the same control of the same run.
     const held = list.contains(document.activeElement) && document.activeElement.closest("[data-run-id]");
     const heldId = held && held.dataset.runId;

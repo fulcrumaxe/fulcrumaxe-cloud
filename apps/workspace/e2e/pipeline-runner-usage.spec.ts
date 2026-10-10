@@ -22,14 +22,15 @@ const tid = (page: Page, id: string) => page.locator(`${WIN} [data-testid="${id}
 
 const usage = (over: Record<string, unknown> = {}) => ({ credential_mode: "subscription", model: "claude-sonnet-4-5", tokens_in: 182000, tokens_out: 9400, cache_read_tokens: 0, cache_write_tokens: 0, api_equivalent_usd: 1.2345, price_table_version: "v1", ...over });
 
-async function start(page: Page, runs: unknown[], ownPlan: number | undefined) {
+/** `ownPlan` is the item's own-plan figure alone (the earlier tests), or the item's own_plan_* fields as the cloud sends them (C42-5). */
+async function start(page: Page, runs: unknown[], ownPlan: number | undefined | Record<string, unknown>) {
   const errors: string[] = [];
   page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(m.text()); });
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   const send = (route: Route, status: number, json: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(json) });
   await page.route((u) => u.pathname.startsWith("/api/v1/") && u.pathname !== "/api/v1/events", async (route) => {
     const p = new URL(route.request().url()).pathname;
-    if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress", ...(ownPlan === undefined ? {} : { own_plan_api_equivalent_usd: ownPlan }) }], next_cursor: null });
+    if (p === "/api/v1/work-items") return send(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress", ...(ownPlan === undefined ? {} : typeof ownPlan === "object" ? ownPlan : { own_plan_api_equivalent_usd: ownPlan }) }], next_cursor: null });
     if (p === "/api/v1/repos") return send(route, 200, REPOS);
     if (p.endsWith("/timeline")) return send(route, 200, TIMELINE);
     if (p === "/api/v1/runs") return send(route, 200, { ...WORK, data: runs });
@@ -94,6 +95,35 @@ test.describe("D#6 R2b-5b: usage in the Pipeline Runs section (mocked API)", () 
 
   test("an item whose reply has no own-plan figure (older server) shows no own-plan line", async ({ page }) => {
     await start(page, [{ ...base, runtime: "production" }], undefined);
+    await expect(tid(page, "pl-own-plan")).toHaveCount(0);
+  });
+
+  // D#6 C42-4 / C42-5: the item's own-plan cost is a state, never a silent $0. The not-priced item is the cloud's own pinned reply.
+  const NOT_PRICED = fx("getWorkItem", "200-own-plan-not-priced.json");
+  const ownPlanOf = (w: Record<string, unknown>) => ({ own_plan_api_equivalent_usd: w.own_plan_api_equivalent_usd, own_plan_usage_state: w.own_plan_usage_state, own_plan_tokens: w.own_plan_tokens });
+
+  test("an item whose runs have tokens and no API price says so, with the tokens, and never shows $0", async ({ page }) => {
+    expect(NOT_PRICED.own_plan_api_equivalent_usd).toBeNull();
+    const errors = await start(page, [runner("aaaaaaaa-0000-4000-8000-000000000001", { usd: null, runner_usage: usage({ api_equivalent_usd: null }) })], ownPlanOf(NOT_PRICED));
+    await expect(tid(page, "pl-own-plan")).toHaveText("On your own plan: 182,000 in / 9,400 out tokens recorded, but no API price for the model yet (that is not $0)");
+    expect(await tid(page, "pl-runs").innerText()).not.toMatch(/\$\d+\.\d|\b(null|undefined|NaN)\b/);
+    expect(errors).toEqual([]);
+  });
+
+  test("an item with a finished run that reported no usage says there is no estimate, and never shows $0", async ({ page }) => {
+    const errors = await start(page, [runner("aaaaaaaa-0000-4000-8000-000000000001", { usd: null, runner_usage: null })], { ...ownPlanOf(NOT_PRICED), own_plan_usage_state: "not_recorded", own_plan_tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
+    await expect(tid(page, "pl-own-plan")).toHaveText("On your own plan: a finished run reported no usage, so there is no estimate (that is not $0)");
+    expect(await tid(page, "pl-runs").innerText()).not.toMatch(/\$\d+\.\d|\b(null|undefined|NaN)\b/);
+    expect(errors).toEqual([]);
+  });
+
+  test("a recorded item shows its figure, and a recorded zero shows nothing", async ({ page }) => {
+    await start(page, [runner("aaaaaaaa-0000-4000-8000-000000000001", { runner_usage: usage() })], { own_plan_api_equivalent_usd: 3.5, own_plan_usage_state: "recorded", own_plan_tokens: { input: 182000, output: 9400, cache_read: 0, cache_write: 0 } });
+    await expect(tid(page, "pl-own-plan")).toHaveText("On your own plan (API-equivalent): $3.50");
+  });
+
+  test("an item with no runs on the person's machine (a recorded zero) shows no own-plan line", async ({ page }) => {
+    await start(page, [{ ...base, runtime: "production" }], { own_plan_api_equivalent_usd: 0, own_plan_usage_state: "recorded", own_plan_tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
     await expect(tid(page, "pl-own-plan")).toHaveCount(0);
   });
 });

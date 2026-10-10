@@ -11,6 +11,7 @@
 // The file has two halves: the pure model (no DOM, no network) and, below the divider, the panel that draws it. They
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { h, timeNode } from "../_lib/dom.js";
+import { runnerUsageText } from "./pipeline-actions.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -93,11 +94,45 @@ export function usdText(usd) {
   return Number.isFinite(usd) ? "$" + usd.toFixed(2) : "";
 }
 
+const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/;
+
+/** HH:MM:SS (the viewer's clock) of an ISO instant, or null when it is not one. */
+export function clockText(iso) {
+  const t = typeof iso === "string" && ISO.test(iso) ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, "0");
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+}
+
+export const ATTACH_HINT = "You can also watch this run on the runner machine with `fx-runner attach`.";
+
+/**
+ * D#6 C42-4: what a run on the person's own machine adds to its section, or null for any other run (which then reads exactly as before).
+ * `cost` is the usage line (never a $0 for a missing figure) and `costNote` the sentence for a state with no figure; `wait` is the server's
+ * own sentence for why a queued run is not running yet; `checkedIn` is only for a live run.
+ */
+export function runnerView(run) {
+  if (run.runtime !== "runner") return null;
+  const state = typeof run.runner_usage_state === "string" ? run.runner_usage_state : null;
+  const note = typeof run.runner_usage_note === "string" && run.runner_usage_note !== "" ? run.runner_usage_note : null;
+  const usage = runnerUsageText(run);
+  const started = run.status === "running";
+  return {
+    cost: usage || (state === "not_recorded" ? "Cost not recorded" : null),
+    costNote: note,
+    wait: run.wait && typeof run.wait.text === "string" && run.wait.text.trim() !== "" ? run.wait.text : null,
+    checkedIn: started ? clockText(run.runner_checked_in_at) : null,
+    started,
+  };
+}
+
 /** One agent run as a section: its phase, a title, whether it starts open, its summary and its newest lines. */
 export function runView(run, maxLines = 40) {
   const live = LIVE_STATUSES.has(run.status);
   const lines = Array.isArray(run.lines) ? run.lines : [];
   return {
+    runner: runnerView(run),
     key: "r:" + run.id,
     phase: phaseOf(run.role),
     role: roleWord(run.role),
@@ -241,6 +276,8 @@ export const SENTENCES = {
   stale: "Couldn't refresh just now. Showing the last update.",
   noRuns: "No agent has run on this item yet.",
   noActivity: "No activity recorded for this run yet.",
+  runnerStarted: "Your runner has started; nothing recorded yet",
+  notStarted: "Not started yet; nothing recorded yet.",
   noPanel: "No panel discussion yet.",
   noSpec: "No Spec yet.",
   olderRuns: "Older runs aren't shown.",
@@ -311,6 +348,26 @@ export function createInsightPanel(deps) {
     );
   }
 
+  /** What a run with no lines says. A runner run that is still queued says why (its wait sentence, shown above) and nothing more, else that it has not started. */
+  function emptyActivity(r) {
+    if (!r.runner || !r.live) return SENTENCES.noActivity;
+    if (r.runner.started) return SENTENCES.runnerStarted;
+    return r.runner.wait ? null : SENTENCES.notStarted;
+  }
+
+  /** D#6 C42-4: the wait, the usage estimate (with its note), when the runner last checked in, and how to watch the run on the machine. Text nodes only. */
+  function runnerNotes(r) {
+    const x = r.runner;
+    if (!x) return [];
+    return [
+      x.wait ? h("p", { class: "pl-ins-wait", role: "status", "data-testid": "pl-run-wait" }, x.wait) : null,
+      x.cost ? h("p", { class: "pl-muted pl-ins-cost", "data-testid": "pl-run-cost" }, x.cost) : null,
+      x.costNote ? h("p", { class: "pl-muted pl-ins-cost-note", "data-testid": "pl-run-cost-note" }, x.costNote) : null,
+      x.checkedIn ? h("p", { class: "pl-muted", "data-testid": "pl-run-checkin" }, "Runner checked in " + x.checkedIn) : null,
+      x.started ? h("p", { class: "pl-muted", "data-testid": "pl-run-attach" }, ATTACH_HINT) : null,
+    ];
+  }
+
   function runSection(r) {
     const head = [
       h("span", { class: "pl-muted" }, r.phase + " · "),
@@ -323,6 +380,7 @@ export function createInsightPanel(deps) {
       { class: "pl-ins-run", "data-testid": "pl-ins-run", "data-phase": r.phase, "data-status": r.status },
       head,
       r.summary ? h("div", { class: "pl-ins-run-summary", "data-testid": "pl-ins-run-summary" }, h("strong", null, "Summary"), text(r.summary)) : null,
+      ...runnerNotes(r),
       r.lines.length
         ? h(
             "ol",
@@ -330,7 +388,9 @@ export function createInsightPanel(deps) {
             r.hiddenLines ? h("li", { class: "pl-muted" }, "Earlier activity isn't shown.") : null,
             r.lines.map((l) => h("li", null, l))
           )
-        : h("p", { class: "pl-muted" }, SENTENCES.noActivity)
+        : emptyActivity(r)
+          ? h("p", { class: "pl-muted", "data-testid": "pl-no-activity" }, emptyActivity(r))
+          : null
     );
   }
 

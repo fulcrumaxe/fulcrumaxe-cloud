@@ -85,14 +85,16 @@ export function runnerUsageLine(u) {
  * `runnerUsage` is the insight's `runner_usage`: undefined for a sandbox run (its output is unchanged), null for a run on the
  * person's machine that recorded no usage yet, else the object.
  */
-export function costRows(cost, status, runnerUsage) {
+export function costRows(cost, status, runnerUsage, usage = {}) {
   const m = isObj(cost) && isObj(cost.model) ? cost.model : {};
   const c = isObj(cost) && isObj(cost.compute) ? cost.compute : {};
   const live = status === "pending" || status === "running";
   if (runnerUsage !== undefined) {
     const u = isObj(runnerUsage) ? runnerUsage : null;
+    // D#6 C42-3b: a finished run's state and the sentence for a state with no figure. A missing figure is never drawn as $0.
+    const note = typeof usage.note === "string" && usage.note !== "" ? usage.note : null;
     return [
-      { key: "model", label: "Model usage", value: u ? runnerUsageLine(u) : live ? "Counting…" : "Not recorded", bill: null, detail: u ? "Estimate, priced at this run's model" : null },
+      { key: "model", label: "Model usage", value: u ? runnerUsageLine(u) : live && usage.state !== "not_recorded" ? "Counting…" : "Not recorded", bill: null, detail: u ? note || "Estimate, priced at this run's model" : note },
       { key: "compute", label: "Compute", value: "Ran on your machine: no sandbox compute", bill: null, detail: null },
     ];
   }
@@ -187,6 +189,18 @@ export function runnerEventLine(p) {
   return displayText(line);
 }
 
+/** HH:MM:SS (the viewer's clock) of an ISO instant, or null when it is not one. */
+export function clockText(iso) {
+  const t = typeof iso === "string" && ISO.test(iso) ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, "0");
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+}
+
+/** D#6 C42-3b: the sentence for why a queued run on the person's machine is not running yet (the server's own words), or null. */
+export const waitSentence = (insight) => (isObj(insight.wait) && typeof insight.wait.text === "string" && insight.wait.text.trim() !== "" ? insight.wait.text : null);
+
 const LIMIT_LABELS = {
   max_run_minutes: ["Time", (v) => v + " min"],
   max_model_calls: ["Model calls", (v) => String(v)],
@@ -203,6 +217,9 @@ export function factRows(insight) {
   const r = insight.run;
   const rows = [];
   if (r.model) rows.push(["Model", r.model]);
+  if (r.runtime === "runner") rows.push(["Runs on", "your runner"]);
+  const seen = r.runtime === "runner" ? clockText(insight.runner_checked_in_at) : null;
+  if (seen) rows.push(["Runner last checked in", seen]);
   if (r.execution_mode) rows.push(["Runs in", word(r.execution_mode)]);
   if (r.head_sha) rows.push(["Head commit", r.head_sha.slice(0, 7), r.head_sha]);
   const lim = isObj(insight.limits) ? insight.limits : {};
@@ -382,7 +399,7 @@ function outcomeBody(insight, o, role) {
 const runnerUsageOf = (insight) => (insight.run.runtime === "runner" ? (isObj(insight.runner_usage) ? insight.runner_usage : null) : undefined);
 
 function costSection(insight) {
-  const rows = costRows(insight.cost, insight.run.status, runnerUsageOf(insight)).map((r) =>
+  const rows = costRows(insight.cost, insight.run.status, runnerUsageOf(insight), { state: insight.runner_usage_state, note: insight.runner_usage_note }).map((r) =>
     h(
       "div",
       { class: "runs-cost-row", "data-testid": "runs-cost-" + r.key },
@@ -393,15 +410,39 @@ function costSection(insight) {
   return section("runs-cost", "Cost", h("dl", { class: "runs-cost" }, rows));
 }
 
+/** What an empty Activity says. "No activity recorded." is for a run that has finished; a run still going has not recorded anything yet. */
+export function noActivityView(insight) {
+  const status = insight.run.status;
+  if (status !== "pending" && status !== "running") return { testid: "runs-no-activity", text: "No activity recorded." };
+  if (insight.run.runtime !== "runner") return { testid: "runs-nothing-yet", text: "Nothing recorded yet." };
+  if (status === "running") return { testid: "runs-nothing-yet", text: "Your runner has started; nothing recorded yet" };
+  return waitSentence(insight) ? null : { testid: "runs-nothing-yet", text: "Not started yet; nothing recorded yet." };
+}
+
+/** The lines a live run on the person's machine adds above its activity: why it waits, when the runner last checked in, and how to watch it there. */
+function runnerNotes(insight) {
+  const wait = waitSentence(insight);
+  const seen = insight.run.runtime === "runner" && insight.run.status === "running" ? clockText(insight.runner_checked_in_at) : null;
+  return [
+    wait ? h("p", { class: "runs-wait", role: "status", "data-testid": "runs-wait" }, wait) : null,
+    seen ? h("p", { class: "runs-muted", "data-testid": "runs-checked-in" }, "Runner last checked in " + seen) : null,
+    insight.run.runtime === "runner" && insight.run.status === "running" ? h("p", { class: "runs-muted", "data-testid": "runs-attach-hint" }, "You can also watch this run on the runner machine with `fx-runner attach`.") : null,
+  ];
+}
+
 function activitySection(insight, ui) {
   const lines = insight.lines;
-  if (lines.length === 0) return section("runs-activity", "Activity", h("p", { class: "runs-muted", "data-testid": "runs-no-activity" }, "No activity recorded."));
+  if (lines.length === 0) {
+    const none = noActivityView(insight);
+    return section("runs-activity", "Activity", ...runnerNotes(insight), none ? h("p", { class: "runs-muted", "data-testid": none.testid }, none.text) : null);
+  }
   const item = (l) => h("li", { class: "runs-act", "data-testid": "runs-act" }, validTime(l.at) ? h("span", { class: "runs-ev-time" }, timeNode(l.at, true)) : null, h("span", { class: "runs-act-text" }, l.text));
   const head = lines.slice(0, LINES_OPEN);
   const rest = lines.slice(LINES_OPEN);
   return section(
     "runs-activity",
     "Activity",
+    ...runnerNotes(insight),
     insight.lines_truncated ? h("p", { class: "runs-muted" }, "Only the latest activity is shown.") : null,
     h("ol", { class: "runs-acts" }, head.map(item)),
     rest.length ? foldBox(ui, "runs-activity-more", "Show " + rest.length + " more", false, h("ol", { class: "runs-acts" }, rest.map(item))) : null
