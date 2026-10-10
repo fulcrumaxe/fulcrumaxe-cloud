@@ -15,7 +15,7 @@ import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { recordSession } from "./session.js";
 import { writeJobFiles } from "./settingsFile.js";
-import { LineBuffer, createRunLog, projectLocalOnly, type StageMarks } from "./stream.js";
+import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -52,6 +52,8 @@ export interface EngineConfig {
   killGraceMs?: number;
   /** Metadata-only events: the only run output meant for the cloud. */
   onLocalEvent?: (event: LocalOnlyEvent) => void | Promise<void>;
+  /** The agent's near-limit warning (D#6 C43-6); `resetsAtMs` when it named a reset time. Nothing about it is uploaded. */
+  onNearLimit?: (info: { resetsAtMs?: number }) => void;
 }
 
 /** How a run ended. `failureReason` is a closed code; no model text is ever in it. */
@@ -196,6 +198,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
           agentOutput = event.agentOutput;
         }
         await opts.onEvent(event);
+        const near = nearLimitOf(message);
+        if (near !== undefined) config.onNearLimit?.(near);
         for (const local of projectLocalOnly(message, event, () => localSeq++, workdir, secrets, marks)) await config.onLocalEvent?.(local);
       };
       const enqueue = (line: string): void => {

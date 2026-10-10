@@ -227,7 +227,7 @@ const classLoad = (max: number) => z.object({ limit: z.number().int().min(0).max
  * Why a runner's limit sits below what it could hold, so a run that waits for a slot can say so. Closed. Optional and nullable: a runner
  * that sends none (an older one, or one with nothing holding it back) leaves the wait unexplained.
  */
-export const LIMITED_BY = ["memory", "cpu", "disk", "paused", "ceiling"] as const;
+export const LIMITED_BY = ["memory", "cpu", "disk", "paused", "ceiling", "usage_limit"] as const;
 export const LimitedBy = z.enum(LIMITED_BY);
 export type LimitedBy = z.infer<typeof LimitedBy>;
 export const ClaimCapacity = z.object({ light: classLoad(MAX_LIGHT_CAPACITY), heavy: classLoad(MAX_HEAVY_CAPACITY), limited_by: LimitedBy.nullable().optional() }).strict();

@@ -39,6 +39,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
         sessionsFile: sessionsFile(input.stateDir),
         spawn: spawnFn,
         onLocalEvent: input.onLocalEvent,
+        ...(input.onNearLimit === undefined ? {} : { onNearLimit: input.onNearLimit }),
       }),
     planSession: (stateDir, continues) => planSession(continues, readSessionIndex(sessionsFile(stateDir))),
     recordSession: (stateDir, sessionId, workspace) => recordSession(sessionsFile(stateDir), sessionId, workspace),

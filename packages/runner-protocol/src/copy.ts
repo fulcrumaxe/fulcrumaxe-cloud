@@ -172,6 +172,7 @@ export const SLOT_CAUSE_LINES = {
   disk: "Waiting for a free slot on your runner (disk is low)",
   paused: "Your runner is paused",
   ceiling: "Waiting: your runner is at its job limit",
+  usage_limit: "Waiting: your Claude usage limit is reached. Your runner takes new work again when it resets",
 } as const;
 
 /** The one sentence for a wait. An unknown reason or cause falls back to the plainest line, never to a code. */

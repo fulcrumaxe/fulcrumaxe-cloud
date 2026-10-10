@@ -3,6 +3,7 @@ import { isKnownStreamJsonType, isMalformedAssistant, type LocalOnlyEvent } from
 import { baseToolNames } from "../../../src/engines/claude/argv.js";
 import { initCredentialMatches } from "../../../src/engines/claude/credentialCheck.js";
 import { outcomeOf } from "../../../src/engines/claude/engine.js";
+import { nearLimitOf } from "../../../src/engines/claude/stream.js";
 import { roleToolsFor } from "../../../src/job/roleTools.js";
 import { engineFor, fixtureText, makeRig } from "./rig.js";
 
@@ -39,6 +40,28 @@ describe("the captured 2.1.289 run (init, two assistant lines, a rate-limit line
     expect(isKnownStreamJsonType(limit)).toBe(false);
     expect(isMalformedAssistant(limit)).toBe(false);
     for (const line of lines) expect(isMalformedAssistant(line)).toBe(false);
+  });
+
+  it("the rate-limit line is the near-limit warning: the engine reports it once, with no reset time because the capture names none (resetsAt 0), and uploads nothing about it", async () => {
+    const warnings: Array<{ resetsAtMs?: number }> = [];
+    const local: LocalOnlyEvent[] = [];
+    const rig = makeRig({ onLocalEvent: (event) => void local.push(event), onNearLimit: (info) => void warnings.push(info) });
+    const { handle } = await engineFor(rig).start(rig.startOptions());
+    await outcomeOf(handle);
+    expect(warnings).toEqual([{}]);
+    expect(local.map((event) => event.type)).toEqual(["engine_version", "usage"]);
+  });
+
+  it("nearLimitOf reads only an allowed_warning status; resetsAt is seconds, and zero, a string or a missing value name no time", () => {
+    const info = (over: Record<string, unknown>): Record<string, unknown> => ({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: 0, ...over } });
+    expect(nearLimitOf(info({ resetsAt: 1_790_000_000 }))).toEqual({ resetsAtMs: 1_790_000_000_000 });
+    expect(nearLimitOf(info({}))).toEqual({});
+    expect(nearLimitOf(info({ resetsAt: "soon" }))).toEqual({});
+    expect(nearLimitOf(info({ resetsAt: -5 }))).toEqual({});
+    expect(nearLimitOf(info({ status: "allowed" }))).toBeUndefined();
+    expect(nearLimitOf(info({ status: "rejected" }))).toBeUndefined();
+    expect(nearLimitOf({ type: "rate_limit_event" })).toBeUndefined();
+    expect(nearLimitOf({ type: "assistant", rate_limit_info: { status: "allowed_warning" } })).toBeUndefined();
   });
 
   it("runs through the engine: every line is kept in order, the rate-limit line as a plain system event, and only metadata is uploaded", async () => {

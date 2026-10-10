@@ -25,6 +25,7 @@ import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
 import { createAdmission } from "../daemon/admission.js";
+import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
 import { realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { isPaused, loadSettings } from "../runnerSettings.js";
@@ -215,6 +216,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
 
     const clock = hooks.clock ?? realClock;
     const relay = createEventRelay();
+    // Claim gating on the plan's usage limit (D#6 C43-6): reads every job's metadata events, so one job's limit holds back the claims of all. A runner on an API key has no plan window.
+    const usage = createUsageGate({ credentialMode: registration.credential_mode === "subscription" ? "subscription" : "api_key", now: () => clock.now().getTime() });
     const stopped = new AbortController();
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
     const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
@@ -231,7 +234,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       mirrorsRoot,
       toolchainReadPaths: toolchainReadPaths(toolchain),
       packageStoreRoot: path.join(path.dirname(mirrorsRoot), "pnpm-store"),
-      makeRuntime: (sandboxSettings, protectedPaths, jobEnv) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit, ...(jobEnv === undefined ? {} : { jobEnv }) }),
+      makeRuntime: (sandboxSettings, protectedPaths, jobEnv) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }) }),
     });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
     const tmuxBinary = host.selfCommand === undefined || socketTooLong ? undefined : findTmux(searchPath);
@@ -313,6 +316,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           footprints: createFootprintStore(stateDir),
           settings: () => loadSettings(stateDir),
           paused: () => isPaused(stateDir),
+          usage: () => usage.state(),
           now: () => clock.now().getTime(),
         }),
         onClaimed: (claimed) => jobs.track(() => handle(claimed)),

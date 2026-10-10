@@ -37,6 +37,8 @@ export interface EngineKit {
     protectedPaths: ProtectedPaths;
     stateDir: string;
     onLocalEvent: (event: LocalOnlyEvent) => void;
+    /** D#6 C43-6: the agent's near-limit warning, as it appears in its stream. Not uploaded. */
+    onNearLimit?: (info: { resetsAtMs?: number }) => void;
     /** D#6 R7b: the per-job variables of a job that carries sandbox allowances (see `CleanEnvOptions.jobEnv`); absent for a job without any. */
     jobEnv?: Readonly<Record<string, string>>;
   }): InterruptibleRuntime;

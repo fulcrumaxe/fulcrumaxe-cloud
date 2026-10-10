@@ -79,6 +79,16 @@ const CASES: Case[] = [
   { name: 'wait-paused-usage-limit', want: { reason: 'paused_usage_limit', limited_by: null }, setup: async (c) => { await c.runner({ credential: 'api_key', online: true, cap: { light: 8, heavy: 4 } }); await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, parent: await c.parentFailed('usage_limit'), claimableAfterHours: 2 }); } },
   // A pending run a runner can take right now is not waiting on anything.
   { name: 'wait-none-claimable', want: null, setup: async (c) => { await c.runner({ credential: 'api_key', online: true, cap: { light: 8, heavy: 4 } }); await c.run({ role: 'executor', status: 'pending', starter: true, item: 1 }); } },
+  // D#6 C43-6: a runner that holds back its claims for the plan's usage limit says so (last in the list, so the other cases keep their pinned fixtures).
+  {
+    name: 'wait-slot-usage_limit',
+    want: { reason: 'waiting_for_runner_slot', limited_by: 'usage_limit' },
+    setup: async (c) => {
+      const r = await c.runner({ credential: 'api_key', online: true, cap: { light: 1, heavy: 1, limitedBy: 'usage_limit' } });
+      await c.run({ role: 'code-reviewer', status: 'running', runnerId: r, starter: true });
+      await c.run({ role: 'code-reviewer', status: 'pending', starter: true, item: 1 });
+    },
+  },
 ];
 
 /** D#6 C42-3b against real Postgres: why a queued runner run waits, on both screens' reads, one pinned fixture per state. */

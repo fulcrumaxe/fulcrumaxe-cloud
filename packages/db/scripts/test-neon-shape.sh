@@ -2206,7 +2206,7 @@ check_runner_capacity_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = 'public.runner_capacity_record(integer,integer,text)'::regprocedure
+      SELECT p.oid, (p.oid IN ('public.runner_capacity_record(integer,integer,text)'::regprocedure, 'public.runner_claim_pause_record(timestamptz)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
@@ -2218,18 +2218,18 @@ check_runner_capacity_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_capacity_definer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_capacity_definer fail the exception shape (not one of its two exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
     return 0
   fi
   echo "$oids"
 }
 
 # D#6 C43-2b (0777): role shape of runner_capacity_definer. A no-op when the role does not exist. NOLOGIN and unprivileged, no member but the
-# migration role and no live membership for it, a member of no role, privileges exactly the 24 granted by 0777 (column grants on the capacity
+# migration role and no live membership for it, a member of no role, privileges exactly the 28 granted by 0777 and 0779 (column grants on the capacity
 # table, runners and accounts, USAGE on public; nothing table-wide), owning exactly its one function and nothing else.
 check_runner_capacity_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column runner_capacity.runner_id SELECT','column runner_capacity.account_id SELECT','column runner_capacity.declared SELECT','column runner_capacity.light_limit SELECT','column runner_capacity.heavy_limit SELECT','column runner_capacity.limited_by SELECT','column runner_capacity.runner_id INSERT','column runner_capacity.account_id INSERT','column runner_capacity.declared INSERT','column runner_capacity.light_limit INSERT','column runner_capacity.heavy_limit INSERT','column runner_capacity.limited_by INSERT','column runner_capacity.updated_at INSERT','column runner_capacity.declared UPDATE','column runner_capacity.light_limit UPDATE','column runner_capacity.heavy_limit UPDATE','column runner_capacity.limited_by UPDATE','column runner_capacity.updated_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+  local expected="'column runner_capacity.runner_id SELECT','column runner_capacity.account_id SELECT','column runner_capacity.declared SELECT','column runner_capacity.light_limit SELECT','column runner_capacity.heavy_limit SELECT','column runner_capacity.limited_by SELECT','column runner_capacity.runner_id INSERT','column runner_capacity.account_id INSERT','column runner_capacity.declared INSERT','column runner_capacity.light_limit INSERT','column runner_capacity.heavy_limit INSERT','column runner_capacity.limited_by INSERT','column runner_capacity.updated_at INSERT','column runner_capacity.declared UPDATE','column runner_capacity.light_limit UPDATE','column runner_capacity.heavy_limit UPDATE','column runner_capacity.limited_by UPDATE','column runner_capacity.updated_at UPDATE','column runner_capacity.claim_paused_until SELECT','column runner_capacity.claim_paused_until INSERT','column runner_capacity.claim_paused_until UPDATE','column runners.credential_mode SELECT','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_capacity_definer'),
     held AS (
@@ -2244,11 +2244,11 @@ check_runner_capacity_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_capacity_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 24 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 24 granted by 0777' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 1
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.runner_capacity_record(integer,integer,text)'::regprocedure::oid)
+      CASE WHEN (SELECT count(*) FROM held) <> 28 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 28 granted by 0777 and 0779' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 2
+              OR EXISTS (SELECT 1 FROM mine WHERE oid NOT IN ('public.runner_capacity_record(integer,integer,text)'::regprocedure::oid, 'public.runner_claim_pause_record(timestamptz)'::regprocedure::oid))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its two functions and nothing else' END,
       CASE WHEN has_schema_privilege('runner_capacity_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -2275,8 +2275,8 @@ check_runner_capacity_table_shape() {
       CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
                 OR has_any_column_privilege('agent_run_writer', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user or agent_run_writer holds a privilege on it' END,
       CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
-      CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 6
-                OR NOT has_column_privilege('app_user', c.oid, 'light_limit', 'SELECT') THEN 'app_user does not read exactly its six columns' END,
+      CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 7
+                OR NOT has_column_privilege('app_user', c.oid, 'light_limit', 'SELECT') THEN 'app_user does not read exactly its seven columns' END,
       CASE WHEN NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'c' AND pg_get_constraintdef(k.oid) ~ 'light_limit.*8.*heavy_limit.*4') THEN 'the limits are not held to the ceilings' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = 'public.runners'::regclass AND t.attname IN ('light_limit', 'heavy_limit', 'capacity') AND NOT t.attisdropped) THEN 'runners has a capacity column' END)
     FROM pg_class c WHERE c.oid = to_regclass('public.runner_capacity');" 2>&1)" || rc=$?

@@ -81,6 +81,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The agent's near-limit warning (D#6 C43-6). The installed CLI writes a `rate_limit_event` line whose `rate_limit_info.status` is
+ * `allowed_warning` once the plan's usage passes a threshold (captured from 2.1.289, see the stream.subscription fixture). `resetsAt` is epoch
+ * seconds; the capture carries 0, which is "not named". Any other status is no warning; the shape of a refusal has not been captured, so none is read.
+ */
+export function nearLimitOf(message: Record<string, unknown>): { resetsAtMs?: number } | undefined {
+  if (message.type !== "rate_limit_event" || !isRecord(message.rate_limit_info) || message.rate_limit_info.status !== "allowed_warning") return undefined;
+  const at = message.rate_limit_info.resetsAt;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? { resetsAtMs: at * 1000 } : {};
+}
+
+/**
  * The metadata-only events the cloud may see for one stream line: tool name and repo-relative path for a tool use, a
  * changed file for a write, and the run's token and cost totals from the final `result` line. There is no field for
  * model text, tool input or tool output, and every event is parsed by the shared schema before it is returned.
