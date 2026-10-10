@@ -9,6 +9,7 @@
  * from a role's toolset were NOT here (D#47 M02 was to add them).
  * C66: the settings held the runner's own limit-warning hook, and nothing else.
  *
+ * OWNER RULING R-C44-1 (2026-10-10) amends D#483 P3 for the executor and the review roles: plain `Bash` (see EXECUTOR_TOOLS).
  * OWNER RULING (D#483 P3, 2026-10-03; amends C59 SS-CONTENT and C66): the settings now ALSO carry, per role, an explicit
  * tool allow list and `defaultMode: "dontAsk"`, the same for a fresh run and a resumed one (`agentSettingsFor`). Found
  * live: a fresh print-mode run had relied on the CLI's implicit default (auto mode), and a RESUMED run (an executor fix
@@ -39,26 +40,21 @@ export const FX_AGENT_SETTINGS = {
 
 /** Reading the checkout: no write, no network. */
 const READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-/** git and the node toolchain: what a reviewer or tester needs to check a commit out, read a diff and run the tests. */
-const TEST_TOOLS = ["Bash(git:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(pnpm:*)", "Bash(yarn:*)"] as const;
-/** Read-only shell helpers. */
-const READ_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(date:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(diff:*)", "Bash(test:*)"] as const;
 /** The read-only helpers of a role that only looks. */
 const LOOK_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(pwd)"] as const;
-/** Basic file operations: the executor only. */
-const FILE_OPS = ["Bash(mkdir:*)", "Bash(rm:*)", "Bash(mv:*)", "Bash(cp:*)", "Bash(touch:*)"] as const;
 
 /**
  * Per role, the exact tools the agent may use (anything else is refused; see `agentSettingsFor`):
- *  - executor: read, edit and write files, git, node and the package managers, curl (the GitHub REST calls its prompt
- *    uses; the proxy decides what each request may do), basic file operations.
- *  - the reviewers (code, security), acceptance-tester and debater: read, git, node and the test runners. NO edit or
- *    write tool: they only report.
+ *  - executor: read, edit and write files, and plain `Bash` (R-C44-1: the VM, the egress firewall and the gh-proxy's push
+ *    and PR rules are the boundary; the proxy decides what each GitHub request may do).
+ *  - the reviewers (code, security), acceptance-tester and debater: read and plain `Bash`, so they can run the tests.
+ *    NO edit or write tool. They can still write files from the shell, so the guarantee that matters is that a
+ *    reviewer's changes are never published: the gh-proxy refuses a reviewer push and the workspace is discarded.
  *  - every other role (the panel seats, the project manager and the like): read, curl (reads of GitHub, which the proxy
  *    allows them), git and read-only helpers.
  */
-export const EXECUTOR_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", ...TEST_TOOLS, ...READ_HELPERS, "Bash(curl:*)", ...FILE_OPS]);
-export const REVIEWER_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, ...TEST_TOOLS, "Bash(mkdir:*)", ...READ_HELPERS]);
+export const EXECUTOR_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]);
+export const REVIEWER_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Bash"]);
 export const OTHER_ROLE_TOOLS: readonly string[] = Object.freeze([...READ_TOOLS, "Bash(curl:*)", "Bash(git:*)", ...LOOK_HELPERS]);
 
 const TOOLS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze({

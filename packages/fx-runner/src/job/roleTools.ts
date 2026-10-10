@@ -7,15 +7,18 @@ import { RUNNER_ELIGIBLE_ROLES, canonicalJson, sha256Text } from "@fulcrumaxe/ru
  * of entry a runner never grants removed: the web fetch tool, the web search tool and every platform MCP tool. This
  * file is a literal copy, because the cloud package does not ship to a customer machine; `test/roleTools.test.ts`
  * deep-equals each entry with that derivation, so a change to the cloud's list cannot silently differ here.
+ *
+ * OWNER RULING R-C44-1 (2026-10-10; amends D#483 P3 for these roles): the executor and the four review roles hold plain
+ * `Bash`, so a job can run a test harness (`bash -c`, `$VAR`, redirects, `mktemp`). The boundary is the OS sandbox, which
+ * `assertEnabledSandbox` still requires (enabled, no unsandboxed fallback, home denied, allowlisted network), plus the
+ * protected-path deny rules. Reviewers still hold no Edit, MultiEdit, Write or NotebookEdit tool, and a reviewer's
+ * changes are never published (`PUBLISHING_ROLES` in prompt.ts, `PUSHING_ROLES` in gitPath.ts).
  */
 const READ_TOOLS = ["Read", "Glob", "Grep", "LS"] as const;
-const TEST_TOOLS = ["Bash(git:*)", "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(pnpm:*)", "Bash(yarn:*)"] as const;
-const READ_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(date:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(diff:*)", "Bash(test:*)"] as const;
 const LOOK_HELPERS = ["Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(pwd)"] as const;
-const FILE_OPS = ["Bash(mkdir:*)", "Bash(rm:*)", "Bash(mv:*)", "Bash(cp:*)", "Bash(touch:*)"] as const;
 
-const EXECUTOR: readonly string[] = [...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", ...TEST_TOOLS, ...READ_HELPERS, "Bash(curl:*)", ...FILE_OPS];
-const REVIEWER: readonly string[] = [...READ_TOOLS, ...TEST_TOOLS, "Bash(mkdir:*)", ...READ_HELPERS];
+const EXECUTOR: readonly string[] = [...READ_TOOLS, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"];
+const REVIEWER: readonly string[] = [...READ_TOOLS, "Bash"];
 const LOOK_ONLY: readonly string[] = [...READ_TOOLS, "Bash(curl:*)", "Bash(git:*)", ...LOOK_HELPERS];
 
 const ENTRY_FOR_ROLE: Readonly<Record<(typeof RUNNER_ELIGIBLE_ROLES)[number], readonly string[]>> = {
