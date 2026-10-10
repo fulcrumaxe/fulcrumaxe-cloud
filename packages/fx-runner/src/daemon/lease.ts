@@ -221,18 +221,33 @@ export function startLease(config: LeaseConfig): Lease {
 }
 
 /**
- * Hands the engine's metadata events to whichever run holds the sandbox. The engine is built once with `emit` as its
- * `onLocalEvent`; the job handler attaches the current run's lease for the length of the run.
+ * Hands each job's engine metadata events to the run that produced them. Jobs can run at the same time and share this one relay, so an
+ * event is always addressed to a run id: it goes to that run's sink and to no other. The engine for a job is built with an `onLocalEvent`
+ * bound to that job's run id; the job handler attaches the run's lease for the length of the run. An event for a run with no sink (not
+ * attached yet, or already detached) is dropped and counted; it is never handed to a different run, which could belong to another repo or tenant.
  */
-export function createEventRelay(): { emit: (event: LocalOnlyEvent) => void; attach: (sink: (event: LocalOnlyEvent) => void) => () => void } {
-  let current: ((event: LocalOnlyEvent) => void) | undefined;
+export interface EventRelay {
+  emit(runId: string, event: LocalOnlyEvent): void;
+  attach(runId: string, sink: (event: LocalOnlyEvent) => void): () => void;
+  /** How many events were addressed to a run with no sink. */
+  dropped(): number;
+}
+
+export function createEventRelay(): EventRelay {
+  const sinks = new Map<string, (event: LocalOnlyEvent) => void>();
+  let dropped = 0;
   return {
-    emit: (event) => current?.(event),
-    attach(sink) {
-      current = sink;
+    emit(runId, event) {
+      const sink = sinks.get(runId);
+      if (sink === undefined) dropped++;
+      else sink(event);
+    },
+    attach(runId, sink) {
+      sinks.set(runId, sink);
       return () => {
-        if (current === sink) current = undefined;
+        if (sinks.get(runId) === sink) sinks.delete(runId);
       };
     },
+    dropped: () => dropped,
   };
 }

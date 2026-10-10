@@ -29,7 +29,7 @@ export interface HostSandboxConfig {
    * Builds the agent runtime for one job from the `sandbox` block this tier computed for it. The runtime writes the
    * block into the settings file it starts the agent with; nothing else decides what the shell sandbox allows.
    */
-  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths, jobEnv?: Readonly<Record<string, string>>): InterruptibleRuntime;
+  makeRuntime(sandbox: Record<string, unknown>, protectedList: ProtectedPaths, jobEnv: Readonly<Record<string, string>> | undefined, runId: string): InterruptibleRuntime;
   /** The user's home directory (absolute). Its reads are denied to the job. */
   home: string;
   /** Per-job temp directories are made under here (0700) and removed with the sandbox. */
@@ -224,7 +224,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
         if (error instanceof JobEnvFileRefused || error instanceof TypeError) throw new HostSandboxRefused("job_env_unsafe");
         throw error;
       }
-      runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }), jobEnv);
+      runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }), jobEnv, opts.runId);
     } catch (error) {
       try {
         releaseScratch(entry.scratch);
