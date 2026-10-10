@@ -19,6 +19,7 @@ import { isProtectedDeployment, readCapped } from "../cloud.js";
 import { loadRunnerKey } from "../keys.js";
 import { BYPASS_ENV_NAME, bypassHeaders, bypassSecret, bypassRefusalText } from "../protectionBypass.js";
 import { MACOS_PREVIEW_NOTICE } from "../platformSupport.js";
+import { UNENFORCED_LINE, detectScopeSupport, type ScopeSupport } from "../sandbox/jobLimits.js";
 import { SandboxRefused, detectPlatform } from "../sandbox/platform.js";
 import { probeMachine, type SandboxHost } from "../sandbox/probe.js";
 import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
@@ -46,6 +47,11 @@ export interface DoctorHost {
   sandbox: SandboxHost;
   /** The kernel release string; the machine's own when left out. Tests set it. */
   osrelease?: string | undefined;
+  /** The user id and `XDG_RUNTIME_DIR`, looked up by name by the caller: where the per-job limits (D#6 C43-5) find the user's systemd manager. */
+  uid?: number | undefined;
+  xdgRuntimeDir?: string | undefined;
+  /** Replaceable by a test only: the answer to "can scopes be made here" instead of trying a real one. */
+  scopeSupport?: ScopeSupport | undefined;
   /** This program's version and real path, for the Updates line. Absent in tests that do not care. */
   update?: { version?: string | undefined; execPath?: string | undefined } | undefined;
 }
@@ -77,6 +83,21 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
   const distro = detectDistro({ platform: host.platform, osRelease: host.sandbox.readText(OS_RELEASE), nixosMarker: host.sandbox.isFile(NIXOS_MARKER) });
   for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
   return false;
+}
+
+/** Whether each job can run under hard memory and process limits here (D#6 C43-5), tried with a real throw-away scope. When it cannot, the runner holds back and this says so. */
+async function limitsCheck(host: DoctorHost, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  const support = host.scopeSupport ?? await detectScopeSupport({
+    platform: host.platform,
+    uid: host.uid,
+    runtimeDir: host.xdgRuntimeDir,
+    searchPath: cleanEnv({ mode: "subscription" }).PATH ?? "",
+    capture: host.sandbox.run,
+    isDir: host.sandbox.isDir,
+    readText: host.sandbox.readText,
+  });
+  if (support.ok) line("PASS", "Job limits", "each job runs in its own systemd scope with a memory and a process limit");
+  else line("WARN", "Job limits", `${UNENFORCED_LINE} (${support.reason})`);
 }
 
 /** The API key file (D#6 R5b-3): whether it is there and safe, never its value. A subscription runner does not use it. */
@@ -216,6 +237,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
   apiKeyCheck(ctx, mode, line);
 
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
+  await limitsCheck(host, line);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.
   // What the job's login shell finds is the next check (D#6 C44-2), and it only means something when the runner's PATH has node and the sandbox runs.

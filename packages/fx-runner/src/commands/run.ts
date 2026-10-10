@@ -29,6 +29,7 @@ import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
 import { realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
 import { isPaused, loadSettings } from "../runnerSettings.js";
+import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
@@ -88,6 +89,8 @@ export interface RunHost {
   uid?: number | undefined;
   /** Whether standard input is a terminal. */
   interactive?: boolean | undefined;
+  /** `XDG_RUNTIME_DIR`, looked up by name by the caller: where the user's systemd manager listens (per-job limits, D#6 C43-5). */
+  xdgRuntimeDir?: string | undefined;
 }
 
 /** Replaceable by a test only: `runCli` never passes any, and nothing in the environment or on the command line can. */
@@ -103,6 +106,8 @@ export interface RunHooks {
   updateTuf?: UpdateHooks["tuf"];
   /** What the machine has free (default: the real one). */
   probe?: ResourceProbe;
+  /** Whether per-job limits are enforced, and the limits to start jobs under (default: tried on the real machine through the engine's process start). */
+  jobLimits?: { enforced: boolean; limits?: JobLimits; reason?: string };
 }
 
 /** Whether a process with this pid exists: ESRCH means gone; success and EPERM (another user's process) mean it is there. */
@@ -201,6 +206,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const keepClear = mirrorKeepClear({ home, stateDir, binaryDir: path.dirname(binaryPath), workspaceRoot, tempRoot });
   if (keepClear.some((other) => pathsOverlap(mirrorsRoot, other))) throw new CliError("mirrors_root_overlap: the repo mirrors directory overlaps the runner's state, binary, workspace or temp directory");
 
+  // Per-job hard limits (D#6 C43-5): tried once here. Without them the runner holds back (2 jobs, 1 heavy) and says so.
+  const { enforced, limits, reason } = hooks.jobLimits ?? (await setUpJobLimits({ platform: host.platform, uid: host.uid, runtimeDir: host.xdgRuntimeDir, searchPath, capture: host.engine.capture, isDir: host.sandbox.isDir, readText: host.sandbox.readText }, () => budgetsOf(loadSettings(stateDir))));
+  if (!enforced) ctx.out(`fx-runner: ${UNENFORCED_LINE}${reason === undefined ? "" : ` (${reason})`}`);
+
   const ledgerFile = path.join(stateDir, LEDGER_FILE);
   removeStaleLedgerTemp(ledgerFile, ctx.now());
   let ledger: FileLedger;
@@ -234,7 +243,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       mirrorsRoot,
       toolchainReadPaths: toolchainReadPaths(toolchain),
       packageStoreRoot: path.join(path.dirname(mirrorsRoot), "pnpm-store"),
-      makeRuntime: (sandboxSettings, protectedPaths, jobEnv, runId) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(runId, event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }) }),
+      makeRuntime: (sandboxSettings, protectedPaths, jobEnv, runId) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(runId, event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }), ...(limits === undefined ? {} : { limits }) }),
     });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
     const tmuxBinary = host.selfCommand === undefined || socketTooLong ? undefined : findTmux(searchPath);
@@ -314,7 +323,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         admission: createAdmission({
           probe: hooks.probe ?? realResourceProbe({ platform: host.platform, diskPaths: [workspaceRoot, path.dirname(mirrorsRoot)], vmStatText: () => vmStat }),
           footprints: createFootprintStore(stateDir),
-          settings: () => loadSettings(stateDir),
+          settings: () => capUnenforced(loadSettings(stateDir), enforced),
+          heavyBudgetBytes: () => budgetsOf(loadSettings(stateDir)).heavy.memoryBytes,
           paused: () => isPaused(stateDir),
           usage: () => usage.state(),
           now: () => clock.now().getTime(),

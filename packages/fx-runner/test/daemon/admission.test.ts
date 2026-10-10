@@ -135,7 +135,7 @@ describe("admission by headroom (fake resource probe)", () => {
 
   it("ceilings: the person can lower the total and the heavy maximum; the reason is ceiling", () => {
     const r = rig();
-    r.settings = { ceilingTotal: 2, ceilingHeavy: 1 };
+    r.settings = { ...DEFAULT_SETTINGS, ceilingTotal: 2, ceilingHeavy: 1 };
     r.admission.begin(claimed("executor"));
     // Heavy is at its ceiling but a light job still fits: nothing is "limited" yet.
     expect(r.admission.snapshot()).toMatchObject({ free: { light: 1, heavy: 0 }, limitedBy: null });
@@ -147,7 +147,7 @@ describe("admission by headroom (fake resource probe)", () => {
     const r = rig();
     r.admission.begin(claimed("code-reviewer"));
     r.admission.begin(claimed("code-reviewer"));
-    r.settings = { ceilingTotal: 1, ceilingHeavy: 1 };
+    r.settings = { ...DEFAULT_SETTINGS, ceilingTotal: 1, ceilingHeavy: 1 };
     const snap = r.admission.snapshot();
     expect(snap.free).toEqual({ light: 0, heavy: 0 });
     expect(snap.capacity.light.in_use).toBe(2);

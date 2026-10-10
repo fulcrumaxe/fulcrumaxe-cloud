@@ -17,6 +17,9 @@ import { FULL_HELP, authText, helpWithout, makeFake, type Fake } from "../engine
 import { failing, fakeSandboxHost } from "../helpers/fakeSandboxHost.js";
 import { findOnPath } from "../helpers/findOnPath.js";
 import { VERCEL_PROTECTED_ROOT_BODY, ownCloud401Response, vercelProtectedResponse } from "../helpers/vercelProtected.js";
+import type { ScopeSupport } from "../../src/sandbox/jobLimits.js";
+
+const SCOPES_OK: ScopeSupport = { ok: true, tools: { systemdRun: "/x/systemd-run", systemctl: "/x/systemctl", env: "/x/env" }, runtimeDir: "/run/user/1000" };
 
 let root: string;
 let stateDir: string;
@@ -62,7 +65,7 @@ interface Result {
 async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"]; sandboxOnly?: boolean } = {}): Promise<Result> {
   const lines: string[] = [];
   const ctx: CommandContext = { stateDir, uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
-  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), ...over.host };
+  const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK, ...over.host };
   const code = await doctorCommand(ctx, host, over.sandboxOnly === undefined ? {} : { sandboxOnly: over.sandboxOnly });
   return { code, out: lines.join("\n") };
 }
@@ -315,6 +318,25 @@ describe("files other users can read are a permission fix, not a damaged registr
   });
 });
 
+describe("job limits (D#6 C43-5)", () => {
+  it("scopes available: PASS, no warning", async () => {
+    register();
+    const result = await doctor();
+    expect(levelOf(result.out, "Job limits")).toBe("PASS");
+    expect(result.out).not.toContain("not enforced");
+  });
+
+  it("no systemd user manager, or macOS: a WARN that says the limits are not enforced and what the runner does instead; the exit code stays 0", async () => {
+    register();
+    for (const scopeSupport of [{ ok: false as const, reason: "no systemd user manager is running for this user" }, { ok: false as const, reason: "this is not Linux" }]) {
+      const result = await doctor({ host: { scopeSupport } });
+      expect(levelOf(result.out, "Job limits")).toBe("WARN");
+      expect(result.out).toContain(`per-job limits not enforced on this machine; concurrency capped (heavy 1, total 2) (${scopeSupport.reason})`);
+      expect(result.code).toBe(0);
+    }
+  });
+});
+
 describe("shell variables and secrets", () => {
   it("warns by name for each Anthropic variable set in the shell in subscription mode, with the spec's wording", async () => {
     register();
@@ -345,7 +367,7 @@ describe("shell variables and secrets", () => {
       stdout: (t) => (out += t),
       stderr: (t) => (out += t),
       fetchFn: (async () => new Response("")) as typeof fetch,
-      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost() },
+      doctorHost: { platform: "linux", shellVars: ["ANTHROPIC_API_KEY"], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), scopeSupport: SCOPES_OK },
     });
     expect(code).toBe(0);
     expect(out).toContain("ANTHROPIC_API_KEY is set");

@@ -104,7 +104,7 @@ function start(over: { host?: Partial<RunHost>; hooks?: RunHooks; ctx?: Partial<
   const signals = newSignals();
   const { ctx, out } = ctxOf(over.ctx);
   const host: RunHost = { ...hostWith(signals), ...over.host };
-  const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, ...over.hooks };
+  const hooks: RunHooks = { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, jobLimits: { enforced: true }, ...over.hooks };
   const done = runCommand(ctx, host, hooks).then(
     (code) => ({ code, message: "", out }),
     (error: unknown) => {
@@ -401,7 +401,7 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
     expect(before).toEqual([Number(new URL(cloud.origin).port)]);
 
     const { ctx, out } = ctxOf();
-    const finished = runCommand(ctx, hostWith(process), { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, remoteUrl: () => pathToFileURL(remote).href });
+    const finished = runCommand(ctx, hostWith(process), { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, probe: ROOMY, jobLimits: { enforced: true }, remoteUrl: () => pathToFileURL(remote).href });
     await until(() => existsSync(path.join(fake.dir, "argv.txt")), 20_000);
     expect(listeningPorts()).toEqual(before);
 
@@ -498,6 +498,17 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     // An ordinary claim: no sandbox reason, and the capacity this machine could take (D#6 C43-4).
     expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 8, in_use: 0 }, heavy: { limit: 4, in_use: 0 }, limited_by: null } });
     expect(sandbox.calls).toHaveLength(1);
+    expect((await stop(run)).code).toBe(0);
+  });
+
+  it("where per-job limits cannot be enforced the claim declares the held-back ceilings (2 jobs, 1 heavy) and the runner says why (D#6 C43-5)", async () => {
+    const job = queuedJob();
+    cloud.enqueue(job);
+    fake.set("hang", "");
+    const run = start({ hooks: { jobLimits: { enforced: false, reason: "no systemd user manager is running for this user" } } });
+    await until(() => cloud.runs.has(job.job.run_id), 20_000);
+    expect(claimBodies()[0]).toEqual({ capacity: { light: { limit: 2, in_use: 0 }, heavy: { limit: 1, in_use: 0 }, limited_by: null } });
+    expect(run.out).toContain("fx-runner: per-job limits not enforced on this machine; concurrency capped (heavy 1, total 2) (no systemd user manager is running for this user)");
     expect((await stop(run)).code).toBe(0);
   });
 

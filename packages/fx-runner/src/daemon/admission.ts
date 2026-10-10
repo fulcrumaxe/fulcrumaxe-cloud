@@ -67,6 +67,8 @@ export interface AdmissionDeps {
   footprints: FootprintStore;
   settings: () => RunnerSettings;
   paused: () => boolean;
+  /** The heavy class's memory budget in bytes (C43-5); absent: no such check. Read for every claim. */
+  heavyBudgetBytes?: () => number;
   /** The plan's usage limit (D#6 C43-6): blocked claims nothing; single claims only with no job in hand. Absent: neither (an `api_key` runner). */
   usage?: () => UsageState;
   now: () => number;
@@ -121,7 +123,9 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     const fit = (cls: JobClass): { count: number; limit: LimitedBy | null } => {
       const footprint = deps.footprints.classEstimate(cls);
       const classRoom = cls === "heavy" ? Math.max(0, settings.ceilingHeavy - used.heavy) : totalRoom;
-      const byMem = Math.floor(Math.max(0, headMem) / footprint.memBytes);
+      // A heavy job is also held back while the machine's free memory is below the heavy job's hard budget (C43-5): it could be given the whole budget.
+      const belowBudget = cls === "heavy" && deps.heavyBudgetBytes !== undefined && reading.availMemBytes < deps.heavyBudgetBytes();
+      const byMem = belowBudget ? 0 : Math.floor(Math.max(0, headMem) / footprint.memBytes);
       const byCpu = Math.floor(Math.max(0, headCores) / footprint.cores);
       const count = paused || usageHeld || !diskOk ? 0 : Math.min(totalRoom, classRoom, byMem, byCpu, usage.single ? 1 : Infinity);
       if (count > 0) return { count, limit: null };

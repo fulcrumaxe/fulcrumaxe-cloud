@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { PAUSE_FILE, SETTINGS_FILE, isPaused, loadSettings } from "../../src/runnerSettings.js";
+import { DEFAULT_BUDGET, PAUSE_FILE, SETTINGS_FILE, isPaused, loadSettings } from "../../src/runnerSettings.js";
 import { useRig } from "./harness.js";
 
 const rig = useRig();
@@ -40,7 +40,7 @@ describe("config set concurrency (D#6 C43-4)", () => {
     expect((await rig.run(["config", "set", "concurrency.total", "3"])).out).toContain("applies from the next claim");
     expect((await rig.run(["config", "set", "concurrency.heavy", "2"])).code).toBe(0);
     expect((await rig.run(["config", "set", "reserve-gb", "6"])).code).toBe(0);
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 3, ceilingHeavy: 2, reserveGb: 6 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 3, ceilingHeavy: 2, reserveGb: 6 });
     expect(lstatSync(path.join(rig.dir, SETTINGS_FILE)).mode & 0o777).toBe(0o600);
   });
 
@@ -64,11 +64,11 @@ describe("config set concurrency (D#6 C43-4)", () => {
     await rig.run(["config", "set", "concurrency.heavy", "2"]);
     await rig.run(["config", "set", "reserve-gb", "6"]);
     expect((await rig.run(["config", "unset", "concurrency.total"])).out).toContain("back to automatic");
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 2, reserveGb: 6 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 2, reserveGb: 6 });
     expect((await rig.run(["config", "unset", "concurrency.heavy"])).code).toBe(0);
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 4, reserveGb: 6 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4, reserveGb: 6 });
     expect((await rig.run(["config", "unset", "reserve-gb"])).code).toBe(0);
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 4 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4 });
     await rig.run(["config", "set", "reserve-gb", "6"]);
     expect((await rig.run(["config", "set", "reserve-gb", "auto"])).code).toBe(0);
     expect(loadSettings(rig.dir).reserveGb).toBeUndefined();
@@ -81,7 +81,39 @@ describe("config set concurrency (D#6 C43-4)", () => {
   it("a settings file over 64 KB counts as none", async () => {
     await rig.run(["pause"]);
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), JSON.stringify({ ceilingTotal: 2, pad: "x".repeat(70_000) }));
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 4 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4 });
+  });
+
+  it("the job budgets: saved per class, in whole GB (a G or GB suffix is allowed) or whole tasks, and refused outside their ranges (D#6 C43-5)", async () => {
+    expect(loadSettings(rig.dir).budget).toEqual(DEFAULT_BUDGET);
+    expect((await rig.run(["config", "set", "budget.heavy.memory", "12GB"])).code).toBe(0);
+    expect((await rig.run(["config", "set", "budget.light.memory", "3G"])).code).toBe(0);
+    expect((await rig.run(["config", "set", "budget.light.tasks", "1000"])).code).toBe(0);
+    expect((await rig.run(["config", "set", "budget.heavy.tasks", "8000"])).code).toBe(0);
+    expect(loadSettings(rig.dir).budget).toEqual({ light: { memoryGb: 3, tasks: 1000 }, heavy: { memoryGb: 12, tasks: 8000 } });
+    // Light memory 1-8, heavy 2-32, tasks 64-65536: both ends are accepted, one past either end is refused and changes nothing.
+    for (const [key, ok, bad] of [["budget.light.memory", ["1", "8"], ["0", "9"]], ["budget.heavy.memory", ["2", "32"], ["1", "33"]], ["budget.light.tasks", ["64", "65536"], ["63", "65537"]], ["budget.heavy.tasks", ["64", "65536"], ["63", "65537"]]] as const) {
+      for (const value of ok) expect((await rig.run(["config", "set", key, value])).code, `${key} ${value}`).toBe(0);
+      const before = JSON.stringify(loadSettings(rig.dir));
+      for (const value of bad) {
+        const result = await rig.run(["config", "set", key, value]);
+        expect(result.code, `${key} ${value}`).toBe(2);
+        expect(result.err).toContain(`${key} takes a whole number`);
+      }
+      expect(JSON.stringify(loadSettings(rig.dir)), key).toBe(before);
+    }
+    for (const junk of ["", "6.5", "-1", "6 GB", "six", "6MB", "0x10"]) expect((await rig.run(["config", "set", "budget.heavy.memory", junk])).code, junk).toBe(2);
+    // A task count takes no unit.
+    expect((await rig.run(["config", "set", "budget.heavy.tasks", "100G"])).code).toBe(2);
+  });
+
+  it("unset returns a budget to its default and touches no other; a hand-edited budget outside its range is ignored one value at a time", async () => {
+    await rig.run(["config", "set", "budget.heavy.memory", "12"]);
+    await rig.run(["config", "set", "budget.light.memory", "4"]);
+    expect((await rig.run(["config", "unset", "budget.heavy.memory"])).out).toContain("back to automatic");
+    expect(loadSettings(rig.dir).budget).toEqual({ light: { memoryGb: 4, tasks: DEFAULT_BUDGET.light.tasks }, heavy: DEFAULT_BUDGET.heavy });
+    writeFileSync(path.join(rig.dir, SETTINGS_FILE), JSON.stringify({ budget: { light: { memoryGb: 99, tasks: 100 }, heavy: { memoryGb: "6", tasks: 5 } } }));
+    expect(loadSettings(rig.dir).budget).toEqual({ light: { memoryGb: DEFAULT_BUDGET.light.memoryGb, tasks: 100 }, heavy: DEFAULT_BUDGET.heavy });
   });
 
   it("a value is needed", async () => {
@@ -93,10 +125,10 @@ describe("config set concurrency (D#6 C43-4)", () => {
   it("a damaged settings file means the defaults, and a hand-edited bad number is ignored", async () => {
     await rig.run(["pause"]); // makes the state directory
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), "{ nope");
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 4 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 4 });
     // Out-of-range numbers in a hand-edited file are ignored one by one, not trusted.
     writeFileSync(path.join(rig.dir, SETTINGS_FILE), JSON.stringify({ ceilingTotal: 99, ceilingHeavy: 2 }));
-    expect(loadSettings(rig.dir)).toEqual({ ceilingTotal: 8, ceilingHeavy: 2 });
+    expect(loadSettings(rig.dir)).toEqual({ budget: DEFAULT_BUDGET, ceilingTotal: 8, ceilingHeavy: 2 });
   });
 
   it("the help text names the new commands", async () => {

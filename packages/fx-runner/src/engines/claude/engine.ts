@@ -5,6 +5,7 @@ import { SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRunti
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
+import type { JobLimits } from "../../sandbox/jobLimits.js";
 import { claudeArgv } from "./argv.js";
 import { confineFileTools } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
@@ -50,6 +51,8 @@ export interface EngineConfig {
   spawn?: SpawnFn;
   /** How long a stopped agent gets to exit on SIGTERM before everything left in its process group is killed. Default 3000. */
   killGraceMs?: number;
+  /** D#6 C43-5: the job's hard memory and task limits (a transient scope). Absent where none can be enforced. */
+  limits?: JobLimits;
   /** Metadata-only events: the only run output meant for the cloud. */
   onLocalEvent?: (event: LocalOnlyEvent) => void | Promise<void>;
   /** The agent's near-limit warning (D#6 C43-6); `resetsAtMs` when it named a reset time. Nothing about it is uploaded. */
@@ -59,7 +62,7 @@ export interface EngineConfig {
 /** How a run ended. `failureReason` is a closed code; no model text is ever in it. */
 export interface RunOutcome {
   status: "ok" | "failed";
-  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit";
+  failureReason?: "credential_mismatch" | "no_init_line" | "claude_flags_unsupported" | "permission_mode_forced" | "agent_error" | "agent_exit" | "resource_limit";
   /** The agent build the run used. */
   engineVersion: string;
   sessionId?: string;
@@ -138,7 +141,11 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
 
-    const child = spawnFn(binary.path, argv, { cwd: workdir, env, shell: false, detached: OWN_PROCESS_GROUP, stdio: ["pipe", "pipe", "pipe"] });
+    // Under a scope the agent is still this child's own program (systemd-run moves itself into the scope and then runs it), so the
+    // group, the signals and the exit code are the agent's. The agent's environment is the one built above.
+    const launch = config.limits?.wrap({ runId: opts.runId, role: opts.role }, binary.path, argv, env) ?? { command: binary.path, args: argv, env };
+    const launchEnv = launch.env;
+    const child = spawnFn(launch.command, launch.args, { cwd: workdir, env: launchEnv, shell: false, detached: OWN_PROCESS_GROUP, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin?.on("error", () => {
       // fx-swallow-ok: the agent exiting before it read its prompt is reported through its exit, not here
     });
@@ -224,6 +231,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
       child.on("close", (code) => {
         lineBuffer.end().forEach(enqueue);
         void chain.then(async () => {
+          // A clean end needs no question; any other end may be the kernel enforcing the memory budget, which only the scope can say.
+          const limited = config.limits !== undefined && code !== 0 && !mismatch && !noInit && !modeForced ? await config.limits.exceeded(opts.runId).catch(() => false) : false;
           if (sessionId !== undefined && !mismatch && !noInit && !modeForced) {
             try {
               await recordSession(config.sessionsFile, sessionId, workdir);
@@ -232,7 +241,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
             }
           }
           const base = { engineVersion, ...(sessionId === undefined ? {} : { sessionId }), ...(agentOutput === undefined ? {} : { agentOutput }) };
-          if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
+          if (limited) resolve({ status: "failed", failureReason: "resource_limit", ...base });
+          else if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
           else if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });
           else if (noInit) resolve({ status: "failed", failureReason: "no_init_line", engineVersion });
           // Backstop for a build that dropped a flag after the --help check: an unknown-option exit before any init line.

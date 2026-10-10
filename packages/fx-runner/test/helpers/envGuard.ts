@@ -51,6 +51,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
   "src/daemon/resources.ts": ["fs", "os", "path"], // D#6 C43-4: what the machine has free: os.freemem (MemAvailable), load average and core count, and statfs of the workspace and cache volumes; no process is started and no process-table file is read
   "src/daemon/footprints.ts": ["fs", "path"], // D#6 C43-4: the learned per-repo, per-role memory estimates: lstat and a bounded read of one small file in the state directory, written through the private-file writer
+  "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
   "src/runnerSettings.ts": ["fs", "path"], // D#6 C43-4: the concurrency settings file and the claiming-pause marker in the state directory: lstat, a bounded read, the private-file writer and one removal
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
   "src/daemon/mirror.ts": ["fs", "path"], // the persistent mirrors: a 0700 directory of bare repositories, one per repo id

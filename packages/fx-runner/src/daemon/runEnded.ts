@@ -35,7 +35,9 @@ export function endOfRefusal(refusal: JobRefusal | "duplicate_job"): RunEnd {
 }
 
 const SETUP_CODES: ReadonlySet<string> = new Set(RUNNER_SETUP_DETAILS.filter((code) => code !== "other"));
-const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "agent_exit"]);
+// `resource_limit` (D#6 C43-5): the job went past its own memory budget and was stopped by it. The cloud sees an agent failure (no retry);
+// the closed reason stays on the runner's side.
+const AGENT_CODES: ReadonlySet<string> = new Set(["agent_error", "no_result", "agent_exit", "resource_limit"]);
 
 /**
  * The end to report for a run that `runJob` returned `failed` for. Null means report nothing: a credential mismatch ends the run on
