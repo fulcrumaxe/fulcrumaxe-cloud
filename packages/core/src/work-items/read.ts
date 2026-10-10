@@ -4,6 +4,7 @@ import { toQueueRank } from './priority.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import type { WorkItemStage } from './stages.js';
+import { cleanWorkItemTitle } from './title.js';
 
 /** D#31 comment 18494573 (C7): this module's own local copy of the ctx principal shape. */
 export interface Principal {
@@ -30,6 +31,8 @@ export interface WorkItemDTO {
   repo_id: string | null;
   kind: string | null;
   issue_number: number | null;
+  /** A one-line plain-English title (the GitHub issue's, cleaned and cut to 120 characters). Untrusted text: render it as text only. Null when the item has none yet. */
+  title: string | null;
   stage: WorkItemStage;
   provenance: 'internal' | 'external';
   priority: WorkItemPriority;
@@ -54,6 +57,7 @@ interface WorkItemRow {
   repo_id: string | null;
   kind: string | null;
   gh_number: string | null;
+  title: string | null;
   stage: string;
   provenance: string;
   priority: number;
@@ -83,7 +87,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * dependent on it.
  */
 const WORK_ITEM_SELECT = `
-  SELECT wi.id, wi.repo_id, wi.kind, wi.gh_number, wi.stage, wi.provenance, wi.priority, wi.queue_rank,
+  SELECT wi.id, wi.repo_id, wi.kind, wi.gh_number, wi.title, wi.stage, wi.provenance, wi.priority, wi.queue_rank,
          wi.created_at, wi.updated_at,
          to_char(wi.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
          COALESCE(SUM(ar.usd), 0) AS cost_usd,
@@ -121,6 +125,8 @@ function toDTO(row: WorkItemRow): WorkItemDTO {
     repo_id: row.repo_id,
     kind: row.kind,
     issue_number: row.gh_number === null ? null : Number(row.gh_number),
+    // Cleaned on every read: a root's title is the discussion's (up to 256 characters, as the issue had it).
+    title: cleanWorkItemTitle(row.title),
     // The stage CHECK constraint (0610) already restricts this column to
     // WORK_ITEM_STAGES; this cast documents that invariant.
     stage: row.stage as WorkItemStage,

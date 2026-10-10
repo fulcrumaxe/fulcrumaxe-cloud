@@ -24,7 +24,9 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const V1 = join(SCRIPT_DIR, "..", "..", "..", "packages", "api", "fixtures", "v1");
 const readFixture = (...p: string[]) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
 const LIST = readFixture("listWorkItems", "200-page.json");
-const REPOS = readFixture("listRepos", "200-page.json");
+const REPOS_RAW = readFixture("listRepos", "200-page.json");
+// The work item's repo has no full name in the shared fixture; here it has one, as an installed repo does.
+const REPOS = { ...REPOS_RAW, data: REPOS_RAW.data.map((r: { product: string }) => (r.product === "docs" ? { ...r, full_name: "acme/docs" } : r)) };
 const IN_REVIEW = readFixture("getWorkItem", "200-in-review.json");
 const NEEDS_HUMAN = readFixture("getWorkItem", "200-needs-human.json");
 const TIMELINE = readFixture("getWorkItemTimeline", "200-ok.json");
@@ -166,8 +168,9 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
       "Changes requested 0", "Review passed 0", "Needs a person 0", "Done 0",
     ]);
     const card = cards(page, "in_progress").first();
-    await expect(card).toContainText("docs #42");
-    await expect(card).toContainText("feature");
+    await expect(card).toContainText("acme/docs #42");
+    await expect(card.locator('[data-testid="pl-card-title"]')).toHaveText("Add a dark mode toggle");
+    await expect(card.locator('[data-testid="pl-kind"]')).toHaveText("Feature");
     await expect(card.locator('[data-testid="pl-verdict"]')).toHaveCount(0);
     // The dock click is a user input, which reopens the idle live stream and makes the
     // shell emit one refresh; the coalescing allows at most one more load after the first.
@@ -198,7 +201,51 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     const card = cards(page, "in_progress").first();
     await expect(card).toBeVisible();
     await expect(card).toContainText("#42");
-    await expect(card).not.toContainText("docs");
+    await expect(card).not.toContainText("acme/docs");
+  });
+
+  test("title: a card and its detail header show repo, number, title and a kind badge; with no title they show the kind and the number", async ({ page }) => {
+    const NONE = "55555555-5555-4555-8555-555555555551";
+    await setup(page, (m) => (m.list.data = [item(LIST.data[0], { id: ID, stage: "in_progress" }), item(LIST.data[0], { id: NONE, stage: "spec_ready", kind: "bug", issue_number: 595, title: null })]));
+    const titled = cards(page, "in_progress").first();
+    await expect(titled.locator('[data-testid="pl-card-head"]')).toHaveText("acme/docs #42");
+    await expect(titled.locator('[data-testid="pl-card-title"]')).toHaveText("Add a dark mode toggle");
+    await expect(titled.locator('[data-testid="pl-kind"]')).toHaveText("Feature");
+    const bare = cards(page, "spec_ready").first();
+    await expect(bare.locator('[data-testid="pl-card-head"]')).toHaveText("acme/docs #595");
+    await expect(bare.locator('[data-testid="pl-card-title"]')).toHaveText("Bug #595");
+    await expect(bare.locator('[data-testid="pl-kind"]')).toHaveText("Bug");
+    expect(await page.locator(`${WIN} [data-testid="pl-columns"]`).innerText()).not.toMatch(/null|undefined/);
+    await bare.click();
+    await expect(tid(page, "pl-detail-title")).toHaveText("acme/docs #595");
+    await expect(tid(page, "pl-detail-name")).toHaveText("Bug #595");
+    await tid(page, "pl-back").click();
+    await titled.click();
+    await expect(tid(page, "pl-detail-title")).toHaveText("acme/docs #42");
+    await expect(tid(page, "pl-detail-name")).toHaveText("Add a dark mode toggle");
+  });
+
+  test("title: a hostile title is shown as text, never as markup, on the card and in the detail, and a long one wraps inside the window", async ({ page }) => {
+    const HOSTILE = '<img src=x onerror="window.__pwn=1"><b>bold</b>\u0007\r\nsecond line';
+    const LONG = "W".repeat(150) + " " + "x".repeat(10);
+    const ID6 = "55555555-5555-4555-8555-555555555556";
+    const { w } = await setup(page, (m) =>
+      (m.list.data = [item(LIST.data[0], { id: ID, stage: "in_progress", title: HOSTILE }), item(LIST.data[0], { id: ID6, stage: "in_progress", issue_number: 43, title: LONG })]),
+    );
+    const card = cards(page, "in_progress").first();
+    await expect(card).toBeVisible();
+    await expect(card.locator('[data-testid="pl-card-title"]')).toHaveText('<img src=x onerror="window.__pwn=1"><b>bold</b> second line');
+    expect(await page.locator(`${WIN} .pl-app img, ${WIN} .pl-app b`).count()).toBe(0);
+    await card.click();
+    await expect(tid(page, "pl-detail-name")).toHaveText('<img src=x onerror="window.__pwn=1"><b>bold</b> second line');
+    expect(await page.locator(`${WIN} .pl-detail img, ${WIN} .pl-detail b`).count()).toBe(0);
+    expect(await page.evaluate(() => (window as unknown as { __pwn?: number }).__pwn)).toBeUndefined();
+    expect(await w.tt()).toEqual([]);
+    expect(w.errors).toEqual([]);
+    await tid(page, "pl-back").click();
+    // The long title wraps: no card is wider than its column and the board does not scroll sideways past its window.
+    const fits = await page.locator(`${WIN} [data-testid="pl-card"]`).evaluateAll((els) => els.every((el) => el.scrollWidth <= el.clientWidth + 1));
+    expect(fits).toBe(true);
   });
 
   test("detail: a card opens by click or Enter with exactly one timeline request, reviewers are named there only", async ({ page }) => {
@@ -243,7 +290,7 @@ test.describe("D#37 WS-F1a: Pipeline app (mocked API)", () => {
     expect(mock.requests.length).toBe(before);
     const text = await page.locator(WIN).innerText();
     expect(text).not.toMatch(/Terminal|Cancel|Retry|Run in|agent/i);
-    expect(await page.locator(`${WIN} .pl-app button`).allInnerTexts()).toEqual(["docs #42\nfeature"]);
+    expect(await page.locator(`${WIN} .pl-app button`).allInnerTexts()).toEqual(["acme/docs #42\nAdd a dark mode toggle\nFeature"]);
   });
 
   test("a mocked 401 on the list shows the app's own error line and never 'Reload the page'", async ({ page }) => {

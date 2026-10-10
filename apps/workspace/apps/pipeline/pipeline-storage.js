@@ -44,7 +44,52 @@ export const REVIEWER_LABELS = {
   acceptance: "Acceptance review",
 };
 
-const COLUMN_OF = new Map(COLUMNS.flatMap((c) => c.stages.map((s) => [s, c.id])));
+/** What an item's kind is called, in plain words (the work item kinds, and the two a webhook row carries). */
+export const KIND_LABELS = {
+  feature: "Feature",
+  critical: "Critical change",
+  small: "Small change",
+  bug: "Bug",
+  doc: "Documentation",
+  process: "Process",
+  review: "Review",
+  other: "Other",
+  issue: "Issue",
+  discussion: "Discussion",
+};
+/** Never empty and never null: a kind this build does not know is just "Work item". */
+export const kindLabel = (kind) => (typeof kind === "string" && Object.hasOwn(KIND_LABELS, kind) ? KIND_LABELS[kind] : "Work item");
+
+const TITLE_SHOWN = 160; // the server cuts to 120; this is only a bound on what a wrong reply can put on a card
+
+/** The title as one clean line, or null: control characters become spaces, whitespace collapses, and a very long one is cut. */
+function cleanTitle(raw) {
+  if (typeof raw !== "string") return null;
+  let flat = "";
+  for (const ch of raw) {
+    const c = ch.codePointAt(0);
+    flat += c <= 0x1f || (c >= 0x7f && c <= 0x9f) ? " " : ch;
+  }
+  flat = flat.replace(/\s+/g, " ").trim();
+  if (flat === "") return null;
+  const pts = Array.from(flat);
+  return pts.length > TITLE_SHOWN ? pts.slice(0, TITLE_SHOWN).join("").trimEnd() : flat;
+}
+
+/**
+ * What a card and the detail header say about an item: the repo's full name when the repo is known (`repo`, else
+ * null), "#N" (else ""), and a one-line `title`. With no title yet the title is the kind in plain words plus the
+ * number ("Bug #595"), so a card is never blank. All three are plain strings for the DOM builder to set as text.
+ */
+export function itemHeading(item, repos) {
+  const repo = repos && typeof item.repo_id === "string" ? repos.get(item.repo_id) || null : null;
+  const number = Number.isInteger(item.issue_number) ? "#" + item.issue_number : "";
+  const kind = kindLabel(item.kind);
+  const title = cleanTitle(item.title) || (number ? kind + " " + number : kind);
+  return { repo, number, title, kind };
+}
+
+const COLUMN_OF =new Map(COLUMNS.flatMap((c) => c.stages.map((s) => [s, c.id])));
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PAGES = 40;
 
@@ -155,7 +200,8 @@ export function createBoard({ get = api, onChange = () => {}, coalesceMs = 1000,
       const rows = await getAllPages("/api/v1/repos", get, ac.signal);
       if (destroyed) return;
       const repos = new Map();
-      for (const r of rows) if (r && typeof r.id === "string" && typeof r.product === "string") repos.set(r.id, r.product);
+      // The label is the repo's full name (owner/name). `product` is the App's label ("team"), which names no repo; a repo with no full name is left out.
+      for (const r of rows) if (r && typeof r.id === "string" && typeof r.full_name === "string" && r.full_name !== "") repos.set(r.id, r.full_name);
       set({ repos });
     } catch {
       /* cards fall back to #<issue_number> */

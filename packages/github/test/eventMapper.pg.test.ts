@@ -450,6 +450,23 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       expect(rows[0]).toMatchObject({ provenance: 'internal', kind: 'issue', gh_number: 900, stage: 'triaged' });
     });
 
+    it('intake stores the issue title, cleaned and capped at 120 characters; an issue with no title stores NULL', async () => {
+      const payload = loadFixture<GithubIssuePayload>('issue.opened.trusted.json');
+      payload.issue.number = 902;
+      payload.issue.title = `<img src=x onerror=1>\r\n${String.fromCharCode(0x1b)}${'é'.repeat(300)}`;
+      const created = await apply(mapEvent('issues', payload, { allowlist: [] }));
+      const { rows } = await admin.query(`SELECT title FROM work_items WHERE account_id = $1 AND id = $2`, [refs.accountId, (created as { workItemId: string }).workItemId]);
+      expect(rows[0].title.startsWith('<img src=x onerror=1> éé')).toBe(true);
+      expect(Array.from(rows[0].title as string)).toHaveLength(120);
+
+      const bare = loadFixture<GithubIssuePayload>('issue.opened.trusted.json');
+      bare.issue.number = 903;
+      delete bare.issue.title;
+      const none = await apply(mapEvent('issues', bare, { allowlist: [] }));
+      const { rows: r2 } = await admin.query(`SELECT title FROM work_items WHERE account_id = $1 AND id = $2`, [refs.accountId, (none as { workItemId: string }).workItemId]);
+      expect(r2[0].title).toBeNull();
+    });
+
     it('redelivery of the same issue.opened event is idempotent (no duplicate row)', async () => {
       const payload = loadFixture<GithubIssuePayload>('issue.opened.trusted.json');
       payload.issue.number = 901;

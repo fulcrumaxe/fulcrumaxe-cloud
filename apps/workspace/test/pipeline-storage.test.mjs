@@ -7,14 +7,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ACTIVE_STAGES, COLUMNS, POLL_MS, columnOf, createBoard, getAllPages, groupByColumn, isUuid, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
+import { ACTIVE_STAGES, COLUMNS, KIND_LABELS, POLL_MS, columnOf, createBoard, getAllPages, groupByColumn, isUuid, itemHeading, kindLabel, sameItems, verdictFor } from "../apps/pipeline/pipeline-storage.js";
 
 const V1 = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "api", "fixtures", "v1");
 const fx = (...p) => JSON.parse(readFileSync(join(V1, ...p), "utf8"));
 const PAGE = fx("listWorkItems", "200-page.json");
 const IN_REVIEW = fx("getWorkItem", "200-in-review.json");
 const NEEDS_HUMAN = fx("getWorkItem", "200-needs-human.json");
-const REPOS = fx("listRepos", "200-page.json");
+const REPOS_RAW = fx("listRepos", "200-page.json");
+// The fixture's second repo (the work item's) has no full name; this copy gives it one, as an installed repo has.
+const REPOS = { ...REPOS_RAW, data: REPOS_RAW.data.map((r) => (r.product === "docs" ? { ...r, full_name: "acme/docs" } : r)) };
 const ID = PAGE.data[0].id;
 const OTHER = "55555555-5555-4555-8555-555555555555";
 
@@ -108,16 +110,56 @@ describe("loading", () => {
     expect(get.calls).toHaveLength(2);
   });
 
-  it("loads the list once and the repos once, and labels cards by repo product", async () => {
+  it("loads the list once and the repos once, and labels cards by the repo's full name, never its product", async () => {
     const get = fakeGet({ "/api/v1/work-items": PAGE, "/api/v1/repos": REPOS });
     const board = createBoard({ get });
     await board.load();
     const st = board.getState();
     expect(st.status).toBe("ready");
     expect(st.items.size).toBe(1);
-    expect(st.repos.get(PAGE.data[0].repo_id)).toBe("docs");
+    expect(st.repos.get(PAGE.data[0].repo_id)).toBe("acme/docs");
+    expect(st.repos.get("33333333-3333-4333-8333-333333333333")).toBe("acme/widgets");
+    expect([...st.repos.values()]).not.toContain("docs");
     expect(get.count("/api/v1/work-items")).toBe(1);
     expect(get.count("/api/v1/repos")).toBe(1);
+  });
+
+  it("a repo with no full name is left out, so its cards fall back to #N rather than the product label", async () => {
+    const board = createBoard({ get: fakeGet({ "/api/v1/work-items": PAGE, "/api/v1/repos": REPOS_RAW }) });
+    await board.load();
+    expect(board.getState().repos.has(PAGE.data[0].repo_id)).toBe(false);
+    expect(itemHeading(PAGE.data[0], board.getState().repos)).toMatchObject({ repo: null, number: "#42" });
+  });
+
+  describe("itemHeading", () => {
+    const repos = new Map([["r1", "fulcrumaxe/cloud"]]);
+    const base = { repo_id: "r1", kind: "bug", issue_number: 595, title: "Cards only say team #595" };
+    it("gives the repo's full name, the number and the title", () => {
+      expect(itemHeading(base, repos)).toEqual({ repo: "fulcrumaxe/cloud", number: "#595", title: "Cards only say team #595", kind: "Bug" });
+    });
+    it("falls back to the number alone when the repo is not loaded", () => {
+      expect(itemHeading(base, new Map())).toMatchObject({ repo: null, number: "#595" });
+      expect(itemHeading({ ...base, repo_id: null }, repos).repo).toBeNull();
+    });
+    it("with no title shows the kind in plain words plus the number, never empty or null", () => {
+      for (const title of [null, undefined, "", "   ", "\u0007\n\t", 42, {}]) {
+        expect(itemHeading({ ...base, title }, repos).title).toBe("Bug #595");
+      }
+      expect(itemHeading({ ...base, title: null, kind: "small" }, repos).title).toBe("Small change #595");
+      expect(itemHeading({ ...base, title: null, kind: "feature", issue_number: null }, repos)).toMatchObject({ title: "Feature", number: "" });
+      expect(itemHeading({ repo_id: null, kind: null, issue_number: null, title: null }, repos).title).toBe("Work item");
+    });
+    it("names every kind the pipeline uses and an unknown or inherited one as Work item", () => {
+      expect(Object.keys(KIND_LABELS)).toEqual(expect.arrayContaining(["feature", "critical", "small", "bug", "doc", "process", "review", "other", "issue", "discussion"]));
+      for (const k of ["toString", "__proto__", "constructor", "nope", "", 7]) expect(kindLabel(k)).toBe("Work item");
+    });
+    it("a hostile title stays plain text: markup is kept as characters, control characters and newlines become spaces, length is bounded", () => {
+      const hostile = '<img src=x onerror="alert(1)">\u0000\u001b[31m\r\nline two\u0085<script>x</script>';
+      const out = itemHeading({ ...base, title: hostile }, repos).title;
+      expect(out).toBe('<img src=x onerror="alert(1)"> [31m line two <script>x</script>');
+      expect(/[\u0000-\u001f\u007f-\u009f]/.test(out)).toBe(false);
+      expect(Array.from(itemHeading({ ...base, title: "é".repeat(500) }, repos).title)).toHaveLength(160);
+    });
   });
 
   it("still renders the board when the repos request fails", async () => {
