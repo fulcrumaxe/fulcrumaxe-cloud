@@ -10,7 +10,7 @@
 //
 // The file has two halves: the pure model (no DOM, no network) and, below the divider, the panel that draws it. They
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
-import { h, timeNode } from "../_lib/dom.js";
+import { clockText, h, timeNode } from "../_lib/dom.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -93,11 +93,44 @@ export function usdText(usd) {
   return Number.isFinite(usd) ? "$" + usd.toFixed(2) : "";
 }
 
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const apiUsd = (n) => "$" + (n !== 0 && Math.abs(n) < 0.01 ? n.toFixed(4) : n.toFixed(2));
+
+/**
+ * C42-4: a run on the person's machine has no spend of its own, so its cost is the estimate at API prices and its state, never a bare "$0".
+ * `head` is the short text after the title; `note` is the server's sentence for a state with no figure ("not the same as $0"). A live run has neither yet.
+ */
+export function runnerCost(run) {
+  const u = isObj(run.runner_usage) ? run.runner_usage : null;
+  const note = typeof run.runner_usage_note === "string" && run.runner_usage_note !== "" ? run.runner_usage_note : null;
+  if (u && Number.isFinite(u.api_equivalent_usd)) return { head: "≈ " + apiUsd(u.api_equivalent_usd) + " at API prices · " + (u.credential_mode === "api_key" ? "on your own API key" : "on your plan"), note: null };
+  if (run.runner_usage_state === "not_priced" || u) return { head: "usage not priced", note };
+  if (run.runner_usage_state === "not_recorded") return { head: "usage not recorded", note };
+  return { head: "", note: null };
+}
+
+/** What a run with no lines says: "No activity recorded." only once it is over. */
+export function noActivityText(run) {
+  if (!LIVE_STATUSES.has(run.status)) return SENTENCES.noActivity;
+  if (run.runtime !== "runner") return "Nothing recorded yet.";
+  return run.status === "running" ? "Your runner has started; nothing recorded yet" : "Not started yet; nothing recorded yet.";
+}
+
 /** One agent run as a section: its phase, a title, whether it starts open, its summary and its newest lines. */
 export function runView(run, maxLines = 40) {
   const live = LIVE_STATUSES.has(run.status);
   const lines = Array.isArray(run.lines) ? run.lines : [];
+  const runner = run.runtime === "runner";
+  const rc = runner ? runnerCost(run) : null;
+  const waitText = runner && run.status === "pending" && isObj(run.wait) && typeof run.wait.text === "string" && run.wait.text !== "" ? run.wait.text : null;
+  const seen = runner && run.status === "running" ? clockText(run.runner_checked_in_at) : null;
   return {
+    runner,
+    emptyText: noActivityText(run),
+    costNote: rc ? rc.note : null,
+    waitText,
+    checkedIn: seen ? "Runner checked in " + seen : null,
+    attachHint: runner && live,
     key: "r:" + run.id,
     phase: phaseOf(run.role),
     role: roleWord(run.role),
@@ -105,7 +138,7 @@ export function runView(run, maxLines = 40) {
     statusWord: statusWord(run.status),
     live,
     openByDefault: live,
-    cost: usdText(run.usd),
+    cost: rc ? rc.head : usdText(run.usd),
     at: run.created_at,
     summary: typeof run.summary === "string" && run.summary.trim() ? run.summary : null,
     lines: lines.slice(-maxLines).map((l) => String(l.text)),
@@ -240,7 +273,7 @@ export const SENTENCES = {
   error: "What the pipeline is doing isn't available right now.",
   stale: "Couldn't refresh just now. Showing the last update.",
   noRuns: "No agent has run on this item yet.",
-  noActivity: "No activity recorded for this run yet.",
+  noActivity: "No activity recorded.",
   noPanel: "No panel discussion yet.",
   noSpec: "No Spec yet.",
   olderRuns: "Older runs aren't shown.",
@@ -323,6 +356,10 @@ export function createInsightPanel(deps) {
       { class: "pl-ins-run", "data-testid": "pl-ins-run", "data-phase": r.phase, "data-status": r.status },
       head,
       r.summary ? h("div", { class: "pl-ins-run-summary", "data-testid": "pl-ins-run-summary" }, h("strong", null, "Summary"), text(r.summary)) : null,
+      r.waitText ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-run-wait" }, r.waitText) : null,
+      r.checkedIn ? h("p", { class: "pl-muted", "data-testid": "pl-run-checkin" }, r.checkedIn) : null,
+      r.costNote ? h("p", { class: "pl-muted", "data-testid": "pl-run-cost-note" }, r.costNote) : null,
+      r.attachHint ? h("p", { class: "pl-muted", "data-testid": "pl-run-attach-hint" }, "You can also watch this run on the runner machine with ", h("code", null, "fx-runner attach"), ".") : null,
       r.lines.length
         ? h(
             "ol",
@@ -330,7 +367,7 @@ export function createInsightPanel(deps) {
             r.hiddenLines ? h("li", { class: "pl-muted" }, "Earlier activity isn't shown.") : null,
             r.lines.map((l) => h("li", null, l))
           )
-        : h("p", { class: "pl-muted" }, SENTENCES.noActivity)
+        : h("p", { class: "pl-muted", "data-testid": "pl-run-no-activity" }, r.emptyText)
     );
   }
 

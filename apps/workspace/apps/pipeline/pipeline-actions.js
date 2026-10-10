@@ -75,6 +75,20 @@ export function runnerUsageText(run) {
 /** The work item's separate total, shown only when its runs on the person's machine have one. */
 export const ownPlanText = (usd) => (Number.isFinite(usd) && usd > 0 ? "On your own plan (API-equivalent): " + apiUsd(usd) : null);
 
+/**
+ * C42-5/C42-4: the item's own-plan line from its usage state. A finished run with no usage, or tokens with no price, is said in words and is never
+ * drawn as $0; a recorded figure reads as before. An older server (no state) is read as before too.
+ */
+export function ownPlanLine(item) {
+  if (!isObj(item)) return null;
+  if (item.own_plan_usage_state === "not_recorded") return "On your own plan: usage was not recorded for a finished run. That is not the same as $0.";
+  if (item.own_plan_usage_state === "not_priced") {
+    const t = isObj(item.own_plan_tokens) ? item.own_plan_tokens : {};
+    return "On your own plan: " + tok(t.input) + " in / " + tok(t.output) + " out tokens, with no API price for the model. That is not the same as $0.";
+  }
+  return ownPlanText(item.own_plan_api_equivalent_usd);
+}
+
 const validRun = (r) => r && typeof r === "object" && typeof r.id === "string" && typeof r.role === "string" && typeof r.status === "string";
 
 /** Cancel for a live run; Retry for a failed-kind run that is the newest of its role. `runs` is newest first. */
@@ -277,7 +291,7 @@ export function createActions({ itemId, repoId, call = api, uuid = () => crypto.
 }
 
 /** The Runs section: `el` goes into the detail; label() is the pending text for the card. */
-export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlanUsd = () => null }) {
+export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlan = () => null }) {
   let lastLabel = null;
   let lastLive = false;
   let dlg = null;
@@ -320,7 +334,7 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
     return h(
       "li",
       { class: "pl-run", tabindex: "-1", "data-testid": "pl-run", "data-run-id": run.id, "data-status": run.status, "data-action-id": p ? p.actionId : null },
-      h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", STATUS_WORDS[run.status] || "Another status", Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
+      h("span", { class: "pl-run-main" }, h("bdi", null, run.role), " · ", STATUS_WORDS[run.status] || "Another status", run.runtime !== "runner" && Number.isFinite(run.usd) ? " · " + money(run.usd) : ""),
       runnerUsageText(run) ? h("span", { class: "pl-run-usage pl-muted", "data-testid": "pl-run-usage" }, runnerUsageText(run)) : null,
       p ? h("span", { class: "pl-run-pending", "data-testid": "pl-run-pending" }, p.kind === "cancel" ? "Cancelling…" : "Retrying…") : null,
       ...approvalParts(run, approvals),
@@ -379,7 +393,7 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
       : st.list === "error" ? h("p", { class: "pl-muted", "data-testid": "pl-runs-error" }, "Runs aren't available right now.")
       : st.runs.length === 0 ? h("p", { class: "pl-muted" }, "No runs yet.")
       : h("ul", { class: "pl-runlist" }, st.runs.map(row), st.more ? h("li", { class: "pl-muted" }, "Older runs are in the Runs app.") : null);
-    const own = st.list === "ready" ? ownPlanText(ownPlanUsd()) : null;
+    const own = st.list === "ready" ? ownPlanLine(ownPlan()) : null;
     // Rebuilding the rows must not drop keyboard focus: put it back on the same control of the same run.
     const held = list.contains(document.activeElement) && document.activeElement.closest("[data-run-id]");
     const heldId = held && held.dataset.runId;
