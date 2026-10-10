@@ -38,6 +38,7 @@ import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
+import { createDepsInstaller } from "../daemon/depsInstall.js";
 import { createJobWatch } from "../daemon/watch.js";
 import { createEventRelay, realClock, type Clock } from "../daemon/lease.js";
 import { createAutoUpdate, type UpdateHost } from "../update/updater.js";
@@ -232,6 +233,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
     const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
+    const packageStoreRoot = path.join(path.dirname(mirrorsRoot), "pnpm-store");
     const sandbox = createHostSandbox({
       credentials,
       envOptions,
@@ -242,7 +244,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       binaryDir: path.dirname(binaryPath),
       mirrorsRoot,
       toolchainReadPaths: toolchainReadPaths(toolchain),
-      packageStoreRoot: path.join(path.dirname(mirrorsRoot), "pnpm-store"),
+      packageStoreRoot,
       makeRuntime: (sandboxSettings, protectedPaths, jobEnv, runId) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(runId, event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }), ...(limits === undefined ? {} : { limits }) }),
     });
     const socketTooLong = Buffer.byteLength(socketPath(stateDir)) > MAX_SOCKET_PATH_BYTES;
@@ -258,7 +260,11 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       host.engine.captureLarge === undefined
         ? undefined
         : createNixShell({ nixBin: findNix(searchPath), bwrapBin: findTool("bwrap", searchPath), ...(findTool("git", searchPath) === undefined ? {} : { gitBin: findTool("git", searchPath) }), capture: host.engine.captureLarge, dataDir: path.join(path.dirname(mirrorsRoot), "nix-shell"), identity: identityVia(host.engine.capture), signal: stopped.signal });
+    // D#6 C44-4: the host-side dependency install, wired only where the engine offers the process-group capture.
+    const depsInstall = host.engine.installCapture === undefined ? undefined : createDepsInstaller({ capture: host.engine.installCapture, envOptions, say: (line) => ctx.out(line) });
     const handle = createJobHandler({
+      ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
+      onDepsDetail: (detail: string) => ctx.out(`fx-runner: dependencies for this job (${detail})`),
       ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`), onNixDetail: (detail: string) => ctx.out(`fx-runner: Nix dev shell for this job (${detail})`) }),
       ...(watch === undefined ? {} : { watch, interrupt: (job) => sandbox.interrupt(job) }),
       client,

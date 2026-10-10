@@ -1,4 +1,5 @@
 import type { spawn } from "node:child_process";
+import { OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 
 export type SpawnFn = typeof spawn;
 
@@ -43,6 +44,58 @@ export function runCapture(spawnFn: SpawnFn, command: string, args: readonly str
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => finish(code));
+  });
+}
+
+export interface InstallCaptured {
+  code: number | null;
+  /** The last `tailChars` characters of the output (standard output and error together). Raw: the caller redacts it. */
+  tail: string;
+  timedOut: boolean;
+  aborted: boolean;
+}
+
+/**
+ * D#6 C44-4: runs a dependency install in `cwd` with an explicit environment and no shell, as the leader of its own process group. When `timeoutMs`
+ * passes or `signal` aborts, the whole group is ended (SIGTERM, then SIGKILL), and the group is cleared when the program exits too, so nothing the
+ * install started outlives it. Only the end of the output is kept.
+ */
+export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal): Promise<InstallCaptured> {
+  return new Promise((resolve) => {
+    let tail = "";
+    let timedOut = false;
+    let aborted = false;
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ code, tail, timedOut, aborted });
+    };
+    const child = spawnFn(command, [...args], { cwd, env, shell: false, detached: OWN_PROCESS_GROUP, stdio: ["ignore", "pipe", "pipe"] });
+    const stop = (): void => {
+      void terminateGroup(child, 2000).then(() => finish(null));
+    };
+    const onAbort = (): void => {
+      aborted = true;
+      stop();
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, timeoutMs);
+    const keep = (chunk: Buffer): void => {
+      tail = (tail + chunk.toString("utf8")).slice(-tailChars);
+    };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", keep);
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      void terminateGroup(child, 500).then(() => finish(code));
+    });
+    if (signal?.aborted === true) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

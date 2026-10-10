@@ -1,4 +1,5 @@
 import { isReviewJobRole, type Job } from "@fulcrumaxe/runner-protocol";
+import { TEST_ROLES } from "./depsRegistry.js";
 import { roleToolsFor } from "./roleTools.js";
 
 /**
@@ -28,6 +29,25 @@ const PUBLISHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"
  */
 export const REVIEW_BACKSTOP =
   "This review runs on the person's own machine. The runner has checked out the exact commit to review. Do not fetch, check out, reset, push or change a remote.";
+
+/**
+ * D#6 C44-4: runner-owned, for the roles that run tests. The lockfile is a sandbox-protected path, so only the frozen install can work, and
+ * it must never be rewritten. Fixed text; nothing from a job is in it, and it sits before the untrusted block, which cannot move it.
+ */
+export const TEST_BACKSTOP =
+  "Before running the tests, install dependencies from the lockfile with the frozen install (`pnpm install --frozen-lockfile` when `pnpm-lock.yaml` is present; `npm ci` for `package-lock.json`). Never update the lockfile. A criterion you could not verify is reported as not verified, with the command and its error.";
+
+/** The one fixed line a test role also gets when the repo has a lockfile and the job's sandbox allows no npm registry host. Runner text, never from the job. */
+export const DEPS_REGISTRY_NOTE =
+  "NOTE: This job's sandbox allows no npm registry host, so the frozen install cannot download packages. Report the install failure as it is; do not try to get around the network rules.";
+
+/** D#6 C44-4: the runner installed the repo's dependencies on the host before this run started. Runner text, never from the job. */
+export const DEPS_INSTALLED_NOTE =
+  "NOTE: The runner already installed dependencies from the lockfile before this run started, so do not run an install. Install scripts did not run: a package that needs one (a native build) is not built. If a test fails for that reason, report it as not verified, with the command and its error.";
+
+/** D#6 C44-4: the host-side install did not happen or did not finish (refused lockfile, tool missing, error, time limit). Runner text; the closed code is `deps_install_failed`. */
+export const DEPS_FAILED_NOTE =
+  "NOTE: Dependencies were not installed (deps_install_failed), and the sandbox cannot install them for you. Report what you could not verify because of it, with the command and its error; do not try to get around the sandbox or the network rules.";
 
 const CLOSING = "</untrusted>";
 /** The closing tag as it reads after normalising: space allowed anywhere inside it, any letter case. */
@@ -102,6 +122,7 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = []): stri
     "Complete the task described in the untrusted block below. Return an AGENT_OUTPUT JSON envelope at the end of your final message.",
     ...(PUBLISHING_ROLES.has(job.role) ? ["", PUBLISH_BACKSTOP] : []),
     ...(isReviewJobRole(job.role) ? ["", REVIEW_BACKSTOP] : []),
+    ...(TEST_ROLES.has(job.role) ? ["", TEST_BACKSTOP] : []),
     ...notes.flatMap((note) => ["", note]),
     "",
     "<untrusted>",

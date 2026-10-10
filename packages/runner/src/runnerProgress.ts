@@ -47,10 +47,13 @@ export function eventForStorage(clean: LocalOnlyEvent): LocalOnlyEvent {
   return reduced === null ? rest : { ...rest, activity: reduced };
 }
 
+/** The stages a runner event can become. The two dependency outcomes (D#6 C44-4) are stored as they are; the cloud sandbox recorder widens `RunStage` the same way. */
+type ProjectedStage = RunStage | "deps_installed" | "deps_install_failed";
+
 interface Row {
   seq: number;
   activity?: Activity;
-  stage?: RunStage;
+  stage?: ProjectedStage;
 }
 
 /**
@@ -61,10 +64,10 @@ interface Row {
 export async function projectRunnerProgress(client: PoolClient, input: { accountId: string; runId: string; stored: readonly LocalOnlyEvent[] }): Promise<void> {
   const rows: Row[] = [];
   let window: { anchor: number; row: Row } | null = null;
-  const stages = new Set<RunStage>();
+  const stages = new Set<ProjectedStage>();
   for (const event of input.stored) {
     if (event.type === "stage" && event.stage !== undefined) {
-      const stage: RunStage = event.stage === "workspace_ready" ? "sandbox_ready" : event.stage;
+      const stage: ProjectedStage = event.stage === "workspace_ready" ? "sandbox_ready" : event.stage;
       if (!stages.has(stage)) {
         stages.add(stage);
         rows.push({ seq: event.seq, stage });

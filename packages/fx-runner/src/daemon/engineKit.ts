@@ -6,6 +6,9 @@ import type { JobLimits } from "../sandbox/jobLimits.js";
 import type { ProtectedPaths } from "../sandbox/sandboxSettings.js";
 import type { GitCapture } from "./git.js";
 
+/** Runs a program in `cwd` with exactly this environment and no shell; ends its whole process group on the time limit or the signal; keeps the last `tailChars` of its output. */
+export type InstallCapture = (command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal) => Promise<{ code: number | null; tail: string; timedOut: boolean; aborted: boolean }>;
+
 /** What `doctor` shows of the agent CLI: its version against the minimum, the flags it lacks, and whether a login of the right kind exists. */
 export interface EngineReport {
   /** Undefined when `--version` did not parse. */
@@ -59,6 +62,8 @@ export interface EngineKit {
   foreground(command: string, args: readonly string[], env: Record<string, string>): Promise<number | null>;
   /** Resumes a taken-over run's agent session interactively, in its workspace, under the job's own settings (D#6 R4a-7). Throws an `EngineRefusal` if the run has no session left to resume. */
   takeOver(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions; stateDir: string; runId: string; role: string }): Promise<number | null>;
+  /** D#6 C44-4: runs the host-side dependency install in a directory, in its own process group that is ended on the time limit or the stop signal. Absent: no install is wired. */
+  installCapture?: InstallCapture;
   /** The same capture with a short piece of the error output kept too: what the sandbox probe (`doctor`) reads its reason from. */
   captureWithStderr(command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 }

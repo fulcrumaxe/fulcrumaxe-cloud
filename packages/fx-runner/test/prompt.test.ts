@@ -1,6 +1,7 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { PUBLISH_BACKSTOP, SECURITY_BOUNDARY, buildPrompt, escapeUntrustedClose } from "../src/job/prompt.js";
+import { RUNNER_ELIGIBLE_ROLES } from "@fulcrumaxe/runner-protocol";
+import { PUBLISH_BACKSTOP, SECURITY_BOUNDARY, TEST_BACKSTOP, buildPrompt, escapeUntrustedClose } from "../src/job/prompt.js";
 import { UnknownRoleError } from "../src/job/roleTools.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 import { srcFiles } from "./helpers/srcFiles.js";
@@ -89,6 +90,32 @@ describe("prompt", () => {
         const frame = text.lastIndexOf(PUBLISH_BACKSTOP, text.indexOf("<untrusted>"));
         expect(text.slice(frame - 140, frame), name).toContain("Return an AGENT_OUTPUT JSON envelope");
       }
+    });
+  });
+
+  // D#6 C44-4: the runner's own paragraph about the frozen install, for the roles that run tests and no other.
+  describe("the frozen install backstop", () => {
+    const WITH = ["executor", "code-reviewer", "security-reviewer", "acceptance-tester", "debater"];
+
+    it.each(WITH)("%s: the fixed paragraph is in the frame once, after the role card and before the untrusted block", (role) => {
+      const text = buildPrompt(sampleJob({ role, prompt: "Do the thing.", card: "ROLE CARD TEXT" }));
+      expect(text.split(TEST_BACKSTOP).length - 1).toBe(1);
+      expect(text.indexOf(TEST_BACKSTOP)).toBeGreaterThan(text.indexOf("ROLE CARD TEXT"));
+      expect(text.indexOf(TEST_BACKSTOP)).toBeLessThan(text.indexOf("<untrusted>"));
+    });
+
+    it("no other runner-eligible role gets it", () => {
+      const others = RUNNER_ELIGIBLE_ROLES.filter((role) => !WITH.includes(role));
+      expect(others.length).toBeGreaterThan(0);
+      for (const role of others) expect(buildPrompt(sampleJob({ role })), role).not.toContain(TEST_BACKSTOP);
+      for (const role of WITH) expect(RUNNER_ELIGIBLE_ROLES as readonly string[]).toContain(role);
+    });
+
+    it("says what the spec says: the frozen install for each lockfile, never update it, report what could not be verified", () => {
+      expect(TEST_BACKSTOP).toContain("`pnpm install --frozen-lockfile` when `pnpm-lock.yaml` is present");
+      expect(TEST_BACKSTOP).toContain("`npm ci` for `package-lock.json`");
+      expect(TEST_BACKSTOP).toContain("Never update the lockfile.");
+      expect(TEST_BACKSTOP).toContain("reported as not verified, with the command and its error");
     });
   });
 

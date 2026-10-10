@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { EngineKit } from "../../daemon/engineKit.js";
 import { cleanEnv } from "../../job/cleanEnv.js";
-import { runCapture, runForeground, type SpawnFn } from "./capture.js";
+import { runCapture, runForeground, runInstall, type SpawnFn } from "./capture.js";
 import { authState } from "./authStatus.js";
 import { createClaudeEngine } from "./engine.js";
 import { MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
@@ -47,6 +47,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
     // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
     capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, undefined, 2048),
     captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),
+    installCapture: (command, args, env, cwd, timeoutMs, tailChars, signal) => runInstall(starter.spawn, command, args, env, cwd, timeoutMs, tailChars, signal),
     foreground: (command, args, env) => runForeground(starter.spawn, command, args, env),
     takeOver(input) {
       const { argv, cwd } = takeoverCommand(input);

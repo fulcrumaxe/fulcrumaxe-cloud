@@ -5,6 +5,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["./**/*.ts"],
+  // The runner's source is compiled through the e2e rigs; js-yaml ships no types, so its small declaration (fx-runner/src/types) is included here.
+  "include": ["./**/*.ts", "../../../fx-runner/src/types/*.d.ts"],
   "exclude": []
 }

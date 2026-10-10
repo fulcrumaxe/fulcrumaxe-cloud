@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PUBLISH_BACKSTOP, REVIEW_BACKSTOP, SECURITY_BOUNDARY, buildPrompt } from "../src/job/prompt.js";
+import { PUBLISH_BACKSTOP, REVIEW_BACKSTOP, SECURITY_BOUNDARY, TEST_BACKSTOP, buildPrompt } from "../src/job/prompt.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
 // D#6 R4d-4b (C33 H6): the runner's own sentence for the four review roles, in the frame, whatever the cloud's prompt and card say.
@@ -23,7 +23,7 @@ describe("the review backstop", () => {
     expect(buildPrompt(sampleJob({ role }))).not.toContain(REVIEW_BACKSTOP);
   });
 
-  it("an executor's frame is unchanged by this child: the publishing sentence and nothing else", () => {
+  it("an executor's frame is the publishing sentence and the frozen install paragraph, nothing else", () => {
     const text = buildPrompt(sampleJob({ prompt: "P", card: "C" }));
     const expected = [
       "You are a executor agent in the autonomous development team.",
@@ -35,6 +35,8 @@ describe("the review backstop", () => {
       "Complete the task described in the untrusted block below. Return an AGENT_OUTPUT JSON envelope at the end of your final message.",
       "",
       PUBLISH_BACKSTOP,
+      "",
+      TEST_BACKSTOP,
       "",
       "<untrusted>",
       "P",

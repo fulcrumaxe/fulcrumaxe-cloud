@@ -107,6 +107,8 @@ describe("the runner's own events in the event list", () => {
   it("the three stages are worded as the sandbox's are, and an unknown one is a plain step", () => {
     expect(runnerEventLine({ type: "stage", stage: "workspace_ready" })).toBe("The secure sandbox is ready");
     expect(runnerEventLine({ type: "stage", stage: "cloned" })).toBe("Repository cloned");
+    expect(runnerEventLine({ type: "stage", stage: "deps_installed" })).toBe("Dependencies installed");
+    expect(runnerEventLine({ type: "stage", stage: "deps_install_failed" })).toBe("Dependencies did not install");
     expect(runnerEventLine({ type: "stage", stage: "writing_result" })).toBe("Writing up the result");
     expect(runnerEventLine({ type: "stage", stage: "later" })).toBe("Runner step");
   });
