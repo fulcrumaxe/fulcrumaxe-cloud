@@ -2379,6 +2379,101 @@ check_runner_allowance_table_shape() {
   fi
 }
 
+# D#597 CC-1 (0780): the SECURITY DEFINER functions owned by work_item_correction_definer, which create, decide and mark applied a work item
+# correction. Prints their oids, comma separated, when every one is exactly one of the three signatures (matched by regprocedure), pinned to
+# search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no
+# grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
+check_work_item_correction_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY(ARRAY['public.work_item_correction_create(uuid,text,text,text)'::regprocedure, 'public.work_item_correction_decide(uuid,text,text)'::regprocedure, 'public.work_item_correction_mark_applied(uuid,uuid)'::regprocedure]::oid[])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'work_item_correction_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'work-item-correction-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by work_item_correction_definer fail the exception shape (not one of its three exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#597 CC-1 (0780): role shape of work_item_correction_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and
+# unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly the 40 granted by 0780
+# (column grants on the corrections table, agent_runs, account_members, accounts and audit_log, USAGE on public; nothing table-wide), owning
+# exactly its three functions and nothing else.
+check_work_item_correction_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column work_item_corrections.id SELECT','column work_item_corrections.account_id SELECT','column work_item_corrections.work_item_id SELECT','column work_item_corrections.origin SELECT','column work_item_corrections.kind SELECT','column work_item_corrections.status SELECT','column work_item_corrections.decided_via SELECT','column work_item_corrections.decided_at SELECT','column work_item_corrections.applied_run_id SELECT','column work_item_corrections.id INSERT','column work_item_corrections.account_id INSERT','column work_item_corrections.work_item_id INSERT','column work_item_corrections.origin INSERT','column work_item_corrections.kind INSERT','column work_item_corrections.body INSERT','column work_item_corrections.status INSERT','column work_item_corrections.created_by INSERT','column work_item_corrections.content_hash INSERT','column work_item_corrections.status UPDATE','column work_item_corrections.decided_by UPDATE','column work_item_corrections.decided_via UPDATE','column work_item_corrections.decided_at UPDATE','column work_item_corrections.applied_run_id UPDATE','column work_item_corrections.applied_at UPDATE','column work_item_corrections.updated_at UPDATE','column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.created_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'work_item_correction_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'work_item_correction_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 40 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 40 granted by 0780' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 3
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.work_item_correction_create(uuid,text,text,text)'::regprocedure, 'public.work_item_correction_decide(uuid,text,text)'::regprocedure, 'public.work_item_correction_mark_applied(uuid,uuid)'::regprocedure]::oid[]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its three functions and nothing else' END,
+      CASE WHEN has_schema_privilege('work_item_correction_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_correction_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): work_item_correction_definer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
+# D#597 CC-1 (0780): the shape of work_item_corrections. Row security enabled and forced; platform_ops, partner_user and agent_run_writer hold
+# nothing on it; app_user holds exactly the sixteen-column SELECT and no write; the definer cannot delete a row, nor update the text, the hash,
+# the author or the item. A no-op when the table does not exist.
+check_work_item_correction_table_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN NOT (c.relrowsecurity AND c.relforcerowsecurity) THEN 'row security is not enabled and forced' END,
+      CASE WHEN has_any_column_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_table_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN 'platform_ops holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_any_column_privilege('agent_run_writer', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user or agent_run_writer holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
+      CASE WHEN has_table_privilege('work_item_correction_definer', c.oid, 'DELETE, TRUNCATE, TRIGGER')
+                OR has_column_privilege('work_item_correction_definer', c.oid, 'body', 'UPDATE')
+                OR has_column_privilege('work_item_correction_definer', c.oid, 'content_hash', 'UPDATE')
+                OR has_column_privilege('work_item_correction_definer', c.oid, 'created_by', 'UPDATE')
+                OR has_column_privilege('work_item_correction_definer', c.oid, 'work_item_id', 'UPDATE') THEN 'the definer can delete rows or change what is written once' END,
+      CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 16 THEN 'app_user does not read exactly its sixteen columns' END)
+    FROM pg_class c WHERE c.oid = to_regclass('public.work_item_corrections');" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_corrections-table-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): work_item_corrections table shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -2642,7 +2737,16 @@ if [ -n "$RUNNER_CAPACITY_RESULT" ] && ! [[ "$RUNNER_CAPACITY_RESULT" =~ ^[0-9]+
   echo "neon-shape: internal error -- runner_capacity_definer exempt function oid was not numeric: $RUNNER_CAPACITY_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}"
+WORK_ITEM_CORRECTION_RESULT="$(check_work_item_correction_exception_shape fx_neon)"
+if [[ "$WORK_ITEM_CORRECTION_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${WORK_ITEM_CORRECTION_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
+  exit 1
+fi
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2687,6 +2791,8 @@ check_runner_allowance_role_shape fx_neon
 check_runner_allowance_table_shape fx_neon
 check_runner_capacity_role_shape fx_neon
 check_runner_capacity_table_shape fx_neon
+check_work_item_correction_role_shape fx_neon
+check_work_item_correction_table_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
