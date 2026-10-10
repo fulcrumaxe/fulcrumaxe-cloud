@@ -3679,6 +3679,36 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "wait": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "reason": {
+                                    "type": "string"
+                                  },
+                                  "limited_by": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "reason",
+                                  "limited_by",
+                                  "text"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -5100,6 +5130,57 @@
                             "cache_write_tokens",
                             "api_equivalent_usd",
                             "price_table_version"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runner_usage_state": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "recorded",
+                            "not_priced",
+                            "not_recorded"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runner_usage_note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "wait": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "reason": {
+                              "type": "string"
+                            },
+                            "limited_by": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "text": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "reason",
+                            "limited_by",
+                            "text"
                           ],
                           "additionalProperties": false
                         },

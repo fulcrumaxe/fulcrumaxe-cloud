@@ -29,7 +29,12 @@
       "runner_usage": null,
       "runner_usage_state": null,
       "runner_usage_note": null,
-      "runner_checked_in_at": null
+      "runner_checked_in_at": null,
+      "wait": {
+        "reason": "waiting_for_runner",
+        "limited_by": null,
+        "text": "Waiting for your runner to come online"
+      }
     }
   ],
   "runs_truncated": false,
