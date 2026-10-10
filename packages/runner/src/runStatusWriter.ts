@@ -306,6 +306,26 @@ export async function recordAgentActivity(
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "agent.activity", payload));
 }
 
+/**
+ * D#6 C42-1: the same three progress rows as above, written on the caller's client so they commit with the runner event batch that
+ * produced them (or not at all). Same payload shapes, same redacting writer.
+ */
+export async function recordRunStageOn(client: PoolClient, p: { accountId: string; runId: string; stage: string }): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, "run.stage", { stage: p.stage });
+}
+
+export async function recordAgentActivityOn(client: PoolClient, p: { accountId: string; runId: string; tool: string; path?: string; pattern?: string; command?: string }): Promise<void> {
+  const payload: Record<string, unknown> = { tool: p.tool };
+  if (p.path !== undefined) payload.path = p.path;
+  if (p.pattern !== undefined) payload.pattern = p.pattern;
+  if (p.command !== undefined) payload.command = p.command;
+  await insertRunEvent(client, p.accountId, p.runId, "agent.activity", payload);
+}
+
+export async function recordAgentActivityCappedOn(client: PoolClient, p: { accountId: string; runId: string; dropped: number }): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, "agent.activity.capped", { dropped: p.dropped });
+}
+
 /** D#2 PREVIEW-RUNNER-EVENTS: the one row a run's finish leaves when the per-run activity cap folded events away. */
 export async function recordAgentActivityCapped(pool: Pool, p: { accountId: string; runId: string; dropped: number }): Promise<void> {
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "agent.activity.capped", { dropped: p.dropped }));

@@ -16,7 +16,7 @@ import {
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RUNNER_RUN_CATALOGUE_VERSION } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_MODES_SQL, insertRunnerEvent, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
+import { MAX_RAW_TOOL_EVENTS_PER_RUN, RAW_CAPPED_TYPES, RUNNER_MODES_SQL, insertRunnerEvent, eventForStorage, noteRunnerActivityCap, projectRunnerProgress, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
 import { recordRunnerUsage } from "./runnerUsage.js";
@@ -184,6 +184,23 @@ export const leaseVerdict = async (client: PoolClient, i: HeartbeatRunnerRunInpu
   ]);
   return rows[0]!.verdict;
 };
+
+/** How many more raw `tool_use` / `file_changed` rows this run may store (C42-1). */
+async function rawToolRoom(client: PoolClient, accountId: string, runId: string): Promise<number> {
+  const { rows } = await client.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM run_events WHERE run_id = $1 AND account_id = $2 AND kind = 'runner.event' AND payload->>'type' IN ('tool_use', 'file_changed')",
+    [runId, accountId],
+  );
+  return MAX_RAW_TOOL_EVENTS_PER_RUN - rows[0]!.n;
+}
+
+async function rawStageStored(client: PoolClient, accountId: string, runId: string, stage: string | undefined): Promise<boolean> {
+  const { rows } = await client.query(
+    "SELECT 1 FROM run_events WHERE run_id = $1 AND account_id = $2 AND kind = 'runner.event' AND payload->>'type' = 'stage' AND payload->>'stage' = $3 LIMIT 1",
+    [runId, accountId, stage ?? ""],
+  );
+  return rows.length > 0;
+}
 
 /** C42-5: how long after its run ended the runner that held it may still report its `usage` (the lease length). */
 export const LATE_USAGE_GRACE_SECONDS = RUNNER_LEASE_SECONDS;
@@ -415,7 +432,22 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           let conflicts = 0;
           let ending: Ending | null = null;
           const newlyStored: LocalOnlyEvent[] = [];
+          const cleanStored: LocalOnlyEvent[] = [];
+          // C42-1: at most this many raw tool_use / file_changed rows per run. Past it they are acknowledged and not stored; every other type always is.
+          let rawRoom: number | null = null;
           for (const event of input.events) {
+            if (RAW_CAPPED_TYPES.includes(event.type)) {
+              rawRoom ??= await rawToolRoom(client, input.accountId, input.runId);
+              if (rawRoom <= 0) {
+                stored++;
+                continue;
+              }
+            }
+            // C42-1: one raw row per stage per run; a repeat is acknowledged and not stored.
+            if (event.type === "stage" && (await rawStageStored(client, input.accountId, input.runId, event.stage))) {
+              stored++;
+              continue;
+            }
             // G2 at ingest: the runner redacts before it sends, and the cloud does it again before anything is stored.
             const clean = redactDeep(event, []);
             // `ON CONFLICT (run_id, runner_seq) DO NOTHING` is the defence against a race; a body that differs from the stored one is counted and dropped.
@@ -424,11 +456,14 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
               runId: input.runId,
               runnerSeq: event.seq,
               bodySha256: createHash("sha256").update(canonicalJson(event), "utf8").digest("hex"),
-              payload: clean as unknown as Record<string, unknown>,
+              // The body hash above covers what the runner sent; the stored copy holds the reduced activity (never the runner's own command line).
+              payload: eventForStorage(clean) as unknown as Record<string, unknown>,
             });
             if (outcome === "stored") {
               stored++;
               newlyStored.push(event);
+              cleanStored.push(clean);
+              if (rawRoom !== null && RAW_CAPPED_TYPES.includes(event.type)) rawRoom--;
             } else {
               duplicates++;
               if (outcome === "conflict") conflicts++;
@@ -437,10 +472,13 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           }
           // D#6 R2b-5a: the API-equivalent figure for the usage events stored just now. Information only; it is written to its own table.
           await recordRunnerUsage(client, { accountId: input.accountId, runId: input.runId, runnerId: input.runnerId, stored: newlyStored });
+          // C42-1: the same activity and stage rows a sandbox run writes, from what was stored just now (so a resent batch makes none).
+          await projectRunnerProgress(client, { accountId: input.accountId, runId: input.runId, stored: cleanStored });
           if (ending === null) {
             await leaseVerdict(client, input, at, RUNNER_LEASE_SECONDS, maxWallClockMs);
             return { outcome: "accepted", stored, duplicates, conflicts, ended: null, leaseExpiresAt: new Date(at.getTime() + RUNNER_LEASE_SECONDS * 1000) };
           }
+          await noteRunnerActivityCap(client, { accountId: input.accountId, runId: input.runId });
           await writeRunStatusOn(client, { accountId: input.accountId, runId: input.runId, from: "running", to: ending.to, failureReason: ending.reason });
           // A usage limit or a shutdown makes the run that follows it, in this same transaction: the child commits with the status move or not at all.
           const followUp = ending.followUp ? await requestFollowUp(client, input.runId) : null;

@@ -32,7 +32,30 @@ export type Ed25519PublicJwk = z.infer<typeof Ed25519PublicJwk>;
 export const MAX_EVENTS_PER_BATCH = 100;
 
 /** What a runner may say about its progress: metadata only, with no field for model text, tool output or file content. */
-export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch", "engine_version", "run_ended", "taken_over"] as const;
+export const LOCAL_ONLY_EVENT_TYPES = ["tool_use", "file_changed", "command_exit", "usage", "usage_limit_reached", "credential_mismatch", "engine_version", "run_ended", "taken_over", "stage"] as const;
+
+/**
+ * D#6 C42-1 (additive under C8 section 6; the cloud first): what a `tool_use` may say about itself beyond the tool's name, the same coarse
+ * record a sandbox run keeps. `path` is repo-relative, `pattern` a short search term, `command` a shell command's first line. The runner
+ * sends a command only when it holds nothing that looks like a credential, and the cloud checks it again before it stores anything.
+ */
+export const ACTIVITY_TOOLS = ["read", "list", "search", "test", "command"] as const;
+export const ACTIVITY_LIMITS = { maxPathChars: 90, maxPatternChars: 40, maxCommandChars: 200 } as const;
+const printable = /^[^\u0000-\u001f\u007f]+$/;
+export const ActivityField = z
+  .object({
+    tool: z.enum(ACTIVITY_TOOLS),
+    path: z.string().min(1).max(ACTIVITY_LIMITS.maxPathChars).regex(printable).optional(),
+    pattern: z.string().min(1).max(ACTIVITY_LIMITS.maxPatternChars).regex(printable).optional(),
+    command: z.string().min(1).max(ACTIVITY_LIMITS.maxCommandChars).regex(printable).optional(),
+  })
+  .strict();
+export type ActivityField = z.infer<typeof ActivityField>;
+
+/** D#6 C42-1: the stages a runner marks, once each per run. `workspace_ready` is stored as the sandbox runs' `sandbox_ready`. */
+export const RUNNER_STAGES = ["workspace_ready", "cloned", "writing_result"] as const;
+export const RunnerStage = z.enum(RUNNER_STAGES);
+export type RunnerStage = z.infer<typeof RunnerStage>;
 
 /**
  * D#6 R4a-2 (correction C24 section 1; additive under C8 section 6): why the runner ended a run it refused or could not finish. A
@@ -100,7 +123,9 @@ export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetai
   push_rejected: [],
 };
 
-const TAKEN_OVER_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb"] as const;
+const TAKEN_OVER_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb", "activity", "stage"] as const;
+
+const STAGE_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb"] as const;
 
 export const LocalOnlyEvent = z
   .object({
@@ -135,9 +160,17 @@ export const LocalOnlyEvent = z
     detail: z.enum(RUN_ENDED_DETAILS).optional(),
     // D#6 R5a-2b (C27 section 4.5), on a `run_ended` event with detail `push_too_large` only: the largest commit's size in whole MB.
     size_mb: safeInt.min(PUSH_TOO_LARGE_SIZE_MB.min).max(PUSH_TOO_LARGE_SIZE_MB.max).optional(),
+    // D#6 C42-1 (additive under C8 section 6): what a tool use did (`tool_use` only) and which stage a `stage` event marks (that type only).
+    activity: ActivityField.optional(),
+    stage: RunnerStage.optional(),
   })
   .strict()
   .superRefine((event, ctx) => {
+    if (event.activity !== undefined && event.type !== "tool_use") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "activity belongs to tool_use only", path: ["activity"] });
+    if (event.type === "stage") {
+      if (event.stage === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a stage event names its stage", path: ["stage"] });
+      for (const field of STAGE_FORBIDDEN) if (event[field] !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a stage event carries no field but seq, ts and stage", path: [field] });
+    } else if (event.stage !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "stage belongs to the stage event only", path: ["stage"] });
     if (event.size_mb !== undefined && !(event.type === "run_ended" && event.reason === "runner_setup" && event.detail === "push_too_large"))
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "size_mb belongs to run_ended push_too_large only", path: ["size_mb"] });
     // D#6 R4a-7 (additive under C8 section 6): `taken_over` is a timestamp and nothing else. The owner took the run over on the machine; no other field fits.
