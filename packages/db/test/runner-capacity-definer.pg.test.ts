@@ -8,10 +8,11 @@ import { seedAccount, type SeedRefs } from './helpers/seed.js';
 
 const ROLE = 'runner_capacity_definer';
 const FN = 'runner_capacity_record(integer,integer,text)';
+const PAUSE_FN = 'runner_claim_pause_record(timestamp with time zone)';
 const TABLE = 'runner_capacity';
 
 /** 0777 (D#6 C43-2b): the side table of declared capacity, and the definer that sets it for the runner named by the session. */
-describe('migration 0777: runner_capacity and runner_capacity_record', () => {
+describe('migrations 0777 and 0779: runner_capacity, runner_capacity_record and runner_claim_pause_record', () => {
   let adminPool: Pool;
   let appPool: Pool;
   let admin: PoolClient;
@@ -38,12 +39,12 @@ describe('migration 0777: runner_capacity and runner_capacity_record', () => {
       await client.query('SELECT runner_capacity_record($1::int, $2::int, $3::text)', [light, heavy, limitedBy]);
     });
 
-  it('the role is NOLOGIN and unprivileged, has no member, is a member of nothing, and owns exactly this function', async () => {
+  it('the role is NOLOGIN and unprivileged, has no member, is a member of nothing, and owns exactly its two functions', async () => {
     const { rows } = await admin.query(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1`, [ROLE]);
     expect(rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false });
     expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole OR member = $1::regrole`, [ROLE])).rowCount).toBe(0);
     const owned = await admin.query<{ sig: string }>(`SELECT p.oid::regprocedure::text AS sig FROM pg_proc p WHERE p.proowner = $1::regrole`, [ROLE]);
-    expect(owned.rows.map((r) => r.sig)).toEqual([FN]);
+    expect(owned.rows.map((r) => r.sig).sort()).toEqual([FN, PAUSE_FN].sort());
     expect((await admin.query(`SELECT has_schema_privilege($1, 'public', 'CREATE') AS ok`, [ROLE])).rows[0].ok).toBe(false);
   });
 
@@ -60,9 +61,10 @@ describe('migration 0777: runner_capacity and runner_capacity_record', () => {
     const col = (c: string, p: string) => `column ${TABLE}.${c} ${p}`;
     expect((await held(ROLE)).rows.map((r) => r.x).sort()).toEqual(
       [
-        ...['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by'].map((c) => col(c, 'SELECT')),
-        ...['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by', 'updated_at'].map((c) => col(c, 'INSERT')),
-        ...['declared', 'light_limit', 'heavy_limit', 'limited_by', 'updated_at'].map((c) => col(c, 'UPDATE')),
+        ...['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by', 'claim_paused_until'].map((c) => col(c, 'SELECT')),
+        ...['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by', 'updated_at', 'claim_paused_until'].map((c) => col(c, 'INSERT')),
+        ...['declared', 'light_limit', 'heavy_limit', 'limited_by', 'updated_at', 'claim_paused_until'].map((c) => col(c, 'UPDATE')),
+        'column runners.credential_mode SELECT',
         'column runners.id SELECT',
         'column runners.account_id SELECT',
         'column runners.revoked_at SELECT',
@@ -71,7 +73,7 @@ describe('migration 0777: runner_capacity and runner_capacity_record', () => {
         'schema public USAGE',
       ].sort(),
     );
-    expect((await held('app_user')).rows.map((r) => r.x).filter((x) => x.includes(TABLE)).sort()).toEqual(['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by'].map((c) => col(c, 'SELECT')).sort());
+    expect((await held('app_user')).rows.map((r) => r.x).filter((x) => x.includes(TABLE)).sort()).toEqual(['runner_id', 'account_id', 'declared', 'light_limit', 'heavy_limit', 'limited_by', 'claim_paused_until'].map((c) => col(c, 'SELECT')).sort());
   });
 
   it('the table is row-secured and forced, with a policy per write command for the definer and a tenant read for app_user', async () => {
@@ -117,7 +119,7 @@ describe('migration 0777: runner_capacity and runner_capacity_record', () => {
   });
 
   it('stores the cause of a low limit, changes it, clears it, and refuses one outside the set or without limits (22023)', async () => {
-    for (const cause of ['memory', 'cpu', 'disk', 'paused', 'ceiling']) {
+    for (const cause of ['memory', 'cpu', 'disk', 'paused', 'ceiling', 'usage_limit']) {
       await record(2, 1, runner, refs.accountId, cause);
       expect((await stored())!.limited_by, cause).toBe(cause);
     }

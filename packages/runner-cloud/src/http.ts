@@ -124,7 +124,7 @@ export interface RunnerLeaseOps {
     { verdict: "ok"; leaseExpiresAt: Date } | { verdict: string; reason: StopReason }
   >;
   ingestRunnerEvents(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; events: readonly LocalOnlyEvent[] }): Promise<
-    | { outcome: "accepted"; stored: number; duplicates: number; leaseExpiresAt: Date }
+    | { outcome: "accepted"; stored: number; duplicates: number; leaseExpiresAt: Date; /** Why the batch ended the run, when it did (D#6 C43-6 reads `usage_limit`). Absent from an older worker. */ ended?: string | null }
     | { outcome: "seq_order" }
     | { outcome: "seq_not_increasing"; lastAcceptedSeq: number }
     | { outcome: "fenced"; reason: StopReason }

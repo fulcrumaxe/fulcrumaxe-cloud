@@ -15,6 +15,7 @@ import type { Claimed } from "./client.js";
 import { GIB, type Footprint, type FootprintStore } from "./footprints.js";
 import type { ResourceProbe, ResourceReading } from "./resources.js";
 import type { RunnerSettings } from "../runnerSettings.js";
+import type { UsageState } from "./usageGate.js";
 
 export interface AdmissionConfig {
   /** Fraction of RAM kept free for the person (default 0.25). */
@@ -66,6 +67,8 @@ export interface AdmissionDeps {
   footprints: FootprintStore;
   settings: () => RunnerSettings;
   paused: () => boolean;
+  /** The plan's usage limit (D#6 C43-6): blocked claims nothing; single claims only with no job in hand. Absent: neither (an `api_key` runner). */
+  usage?: () => UsageState;
   now: () => number;
   /** Starts a repeating call and returns how to stop it. Default: an unref'd interval. */
   every?: (fn: () => void, ms: number) => () => void;
@@ -109,6 +112,9 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     const headCores = reading.cores * config.loadPerCore - reading.load1 - heldCores;
     const diskOk = reading.freeDiskBytes === undefined || reading.freeDiskBytes >= config.minFreeDiskBytes;
     const paused = deps.paused();
+    const usage = deps.usage?.() ?? { blocked: false, single: false };
+    // Near the plan's limit the runner takes one job at a time: nothing while a job is in hand, and at most one when none is.
+    const usageHeld = usage.blocked || (usage.single && inHand.size > 0);
     const totalRoom = Math.max(0, settings.ceilingTotal - used.light - used.heavy);
 
     /** More jobs of one class that fit, and what stops the next one. */
@@ -117,9 +123,10 @@ export function createAdmission(deps: AdmissionDeps): Admission {
       const classRoom = cls === "heavy" ? Math.max(0, settings.ceilingHeavy - used.heavy) : totalRoom;
       const byMem = Math.floor(Math.max(0, headMem) / footprint.memBytes);
       const byCpu = Math.floor(Math.max(0, headCores) / footprint.cores);
-      const count = paused || !diskOk ? 0 : Math.min(totalRoom, classRoom, byMem, byCpu);
+      const count = paused || usageHeld || !diskOk ? 0 : Math.min(totalRoom, classRoom, byMem, byCpu, usage.single ? 1 : Infinity);
       if (count > 0) return { count, limit: null };
       if (paused) return { count: 0, limit: "paused" };
+      if (usageHeld) return { count: 0, limit: "usage_limit" };
       if (Math.min(totalRoom, classRoom) === 0) return { count: 0, limit: "ceiling" };
       if (!diskOk) return { count: 0, limit: "disk" };
       return { count: 0, limit: byMem === 0 ? "memory" : "cpu" };
@@ -128,7 +135,7 @@ export function createAdmission(deps: AdmissionDeps): Admission {
     const heavy = fit("heavy");
     // Progress floor: a runner with no job in hand that is neither paused nor out of disk may take ONE light job even when memory or CPU headroom is short,
     // so a busy machine never starves the runner for good. Heavy stays at 0 until the headroom is there.
-    if (inHand.size === 0 && !paused && diskOk && totalRoom > 0 && light.count === 0 && heavy.count === 0) light.count = 1;
+    if (inHand.size === 0 && !paused && !usageHeld && diskOk && totalRoom > 0 && light.count === 0 && heavy.count === 0) light.count = 1;
     const ceilingLight = Math.min(MAX_LIGHT_CAPACITY, light.count + used.light);
     const ceilingHeavy = Math.min(MAX_HEAVY_CAPACITY, heavy.count + used.heavy);
     // Named only when nothing at all can be claimed; the light class is the one that fits most easily, so its reason is the binding one.

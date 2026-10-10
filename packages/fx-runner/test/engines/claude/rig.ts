@@ -22,7 +22,7 @@ export interface Rig {
 }
 
 /** An engine over a fake binary, with every directory under one temporary root and a spawn wrapper that counts calls. */
-export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; envOptions?: EngineConfig["envOptions"]; onLocalEvent?: EngineConfig["onLocalEvent"]; sandbox?: Record<string, unknown> } = {}): Rig {
+export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credentials"]; envOptions?: EngineConfig["envOptions"]; onLocalEvent?: EngineConfig["onLocalEvent"]; onNearLimit?: EngineConfig["onNearLimit"]; sandbox?: Record<string, unknown> } = {}): Rig {
   const fake = over.fake ?? makeFake();
   const root = mkdtempSync(path.join(tmpdir(), "r4b12_rig-"));
   const workdir = path.join(root, "workspace");
@@ -38,6 +38,7 @@ export function makeRig(over: { fake?: Fake; credentials?: EngineConfig["credent
     sessionsFile: path.join(root, "sessions.json"),
     spawn: counting,
     ...(over.onLocalEvent === undefined ? {} : { onLocalEvent: over.onLocalEvent }),
+    ...(over.onNearLimit === undefined ? {} : { onNearLimit: over.onNearLimit }),
     ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),
   };
   return {

@@ -297,7 +297,7 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
          (SELECT c.limited_by FROM runners r JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
            WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
              AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL
-           ORDER BY array_position(ARRAY['paused', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by,
+           ORDER BY array_position(ARRAY['paused', 'usage_limit', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by,
          -- What the claim counts under its account lock: runner runs 'running' in all (no lease test: the claim has none), and the heavy ones.
          (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running') AS account_running_total,
          (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running' AND NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS account_running_heavy

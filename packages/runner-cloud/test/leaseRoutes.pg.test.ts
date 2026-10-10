@@ -303,6 +303,71 @@ describe("lease routes [pg]", () => {
       });
     });
 
+    describe("a pause after a usage limit (D#6 C43-6)", () => {
+      const again = () => h.admin.query("DELETE FROM runner_claim_stamps WHERE runner_id = $1", [runnerId]);
+      const pausedFor = (seconds: number) =>
+        h.admin.query("INSERT INTO runner_capacity (runner_id, account_id, declared, claim_paused_until) VALUES ($1, $2, false, now() + make_interval(secs => $3)) ON CONFLICT (runner_id) DO UPDATE SET claim_paused_until = EXCLUDED.claim_paused_until", [runnerId, A.accountId, seconds]);
+      beforeEach(async () => {
+        await h.admin.query("DELETE FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+        claimResult = { kind: "claimed", signedJob: signJob(job, generateKeyPairSync("ed25519").privateKey), runId: RUN, leaseGeneration: 1 };
+      });
+
+      it("answers idle with a retry_after no longer than the time left, offers no run even with one queued, and the worker is not asked", async () => {
+        await pausedFor(120);
+        const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect(res.status).toBe(200);
+        expect(ClaimReply.safeParse(res.body).success).toBe(true);
+        const retryAfter = (res.body as { retry_after: number }).retry_after;
+        expect(retryAfter).toBeGreaterThan(100);
+        expect(retryAfter).toBeLessThanOrEqual(120);
+        expect(res.headers?.["retry-after"]).toBe(String(retryAfter));
+        expect(res.body).not.toHaveProperty("run_id");
+        expect(calls).toEqual([]);
+      });
+
+      it("a pause longer than the idle answer may say is answered with the longest the protocol allows", async () => {
+        await pausedFor(5 * 3600);
+        const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect((res.body as { retry_after: number }).retry_after).toBe(3600);
+      });
+
+      it("keeps recording the capacity the runner declares while it is paused, so the runner list can say why", async () => {
+        await pausedFor(120);
+        await run(() => claimRun(deps(), req(CLAIM, { capacity: { light: { limit: 1, in_use: 1 }, heavy: { limit: 0, in_use: 0 }, limited_by: "usage_limit" } })));
+        const { rows } = await h.admin.query("SELECT declared, light_limit, heavy_limit, limited_by FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+        expect(rows[0]).toEqual({ declared: true, light_limit: 1, heavy_limit: 0, limited_by: "usage_limit" });
+      });
+
+      it("after the time has passed the next claim goes ahead and reaches the worker, with no cleanup in between", async () => {
+        await pausedFor(120);
+        await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect(calls).toEqual([]);
+        await h.admin.query("UPDATE runner_capacity SET claim_paused_until = now() - interval '1 second' WHERE runner_id = $1", [runnerId]);
+        await again();
+        const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect(res.body).toMatchObject({ run_id: RUN, lease_generation: 1 });
+        expect(calls.map((c) => c.method)).toEqual(["claim"]);
+      });
+
+      it("a runner with no pause row, and one with a null pause, claim as before", async () => {
+        const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect(res.body).toMatchObject({ run_id: RUN });
+        await again();
+        await h.admin.query("UPDATE runner_capacity SET claim_paused_until = NULL WHERE runner_id = $1", [runnerId]);
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).body).toMatchObject({ run_id: RUN });
+        expect(calls).toHaveLength(2);
+      });
+
+      it("one runner's pause does not hold another runner of the same account", async () => {
+        const other = newKey();
+        const otherId = await registerKey(h.admin, A.accountId, A.userId, other);
+        await pausedFor(600);
+        const res = await run(() => claimRun(deps(), req(CLAIM, {}, other)));
+        expect(res.body).toMatchObject({ run_id: RUN });
+        expect(calls[0]!.input).toMatchObject({ runnerId: otherId });
+      });
+    });
+
     it("takes no body: a field is 400", async () => {
       expect((await run(() => claimRun(deps(), req(CLAIM, { account_id: A.accountId })))).status).toBe(400);
       expect(calls).toEqual([]);
@@ -385,6 +450,58 @@ describe("lease routes [pg]", () => {
     it("the path and the body must name the same run, and the path must be a run id", async () => {
       expect((await send(batch([event(0)]), randomUUID())).status).toBe(400);
       expect((await send(batch([event(0)]), "not-a-uuid" as typeof RUN)).status).toBe(404);
+    });
+
+    describe("a batch that ended the run on the usage limit (D#6 C43-6)", () => {
+      const pause = async () => (await h.admin.query<{ s: number | null }>("SELECT EXTRACT(EPOCH FROM (claim_paused_until - now()))::float8 AS s FROM runner_capacity WHERE runner_id = $1", [runnerId])).rows[0]?.s ?? null;
+      const limit = (seq: number, extra: object = {}) => ({ seq, ts: "2026-10-10T12:00:00.000Z", type: "usage_limit_reached", ...extra });
+      beforeEach(async () => {
+        await h.admin.query("DELETE FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+        ingestResult = { outcome: "accepted", stored: 1, duplicates: 0, ended: "usage_limit", leaseExpiresAt: LEASE_END };
+      });
+
+      it("sets the runner's pause to the reset time the event reported, and the answer is the ordinary accepted one", async () => {
+        const reset = new Date(Date.now() + 900_000).toISOString();
+        const res = await send(batch([limit(0, { reset_at: reset })]));
+        expect(res).toMatchObject({ status: 200, body: { continue: true, accepted: 1 } });
+        expect(Math.abs((await pause())! - 900)).toBeLessThan(30);
+      });
+
+      it("holds for an hour when the event named no reset, and a second report overwrites the first", async () => {
+        await send(batch([limit(0)]));
+        expect(Math.abs((await pause())! - 3600)).toBeLessThan(30);
+        await send(batch([limit(1, { reset_at: new Date(Date.now() + 300_000).toISOString() })]));
+        expect(Math.abs((await pause())! - 300)).toBeLessThan(30);
+      });
+
+      it("a reset time already past stores nothing", async () => {
+        await send(batch([limit(0, { reset_at: new Date(Date.now() - 60_000).toISOString() })]));
+        expect(await pause()).toBeNull();
+      });
+
+      it("a batch that ended the run any other way, or none, sets no pause", async () => {
+        for (const ended of [null, "credential_mismatch", "runner_lost"]) {
+          ingestResult = { outcome: "accepted", stored: 1, duplicates: 0, ended, leaseExpiresAt: LEASE_END };
+          await send(batch([limit(0, { reset_at: new Date(Date.now() + 900_000).toISOString() })]));
+          expect(await pause(), String(ended)).toBeNull();
+        }
+      });
+
+      it("a fenced batch (the run is not this runner's any more) sets no pause", async () => {
+        ingestResult = { outcome: "fenced", reason: "run_terminal" };
+        await send(batch([limit(0, { reset_at: new Date(Date.now() + 900_000).toISOString() })]));
+        expect(await pause()).toBeNull();
+      });
+
+      it("an api_key runner is not paused by the same batch", async () => {
+        await h.admin.query("UPDATE runners SET credential_mode = 'api_key' WHERE id = $1", [runnerId]);
+        try {
+          expect((await send(batch([limit(0, { reset_at: new Date(Date.now() + 900_000).toISOString() })]))).status).toBe(200);
+          expect(await pause()).toBeNull();
+        } finally {
+          await h.admin.query("UPDATE runners SET credential_mode = 'subscription' WHERE id = $1", [runnerId]);
+        }
+      });
     });
 
     it("an event with text, output, content or message is 400, and what was sent is never logged", async () => {
