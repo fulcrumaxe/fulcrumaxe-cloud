@@ -81,10 +81,14 @@ async function requireOwnerOrAdmin(client: PoolClient): Promise<void> {
   if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");
 }
 
-/** The cloud-verified opt-in needs a model key to review with: a connection that is not broken, read in the gate's order (ok, unvalidated, broken). */
-async function requireUsableKey(client: PoolClient, accountId: string): Promise<void> {
+/** Whether the account has a model connection the gate can review with: one whose status is not `broken`. Reads the status column only, never key material, in the gate's order (ok, unvalidated, broken). */
+export async function hasUsableKey(client: PoolClient, accountId: string): Promise<boolean> {
   const key = (await client.query<{ status: string }>("SELECT status FROM model_connections WHERE account_id = $1 ORDER BY CASE status WHEN 'ok' THEN 0 WHEN 'unvalidated' THEN 1 ELSE 2 END LIMIT 1", [accountId])).rows[0];
-  if (key === undefined || key.status === "broken") throw new RunnerHttpError(409, "api_key_required", "connect a model API key to use cloud-verified review");
+  return key !== undefined && key.status !== "broken";
+}
+
+async function requireUsableKey(client: PoolClient, accountId: string): Promise<void> {
+  if (!(await hasUsableKey(client, accountId))) throw new RunnerHttpError(409, "api_key_required", "connect a model API key to use cloud-verified review");
 }
 
 const state = (repo: { execution_mode: string }, autoMerge: boolean): RunnerHttpResponse["body"] => ({ execution_mode: repo.execution_mode, auto_merge: autoMerge });
