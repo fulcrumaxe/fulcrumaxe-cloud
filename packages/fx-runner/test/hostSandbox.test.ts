@@ -14,6 +14,7 @@ const STATE = mkdtempSync(path.join(tmpdir(), "r4b13_state-"));
 
 function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOptions; mirrorsRoot?: string } = {}) {
   const blocks: Block[] = [];
+  const runIds: unknown[] = [];
   const starts: unknown[] = [];
   const stops: unknown[] = [];
   let release: () => void = () => undefined;
@@ -35,8 +36,9 @@ function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOpti
   const host = createHostSandbox({
     credentials: { mode: "subscription" },
     ...(over.envOptions === undefined ? {} : { envOptions: over.envOptions }),
-    makeRuntime: (sandbox) => {
+    makeRuntime: (sandbox, _protected, _jobEnv, runId) => {
       blocks.push(sandbox as Block);
+      runIds.push(runId);
       return runtime;
     },
     home: HOME,
@@ -53,7 +55,7 @@ function setup(over: { hold?: boolean; done?: unknown; envOptions?: CleanEnvOpti
     networkPolicy: [{ host: "api.anthropic.com", purpose: "model" }], env: cleanEnv({ mode: "subscription" }), onEvent: () => undefined, ...more,
   });
   const create = (name = "rn-1") => host.createSandbox({ sandboxName: name, retention: { persistent: false }, timeoutMs: 1_000 });
-  return { host, blocks, starts, stops, tempRoot, workdir, opts, create, release: () => release() };
+  return { host, blocks, runIds, starts, stops, tempRoot, workdir, opts, create, release: () => release() };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -102,6 +104,17 @@ describe("hostSandbox: refusals happen before anything is built or started", () 
   it("starting a sandbox that was never created or is deleted throws not-found", async () => {
     const t = setup();
     expect(() => t.host.startDetached({ runId: "", sandboxName: "nope" }, t.opts())).toThrow("sandbox not found");
+  });
+});
+
+describe("hostSandbox: the runtime is built for one run", () => {
+  it("hands makeRuntime the run id of the job it is built for, so its events can be routed to that run", async () => {
+    const t = setup();
+    const one = await t.create("rn-1");
+    const two = await t.create("rn-2");
+    await t.host.startDetached(one, t.opts({ runId: "run-1" })).hookFired;
+    await t.host.startDetached(two, t.opts({ runId: "run-2" })).hookFired;
+    expect(t.runIds).toEqual(["run-1", "run-2"]);
   });
 });
 

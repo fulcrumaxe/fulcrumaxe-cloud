@@ -24,7 +24,7 @@ import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import { GitPathError } from "./git.js";
 import type { GitPath } from "./gitPath.js";
-import { startLease, type Clock, type Lease, type LeaseEnd, type createEventRelay } from "./lease.js";
+import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
 import type { JobWatch, WatchedJob } from "./watch.js";
@@ -60,7 +60,7 @@ export interface JobHandlerDeps {
   git: GitPath;
   /** Git path A (cloud-verified, D#6 R5a-3). Absent when this build pins no GitHub relay for the cloud: a `verified` job then ends `git_proxy_unpinned`. */
   gitA?: GitPath;
-  events: ReturnType<typeof createEventRelay>;
+  events: EventRelay;
   /** Writes the local session index the next fix round reads (the engine's own recorder, bound to its file). */
   recordSession: (sessionId: string, workspace: string) => Promise<void>;
   /** Aborts when the daemon is asked to stop. */
@@ -217,7 +217,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // One run, one `seq` line: the engine numbers its events from 0 on each start and the stage marks below are made here, so every event is
     // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
     const next = (): number => (lease.highestSeq() ?? -1) + 1;
-    const detach = deps.events.attach((event) => lease.push({ ...event, seq: next() }));
+    const detach = deps.events.attach(claimed.runId, (event) => lease.push({ ...event, seq: next() }));
     const mark = (stage: "workspace_ready" | "cloned"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
     const held: HeldSandbox = {};

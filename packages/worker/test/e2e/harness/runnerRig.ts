@@ -85,8 +85,8 @@ export function createRunnerRig(input: RunnerRigInput): RunnerRig {
     stateDir,
     binaryDir,
     mirrorsRoot,
-    makeRuntime: (sandboxSettings, protectedPaths) =>
-      kit.makeRuntime({ binaryPath: input.binary, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: relay.emit }),
+    makeRuntime: (sandboxSettings, protectedPaths, _jobEnv, runId) =>
+      kit.makeRuntime({ binaryPath: input.binary, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => relay.emit(runId, event) }),
   });
   const handle = createJobHandler({
     client,

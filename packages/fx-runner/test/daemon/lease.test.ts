@@ -272,25 +272,152 @@ describe("what the lease knows about the events it was given (for run_ended)", (
   });
 });
 
+const RUN_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const RUN_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
 describe("the event relay", () => {
-  it("hands events to the attached run only, and detaching stops it", () => {
+  it("hands a run's events to that run's sink only, and detaching stops it", () => {
     const relay = createEventRelay();
     const got: number[] = [];
-    relay.emit(event(0));
-    const detach = relay.attach((e) => got.push(e.seq));
-    relay.emit(event(1));
+    relay.emit(RUN_A, event(0));
+    const detach = relay.attach(RUN_A, (e) => got.push(e.seq));
+    relay.emit(RUN_A, event(1));
     detach();
-    relay.emit(event(2));
+    relay.emit(RUN_A, event(2));
     expect(got).toEqual([1]);
   });
 
-  it("a stale detach does not remove a newer sink", () => {
+  it("a stale detach of the same run does not remove a newer sink for it", () => {
     const relay = createEventRelay();
     const got: string[] = [];
-    const first = relay.attach(() => got.push("a"));
-    relay.attach(() => got.push("b"));
+    const first = relay.attach(RUN_A, () => got.push("a"));
+    relay.attach(RUN_A, () => got.push("b"));
     first();
-    relay.emit(event(0));
+    relay.emit(RUN_A, event(0));
     expect(got).toEqual(["b"]);
+  });
+
+  it("an event for a run with no sink, or a detached one, is dropped and counted, never routed to another run", () => {
+    const relay = createEventRelay();
+    const other: string[] = [];
+    relay.attach(RUN_B, (e) => other.push(String(e.seq)));
+    relay.emit(RUN_A, event(0));
+    const detach = relay.attach(RUN_A, () => undefined);
+    detach();
+    relay.emit(RUN_A, event(1));
+    expect(other).toEqual([]);
+    expect(relay.dropped()).toBe(2);
+  });
+
+  it("two attached runs each get their own events, in order, whatever the interleaving", () => {
+    const relay = createEventRelay();
+    const a: number[] = [];
+    const b: number[] = [];
+    relay.attach(RUN_A, (e) => a.push(e.seq));
+    relay.attach(RUN_B, (e) => b.push(e.seq));
+    relay.emit(RUN_A, event(10));
+    relay.emit(RUN_B, event(20));
+    relay.emit(RUN_B, event(21));
+    relay.emit(RUN_A, event(11));
+    expect(a).toEqual([10, 11]);
+    expect(b).toEqual([20, 21]);
+    expect(relay.dropped()).toBe(0);
+  });
+});
+
+/** Two concurrent jobs wired the way the job handler wires one: a lease per run, a sink that renumbers into that lease. */
+function twoJobs() {
+  const clock = manualClock();
+  const relay = createEventRelay();
+  const make = (runId: string) => {
+    const { client, calls } = scripted();
+    const lease = startLease({ client, clock, runId, leaseGeneration: 1 });
+    const next = (): number => (lease.highestSeq() ?? -1) + 1;
+    const detach = relay.attach(runId, (e) => lease.push({ ...e, seq: next() }));
+    return { lease, calls, detach, emit: (e: LocalOnlyEvent) => relay.emit(runId, e) };
+  };
+  return { clock, relay, a: make(RUN_A), b: make(RUN_B) };
+}
+const tagged = (tool: string): LocalOnlyEvent => ({ seq: 0, ts: "2026-10-08T12:00:00.000Z", type: "tool_use", tool_name: tool });
+
+describe("concurrent jobs share one relay without sharing events", () => {
+  it("interleaved events land on their own lease, each with its own seq line", async () => {
+    const t = twoJobs();
+    t.a.emit(tagged("A1"));
+    t.b.emit(tagged("B1"));
+    t.a.emit(tagged("A2"));
+    t.b.emit(tagged("B2"));
+    t.b.emit(tagged("B3"));
+    expect(t.a.lease.pending()).toBe(2);
+    expect(t.b.lease.pending()).toBe(3);
+    expect(t.a.lease.highestSeq()).toBe(1);
+    expect(t.b.lease.highestSeq()).toBe(2);
+    await t.a.lease.flush();
+    await t.b.lease.flush();
+    expect(t.a.calls.events).toEqual([[0, 1]]);
+    expect(t.b.calls.events).toEqual([[0, 1, 2]]);
+    await t.a.lease.close();
+    await t.b.lease.close();
+  });
+
+  it("detaching one job leaves the other streaming", () => {
+    const t = twoJobs();
+    t.b.emit(tagged("B1"));
+    t.b.detach();
+    t.a.emit(tagged("A1"));
+    t.b.emit(tagged("B-late"));
+    t.a.emit(tagged("A2"));
+    expect(t.a.lease.pending()).toBe(2);
+    expect(t.b.lease.pending()).toBe(1);
+    expect(t.relay.dropped()).toBe(1);
+    void t.a.lease.close({ abandon: true });
+    void t.b.lease.close({ abandon: true });
+  });
+
+  it("aborting one job (its lease stops) leaves the other's events and seq untouched", async () => {
+    const clock = manualClock();
+    const relay = createEventRelay();
+    const stopA = scripted({ heartbeat: () => ({ kind: "stop", reason: "lease_expired" }) });
+    const okB = scripted();
+    const leaseA = startLease({ client: stopA.client, clock, runId: RUN_A, leaseGeneration: 1 });
+    const leaseB = startLease({ client: okB.client, clock, runId: RUN_B, leaseGeneration: 1 });
+    const detachA = relay.attach(RUN_A, (e) => leaseA.push({ ...e, seq: (leaseA.highestSeq() ?? -1) + 1 }));
+    relay.attach(RUN_B, (e) => leaseB.push({ ...e, seq: (leaseB.highestSeq() ?? -1) + 1 }));
+    relay.emit(RUN_B, tagged("B1"));
+    await clock.advance(30_000);
+    expect(leaseA.signal.aborted).toBe(true);
+    expect(leaseB.signal.aborted).toBe(false);
+    detachA();
+    relay.emit(RUN_A, tagged("A-after-abort"));
+    relay.emit(RUN_B, tagged("B2"));
+    expect(leaseB.highestSeq()).toBe(1);
+    expect(leaseA.pending()).toBe(0);
+    await leaseA.close({ abandon: true });
+    await leaseB.close({ abandon: true });
+  });
+
+  it("one job finishing mid-stream of another does not drop the other's later events", () => {
+    const t = twoJobs();
+    t.a.emit(tagged("A1"));
+    t.b.emit(tagged("B1"));
+    t.b.detach(); // B is the later attach: under a single shared sink this is the call that used to silence A
+    t.a.emit(tagged("A2"));
+    t.a.emit(tagged("A3"));
+    expect(t.a.lease.highestSeq()).toBe(2);
+    expect(t.a.lease.pending()).toBe(3);
+    void t.a.lease.close({ abandon: true });
+    void t.b.lease.close({ abandon: true });
+  });
+
+  it("each job keeps its own buffering bound: a flooded job drops its oldest, the other keeps everything", () => {
+    const t = twoJobs();
+    for (let i = 0; i < MAX_QUEUED_EVENTS + 10; i++) t.a.emit(tagged(`A${i}`));
+    for (let i = 0; i < 5; i++) t.b.emit(tagged(`B${i}`));
+    expect(t.a.lease.pending()).toBe(MAX_QUEUED_EVENTS);
+    expect(t.a.lease.highestSeq()).toBe(MAX_QUEUED_EVENTS + 9);
+    expect(t.b.lease.pending()).toBe(5);
+    expect(t.b.lease.highestSeq()).toBe(4);
+    void t.a.lease.close({ abandon: true });
+    void t.b.lease.close({ abandon: true });
   });
 });

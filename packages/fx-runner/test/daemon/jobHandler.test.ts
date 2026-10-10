@@ -147,8 +147,8 @@ describe("a verified job runs and is reported done", () => {
     const rig = makeRig({ portOver: { emit: () => undefined } });
     const claimed = await rig.claim();
     rig.port.port.startDetached = ((_h: SandboxHandle, opts: StartDetachedOptions) => {
-      rig.relay.emit(localEvent(0));
-      rig.relay.emit(localEvent(1));
+      rig.relay.emit(opts.runId, localEvent(0));
+      rig.relay.emit(opts.runId, localEvent(1));
       return { handle: { runId: "", sandboxName: "rn" }, hookFired: Promise.resolve(resultEvent(opts.runId)) };
     }) as SandboxPort["startDetached"];
     const result = await rig.handle(claimed);
@@ -451,7 +451,7 @@ describe("a run that does not finish is not reported done", () => {
     const claimed = await rig.claim();
     const running = rig.handle(claimed);
     await until(() => rig.port.calls.includes("create"));
-    rig.relay.emit(localEvent(0));
+    rig.relay.emit(claimed.runId, localEvent(0));
     cloud.stopRun(claimed.runId, "stale_generation");
     expect(await running).toEqual({ status: "stopped", reason: "stale_generation" });
     expect(cloud.seen.some((s) => s.path.endsWith("/done"))).toBe(false);
@@ -507,8 +507,8 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       const rig = makeRig();
       const claimed = await rig.claim();
       rig.port.port.startDetached =((_h: SandboxHandle, opts: StartDetachedOptions) => {
-        rig.relay.emit(localEvent(0));
-        rig.relay.emit(localEvent(7));
+        rig.relay.emit(opts.runId, localEvent(0));
+        rig.relay.emit(opts.runId, localEvent(7));
         return { handle: { runId: "", sandboxName: "rn" }, hookFired: Promise.resolve(resultEvent(opts.runId, { type: "error" })) };
       }) as SandboxPort["startDetached"];
       expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "agent_error" });
@@ -569,7 +569,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
     });
 
     it("nor when the engine has already sent its own credential_mismatch event and the run then fails some other way", async () => {
-      const rig = makeRig({ handler: { runJobFn: async () => (rig.relay.emit({ seq: 0, ts: "2026-10-08T12:00:00.000Z", type: "credential_mismatch" }), { status: "failed" as const, reason: "agent_error" }) } });
+      const rig = makeRig({ handler: { runJobFn: async (job) => (rig.relay.emit(job.run_id, { seq: 0, ts: "2026-10-08T12:00:00.000Z", type: "credential_mismatch" }), { status: "failed" as const, reason: "agent_error" }) } });
       const claimed = await rig.claim();
       await rig.handle(claimed);
       const sent = eventsOf(claimed.runId).map((e) => e.type);
@@ -580,7 +580,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
     });
 
     it("an ending event the engine already sent wins: run_ended is sent after it, and the cloud's answer to that is a stop", async () => {
-      const rig = makeRig({ handler: { runJobFn: async () => (rig.relay.emit({ seq: 0, ts: "2026-10-08T12:00:00.000Z", type: "usage_limit_reached" }), { status: "failed" as const, reason: "agent_error" }) } });
+      const rig = makeRig({ handler: { runJobFn: async (job) => (rig.relay.emit(job.run_id, { seq: 0, ts: "2026-10-08T12:00:00.000Z", type: "usage_limit_reached" }), { status: "failed" as const, reason: "agent_error" }) } });
       const claimed = await rig.claim();
       expect((await rig.handle(claimed)).status).toBe("failed");
       expect(cloud.runs.get(claimed.runId)?.endedBy?.type).toBe("usage_limit_reached");
@@ -589,7 +589,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
     });
 
     it("a stop on the flush that comes first ends it: run_ended is not sent", async () => {
-      const rig = makeRig({ handler: { runJobFn: async () => (rig.relay.emit(localEvent(0)), { status: "failed" as const, reason: "agent_error" }) } });
+      const rig = makeRig({ handler: { runJobFn: async (job) => (rig.relay.emit(job.run_id, localEvent(0)), { status: "failed" as const, reason: "agent_error" }) } });
       const claimed = await rig.claim();
       cloud.force.events.push(stopBody("run_terminal"));
       expect(await rig.handle(claimed)).toEqual({ status: "stopped", reason: "run_terminal" });
@@ -615,7 +615,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
     });
 
     it("seq_not_increasing drops what the cloud already has and sends the rest: run_ended, above that number, still goes", async () => {
-      const rig = makeRig({ handler: { runJobFn: async () => (rig.relay.emit(localEvent(0)), rig.relay.emit(localEvent(1)), { status: "failed" as const, reason: "agent_error" }) } });
+      const rig = makeRig({ handler: { runJobFn: async (job) => (rig.relay.emit(job.run_id, localEvent(0)), rig.relay.emit(job.run_id, localEvent(1)), { status: "failed" as const, reason: "agent_error" }) } });
       const claimed = await rig.claim();
       // The first batch is accepted. The cloud then says it already holds up to 1 (a lost reply): run_ended, at 2, is kept and resent.
       cloud.force.events.push({ status: 200, body: { continue: true, accepted: 2, duplicates: 0, lease_expires_at: "2026-10-08T12:01:30.000Z" } });
@@ -655,8 +655,8 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       const claimed = await rig.claim();
       const running = rig.handle(claimed);
       await until(() => rig.port.calls.includes("create"));
-      rig.relay.emit(localEvent(0));
-      rig.relay.emit(localEvent(1));
+      rig.relay.emit(claimed.runId, localEvent(0));
+      rig.relay.emit(claimed.runId, localEvent(1));
       shutdown.abort();
       await running;
       expect(eventsOf(claimed.runId).map((e) => `${e.type}:${e.seq}`)).toEqual(["stage:0", "stage:1", "tool_use:2", "tool_use:3", "run_ended:4"]);
@@ -884,7 +884,7 @@ describe("git path B around the run (D#6 R4a-3)", () => {
         stopped = askStopped;
         expect(askStopped?.()).toBe(false);
         cloud.force.events.push(stopBody("run_terminal"));
-        holder.rig!.relay.emit(localEvent(0));
+        holder.rig!.relay.emit(claimed.runId, localEvent(0));
         return { pushed: false };
       },
     });
@@ -1127,8 +1127,8 @@ describe("the stage marks (D#6 C42-2)", () => {
     const rig = makeRig();
     const claimed = await rig.claim();
     rig.port.port.startDetached = ((_h: SandboxHandle, opts: StartDetachedOptions) => {
-      rig.relay.emit(localEvent(0));
-      rig.relay.emit(localEvent(0));
+      rig.relay.emit(opts.runId, localEvent(0));
+      rig.relay.emit(opts.runId, localEvent(0));
       return { handle: { runId: "", sandboxName: "rn" }, hookFired: Promise.resolve(resultEvent(opts.runId)) };
     }) as SandboxPort["startDetached"];
     expect((await rig.handle(claimed)).status).toBe("completed");
