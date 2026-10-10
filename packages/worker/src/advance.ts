@@ -227,6 +227,11 @@ export interface AdvanceFixRequest {
   round: number;
   /** The approval that started the driver: names this fix attempt, so a replay finds its run and a fresh approval asks again. */
   actionId: string;
+  /**
+   * 0 (absent) for the first fix attempt on a head; 1 or more for a further attempt on the SAME head under the same approval (a re-review of a
+   * "no change needed" fix that still asked for changes). It joins the run's key, so that attempt is a run of its own, not the finished one.
+   */
+  retry?: number;
   /** Which review the card shows as asking for changes. */
   reviewer: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. */
@@ -831,11 +836,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  /** The newest executor run of the item that holds a session (the build's, or the last fix's). */
+  /**
+   * The newest executor run of the item that holds a session (the build's, or the last fix's). A runner fix run that ended `no_commit` (the
+   * agent finished and pushed nothing) recorded no branch, so a continuation cannot start from it: the run before it is the parent.
+   */
   async function newestExecutorRun(who: AdvanceStepWho): Promise<string | null> {
     return withTenant(runnerPool, who.accountId, async (client) => {
       const r = await client.query<{ id: string }>(
-        "SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = 'executor' AND cc_session_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND role = 'executor' AND cc_session_id IS NOT NULL " +
+          "AND NOT (status = 'failed' AND EXISTS (SELECT 1 FROM run_events e WHERE e.account_id = agent_runs.account_id AND e.run_id = agent_runs.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'failed' AND e.payload->>'failureReason' = 'no_commit')) " +
+          "ORDER BY created_at DESC LIMIT 1",
         [who.accountId, who.workItemId],
       );
       return r.rows[0]?.id ?? null;
@@ -851,19 +861,21 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       SHA_RE.test(req.headSha) &&
       typeof req.prompt === "string" && req.prompt !== "" && req.prompt.length <= MAX_FIX_PROMPT_CHARS &&
       Number.isInteger(req.round) && req.round >= 1 && req.round <= 20 &&
+      (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
       (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
       (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode));
     if (!sane) return { ok: false, reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
 
+    const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}`;
     const refuse = async (reason: string): Promise<AdvanceRunStart> => {
-      await writeEvent(who, { kind: "fix_round_refused", dedupeKey: `fix:${req.headSha}:${req.actionId}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(reason) ? reason : "refused", headSha: req.headSha, round: req.round });
+      await writeEvent(who, { kind: "fix_round_refused", dedupeKey: `fix:${attemptKey}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(reason) ? reason : "refused", headSha: req.headSha, round: req.round });
       return { ok: false, reason };
     };
 
     // A replay of the same approval on the same head finds the run it started; it never starts a second one.
-    const key = `advance:${who.workItemId}:fix:${req.headSha}:${req.actionId}`;
+    const key = `advance:${who.workItemId}:fix:${attemptKey}`;
     const claimedRun = async (): Promise<string | null> =>
       withTenant(runnerPool, who.accountId, async (client) => {
         const r = await client.query<{ run_id: string }>("SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [who.accountId, key]);
@@ -872,7 +884,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // The fact is written on every path that returns a started run (it is deduped): a step that died between the resume
     // and the event write would otherwise leave the run uncounted, and `fixRoundsStarted` would undercount.
     const started = async (runId: string): Promise<AdvanceRunStart> => {
-      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${req.headSha}:${req.actionId}`, headSha: req.headSha, round: req.round, runId });
+      await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId });
       return { ok: true, runId };
     };
     const already = await claimedRun();

@@ -178,6 +178,7 @@ export async function startReviewerBody(
   pr: Pick<PrFound, "number" | "headSha" | "baseRef" | "branch">,
   role: string,
   prior: ReadonlyArray<{ role: string; runId: string }>,
+  rereview = 0,
 ): Promise<StartedReviewer> {
   if (!worker) return { role, runId: null, reason: "worker_unavailable" };
   if (!REVIEW_ROLES.includes(role)) return { role, runId: null, reason: "invalid_input" };
@@ -214,7 +215,7 @@ export async function startReviewerBody(
     accountId: who.accountId,
     workItemId: who.workItemId,
     haltEpoch: who.haltEpoch,
-    step: `review:${pr.headSha}:${role}`,
+    step: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`,
     role,
     prompt,
     clone: true,
@@ -222,7 +223,7 @@ export async function startReviewerBody(
     expectedExecutionMode: ctx.executionMode,
   });
   if (!started.ok) return { role, runId: null, reason: started.reason };
-  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
+  await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
   return { role, runId: started.runId, reason: null };
 }
 
@@ -292,6 +293,7 @@ export async function startFixBody(
   actionId: string,
   round: number,
   failing: ReadonlyArray<{ role: string; runId: string }>,
+  retry = 0,
 ): Promise<FixOut> {
   if (!worker) return { ok: false, runId: null, reason: "worker_unavailable" };
   const first = failing[0];
@@ -317,6 +319,7 @@ export async function startFixBody(
     prompt,
     round,
     actionId,
+    ...(retry > 0 ? { retry } : {}),
     reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
     failingRunId: first.runId,
     expectedExecutionMode: ctx.executionMode,

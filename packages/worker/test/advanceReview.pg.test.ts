@@ -523,6 +523,50 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect((await events(w)).filter((e) => e.kind === "fix_round_started")).toHaveLength(1);
     });
 
+    it("D#6 C44-7: a further attempt on the same head under the same approval (retry) is a run of its own, keyed by the retry; its own replay finds it, and each attempt counts as a started round", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      await buildRun(a, w);
+      const resume = realResume();
+      const t = build({}, review({ resume: resume.fn }));
+      const req = fixRequest(a);
+      const first = await t.module.advanceStartFix(who(a, w), req);
+      await writeRunStatus(writerPool, { accountId: a.accountId, runId: (first as { runId: string }).runId, from: "running", to: "succeeded", result: { sessionId: "cc-session-2", envelope: { summary: "no change needed" } } });
+      const retry = await t.module.advanceStartFix(who(a, w), { ...req, round: 2, retry: 1 });
+      expect(retry.ok).toBe(true);
+      expect((retry as { runId: string }).runId).not.toBe((first as { runId: string }).runId);
+      expect(resume.fn).toHaveBeenCalledTimes(2);
+      expect(resume.inputs[0]!.idempotency!.key).toBe(`advance:${w}:fix:${HEAD}:${req.actionId}`);
+      expect(resume.inputs[1]!.idempotency!.key).toBe(`advance:${w}:fix:${HEAD}:${req.actionId}:r1`);
+      await writeRunStatus(writerPool, { accountId: a.accountId, runId: (retry as { runId: string }).runId, from: "running", to: "succeeded", result: { sessionId: "cc-session-3", envelope: { summary: "no change needed" } } });
+      // A replay of the retry finds ITS run; it neither resumes again nor returns the first attempt's.
+      expect(await t.module.advanceStartFix(who(a, w), { ...req, round: 2, retry: 1 })).toEqual(retry);
+      expect(resume.fn).toHaveBeenCalledTimes(2);
+      expect((await events(w)).filter((e) => e.kind === "fix_round_started").map((e) => e.round)).toEqual([1, 2]);
+      // The retry is bounded and must be a whole number of at least 1.
+      for (const bad of [0, -1, 1.5, 4]) expect(await t.module.advanceStartFix(who(a, w), { ...req, retry: bad })).toEqual({ ok: false, reason: "invalid_input" });
+    });
+
+    it("D#6 C44-7: a fix run that ended failed no_commit recorded no branch, so the next fix continues from the run before it; a fix run that failed for another reason is still the newest", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const build1 = await buildRun(a, w);
+      const noCommit = await buildRun(a, w, "running");
+      await writeRunStatus(writerPool, { accountId: a.accountId, runId: noCommit, from: "running", to: "failed", failureReason: "no_commit" });
+      const resume = realResume();
+      expect((await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a))).ok).toBe(true);
+      expect(resume.inputs[0]!.parentRunId).toBe(build1);
+
+      const a2 = await seedAccount(admin, randomUUID());
+      const w2 = await item(a2);
+      await buildRun(a2, w2);
+      const other = await buildRun(a2, w2, "running");
+      await writeRunStatus(writerPool, { accountId: a2.accountId, runId: other, from: "running", to: "failed", failureReason: "internal_error" });
+      const resume2 = realResume();
+      expect(await build({}, review({ resume: resume2.fn })).module.advanceStartFix(who(a2, w2), fixRequest(a2))).toMatchObject({ ok: true });
+      expect(resume2.inputs[0]!.parentRunId).toBe(other);
+    });
+
     it("a step that died after the resume but before the event write: the replay finds the claimed run and still writes fix_round_started (deduped), so rounds are not undercounted", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);

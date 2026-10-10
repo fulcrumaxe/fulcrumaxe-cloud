@@ -49,7 +49,8 @@ import {
  *                   the review. The required reviewers run on the pull request's EXACT head commit; every verdict of the
  *                   head is gathered, then recorded (passes first, so a needs-fix is never overwritten by a later pass).
  *                   All passed: the merge gate. A needs-fix: an executor fix round that RESUMES the build's sandbox and
- *                   session, then the review again on the new head. A fix that pushed nothing, a reviewer's `fail`, and
+ *                   session, then the review again on the new head. A fix that proved no change needed (it ended with nothing pushed) sends the
+ *                   reviewers that asked for it back to the SAME head, once per head; a second such fix on it, a reviewer's `fail`, and
  *                   the fix-round limit used each stop the driver with a recorded outcome.
  *
  * Rules this file keeps (each learned live):
@@ -124,6 +125,8 @@ const CHECK_AMBIGUOUS = "check_build_ambiguous";
  */
 const BUILD_REAPING_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 120_000, 120_000, 120_000, 120_000];
 const BUILD_REAPING_REASON = "start_sandbox_reaping";
+/** C44-7: the fixed reason when a second fix on one head also changed nothing. */
+const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
 const LIGHT_SPEC_WAIT_MS = 20 * 60_000;
 
@@ -264,9 +267,10 @@ export async function advanceStartReviewerStep(
   pr: { number: number; headSha: string; baseRef: string; branch: string },
   role: string,
   prior: Array<{ role: string; runId: string }>,
+  rereview = 0,
 ): Promise<StartedReviewer> {
   "use step";
-  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior);
+  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior, rereview);
 }
 
 export async function advanceReviewerOutcomeStep(accountId: string, runId: string): Promise<ReviewerOutcome> {
@@ -295,9 +299,10 @@ export async function advanceStartFixStep(
   actionId: string,
   round: number,
   failing: Array<{ role: string; runId: string }>,
+  retry = 0,
 ): Promise<FixOut> {
   "use step";
-  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing);
+  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry);
 }
 
 export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
@@ -726,12 +731,13 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
 }
 
 /** Starts the given roles in parallel (each keyed by head and role) and waits for each; a role that could not start has no verdict. */
-async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number): Promise<{ verdicts: Verdict[]; refused: string[] }> {
+async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[] }> {
   const { accountId, userId, workItemId } = args;
-  const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior)));
+  const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview)));
   await advanceLogStep("advance.review_started", {
     work_item_id: workItemId,
     round,
+    rereview,
     pr: pr.number,
     head: pr.headSha.slice(0, 12),
     started: started.filter((s) => s.runId !== null).map((s) => s.role).join(","),
@@ -843,6 +849,10 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
   }
   let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
 
+  // C44-7: a fix round that proved "no change needed" asks the reviewers that wanted the fix to look again at the SAME head, once per head.
+  // `again` is that pending look; `lookedAgain` holds the heads already given theirs (workflow state, rebuilt by a replay from the same step results).
+  let again: { head: string; roles: string[]; passes: Array<{ role: string; runId: string }>; n: number } | null = null;
+  const lookedAgain = new Set<string>();
   for (let attempt = 0; attempt < MAX_REVIEW_ROUNDS; attempt++) {
     let found = await advanceFindPrStep(ctx);
     if (!found.ok) {
@@ -857,21 +867,25 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       found = quiet.found;
     }
     const pr = { number: found.number, headSha: found.headSha, baseRef: found.baseRef, branch: found.branch };
+    // A push since the "no change" fix makes it a new head: it gets the full review, not the narrow one.
+    if (again !== null && again.head !== pr.headSha) again = null;
+    const carried: Array<{ role: string; runId: string }> = again?.passes ?? [];
+    const rereview: number = again?.n ?? 0;
 
     // Who must review this head: code and acceptance always; security when the item is critical, the diff touches a
     // security surface, or (below) the code reviewer asks for it; the debater when the repo's role setting allows it.
     let plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, false);
-    const roundOne = plan.roles.filter((r) => r !== "debater");
-    const first = await runReviewers(args, ctx, pr, roundOne, [], attempt);
+    const roundOne = again !== null ? again.roles.filter((r) => r !== "debater") : plan.roles.filter((r) => r !== "debater");
+    const first = await runReviewers(args, ctx, pr, roundOne, [], attempt, rereview);
     const verdicts = [...first.verdicts];
     let refused = [...first.refused];
 
     // The code reviewer's "security review needed" flag adds the security reviewer for this head.
     if (verdicts.some((v) => v.role === "code-reviewer" && v.securityNeeded)) {
       plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, true);
-      const extra = plan.roles.filter((r) => r !== "debater" && !roundOne.includes(r));
+      const extra = plan.roles.filter((r) => r !== "debater" && !roundOne.includes(r) && !carried.some((c) => c.role === r));
       if (extra.length > 0) {
-        const more = await runReviewers(args, ctx, pr, extra, [], attempt);
+        const more = await runReviewers(args, ctx, pr, extra, [], attempt, rereview);
         verdicts.push(...more.verdicts);
         refused = [...refused, ...more.refused];
       }
@@ -880,10 +894,10 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     // The debater tries to refute a pass: it runs only after everyone else has passed.
     const others = plan.roles.filter((r) => r !== "debater");
     let debaterRan = false;
-    if (plan.roles.includes("debater") && refused.length === 0 && others.every((r) => verdicts.some((v) => v.role === r && v.verdict === "pass"))) {
-      const passes = verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId }));
+    if (plan.roles.includes("debater") && refused.length === 0 && others.every((r) => carried.some((c) => c.role === r) || verdicts.some((v) => v.role === r && v.verdict === "pass"))) {
+      const passes = [...carried, ...verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId }))];
       debaterRan = true;
-      const debate = await runReviewers(args, ctx, pr, ["debater"], passes, attempt);
+      const debate = await runReviewers(args, ctx, pr, ["debater"], passes, attempt, rereview);
       verdicts.push(...debate.verdicts);
       refused = [...refused, ...debate.refused];
     }
@@ -895,10 +909,11 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       // The debater is required only once it has been started: it runs after everyone else passed, so a needs-fix from
       // another reviewer must start a fix round, not stop as "incomplete" for want of a debater verdict. (The merge gate
       // still demands its pass: it reads the full plan.)
-      requiredRoles: plan.roles.filter((r) => r !== "debater" || debaterRan),
+      requiredRoles: plan.roles.filter((r) => (r !== "debater" || debaterRan) && !carried.some((c) => c.role === r)),
       verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict })),
     });
-    await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
+    again = null;
+    await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
 
     if (round.decision === "halted") return haltedEnd(args, "review");
     if (round.decision === "all_passed") {
@@ -925,7 +940,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
-    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing);
+    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
     if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
     if (!fix.ok || fix.runId === null) {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
@@ -947,7 +962,10 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       return { status: "fix_failed", detail: "wait_timeout" };
     }
     await advanceLogStep("advance.fixed", { work_item_id: workItemId, round: round.nextRound ?? round.round + 1, run_id: fix.runId, run_status: fixed.status });
-    if (fixed.status !== "succeeded") {
+    // A runner fix run whose agent finished and pushed nothing ends `failed no_commit`; a sandbox one ends `succeeded` with the head unmoved. Both are
+    // "no change", and the head decides it (below), so only a fix that failed some other way, or is not the runner's no-commit, stops here.
+    const noCommit = fixed.status === "failed" && fixed.failureReason === "no_commit";
+    if (fixed.status !== "succeeded" && !noCommit) {
       await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code: `run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"), headSha: pr.headSha, runId: fix.runId });
       return { status: "fix_failed", detail: fixed.status };
     }
@@ -958,9 +976,24 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       return { status: "no_pr", detail: after.reason };
     }
     if (after.headSha === pr.headSha) {
-      await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}`, headSha: pr.headSha, prNumber: pr.number, runId: fix.runId });
-      await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: "fix_pushed_nothing", head: pr.headSha.slice(0, 12) });
-      return { status: "fix_pushed_nothing" };
+      // "No change needed": the fix proved the code right and pushed nothing. The reviewers that asked for the fix look once more at this same head; a second
+      // "no change" on it is a disagreement the driver cannot settle, and goes to a person. The fix-round limit still bounds the whole.
+      const repeat = lookedAgain.has(pr.headSha);
+      await advanceEventStep(accountId, userId, workItemId, { kind: "fix_pushed_nothing", dedupeKey: `nothing:${pr.headSha}:${actionId}:${rereview}`, code: repeat ? NO_CHANGE_REPEATED : "rereview", headSha: pr.headSha, prNumber: pr.number, runId: fix.runId });
+      if (repeat) {
+        await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: NO_CHANGE_REPEATED, head: pr.headSha.slice(0, 12) });
+        await advanceEventStep(accountId, userId, workItemId, { kind: "escalated", dedupeKey: `${NO_CHANGE_REPEATED}:${pr.headSha}`, code: NO_CHANGE_REPEATED, headSha: pr.headSha, prNumber: pr.number, runId: fix.runId });
+        return { status: "needs_human", detail: NO_CHANGE_REPEATED };
+      }
+      lookedAgain.add(pr.headSha);
+      await advanceLogStep("advance.fix_no_change", { work_item_id: workItemId, run_id: fix.runId, run_status: fixed.status, head: pr.headSha.slice(0, 12), roles: failing.map((f) => f.role).join(",") });
+      again = { head: pr.headSha, roles: failing.map((f) => f.role), passes: verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId })).concat(carried), n: rereview + 1 };
+      continue;
+    }
+    // The fix changed the head. A run that FAILED yet moved the head is not a "no change": it stays a failed fix, as before.
+    if (fixed.status !== "succeeded") {
+      await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code: `run_${fixed.status}`.replace(/[^a-z0-9_]/g, "_"), headSha: pr.headSha, runId: fix.runId });
+      return { status: "fix_failed", detail: fixed.status };
     }
   }
   await stopped(args, "review", "review_rounds_used");
