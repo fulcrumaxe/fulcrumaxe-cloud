@@ -39,6 +39,10 @@ beforeEach(() => {
   mkdirSync(toolbin);
   vi.stubEnv("PATH", `${tools}:${toolbin}:${HOST_PATH}`);
   vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
+  // The runner copies this marker into a job's environment only when its own environment has it (cleanEnv, LOGIN_SHELL_MARKERS), and without it the NixOS system profile replaces PATH wholesale.
+  // A desktop session has the marker and a systemd service unit does not, so set it here: the cases below are about the rc files in the throwaway HOME, not about the host's system profile.
+  // The resetting rc files unset it themselves, which is the case they exist to show.
+  vi.stubEnv("__NIXOS_SET_ENVIRONMENT_DONE", "1");
 });
 afterEach(() => {
   vi.unstubAllEnvs();
