@@ -21,6 +21,23 @@ the daemon come in later changes.
   where the binary says its credential came from before it processes any output, keeps the raw stream only in
   `~/.fx-runner/logs/<run>.jsonl` (0600, credential values removed) and reports metadata-only events.
 
+## What leaves your machine
+
+While a run is held, the events route carries these and nothing else (the schema in `@fulcrumaxe/runner-protocol` has no field for
+anything more, and rejects an unknown key):
+
+- a tool's name, and for a tool use its coarse kind (read, list, search, test or command) with at most a repo-relative path, a
+  search term of up to 40 characters, or a shell command's first line (up to 200 characters). The command is sent only when it
+  holds nothing that looks like a credential: it is checked for credential shapes and then against this run's own API key and
+  subscription token, and one that fails is not shortened, the line is dropped and only the kind is sent;
+- the repo-relative path of a file the agent changed;
+- three stage marks, each once per run: the workspace is ready, the repository is checked out, the agent has started writing its result;
+- token counts and the cost the agent reported, the agent build's version, and the closed codes for a run that ended early;
+- the session id and the agent's result envelope, with `done`.
+
+At most 400 tool uses per run carry an activity, and a burst inside 250 ms keeps its newest. Model text, tool output, file contents and
+the rest of a command never leave: they stay in `~/.fx-runner/logs/<run>.jsonl`.
+
 ## The daemon's parts
 
 `src/daemon/` is what a runner does between claiming a run and reporting it done. `fx-runner run` (below) wires it together.

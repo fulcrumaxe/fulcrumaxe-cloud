@@ -126,7 +126,7 @@ function makeRig(over: { portOver?: Parameters<typeof recordingPort>[0]; handler
   const ledger = createFileLedger(path.join(root, "jobs.json"), ledgerOptions());
   const deps: JobHandlerDeps = {
     client, keyring: KEYRING, clock, run, sandbox: port.port, ledger, git: fakeGitPath(), events: relay, recordSession: (id, workspace) => recordSession(sessionsFile, id, workspace),
-    heartbeatMs: 1e9, flushMs: 1e9, runJobFn: (job, d) => (calls++, runJob(job, d)), ...over.handler,
+    heartbeatMs: 1e9, flushMs: 1e9, activityFlushMs: 1e9, runJobFn: (job, d) => (calls++, runJob(job, d)), ...over.handler,
   };
   const handler = createJobHandler(deps);
   return {
@@ -156,7 +156,8 @@ describe("a verified job runs and is reported done", () => {
     expect(rig.runJobCalls()).toBe(1);
     expect(rig.port.calls).toEqual(["create", "stop", "delete"]);
     expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/events", "/api/runner/runs/:id/done"]);
-    expect(cloud.runs.get(claimed.runId)?.events.map((e) => e.seq)).toEqual([0, 1]);
+    // The two stage marks the handler makes (workspace_ready, cloned) come first; the engine's two events follow on the same seq line.
+    expect(cloud.runs.get(claimed.runId)?.events.map((e) => `${e.type}:${e.seq}`)).toEqual(["stage:0", "stage:1", "tool_use:2", "tool_use:3"]);
     expect(cloud.seen.at(-1)?.body).toEqual({ run_id: claimed.runId, lease_generation: 1, session_id: "sess-1", agentOutput: { verdict: "done" } });
     const index = JSON.parse(readFileSync(rig.sessionsFile, "utf8")) as Record<string, { workspace: string }>;
     expect(Object.keys(index)).toEqual(["sess-1"]);
@@ -317,7 +318,7 @@ describe("a redelivered job id is acknowledged, not run twice", () => {
     expect(cloud.seen.filter((s) => s.path.endsWith("/done"))).toHaveLength(1);
     expect(cloud.seen.filter((s) => s.path.includes("/heartbeat"))).toEqual([]);
     // The first run was done, so the replayed claim's run is terminal and the cloud answers a harmless 409; the daemon sends it once.
-    const reported = cloud.seen.filter((s) => s.path.endsWith("/events"));
+    const reported = cloud.seen.filter((s) => s.path.endsWith("/events") && (s.body as { lease_generation: number }).lease_generation === 2);
     expect(reported).toHaveLength(1);
     expect(reported[0]!.body).toMatchObject({ lease_generation: 2, events: [{ seq: 0, type: "run_ended", reason: "job_refused", detail: "duplicate_job" }] });
   });
@@ -388,7 +389,7 @@ describe("done is retried, boundedly", () => {
     expect(cloud.seen.filter((s) => s.path.endsWith("/done"))).toHaveLength(5);
     expect(rig.clock.slept.filter((ms) => ms === 60_000)).toHaveLength(4);
     // An unconfirmed done sends no run_ended: the lease path covers it.
-    expect(cloud.seen.some((s) => s.path.endsWith("/events"))).toBe(false);
+    expect(cloud.runs.get(claimed.runId)?.events.some((e) => e.type === "run_ended")).toBe(false);
     expect(rig.clock.slept.every((ms) => ms <= 60_000 || ms === 1e9)).toBe(true);
   });
 
@@ -423,7 +424,8 @@ describe("a run that does not finish is not reported done", () => {
     const rig = makeRig({ portOver: { end: (runId) => resultEvent(runId, { type: "error" }) } });
     const claimed = await rig.claim();
     expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "agent_error" });
-    expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/events"]);
+    // The stage marks are flushed first, then run_ended goes alone.
+    expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/events", "/api/runner/runs/:id/events"]);
     expect(cloud.runs.get(claimed.runId)?.endedBy).toMatchObject({ type: "run_ended", reason: "agent_failed" });
     expect(existsSync(rig.sessionsFile)).toBe(false);
   });
@@ -511,8 +513,8 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       }) as SandboxPort["startDetached"];
       expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "agent_error" });
       const calls = eventsCalls().map((s) => (s.body as { events: Array<{ seq: number; type: string }> }).events.map((e) => `${e.type}:${e.seq}`));
-      expect(calls).toEqual([["tool_use:0", "tool_use:7"], ["run_ended:8"]]);
-      expect(eventsOf(claimed.runId).at(-1)).toMatchObject({ type: "run_ended", seq: 8, reason: "agent_failed" });
+      expect(calls).toEqual([["stage:0", "stage:1", "tool_use:2", "tool_use:3"], ["run_ended:4"]]);
+      expect(eventsOf(claimed.runId).at(-1)).toMatchObject({ type: "run_ended", seq: 4, reason: "agent_failed" });
     });
 
     const CODES: Array<[code: string, reason: string, detail?: string]> = [
@@ -657,7 +659,7 @@ describe("what the cloud is told when a run does not finish (D#6 R4a-2, C24 sect
       rig.relay.emit(localEvent(1));
       shutdown.abort();
       await running;
-      expect(eventsOf(claimed.runId).map((e) => `${e.type}:${e.seq}`)).toEqual(["tool_use:0", "tool_use:1", "run_ended:2"]);
+      expect(eventsOf(claimed.runId).map((e) => `${e.type}:${e.seq}`)).toEqual(["stage:0", "stage:1", "tool_use:2", "tool_use:3", "run_ended:4"]);
     });
 
     it("does not wait longer than five seconds for a call that does not answer, and returns", async () => {
@@ -705,7 +707,7 @@ describe("the pieces together: poll, verify, run, done, then idle", () => {
     expect(end).toBe("stopped");
     expect(handled).toEqual([{ status: "completed", outcome: "succeeded", failureReason: null, prNumber: 7 }]);
     expect(rig.clock.slept).toContain(60_000);
-    expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/done", "/api/runner/claim"]);
+    expect(sentToCloud()).toEqual(["/api/runner/claim", "/api/runner/runs/:id/events", "/api/runner/runs/:id/done", "/api/runner/claim"]);
   });
 });
 
@@ -1111,5 +1113,61 @@ describe("an api_key runner reads its key file at the start of each job (D#6 R5b
     const claimed = await rig.claim();
     expect(await rig.handle(claimed)).toEqual({ status: "failed", reason: "api_key_not_configured" });
     expect(rig.port.calls).toEqual([]);
+  });
+});
+
+describe("the stage marks (D#6 C42-2)", () => {
+  const throwing = (code: ConstructorParameters<typeof GitPathError>[0]) => async (): Promise<never> => {
+    throw new GitPathError(code);
+  };
+  const continuing = () => jobFor({ continues: { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch: "fx/22222222-2222-4222-8222-222222222222-g1" } });
+  const stagesOf = (runId: string): string[] => (cloud.runs.get(runId)?.events ?? []).filter((e) => e.type === "stage").map((e) => String(e.stage));
+
+  it("a normal run sends workspace_ready then cloned, once each, before the engine's events, on one strictly rising seq line", async () => {
+    const rig = makeRig();
+    const claimed = await rig.claim();
+    rig.port.port.startDetached = ((_h: SandboxHandle, opts: StartDetachedOptions) => {
+      rig.relay.emit(localEvent(0));
+      rig.relay.emit(localEvent(0));
+      return { handle: { runId: "", sandboxName: "rn" }, hookFired: Promise.resolve(resultEvent(opts.runId)) };
+    }) as SandboxPort["startDetached"];
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    const events = cloud.runs.get(claimed.runId)?.events ?? [];
+    expect(stagesOf(claimed.runId)).toEqual(["workspace_ready", "cloned"]);
+    expect(events.map((e) => e.type)).toEqual(["stage", "stage", "tool_use", "tool_use"]);
+    expect(events.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("a job refused before the workspace (the path will not push it) sends no workspace_ready and no cloned", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ check: () => { throw new GitPathError("push_ref_refused"); } }) } });
+    const claimed = await rig.claim();
+    await rig.handle(claimed);
+    expect(stagesOf(claimed.runId)).toEqual([]);
+  });
+
+  it("a duplicate job id sends no stage", async () => {
+    const rig = makeRig();
+    const signed = signedJob();
+    await rig.handle(await rig.claim(signed));
+    const again = await rig.claim(signed);
+    expect(await rig.handle(again)).toEqual({ status: "duplicate" });
+    expect(cloud.runs.get(again.runId)?.events.filter((e) => e.type === "stage")).toHaveLength(2);
+  });
+
+  it("a workspace that could not be filled sends workspace_ready but never cloned", async () => {
+    const rig = makeRig({ handler: { git: fakeGitPath({ prepare: throwing("workspace_failed") }) } });
+    const claimed = await rig.claim();
+    await rig.handle(claimed);
+    expect(stagesOf(claimed.runId)).toEqual(["workspace_ready"]);
+  });
+
+  it("a kept session resumed in place sends both marks once the resume succeeds", async () => {
+    const kept = path.join(root, "work", "kept");
+    mkdirSync(kept, { recursive: true });
+    const rig = makeRig({ handler: { git: fakeGitPath({ resume: async () => ({ base: "e".repeat(40) }) }) } });
+    rig.deps.run.planSession = () => ({ kind: "resume", sessionId: "s1", workspace: kept });
+    const claimed = await rig.claim(signRaw(continuing()) as never);
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(stagesOf(claimed.runId)).toEqual(["workspace_ready", "cloned"]);
   });
 });

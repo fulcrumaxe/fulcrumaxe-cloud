@@ -1,6 +1,7 @@
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { LocalOnlyEvent, normalizeRepoPath, redactText, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { activityOf } from "./activity.js";
 import { isInitLine, isKnownKeySource } from "./credentialCheck.js";
 
 const MAX_LINE_CHARS = 4 * 1024 * 1024;
@@ -88,8 +89,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const tokenCount = <K extends "cache_read" | "cache_write">(key: K, n: number | undefined): { [P in K]?: number } =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? ({ [key]: n } as { [P in K]?: number }) : {};
 
-export function projectLocalOnly(message: Record<string, unknown>, normalized: NormalizedEvent, nextSeq: () => number, repoRoot: string): LocalOnlyEvent[] {
+/** Which once-per-run marks this run has sent. The engine owns one per run. */
+export interface StageMarks {
+  writingResult: boolean;
+}
+
+/**
+ * `secrets` are the run's real credential values (the API key, the subscription token): a tool use's activity is rechecked against them
+ * before it is attached (D#6 C42-2). `marks` makes `writing_result` go out once, on the first write tool or the first line of the envelope.
+ */
+export function projectLocalOnly(message: Record<string, unknown>, normalized: NormalizedEvent, nextSeq: () => number, repoRoot: string, secrets: readonly string[] = [], marks: StageMarks = { writingResult: false }): LocalOnlyEvent[] {
   const events: LocalOnlyEvent[] = [];
+  if (!marks.writingResult && (normalized.writesResult === true || (normalized.toolUses ?? []).some((use) => use.writes))) {
+    marks.writingResult = true;
+    events.push(LocalOnlyEvent.parse({ seq: nextSeq(), ts: normalized.ts, type: "stage", stage: "writing_result" }));
+  }
   const names = new Map<string, string>();
   const writtenPaths = new Map<string, string | undefined>();
   const inner = isRecord(message.message) ? message.message : undefined;
@@ -105,7 +119,8 @@ export function projectLocalOnly(message: Record<string, unknown>, normalized: N
   for (const use of normalized.toolUses ?? []) {
     const toolName = names.get(use.id);
     if (toolName === undefined) continue;
-    events.push(LocalOnlyEvent.parse({ seq: nextSeq(), ts: normalized.ts, type: "tool_use", tool_name: toolName, ...(use.path === undefined ? {} : { file_path: use.path }), ...(use.writes && writtenPaths.get(use.id) ? { file_path: writtenPaths.get(use.id) } : {}) }));
+    const activity = activityOf(use, secrets);
+    events.push(LocalOnlyEvent.parse({ seq: nextSeq(), ts: normalized.ts, type: "tool_use", tool_name: toolName, ...(use.path === undefined ? {} : { file_path: use.path }), ...(use.writes && writtenPaths.get(use.id) ? { file_path: writtenPaths.get(use.id) } : {}), ...(activity === undefined ? {} : { activity }) }));
     const changed = use.writes ? writtenPaths.get(use.id) : undefined;
     if (use.writes) events.push(LocalOnlyEvent.parse({ seq: nextSeq(), ts: normalized.ts, type: "file_changed", ...(changed ? { file_path: changed } : {}) }));
   }

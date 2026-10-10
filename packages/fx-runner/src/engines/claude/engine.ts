@@ -15,7 +15,7 @@ import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 import { recordSession } from "./session.js";
 import { writeJobFiles } from "./settingsFile.js";
-import { LineBuffer, createRunLog, projectLocalOnly } from "./stream.js";
+import { LineBuffer, createRunLog, projectLocalOnly, type StageMarks } from "./stream.js";
 
 /** The job schema types a run id as a uuid, so the engine accepts nothing looser: the id names a directory and a log file. */
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -146,6 +146,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     handle.done = new Promise<RunOutcome>((resolve) => {
       let seq = 0;
       let localSeq = 0;
+      const marks: StageMarks = { writingResult: false };
       let sawInit = false;
       let mismatch = false;
       let noInit = false;
@@ -195,7 +196,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
           agentOutput = event.agentOutput;
         }
         await opts.onEvent(event);
-        for (const local of projectLocalOnly(message, event, () => localSeq++, workdir)) await config.onLocalEvent?.(local);
+        for (const local of projectLocalOnly(message, event, () => localSeq++, workdir, secrets, marks)) await config.onLocalEvent?.(local);
       };
       const enqueue = (line: string): void => {
         chain = chain.then(() => handleLine(line)).catch(() => {
