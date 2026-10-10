@@ -9,6 +9,7 @@ import type { CommandContext, Flags } from "./context.js";
 import { attachCommand } from "./commands/attach.js";
 import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
+import { credentialsCommand } from "./commands/credentials.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
 import { versionLine } from "./version.js";
@@ -46,6 +47,8 @@ export interface CliIo {
   serviceHost?: ServiceHost;
   /** What `update`, `config` and the daemon's self-update need from the machine. Only `bin/fx-runner.mjs` supplies it. */
   updateHost?: UpdateHost;
+  /** Reads the API key from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
+  readSecret?: () => Promise<string>;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
@@ -63,6 +66,8 @@ Commands:
                      Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request. --sandbox-only runs only the sandbox test.
   --version          Print the version.
   logs <run id>      Print the local transcript of a run on this machine.
+  credentials set-api-key | clear-api-key | status
+                     Store (from standard input only), remove or check the API key of an api_key runner. status prints "stored" or "not stored".
   service install | uninstall
                      Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
   update --check | --pin <version> | --unpin | --rollback
@@ -86,6 +91,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   service: { flags: [], switches: [], positionals: 1 },
   update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
   config: { flags: [], switches: [], positionals: 3 },
+  credentials: { flags: [], switches: [] },
 };
 
 function parseFlags(command: string, rest: readonly string[]): { flags: Flags; positionals: string[] } {
@@ -131,7 +137,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return command === undefined ? 2 : 0;
     }
     if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command ${command.slice(0, 40)}; run fx-runner --help`, 2);
-    const { flags, positionals } = parseFlags(command, rest);
+    const parsed = command === "credentials" ? undefined : parseFlags(command, rest);
     const ctx: CommandContext = {
       stateDir: stateDirFor(io.home, io.stateDirOverride),
       out: (line) => io.stdout(`${line}\n`),
@@ -140,9 +146,13 @@ export async function runCli(io: CliIo): Promise<number> {
       fetchFn: io.fetchFn ?? fetch,
       bypass: loadBypass(io.protectionBypassFile, io.uid, { home: io.home, platform: io.platform ?? "linux", xdgCacheHome: io.xdgCacheHome }),
       bypassFile: io.protectionBypassFile,
+      uid: io.uid,
     };
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
     if (command === "register" || command === "revoke" || command === "run") requireUsable(ctx.bypass);
+    // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
+    if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
+    const { flags, positionals } = parsed!;
     if (command === "register") return await registerCommand(flags, ctx);
     if (command === "revoke") return await revokeCommand(flags, ctx);
     if (command === "run") {

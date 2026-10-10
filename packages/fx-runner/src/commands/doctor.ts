@@ -13,6 +13,7 @@ import { KEY_MAX_AGE_DAYS, loadRegistration, type Registration } from "../config
 import { CliError } from "../cliError.js";
 import type { CommandContext } from "../context.js";
 import type { EngineKit } from "../daemon/engineKit.js";
+import { ApiKeyError, readApiKey } from "../credentials.js";
 import { cleanEnv } from "../job/cleanEnv.js";
 import { isProtectedDeployment, readCapped } from "../cloud.js";
 import { loadRunnerKey } from "../keys.js";
@@ -72,6 +73,24 @@ async function sandboxCheck(ctx: CommandContext, host: DoctorHost, binaryPath: s
   line("FAIL", "Sandbox", `${result.reason}: ${result.detail}`);
   const distro = detectDistro({ platform: host.platform, osRelease: host.sandbox.readText(OS_RELEASE), nixosMarker: host.sandbox.isFile(NIXOS_MARKER) });
   for (const text of sandboxFixLines(distro, result.reason, result.bwrapPath)) ctx.out(text === "" ? "" : `      ${text}`);
+}
+
+/** The API key file (D#6 R5b-3): whether it is there and safe, never its value. A subscription runner does not use it. */
+function apiKeyCheck(ctx: CommandContext, mode: Registration["credential_mode"] | undefined, line: (level: Level, label: string, detail: string) => void): void {
+  if (mode === "subscription") {
+    line("INFO", "API key", "not used in subscription mode");
+    return;
+  }
+  try {
+    readApiKey(ctx.stateDir, ctx.uid);
+  } catch (error) {
+    if (!(error instanceof ApiKeyError)) throw error;
+    if (mode === undefined && error.code === "api_key_not_configured") return;
+    line(mode === undefined ? "WARN" : "FAIL", "API key", error.message);
+    return;
+  }
+  if (mode === undefined) line("INFO", "API key", "stored, but this machine has no registration (revoke leaves the file); to remove it run: fx-runner credentials clear-api-key");
+  else line("PASS", "API key", "stored (a plain file at mode 0600 in a private directory, owned by you, starting with sk-ant-)");
 }
 
 /** `doctor --sandbox-only` (the probe `install.sh` runs, C16 section 2): just the sandbox line and its fix. It reads no registration and makes no network call. */
@@ -186,9 +205,11 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
     if (report.login === "yes") line("PASS", "Claude login", `yes${method}`);
     else if (report.login === "no") line("FAIL", "Claude login", `no${method}; sign in with Claude Code on this machine`);
     else if (mode === undefined) line("WARN", "Claude login", "unknown: not registered, so the credential mode is not known");
-    else if (mode !== "subscription") line("WARN", "Claude login", "unknown: api_key mode has no local key file yet, so there is nothing to check");
+    else if (mode !== "subscription") line("WARN", "Claude login", "unknown: an API key is not tested here (doctor makes no model request)");
     else line("WARN", "Claude login", "unknown: the CLI did not answer `auth status`");
   }
+
+  apiKeyCheck(ctx, mode, line);
 
   await sandboxCheck(ctx, host, binaryPath, line);
 

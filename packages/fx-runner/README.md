@@ -64,6 +64,17 @@ It only calls out (no listening socket).
 - `fx-runner revoke [--reason <text>] [--local]`: revokes this runner in the cloud with its own signature, then deletes
   the key and the registration. `--local` only deletes the local files, for a machine the cloud no longer accepts.
 
+- `fx-runner credentials set-api-key | clear-api-key | status`: the key of an `api_key` runner lives in
+  `<state dir>/credentials/anthropic-api-key`, a plain file at mode 0600 in a directory at mode 0700, owned by the user the runner
+  runs as and never a link (a file or directory that is group- or world-accessible, a hard-linked file or one of another owner is
+  refused when it is written and when it is read). `set-api-key` reads the key from standard input only (no echo on a terminal), never
+  from an argument; it refuses an empty value, one over 256 bytes, one with a non-printable byte or one that does not start with
+  `sk-ant-` (`api_key_format`), and writes through a temporary file and a rename. `clear-api-key` removes the file; `status` prints
+  `stored` or `not stored`. The key reaches the agent only as `ANTHROPIC_API_KEY` in its clean environment (the CLI scrubs it from the
+  environment of the tools it starts); it is in no argument, log line, tmux call, ledger entry or message to the cloud, and the cloud
+  never learns that the file exists. `doctor` shows whether it is stored and safe (never the value); `revoke` leaves the file in place
+  (clear it with `clear-api-key`), and a subscription-mode runner ignores it.
+
 - `fx-runner run`: claims and runs jobs until you stop it (Ctrl-C or SIGTERM, which stops the job in hand within seconds and
   reports `runner_shutdown`). It checks, before its first claim, that this machine is registered, that this build pins
   job-signing keys for the cloud it registered with (`src/keyring.ts`; the keys are committed in the build, and no file,
@@ -72,7 +83,7 @@ It only calls out (no listening socket).
   mirrors directory (`~/.cache/fx-runner/mirrors`) does not overlap the state directory or the other runner directories, and
   that the job ledger (`jobs.ledger` in the state directory) is not damaged. One `run` holds the state directory at a time.
   At start it removes the temporary files a crash left next to the ledger, but only exact-name regular files older than ten
-  minutes. A registration for `api_key` mode is refused until a local key file is supported. Residual risk, accepted: if three
+  minutes. A registration for `api_key` mode is refused (`api_key_not_configured`, or `api_key_unsafe` / `api_key_format` for a key file that is not usable) until its key file is stored; the file is read again at the start of each job, and one that has gone missing ends that job `runner_setup` / `api_key_not_configured` before anything starts. Residual risk, accepted: if three
   runs start at once on a lock a crash left behind, two may both take it; there is no `flock`, and `service install` runs one
   instance per user.
 - `fx-runner attach [<run | short id> | --latest] [--take-over]`: watch a job running on this machine, or take it over. With tmux

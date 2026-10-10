@@ -10,6 +10,8 @@ import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { RUNNER_VERSION } from "../src/version.js";
+import { API_KEY_MAX_BYTES } from "../src/credentials.js";
+import { readSecret } from "../src/secretInput.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 
@@ -60,6 +62,8 @@ runCli({
   uid: process.getuid?.(),
   platform: process.platform,
   xdgCacheHome: process.env.XDG_CACHE_HOME,
+  // The one place standard input is touched: the API key is read here, never taken from the command line.
+  readSecret: () => readSecret(process.stdin, (text) => process.stderr.write(text), API_KEY_MAX_BYTES),
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
   host: {

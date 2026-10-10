@@ -64,6 +64,8 @@ export interface JobHandlerDeps {
   recordSession: (sessionId: string, workspace: string) => Promise<void>;
   /** Aborts when the daemon is asked to stop. */
   shutdown?: AbortSignal;
+  /** Called when a job is about to start, before any mirror or sandbox: an `api_key` runner reads its key file here. A closed failure code ends the run `runner_setup`; undefined goes on. */
+  credentialsReady?: () => string | undefined;
   /** D#6 R7c: builds a repo's Nix dev shell before a job that carries allowances. Absent (no `nix` on this machine, or none wired): no job gets one. */
   nix?: NixShellStep;
   /** Told the closed detail when the dev shell step is skipped. */
@@ -222,10 +224,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     try {
       const started: { base?: string } = {};
       let result: RunJobResult;
+      let notReady: string | undefined;
       try {
         // An id the price table lacks is refused first, so a fix round with a bad hint starts no process, mirror fetch or ticketed session.
         // `runJob` keeps its own check for callers that do not come through here.
         if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
+        else if ((notReady = deps.credentialsReady?.()) !== undefined) result = { status: "failed", reason: notReady };
         else {
           git.check(job, claimed);
           // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other

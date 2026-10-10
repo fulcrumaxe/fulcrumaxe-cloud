@@ -47,7 +47,7 @@ export async function takeoverPaneCommand(flags: Flags, ctx: CommandContext, hos
   if (entry === undefined || entry.taken_over !== true) throw new CliError("take_over_not_handed: this run was not handed over to you", 1);
   const registration = loadRegistration(ctx.stateDir);
   if (!registration) throw new CliError("not registered; run: fx-runner register --code <code> --credential-mode <mode> --cloud-url <url>");
-  const credentials = credentialsOf(registration);
+  const credentials = credentialsOf(registration, ctx);
   const { binaryPath, toolDirs } = localTools(host, cleanEnv(credentials).PATH ?? "");
   ctx.out("You have taken over this run. The agent was stopped and nothing more is sent to the cloud for it; the runner pushes nothing.");
   ctx.out("Commit and push with your own git when you are done. Each action asks for your approval.");

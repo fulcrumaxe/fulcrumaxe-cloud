@@ -6,6 +6,7 @@
  *
  * Before the first claim, in this order, each failure stops the command with a non-zero exit and a fixed message:
  *  - this machine is registered and its key matches (as `status` checks);
+ *  - an `api_key` runner has a usable key file (`api_key_not_configured`, `api_key_unsafe`, `api_key_format`); the file is read again at the start of each job;
  *  - the build pins job-signing keys for the registration's cloud address (`job_keyring_missing`);
  *  - the platform has a sandbox tier and the agent CLI is found (looked up once, here: a job never consults the search path). A machine whose
  *    sandbox does not start is NOT a stop (D#6 R4a-6, C16 section 1.3): the sandbox probe runs here and again before each claim while it
@@ -22,6 +23,7 @@ import { CliError } from "../cliError.js";
 import { requireUsable } from "../protectionBypass.js";
 import { loadRegistration, type Registration } from "../config.js";
 import type { CommandContext } from "../context.js";
+import { ApiKeyError, perJobApiKey, readApiKey } from "../credentials.js";
 import { createRunnerClient } from "../daemon/client.js";
 import { createSandboxGate } from "../daemon/sandboxGate.js";
 import type { EngineKit } from "../daemon/engineKit.js";
@@ -106,10 +108,21 @@ export function pidIsAlive(kill: RunHost["kill"], pid: number): boolean {
   }
 }
 
-export function credentialsOf(registration: Registration): CredentialMode {
-  if (registration.credential_mode === "subscription") return { mode: "subscription" };
-  // An API key comes from a local config file that no command writes yet. Until one does, such a runner is refused, never run on a guess.
-  throw new CliError("api_key_not_configured: this runner is registered for api_key mode, and no local API key file is supported yet");
+/** The credentials for one use now (the take-over pane): an API key is read from its file once, here. The daemon reads it again for every job instead. */
+export function credentialsOf(registration: Registration, ctx: Pick<CommandContext, "stateDir" | "uid">): CredentialMode {
+  return registration.credential_mode === "subscription" ? { mode: "subscription" } : { mode: "api_key", apiKey: readApiKey(ctx.stateDir, ctx.uid) };
+}
+
+/** Reads the key for the job about to start. A problem is said on the terminal in fixed words and ends the job `api_key_not_configured`, before anything starts. */
+export function readyOrCode(refresh: () => void, ctx: CommandContext): string | undefined {
+  try {
+    refresh();
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof ApiKeyError)) throw error;
+    ctx.out(`fx-runner: ${error.message}`);
+    return "api_key_not_configured";
+  }
 }
 
 /** Where bubblewrap and socat are, as the directories to put on the agent's PATH. Empty when a tool is missing: the probe says so, and the gate holds. */
@@ -157,7 +170,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   if (!key || key.jkt !== registration.jkt) throw new CliError("the runner key is missing or does not match the registration; run: fx-runner revoke --local, then register again");
   const keyring = keyringFor(registration.cloud_origin, hooks.keyrings);
   if (keyring === undefined) throw new CliError("job_keyring_missing: this build pins no job-signing keys for the cloud this runner is registered with, so it will claim nothing");
-  const credentials = credentialsOf(registration);
+  // An api_key runner needs its key file before it claims anything; each job reads the file again (the daemon holds no key between jobs).
+  const live = registration.credential_mode === "api_key" ? perJobApiKey(ctx.stateDir, ctx.uid) : undefined;
+  live?.refresh();
+  const credentials: CredentialMode = live?.credentials ?? { mode: "subscription" };
   const home = host.home;
   if (home === undefined || !path.isAbsolute(home)) throw new CliError("cannot find your home directory");
 
@@ -229,6 +245,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       keyring,
       clock,
       ledger,
+      ...(live === undefined ? {} : { credentialsReady: () => readyOrCode(() => live.refresh(), ctx) }),
       git,
       ...(gitA === undefined ? {} : { gitA }),
       sandbox,

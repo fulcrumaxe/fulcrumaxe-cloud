@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveRegistration } from "../../src/config.js";
+import { writeApiKey } from "../../src/credentials.js";
 import type { CommandContext } from "../../src/context.js";
 import { doctorCommand, type DoctorHost } from "../../src/commands/doctor.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
@@ -60,7 +61,7 @@ interface Result {
 
 async function doctor(over: { host?: Partial<DoctorHost>; fetchFn?: typeof fetch; now?: () => Date; bypass?: CommandContext["bypass"]; sandboxOnly?: boolean } = {}): Promise<Result> {
   const lines: string[] = [];
-  const ctx: CommandContext = { stateDir, out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
+  const ctx: CommandContext = { stateDir, uid: process.getuid?.(), out: (l) => lines.push(l), err: (l) => lines.push(l), now: over.now ?? (() => new Date()), fetchFn: over.fetchFn ?? ((async () => new Response("", { status: 200 })) as typeof fetch), ...(over.bypass === undefined ? {} : { bypass: over.bypass }) };
   const host: DoctorHost = { platform: "linux", shellVars: [], engine: createClaudeKit(spawn), home: root, sandbox: fakeSandboxHost(), ...over.host };
   const code = await doctorCommand(ctx, host, over.sandboxOnly === undefined ? {} : { sandboxOnly: over.sandboxOnly });
   return { code, out: lines.join("\n") };
@@ -198,13 +199,68 @@ describe("each check fails on its own", () => {
     expect(result.code).toBe(0);
   });
 
-  it("an api_key registration cannot check a login yet: WARN, not a pass", async () => {
+  it("an api_key registration does not test its key against the provider: the login line is a WARN, not a pass, and no model request is made", async () => {
     register("api_key");
     const result = await doctor();
     expect(levelOf(result.out, "Claude login")).toBe("WARN");
-    expect(result.out).toContain("api_key mode has no local key file yet");
+    expect(result.out).toContain("an API key is not tested here");
     expect(result.out).not.toContain("Shell variable");
     expect(fake.calls()).toEqual(["--version ", "--help "]);
+  });
+});
+
+describe("the API key file (D#6 R5b-3)", () => {
+  const KEY = ["sk-ant-", "api03-", "DOCTORKEY0123456789abcdef"].join(""); // gitleaks:allow
+  const uid = process.getuid!();
+  const keyFile = (): string => path.join(stateDir, "credentials", "anthropic-api-key");
+
+  it("an api_key runner with no file FAILs with the set-api-key hint, and exits 1", async () => {
+    register("api_key");
+    const result = await doctor();
+    expect(levelOf(result.out, "API key")).toBe("FAIL");
+    expect(result.out).toContain("api_key_not_configured");
+    expect(result.out).toContain("fx-runner credentials set-api-key");
+    expect(result.code).toBe(1);
+  });
+
+  it("a stored, safe key is a PASS that shows the checks and not the value", async () => {
+    register("api_key");
+    writeApiKey(stateDir, uid, KEY);
+    const result = await doctor();
+    expect(levelOf(result.out, "API key")).toBe("PASS");
+    expect(result.out).toContain("mode 0600");
+    expect(result.out).not.toContain("DOCTORKEY");
+    expect(result.code).toBe(0);
+  });
+
+  it.each([
+    ["a file open to the group", () => chmodSync(keyFile(), 0o640), "api_key_unsafe"],
+    ["a link in place of the file", () => (rmSync(keyFile()), symlinkSync(path.join(root, "elsewhere"), keyFile())), "api_key_unsafe"],
+    ["a file that is not a key", () => writeFileSync(keyFile(), "not-a-key", { mode: 0o600 }), "api_key_format"],
+  ])("%s is a FAIL naming the problem, never the value", async (_name, damage, code) => {
+    register("api_key");
+    writeApiKey(stateDir, uid, KEY);
+    writeFileSync(path.join(root, "elsewhere"), KEY, { mode: 0o600 });
+    damage();
+    const result = await doctor();
+    expect(levelOf(result.out, "API key")).toBe("FAIL");
+    expect(result.out).toContain(code);
+    expect(result.out).not.toContain("DOCTORKEY");
+    expect(result.code).toBe(1);
+  });
+
+  it("a subscription runner ignores the file and says so; an unregistered machine with a file is told that revoke leaves it", async () => {
+    register("subscription");
+    writeApiKey(stateDir, uid, KEY);
+    const subscription = await doctor();
+    expect(subscription.out).toContain("API key:           not used in subscription mode");
+    expect(levelOf(subscription.out, "API key")).toBe("INFO");
+    rmSync(path.join(stateDir, "registration.json"));
+    const unregistered = await doctor();
+    expect(levelOf(unregistered.out, "API key")).toBe("INFO");
+    expect(unregistered.out).toContain("revoke leaves the file");
+    expect(unregistered.out).toContain("fx-runner credentials clear-api-key");
+    expect(subscription.out + unregistered.out).not.toContain("DOCTORKEY");
   });
 });
 
