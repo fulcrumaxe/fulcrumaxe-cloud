@@ -50,7 +50,7 @@ echo "$@" >> "${dir}/calls.log"
 env > "${dir}/last-env.txt"
 case "$*" in
   *"config show trusted-users"*) cat "${dir}/trusted"; exit 0;;
-  *print-dev-env*) mkdir -p "${dir}/running"; touch "${dir}/running/$$"; ls "${dir}/running" | wc -l >> "${dir}/seen-running.log"; [ -f "${dir}/delay" ] && sleep "$(cat "${dir}/delay")"; rm -f "${dir}/running/$$"; [ -f "${dir}/fail" ] && exit 3; cat "${dir}/devenv.json"; exit 0;;
+  *print-dev-env*) mkdir -p "${dir}/running"; touch "${dir}/running/$$"; ls "${dir}/running" | wc -l >> "${dir}/seen-running.log"; [ -f "${dir}/delay" ] && sleep "$(cat "${dir}/delay")"; while [ -f "${dir}/hold" ]; do sleep 0.02; done; rm -f "${dir}/running/$$"; [ -f "${dir}/fail" ] && exit 3; cat "${dir}/devenv.json"; exit 0;;
 esac
 exit 9
 `,
@@ -452,27 +452,36 @@ describe("several jobs at once (D#6 C43-3)", () => {
   });
 
   it("a job waiting for another job's build of its key stops waiting when its signal aborts; the build and the other waiters go on", async () => {
-    writeFileSync(path.join(dir, "delay"), "3");
+    // The build is held by a file, not timed: it ends when the test removes `hold`, so no machine load can end it before the abort.
+    writeFileSync(path.join(dir, "hold"), "");
     const input = { approved: true, sha: SHA, source: flake() };
     const stop = new AbortController();
+    const waitUntil = async (what: string, done: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 30_000;
+      while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      if (!done()) throw new Error(`timed out waiting for ${what}`);
+    };
+    const trustedChecks = (): number => calls().filter((line) => line.includes("trusted-users")).length;
+    // The first job is the builder by construction: the others start only once its build is running, so each of them can only wait for it.
     const first = step().prepare(input);
+    await waitUntil("the build to start", () => devCalls().length > 0);
     const patient = step().prepare(input);
     const impatient = step({ signal: stop.signal }).prepare(input);
-    // The build has started and the others have had time to reach the flight; the build still has seconds to run.
-    // All three have passed the trusted-user check (the step just before the flight) and the build has started.
-    const deadline = Date.now() + 10_000;
-    while ((devCalls().length === 0 || calls().filter((line) => line.includes("trusted-users")).length < 3) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    // Both late jobs have started their trusted-user check (the step just before the flight); the build is held, so they end up waiting for it.
+    await waitUntil("both waiters to reach the trusted-user check", () => trustedChecks() >= 3);
     await new Promise((resolve) => setTimeout(resolve, 200));
     stop.abort();
-    const abortedAt = Date.now();
+    // The build is held until the next lines, so this settles only if the abort ended the wait; waiting for the build would never end (the test times out).
     expect(await impatient).toEqual({ ok: false, skip: "nix_failed" });
-    expect(Date.now() - abortedAt).toBeLessThan(500);
-    // Which of the two patient jobs reached the flight first is not fixed: one built it, the other shared it.
+    // The build is still held: the abort did not touch it, and the patient job is still waiting.
+    expect(readdirSync(path.join(dir, "running"))).toHaveLength(1);
+    rmSync(path.join(dir, "hold"));
     const both = [await first, await patient];
     expect(both.every((result) => result.ok)).toBe(true);
     expect(both.filter((result) => result.ok && result.cached)).toHaveLength(1);
     expect(devCalls()).toHaveLength(1);
-  });
+    // Explicit ceiling: the steps above wait on state, so the default 5 s only fails when the machine is starved.
+  }, 30_000);
 
   it("a failed build is shared by the jobs that waited for it, and the next job tries again", async () => {
     writeFileSync(path.join(dir, "delay"), "1");
