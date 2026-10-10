@@ -23,7 +23,7 @@ describe("metadata only through hostSandbox", () => {
       // The engine is handed the block the tier computed; the rig's own placeholder block is replaced.
       makeRuntime: (sandbox, protectedList) => createClaudeEngine({ ...rig.config, sandboxSettings: sandbox, protectedPaths: protectedList }),
       home: "/home/jane",
-      stateDir: "/home/jane/.fx-runner",
+      stateDir: path.join(rig.root, "state"),
       binaryDir: path.dirname(rig.fake.binary),
       tempRoot: path.join(rig.root, "tmp"),
       workspaceRoot: path.dirname(rig.workdir),

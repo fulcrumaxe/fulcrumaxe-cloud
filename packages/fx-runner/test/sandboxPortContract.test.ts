@@ -39,7 +39,7 @@ describeSandboxPortContract("hostSandbox", (runtime) => {
     credentials: { mode: "subscription" },
     makeRuntime: () => runtime,
     home: "/home/contract-user",
-    stateDir: "/home/contract-user/.fx-runner",
+    stateDir: mkdtempSync(path.join(tmpdir(), "r4b13_state-")),
     binaryDir: "/opt/claude/bin",
     tempRoot: mkdtempSync(path.join(tmpdir(), "r4b13_contract-")),
     workspaceRoot: tmpdir(),

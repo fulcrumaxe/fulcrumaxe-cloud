@@ -104,7 +104,7 @@ describe("R7b: the per-job environment", () => {
   });
 
   it("is added to the clean environment by name, and nothing else can be: a credential name or a control character is refused", () => {
-    const env = cleanEnv({ mode: "subscription" }, { jobEnv: jobEnvFor({ tempDir: "/t/x", store: "/s/a", commandTimeoutS: 60 }) });
+    const env = cleanEnv({ mode: "subscription" }, { jobEnv: { ...jobEnvFor({ tempDir: "/t/x", store: "/s/a", commandTimeoutS: 60 }), TMPDIR: "/t/x", CLAUDE_ENV_FILE: "/t/x/claude-env.sh" } });
     for (const name of JOB_ENV_NAMES) expect(env[name], name).toBeDefined();
     expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe("60000");
     expect(() => cleanEnv({ mode: "subscription" }, { jobEnv: { ANTHROPIC_API_KEY: "sk-x" } })).toThrow(TypeError);
@@ -242,7 +242,8 @@ describe("R7b: the host sandbox re-checks the floor and applies the set to that 
     expect(JSON.stringify({ ...b!.filesystem, denyRead: [] })).not.toMatch(/r7b-scratch-a|pnpm-store/);
     expect(JSON.stringify(b)).not.toMatch(/r7b-scratch-a|registry\.npmjs|\/nix\/store/);
     expect(b!.network.allowLocalBinding).toBe(false);
-    expect(r.envs[1]).toBeUndefined();
+    // ...except what every job gets (D#6 C44-1): its own TMPDIR and the env file; none of the allowance names
+    expect(Object.keys(r.envs[1] ?? {}).sort()).toEqual(["CLAUDE_ENV_FILE", "TMPDIR"]);
   });
 
   it("D#6 R7c: the Nix daemon socket directory is denied to every job: none, one with allowances but no dev shell, and one with a dev shell", async () => {
