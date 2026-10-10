@@ -55,6 +55,8 @@ export interface RunJobDeps {
   onEvent?: (event: NormalizedEvent) => void | Promise<void>;
   /** How long a job may run before it is stopped. Default 2 h. */
   wallClockMs?: number;
+  /** Fixed lines from the runner itself (never job text) added to the prompt. Read after the workspace is filled, so a step that runs there can add one. */
+  promptNotes?: () => readonly string[];
 }
 
 export const DEFAULT_WALL_CLOCK_MS = 2 * 60 * 60_000;
@@ -110,7 +112,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     runId: job.run_id,
     role: job.role,
     roleCard: job.role_card.text,
-    prompt: buildPrompt(job),
+    prompt: buildPrompt(job, deps.promptNotes?.() ?? []),
     model: cliModel,
     workdir: workspace,
     capUsd: 0, // the runner settles no money

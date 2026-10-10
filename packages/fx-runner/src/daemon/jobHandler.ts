@@ -15,7 +15,8 @@
  * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
  */
 import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
-import type { NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
+import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
+import { NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
 import { storeKeyOf, type JobAllowanceGrant } from "../sandbox/allowances.js";
 import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
@@ -70,6 +71,8 @@ export interface JobHandlerDeps {
   nix?: NixShellStep;
   /** Told the closed detail when the dev shell step is skipped. */
   onNixSkip?: (skip: NixSkip) => void;
+  /** Told the closed detail when the dev shell came from the default branch's merge-base instead of the job's own commit. */
+  onNixDetail?: (detail: NixDetail) => void;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
   heartbeatMs?: number;
@@ -146,18 +149,27 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
    * Builds the repo's dev shell outside the sandbox and hands its filtered environment to the job's grant (D#6 R7c). Called only for a job that carries
    * allowances. A fix round, and any commit that is not in the default branch's history, is skipped with a closed detail; so is every failure.
    */
-  async function prepareNix(job: Job, git: GitPath, grant: JobAllowanceGrant, base: string): Promise<void> {
+  async function prepareNix(job: Job, git: GitPath, grant: JobAllowanceGrant, base: string, notes: string[]): Promise<void> {
     if (deps.nix === undefined) return;
     let result: NixResult;
+    let fromDefault: NixFromDefault | undefined;
     try {
-      const source: NixSource = job.continues !== null || git.nixSource === undefined ? { kind: "not_default_branch" } : await git.nixSource(job, base);
-      result = await deps.nix.prepare({ approved: true, sha: base, source });
+      const source: NixSource = git.nixSource === undefined ? { kind: "not_default_branch" } : await git.nixSource(job, base);
+      if (source.kind === "flake") fromDefault = source.fromDefault;
+      // A commit outside the default branch is built from its merge-base (D#6 C43-1); the job's own commit is never named to nix.
+      result = await deps.nix.prepare({ approved: true, sha: fromDefault?.rev ?? base, source });
     } catch {
       // fx-swallow-ok: the step fails closed to "no dev shell"; the error text could hold a path
       result = { ok: false, skip: "nix_failed" };
     }
-    if (result.ok) grant.nixEnv = result.env;
-    else deps.onNixSkip?.(result.skip);
+    if (!result.ok) return deps.onNixSkip?.(result.skip);
+    grant.nixEnv = result.env;
+    if (fromDefault === undefined) return;
+    deps.onNixDetail?.("nix_from_default_branch");
+    if (fromDefault.flakeChanged) {
+      deps.onNixDetail?.("nix_flake_changed");
+      notes.push(NIX_FLAKE_CHANGED_NOTE);
+    }
   }
 
   /** A refusal made before anything is held: the one event is the only thing this run sends. */
@@ -223,6 +235,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     }
     try {
       const started: { base?: string } = {};
+      const promptNotes: string[] = [];
       let result: RunJobResult;
       let notReady: string | undefined;
       try {
@@ -248,11 +261,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const fill = async (workspace: string): Promise<void> => {
             started.base = (await git.prepare(job, claimed, workspace)).base;
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
-            if (grant !== undefined) await prepareNix(job, git, grant, started.base);
+            if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const allowed = grant === undefined ? granted : withAllowances(granted, grant);
-          result = await run(job, { ...deps.run, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.

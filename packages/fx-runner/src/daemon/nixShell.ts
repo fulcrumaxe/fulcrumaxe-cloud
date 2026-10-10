@@ -3,7 +3,8 @@
  * sandbox. The job never reaches the Nix daemon; it gets the shell's PATH-like and tool variables (a closed allowlist, `job/nixShellEnv.ts`) and a read of
  * `/nix/store`. Evaluating a flake runs the repo's code with the runner user's rights, so this step is held to these rules:
  *  - it runs only for a job that carries a signed, admin-approved allowance set (the caller's gate, repeated here as `approved`);
- *  - it evaluates only a commit reachable from the default branch's tip in the mirror (the caller's `source`): never a pull request, fix round or run branch;
+ *  - it evaluates only a commit reachable from the default branch's tip in the mirror (the caller's `source`): never a pull request, fix round or run branch.
+ *    A job on such a commit gets the merge-base of it and the default branch (C43-1), which is on the default branch, so its own flake is still never evaluated;
  *  - the lock file must exist and pin every input, each of an allowed type (hosted repos, https sources, repo-relative paths); nothing is written or updated; the flake's own `nixConfig` is never accepted; no import from derivation;
  *  - nix starts with a fixed minimal environment (nothing from the job or the host), under a wall-clock limit, inside a bubblewrap view built from an
  *    allowlist (the mirror, the store, the daemon socket, the nix config, CA files, an empty HOME and /tmp: see `sandbox/nixView.ts`), because the client
@@ -37,7 +38,16 @@ export type NixSkip =
   | "nix_env_empty";
 
 /** What the git path says of the commit the job starts from. `lock` is the text of its `flake.lock`, or null when it has none. */
-export type NixSource = { kind: "not_default_branch" } | { kind: "no_flake" } | { kind: "submodules" } | { kind: "flake"; mirrorDir: string; lock: string | null };
+export type NixSource = { kind: "not_default_branch" } | { kind: "no_flake" } | { kind: "submodules" } | { kind: "flake"; mirrorDir: string; lock: string | null; fromDefault?: NixFromDefault };
+
+/** Set when the job's commit is not on the default branch: the shell is built at the merge-base (`rev`), which is. `flakeChanged`: the commit edits `flake.nix` or `flake.lock` against it. */
+export interface NixFromDefault {
+  rev: string;
+  flakeChanged: boolean;
+}
+
+/** Closed details told when a job got a dev shell built from the default branch instead of its own commit. */
+export type NixDetail = "nix_from_default_branch" | "nix_flake_changed";
 
 export type NixResult = { ok: true; env: Record<string, string>; cached: boolean } | { ok: false; skip: NixSkip };
 

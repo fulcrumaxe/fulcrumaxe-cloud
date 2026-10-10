@@ -8,7 +8,7 @@ import { createRunnerClient, type Claimed } from "../../src/daemon/client.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
-import { createNixShell, type NixSkip, type NixSource } from "../../src/daemon/nixShell.js";
+import { createNixShell, type NixDetail, type NixSkip, type NixSource } from "../../src/daemon/nixShell.js";
 import { runCapture } from "../../src/engines/claude/capture.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
@@ -17,6 +17,7 @@ import { recordSession } from "../../src/engines/claude/session.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { fakeGitPath } from "../helpers/fakeGitPath.js";
 import { ledgerOptions } from "../helpers/ledgerOptions.js";
+import { NIX_FLAKE_CHANGED_NOTE } from "../../src/job/prompt.js";
 import { jobFor, KEYRING, signRaw } from "../helpers/signedJob.js";
 import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/strictRunnerCloud.js";
 
@@ -25,6 +26,7 @@ import { startStrictRunnerCloud, type StrictRunnerCloud } from "../helpers/stric
  * through the real process path, so "nix was not started" is read off a log the script writes, not off a flag a stub sets.
  */
 const BASE = "c".repeat(40);
+const MERGE_BASE = "d".repeat(40);
 const STORE = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const LOCK = JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } } });
 const ENTRIES = [{ kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "install" }];
@@ -69,7 +71,7 @@ const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise
 const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048);
 const nixCalls = (): string[] => (existsSync(path.join(root, "calls.log")) ? readFileSync(path.join(root, "calls.log"), "utf8").trim().split("\n") : []);
 
-function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; sources?: string[] } = {}) {
+function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; details?: NixDetail[]; sources?: string[] } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -97,6 +99,7 @@ function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; sour
     recordSession: (id, workspace) => recordSession(path.join(root, "sessions.json"), id, workspace), heartbeatMs: 1e9, flushMs: 1e9, runJobFn: runJob,
     nix: createNixShell({ nixBin: path.join(root, "nix"), bwrapBin: path.join(root, "bwrap"), viewFs: { exists: () => true, isDir: () => true, isFile: () => false, list: () => [] }, capture, dataDir: path.join(root, "nix-data"), storeExists: () => true, identity: async () => ({ user: "runner", groups: ["users"] }) }),
     onNixSkip: (skip) => over.skips?.push(skip),
+    onNixDetail: (detail) => over.details?.push(detail),
   };
   const handle = createJobHandler(deps);
   return {
@@ -129,15 +132,66 @@ describe("D#6 R7c: the dev shell step in the job handler", () => {
     expect(r.starts[0]!.allowances).toBeUndefined();
   });
 
-  it("a fix-round-shaped job never gets a shell: the git path is not asked, nix is not started, the skip is named", async () => {
-    const skips: NixSkip[] = [];
-    const r = rig({ skips });
+  it("a fix-round-shaped job is asked about its shell like any other: a base off the default branch is built from its merge-base", async () => {
+    const details: NixDetail[] = [];
+    const r = rig({ details, source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: LOCK, fromDefault: { rev: MERGE_BASE, flakeChanged: false } } });
     const job = jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never, continues: { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch: RUN_BRANCH } });
     expect((await r.handle(await r.claim(job))).status).toBe("completed");
-    expect(nixCalls()).toEqual([]);
-    expect(r.sources).toEqual([]);
-    expect(skips).toEqual(["nix_not_default_branch"]);
-    expect(r.starts[0]!.allowances?.nixEnv).toBeUndefined();
+    expect(r.sources).toEqual([BASE]);
+    expect(details).toEqual(["nix_from_default_branch"]);
+    expect(r.starts[0]!.allowances?.nixEnv).toBeDefined();
+  });
+
+  it("a head off the default branch: nix is told the merge-base and never the head, the detail is named, onNixSkip stays silent, the prompt has no flake note", async () => {
+    const details: NixDetail[] = [];
+    const skips: NixSkip[] = [];
+    const r = rig({ details, skips, source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: LOCK, fromDefault: { rev: MERGE_BASE, flakeChanged: false } } });
+    expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
+    const argv = nixCalls().filter((line) => line.includes("print-dev-env"));
+    expect(argv).toHaveLength(1);
+    expect(argv[0]).toContain(`?rev=${MERGE_BASE}`);
+    expect(argv[0]).not.toContain(BASE);
+    expect(details).toEqual(["nix_from_default_branch"]);
+    expect(skips).toEqual([]);
+    expect(r.starts[0]!.allowances?.nixEnv).toEqual({ PATH: `${STORE}-node/bin`, CC: "gcc" });
+    expect(r.starts[0]!.prompt).not.toContain(NIX_FLAKE_CHANGED_NOTE);
+  });
+
+  it("a head that changes the flake adds nix_flake_changed and the one fixed prompt line, ahead of the untrusted block", async () => {
+    const details: NixDetail[] = [];
+    const r = rig({ details, source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: LOCK, fromDefault: { rev: MERGE_BASE, flakeChanged: true } } });
+    expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
+    expect(details).toEqual(["nix_from_default_branch", "nix_flake_changed"]);
+    expect(r.starts[0]!.prompt.split(NIX_FLAKE_CHANGED_NOTE)).toHaveLength(2);
+    expect(r.starts[0]!.prompt.indexOf(NIX_FLAKE_CHANGED_NOTE)).toBeLessThan(r.starts[0]!.prompt.indexOf("<untrusted>"));
+  });
+
+  it("a shell that is skipped adds neither detail nor prompt line, even for a changed flake", async () => {
+    const details: NixDetail[] = [];
+    const skips: NixSkip[] = [];
+    const r = rig({ details, skips, source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: null, fromDefault: { rev: MERGE_BASE, flakeChanged: true } } });
+    expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
+    expect(skips).toEqual(["nix_flake_lock_missing"]);
+    expect(details).toEqual([]);
+    expect(r.starts[0]!.prompt).not.toContain(NIX_FLAKE_CHANGED_NOTE);
+  });
+
+  it("a job whose base is on the default branch gets neither detail nor note", async () => {
+    const details: NixDetail[] = [];
+    const r = rig({ details });
+    expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
+    expect(details).toEqual([]);
+    expect(r.starts[0]!.prompt).not.toContain(NIX_FLAKE_CHANGED_NOTE);
+  });
+
+  it("two review jobs with one merge-base make one nix build and one cache hit", async () => {
+    const r = rig({ source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: LOCK, fromDefault: { rev: MERGE_BASE, flakeChanged: false } } });
+    for (let round = 0; round < 2; round++) {
+      expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
+    }
+    expect(nixCalls().filter((line) => line.includes("print-dev-env"))).toHaveLength(1);
+    expect(r.starts).toHaveLength(2);
+    expect(r.starts[1]!.allowances?.nixEnv).toEqual(r.starts[0]!.allowances?.nixEnv);
   });
 
   it("a base the git path says is not on the default branch gets no shell, and the job still runs with its allowances", async () => {

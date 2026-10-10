@@ -77,6 +77,10 @@ export function escapeUntrustedClose(text: string): string {
   return out + text.slice(from);
 }
 
+/** The one fixed line a job gets when its dev shell came from the default branch and the change edits the flake (D#6 C43-1). Runner text, never from the job. */
+export const NIX_FLAKE_CHANGED_NOTE =
+  "NOTE: The dev shell toolchain for this run was built from the default branch, not from this change. This change's edits to flake.nix or flake.lock were not applied to it.";
+
 /** The fields of a job the prompt reads. */
 export type PromptJob = Pick<Job, "role" | "task" | "role_card">;
 
@@ -86,7 +90,7 @@ export type PromptJob = Pick<Job, "role" | "task" | "role_card">;
  * block. This function only builds a string: nothing in this package runs text from a job, and it is never put in an
  * argument list. An unknown role throws.
  */
-export function buildPrompt(job: PromptJob): string {
+export function buildPrompt(job: PromptJob, notes: readonly string[] = []): string {
   roleToolsFor(job.role);
   return [
     `You are a ${job.role} agent in the autonomous development team.`,
@@ -98,6 +102,7 @@ export function buildPrompt(job: PromptJob): string {
     "Complete the task described in the untrusted block below. Return an AGENT_OUTPUT JSON envelope at the end of your final message.",
     ...(PUBLISHING_ROLES.has(job.role) ? ["", PUBLISH_BACKSTOP] : []),
     ...(isReviewJobRole(job.role) ? ["", REVIEW_BACKSTOP] : []),
+    ...notes.flatMap((note) => ["", note]),
     "",
     "<untrusted>",
     escapeUntrustedClose(job.task.prompt),

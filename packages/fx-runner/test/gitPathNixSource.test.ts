@@ -44,6 +44,13 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
     commit("flake", "lock", { "flake.lock": LOCK });
     git(origin, "checkout", "-q", "-b", "fx/side");
     commit("side", "run branch only", { "side.txt": "x" });
+    commit("sideFlake", "edits the flake", { "flake.nix": "{ outputs = { self }: { touched = true; }; }\n" });
+    git(origin, "checkout", "-q", "main");
+    commit("mainMoved", "default branch moves on after the fork", { "later.txt": "x" });
+    git(origin, "checkout", "-q", "-b", "fx/lockEdit", sha["side"]!);
+    commit("sideLock", "edits the lock", { "flake.lock": JSON.stringify({ nodes: { root: {} }, root: "root", version: 7, edited: true }) });
+    git(origin, "checkout", "-q", "--orphan", "fx/orphan");
+    commit("orphan", "unrelated history", { "orphan.txt": "x" });
     git(origin, "checkout", "-q", "main");
     commit("submodules", "submodules", { ".gitmodules": '[submodule "x"]\n\tpath = x\n\turl = file:///srv/private/x\n' });
     commit("tip", "tip", { "tip.txt": "x" });
@@ -62,8 +69,25 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
     expect(await gitPath.nixSource!(job, sha["flake"]!)).toMatchObject({ kind: "flake", lock: LOCK });
   });
 
-  it("a commit that exists only on a run branch is not the default branch", async () => {
-    expect(await gitPath.nixSource!(job, sha["side"]!)).toEqual({ kind: "not_default_branch" });
+  it("a commit only on a run branch is built from its merge-base with the default branch, not from the branch tip or the commit itself", async () => {
+    const source = await gitPath.nixSource!(job, sha["side"]!);
+    expect(source).toMatchObject({ kind: "flake", lock: LOCK, fromDefault: { rev: sha["flake"], flakeChanged: false } });
+    // the default branch has moved on since the fork: the tip is never the answer
+    expect((source as { fromDefault: { rev: string } }).fromDefault.rev).not.toBe(sha["tip"]);
+    expect((source as { fromDefault: { rev: string } }).fromDefault.rev).not.toBe(sha["side"]);
+  });
+
+  it("a default-branch commit has no fromDefault: it is used as it is", async () => {
+    expect(await gitPath.nixSource!(job, sha["flake"]!)).not.toHaveProperty("fromDefault");
+  });
+
+  it("a commit that edits flake.nix or flake.lock against the merge-base says so, and its own lock text is never the one handed on", async () => {
+    expect(await gitPath.nixSource!(job, sha["sideFlake"]!)).toMatchObject({ kind: "flake", lock: LOCK, fromDefault: { rev: sha["flake"], flakeChanged: true } });
+    expect(await gitPath.nixSource!(job, sha["sideLock"]!)).toMatchObject({ kind: "flake", lock: LOCK, fromDefault: { rev: sha["flake"], flakeChanged: true } });
+  });
+
+  it("unrelated history has no merge-base and keeps the skip", async () => {
+    expect(await gitPath.nixSource!(job, sha["orphan"]!)).toEqual({ kind: "not_default_branch" });
   });
 
   it("an unknown commit and a value that is not a full commit id are not the default branch", async () => {
