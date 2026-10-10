@@ -22,6 +22,7 @@ import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_RAW_TOOL_EVENTS_PER_RUN, RAW_CAPPED_TYPES, RUNNER_MODES_SQL, insertRunnerEvent, eventForStorage, noteRunnerActivityCap, projectRunnerProgress, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
+import { accountCeiling, hostedLimitsFromPlanData, type HostedLimitsSource } from "./runnerAccountCeiling.js";
 import { recordRunnerUsage } from "./runnerUsage.js";
 import { requestFollowUp, settleFollowUp, type FollowUpOutcome, type FollowUpPorts } from "./runnerFollowUp.js";
 
@@ -130,6 +131,8 @@ export interface RunnerClaimDeps {
   randomBetween?: (min: number, max: number) => number;
   /** The concurrency and wall-clock figures per account (C21 section 8). Defaults to `runnerLimits`. */
   limits?: RunnerLimitsSource;
+  /** A hosted plan's runner figures (D#605 FL-12a). Defaults to the plan data; tests inject fixed ones. */
+  hostedLimits?: HostedLimitsSource;
   /** Dispatches the follow-up run after a usage limit. Absent: the child is made (pending, without a job) and the queue sweep expires it. */
   followUp?: FollowUpPorts;
   /** Told when the work after an accepted batch (the follow-up's dispatch) failed; the batch itself stays accepted. */
@@ -275,6 +278,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
   const now = deps.now ?? Date.now;
   const between = deps.randomBetween ?? ((min, max) => randomInt(min, max + 1));
   const limits = deps.limits ?? runnerLimits;
+  const hostedLimits = deps.hostedLimits ?? hostedLimitsFromPlanData;
 
   async function loadRunner(accountId: string, runnerId: string) {
     const runner = await withTenant(runnerPool, accountId, async (client) => {
@@ -328,10 +332,10 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
   async function claimOne(
     accountId: string,
     runnerId: string,
-    candidate: { id: string; role: string },
+    candidate: { id: string; role: string; dispatch_repo_id: string },
     runner: { credential_mode: string; registered_by: string },
     capacity: ClaimCapacity | undefined,
-  ): Promise<{ generation: number } | "at_limit" | "heavy_limit" | "runner_full" | "taken"> {
+  ): Promise<{ generation: number } | "at_limit" | "heavy_limit" | "repo_limit" | "runner_full" | "taken"> {
     const runId = candidate.id;
     const heavy = !LIGHT_JOB_ROLES.includes(candidate.role);
     return withTenant(runnerPool, accountId, async (client) => {
@@ -341,9 +345,14 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         "SELECT count(*) AS total, count(*) FILTER (WHERE NOT role = ANY($2::text[])) AS heavy FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running'",
         [accountId, LIGHT_JOB_ROLES],
       );
-      const caps = limits(accountId);
-      if (Number(account.rows[0]!.total) >= caps.maxConcurrentRunnerJobs) return "at_limit" as const;
-      if (heavy && Number(account.rows[0]!.heavy) >= caps.maxConcurrentHeavyRunnerJobs) return "heavy_limit" as const;
+      // The account's ceiling by its plan (D#605 FL-12a): the runner plan's flat figures, or a hosted plan's setting held under its live runners' capacity.
+      const caps = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits });
+      if (Number(account.rows[0]!.total) >= caps.total) return "at_limit" as const;
+      if (heavy && Number(account.rows[0]!.heavy) >= caps.heavy) return "heavy_limit" as const;
+      if (caps.perRepo !== null) {
+        const onRepo = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running' AND dispatch_repo_id = $2", [accountId, candidate.dispatch_repo_id]);
+        if (Number(onRepo.rows[0]!.n) >= caps.perRepo) return "repo_limit" as const;
+      }
       // The runner's own cap: its free slots in this run's class, counted under the same lock the account count uses.
       const free = freeSlotsFor(capacity, await runningByClass(client, accountId, runnerId));
       if ((heavy ? free.heavy : free.light) <= 0) return "runner_full" as const;
@@ -406,6 +415,13 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           const free = freeSlotsFor(input.capacity, await withTenant(runnerPool, accountId, (client) => runningByClass(client, accountId, runnerId)));
           if (free.total <= 0) break;
           const candidates = await withTenant(runnerPool, accountId, async (client) => {
+            // Repos already at their running limit offer no candidate: left in, their oldest runs would fill the few candidates each poll
+            // looks at and starve every other repo. The claim re-checks the count under the account lock, so a stale read here costs a skip, not a breach.
+            const ceiling = await accountCeiling(client, { accountId, claimingRunnerId: runnerId, nowMs: now(), runnerPlan: limits(accountId), hosted: hostedLimits });
+            const fullRepos = ceiling.perRepo === null ? [] : (await client.query<{ repo_id: string }>(
+              "SELECT dispatch_repo_id AS repo_id FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running' AND dispatch_repo_id IS NOT NULL GROUP BY dispatch_repo_id HAVING count(*) >= $2::int",
+              [accountId, ceiling.perRepo],
+            )).rows.map((row) => row.repo_id);
             const { rows } = await client.query<CandidateRow>(
               `SELECT a.id, a.role, a.dispatch_repo_id, a.job_signed
                  FROM agent_runs a
@@ -415,12 +431,12 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND a.runner_id IS NULL AND a.job_signed IS NOT NULL AND r.execution_mode IN (${RUNNER_MODES_SQL})
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
-                  AND a.id <> ALL($6::uuid[])
+                  AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos],
             );
             return rows;
           });
@@ -445,7 +461,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           }
 
           const claimed = await claimOne(accountId, runnerId, candidate, runner, input.capacity);
-          if (claimed === "taken" || claimed === "runner_full") continue;
+          if (claimed === "taken" || claimed === "runner_full" || claimed === "repo_limit") continue;
           if (claimed === "heavy_limit") {
             heavyBlocked = true;
             continue;

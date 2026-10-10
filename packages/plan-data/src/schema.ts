@@ -32,6 +32,16 @@ const planSchema = z
     tokenStreamsPerTenant: count,
     /** Assumed monthly volume, used only for the role-settings cost estimate. */
     monthlyWorkload: z.object({ features: count, smalls: count }).strict(),
+    /**
+     * D#605 FL-12a: the local-runner figures of a hosted plan. `maxRunners` is the most active runners an account may hold;
+     * `defaultAccountJobs` and `defaultPerRepoJobs` are the runner jobs the account may have running at once, in all and on one
+     * repository, until an owner or admin raises them. Optional so data that predates it still loads; a caller that needs it
+     * gets an "unavailable" answer, never a default (the claim hands out nothing and register answers 503).
+     */
+    runners: z
+      .object({ maxRunners: count.positive(), defaultAccountJobs: count.positive(), defaultPerRepoJobs: count.positive() })
+      .strict()
+      .optional(),
   })
   .strict();
 

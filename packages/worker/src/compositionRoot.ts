@@ -275,7 +275,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
     const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}) }) : unwiredJobIssuer);
-    const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor().runsPerDay };
+    const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor('runner').runsPerDay };
     const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_local");
     // D#6 R5b-2a: a cloud-verified repository's agents run on the runner, and its four reviewers in the sandbox target above, on the customer's key.
     const guardedSandbox = guardWorkdir(sandboxTarget);

@@ -25,7 +25,7 @@ export type RunnerLimitsSource = (accountId: string) => RunnerLimits;
 export const runnerLimits: RunnerLimitsSource = (accountId) => {
   void accountId; // one runner plan for every account today
   try {
-    const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs, maxRunWallClockMs } = runnerLimitsFor();
+    const { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs, maxRunWallClockMs } = runnerLimitsFor('runner');
     if (maxConcurrentHeavyRunnerJobs === undefined) warnHeavyFigureMissingOnce();
     return { maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs: maxConcurrentHeavyRunnerJobs ?? MISSING_HEAVY_FIGURE, maxRunWallClockMs };
   } catch {

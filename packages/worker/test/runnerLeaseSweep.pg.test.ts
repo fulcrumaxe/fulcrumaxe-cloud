@@ -22,7 +22,7 @@ describe("runner lease sweep [pg]", () => {
   let runnerB: string;
   const T0 = Date.parse("2026-10-10T12:00:00Z");
   const HOUR = 3_600_000;
-  const WALL = runnerLimitsFor().maxRunWallClockMs; // the runner plan's figure (the public fixture's here)
+  const WALL = runnerLimitsFor('runner').maxRunWallClockMs; // the runner plan's figure (the public fixture's here)
   const sweeper = (now: number, over: RunnerLeaseSweepDeps = {}) => createRunnerLeaseSweeper(writerPool, { now: () => now, ...over });
 
   beforeAll(async () => {

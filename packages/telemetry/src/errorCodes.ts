@@ -20,6 +20,7 @@ export const OVERFLOW_ERROR_CODE = "error_overflow";
 export const OWN_ERROR_CODES: readonly string[] = [
   OTHER_ERROR_CODE,
   OVERFLOW_ERROR_CODE,
+  "accept_required",
   "already_running",
   "already_subscribed",
   "ambiguous_credentials",
@@ -53,6 +54,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "never_imported",
   "no_billing_account",
   "no_repo",
+  "not_applicable",
   "not_approvable",
   "action_not_available",
   "not_cancellable",

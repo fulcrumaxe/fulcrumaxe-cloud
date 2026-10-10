@@ -144,7 +144,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
 
     it("hands out nothing while the account already has the plan's limit of running runner runs", async () => {
       // The figure is the runner plan's (the public fixture's here), read through the one limits function: N claims succeed and the (N+1)th gets no run.
-      const limit = runnerLimitsFor().maxConcurrentRunnerJobs;
+      const limit = runnerLimitsFor('runner').maxConcurrentRunnerJobs;
       expect(limit).toBeGreaterThan(0);
       const ids: string[] = [];
       for (let i = 0; i <= limit; i++) ids.push(await pending({ createdAt: T0 - 9000 + i }));
@@ -299,7 +299,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       const g = await claimed(id);
       const started = (await row(id)).started_at.getTime();
       await admin.query("UPDATE agent_runs SET lease_expires_at = to_timestamp($2 / 1000.0) WHERE id = $1", [id, started + 3 * 3_600_000]);
-      const wall = runnerLimitsFor().maxRunWallClockMs;
+      const wall = runnerLimitsFor('runner').maxRunWallClockMs;
       clock = started + wall - 1;
       expect(await hb(id, g)).toMatchObject({ verdict: "ok" });
       clock = started + wall + 1; // started_at has microseconds; getTime() truncates them
@@ -657,7 +657,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       };
 
       it("gives the plan's two figures, and follows the data when it changes", () => {
-        const plan = runnerLimitsFor();
+        const plan = runnerLimitsFor('runner');
         // The fixture has no heavy figure, so it reads as 1 (fail closed); one with the figure is followed.
         expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: plan.maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs: plan.maxConcurrentHeavyRunnerJobs ?? 1, maxRunWallClockMs: plan.maxRunWallClockMs });
         withFigures({ maxConcurrentRunnerJobs: 7, maxConcurrentHeavyRunnerJobs: 3, maxRunWallClockMs: 123_456 });

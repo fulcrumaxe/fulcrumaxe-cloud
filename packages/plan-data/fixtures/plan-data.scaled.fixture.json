@@ -12,7 +12,8 @@
       "apiLimits": { "perTokenPerMinute": 55, "perTenantPerMinute": 110 },
       "webhookEndpointLimit": 4,
       "tokenStreamsPerTenant": 3,
-      "monthlyWorkload": { "features": 5, "smalls": 12 }
+      "monthlyWorkload": { "features": 5, "smalls": 12 },
+      "runners": { "maxRunners": 9, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     },
     "team": {
       "foreground": { "kind": "flat", "usdPerMonth": 44 },
@@ -25,7 +26,8 @@
       "apiLimits": { "perTokenPerMinute": 110, "perTenantPerMinute": 430 },
       "webhookEndpointLimit": 12,
       "tokenStreamsPerTenant": 6,
-      "monthlyWorkload": { "features": 14, "smalls": 38 }
+      "monthlyWorkload": { "features": 14, "smalls": 38 },
+      "runners": { "maxRunners": 10, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     },
     "scale": {
       "foreground": { "kind": "flat", "usdPerMonth": 71 },
@@ -43,7 +45,8 @@
       "apiLimits": { "perTokenPerMinute": 270, "perTenantPerMinute": 1100 },
       "webhookEndpointLimit": 22,
       "tokenStreamsPerTenant": 9,
-      "monthlyWorkload": { "features": 42, "smalls": 95 }
+      "monthlyWorkload": { "features": 42, "smalls": 95 },
+      "runners": { "maxRunners": 11, "defaultAccountJobs": 4, "defaultPerRepoJobs": 2 }
     }
   },
   "runnerPlan": {
