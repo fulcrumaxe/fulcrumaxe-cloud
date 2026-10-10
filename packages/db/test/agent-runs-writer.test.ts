@@ -131,8 +131,9 @@ describe('agent_runs writer (0642)', () => {
         expect(r.owner).toBe('platform_ops');
         expect(r.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
         // 0754: runner_lease_definer holds EXECUTE on agent_run_create only, so the follow-up run it makes goes through the one create path.
+        // 0781: work_item_placement_definer holds it too, for the item-scoped cancel.
         // 0759: runner_mode_switch_definer holds EXECUTE on agent_run_set_status only, so the cancellation it makes on a mode switch goes through the one status writer.
-        expect(r.executors).toEqual(r.proname === 'agent_run_create' ? ['agent_run_writer', 'platform_ops', 'runner_lease_definer'] : ['agent_run_writer', 'platform_ops', 'runner_mode_switch_definer']);
+        expect(r.executors).toEqual(r.proname === 'agent_run_create' ? ['agent_run_writer', 'platform_ops', 'runner_lease_definer'] : ['agent_run_writer', 'platform_ops', 'runner_mode_switch_definer', 'work_item_placement_definer']);
       }
     });
 

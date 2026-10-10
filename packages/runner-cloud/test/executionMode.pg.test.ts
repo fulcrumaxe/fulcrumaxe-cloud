@@ -45,7 +45,7 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
     );
   const row = async (id: string) => (await h.admin.query("SELECT execution_mode FROM repos WHERE id = $1", [id])).rows[0].execution_mode as string;
   const optedIn = async (id: string) => (await h.admin.query("SELECT 1 FROM repo_local_review_optins WHERE repo_id = $1", [id])).rowCount === 1;
-  const audits = async (f: F2Fixture) => (await h.admin.query("SELECT actor, action, payload FROM audit_log WHERE account_id = $1 AND action LIKE 'repo.%' ORDER BY created_at, action DESC", [f.accountId])).rows;
+  const audits = async (f: F2Fixture) => (await h.admin.query("SELECT actor, action, payload FROM audit_log WHERE account_id = $1 AND action LIKE 'repo.%' ORDER BY created_at, action DESC, id", [f.accountId])).rows;
   const code = (res: { body: unknown }) => (res.body as { error: { code: string } }).error.code;
   const ON = (name: unknown = NAME, sha: unknown = LOCAL_AUTO_MERGE_COPY_SHA256) => ({ auto_merge: true, confirm_repo: name, copy_sha256: sha });
   const ONLY = (fields: Record<string, unknown>) => ({ auto_merge: true, ...fields });

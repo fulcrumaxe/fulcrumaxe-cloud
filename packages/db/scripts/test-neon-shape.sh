@@ -1971,6 +1971,71 @@ check_runner_mode_switch_definer_role_shape() {
   fi
 }
 
+# D#599 PL-1 (0781): the SECURITY DEFINER functions owned by work_item_placement_definer. Prints their oids, comma
+# separated, when each is one of the two exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog,
+# public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant option;
+# SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic owner check then rejects anything else).
+check_work_item_placement_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid IN ('public.work_item_cancel_pending_runs(uuid,text)'::regprocedure, 'public.work_item_placement_audit(uuid,text,text,integer)'::regprocedure)
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'work_item_placement_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'work-item-placement-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by work_item_placement_definer fail the exception shape (not one of its two exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#599 PL-1 (0781): role shape of work_item_placement_definer. A no-op when the role does not exist. Every problem
+# is named: NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges
+# exactly the 24 granted by 0781 (column SELECT and the updated_at UPDATE on agent_runs, column SELECT on account_members, repos and accounts,
+# column INSERT on audit_log, USAGE on public; nothing table-wide), owning exactly its two functions and nothing else.
+check_work_item_placement_definer_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.status SELECT','column agent_runs.execution_mode SELECT','column agent_runs.work_item_id SELECT','column agent_runs.updated_at UPDATE','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.placement SELECT','column repos.id SELECT','column repos.account_id SELECT','column repos.execution_mode SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'work_item_placement_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'work_item_placement_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 24 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 24 granted by 0781' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 2
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.work_item_cancel_pending_runs(uuid,text)'::regprocedure, 'public.work_item_placement_audit(uuid,text,text,integer)'::regprocedure]::oid[]))
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its two functions and nothing else' END,
+      CASE WHEN has_schema_privilege('work_item_placement_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_placement_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): work_item_placement_definer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#6 R2b-3 part (ii) (0757): the one SECURITY DEFINER function owned by runner_notice_lister, the cross-tenant list of runner runs that
 # still owe a notice. Prints its oid when it is exactly 'agent_run_list_runner_runs_owing_notice(integer,bigint,bigint)' (matched by regprocedure),
 # pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer and nobody else but the owner (no PUBLIC, no
@@ -2647,6 +2712,15 @@ if [ -n "$RUNNER_MODE_SWITCH_RESULT" ] && ! [[ "$RUNNER_MODE_SWITCH_RESULT" =~ ^
   echo "neon-shape: internal error -- runner_mode_switch_definer exempt function oids were not numeric: $RUNNER_MODE_SWITCH_RESULT" >&2
   exit 1
 fi
+WORK_ITEM_PLACEMENT_RESULT="$(check_work_item_placement_definer_exception_shape fx_neon)"
+if [[ "$WORK_ITEM_PLACEMENT_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${WORK_ITEM_PLACEMENT_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$WORK_ITEM_PLACEMENT_RESULT" ] && ! [[ "$WORK_ITEM_PLACEMENT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- work_item_placement_definer exempt function oids were not numeric: $WORK_ITEM_PLACEMENT_RESULT" >&2
+  exit 1
+fi
 RUNNER_NOTICE_RESULT="$(check_runner_notice_lister_exception_shape fx_neon)"
 if [[ "$RUNNER_NOTICE_RESULT" == SHAPE_FAIL:* ]]; then
   echo "neon-shape: ${RUNNER_NOTICE_RESULT#SHAPE_FAIL:}" >&2
@@ -2746,7 +2820,7 @@ if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" 
   echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
   exit 1
 fi
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2785,6 +2859,7 @@ check_runner_usage_definer_role_shape fx_neon
 check_runner_notice_lister_role_shape fx_neon
 check_invariant_sweep_role_shape fx_neon
 check_runner_mode_switch_definer_role_shape fx_neon
+check_work_item_placement_definer_role_shape fx_neon
 check_runner_sandbox_status_role_shape fx_neon
 check_runner_sandbox_status_table_shape fx_neon
 check_runner_allowance_role_shape fx_neon
