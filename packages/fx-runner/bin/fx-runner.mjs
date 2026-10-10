@@ -79,6 +79,7 @@ runCli({
     selfCommand: sea ? [process.execPath] : [process.execPath].concat(process.execArgv, [scriptPath()]),
     term: process.env.TERM,
     uid: process.getuid?.(),
+    xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
     // The take-over confirmation must be typed by a person: a piped stdin is not one.
     interactive: process.stdin.isTTY === true,
     ask: async (question) => {
@@ -90,7 +91,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,

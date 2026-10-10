@@ -38,6 +38,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
         logDir: path.join(input.stateDir, "logs"),
         sessionsFile: sessionsFile(input.stateDir),
         spawn: spawnFn,
+        ...(input.limits === undefined ? {} : { limits: input.limits }),
         onLocalEvent: input.onLocalEvent,
         ...(input.onNearLimit === undefined ? {} : { onNearLimit: input.onNearLimit }),
       }),

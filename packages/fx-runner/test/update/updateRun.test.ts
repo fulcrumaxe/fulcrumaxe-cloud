@@ -65,7 +65,7 @@ function start(hostOver: Partial<UpdateWorld["host"]> = {}, hooks: Partial<RunHo
   const out: string[] = [];
   const ctx: CommandContext = { stateDir: w.stateDir, out: (l) => out.push(l), err: (l) => out.push(l), now: () => new Date(), fetchFn: fetch };
   const host: RunHost = { home, platform: "linux", signals, pid: process.pid, kill: (pid, signal) => process.kill(pid, signal), engine: createClaudeKit(spawn), sandbox: fakeSandboxHost() };
-  const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, updateTuf: w.tuf, ...hooks }, { ...w.host, ...hostOver });
+  const done = runCommand(ctx, host, { keyrings: { [originHash(cloud.origin)!]: KEYRING }, searchPath: toolbin, updateTuf: w.tuf, jobLimits: { enforced: true }, ...hooks }, { ...w.host, ...hostOver });
   return { signals, out, done };
 }
 

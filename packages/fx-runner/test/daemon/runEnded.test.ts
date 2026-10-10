@@ -32,6 +32,8 @@ describe("C1: each git-path code is reported under its own detail", () => {
 
   it("the codes that were already mapped are unchanged", () => {
     expect(endOfFailure("push_rejected")).toEqual({ reason: "push_rejected" });
+    // A job stopped by its own memory budget (D#6 C43-5) is an agent failure on the wire: no new reason, and the cloud does not retry it.
+    expect(endOfFailure("resource_limit")).toEqual({ reason: "agent_failed" });
     expect(endOfFailure("push_too_large", 7)).toEqual({ reason: "runner_setup", detail: "push_too_large", sizeMb: 7 });
     expect(endOfFailure("continuation_branch_missing")).toEqual({ reason: "runner_setup", detail: "continuation_branch_missing" });
     expect(endOfFailure("credential_mismatch")).toBeNull();

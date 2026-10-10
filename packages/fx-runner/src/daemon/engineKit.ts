@@ -2,6 +2,7 @@ import type { LocalOnlyEvent } from "@fulcrumaxe/runner-protocol";
 import type { CleanEnvOptions, CredentialMode } from "../job/cleanEnv.js";
 import type { SessionPlan } from "../job/runJob.js";
 import type { InterruptibleRuntime } from "../sandbox/hostSandbox.js";
+import type { JobLimits } from "../sandbox/jobLimits.js";
 import type { ProtectedPaths } from "../sandbox/sandboxSettings.js";
 import type { GitCapture } from "./git.js";
 
@@ -41,6 +42,8 @@ export interface EngineKit {
     onNearLimit?: (info: { resetsAtMs?: number }) => void;
     /** D#6 R7b: the per-job variables of a job that carries sandbox allowances (see `CleanEnvOptions.jobEnv`); absent for a job without any. */
     jobEnv?: Readonly<Record<string, string>>;
+    /** D#6 C43-5: the hard limits this job's agent runs under; absent where they cannot be enforced. */
+    limits?: JobLimits;
   }): InterruptibleRuntime;
   /** Resume or fresh, from the local session index in the state directory. */
   planSession(stateDir: string, continues: { session_id: string; branch: string } | null): SessionPlan;
