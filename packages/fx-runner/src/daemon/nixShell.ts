@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { GitCapture } from "./git.js";
+import { singleFlight } from "./keyedLock.js";
 import { buildNixView, viewedArgv, type NixViewFs } from "../sandbox/nixView.js";
 import { filterDevEnv, isStoreEntry, NIX_ENV_NAMES, nixEnvValue } from "../job/nixShellEnv.js";
 
@@ -258,8 +259,18 @@ export function createNixShell(deps: NixShellDeps): NixShellStep {
       const hit = readCache(file);
       if (hit !== undefined) return { ok: true, env: hit, cached: true };
 
+      // One build per cache key at a time (D#6 C43-3): a second job on the same key waits for the first build and takes its result, success or skip,
+      // instead of running its own `print-dev-env` (up to 15 minutes). A job that arrives after it ends finds the cache file.
+      const flight = await singleFlight(file, () => build(lock, file));
+      return flight.shared && flight.value.ok ? { ...flight.value, cached: true } : flight.value;
+    } catch {
+      // fx-swallow-ok: the failure is returned as a closed code; the error text could hold a path
+      return skip("nix_failed");
+    }
+
+    async function build(lockText: string, file: string): Promise<NixResult> {
       const ref = `git+file://${encodeURI(mirrorDir).replace(/[?#]/g, (c) => (c === "?" ? "%3F" : "%23"))}?rev=${input.sha}`;
-      const run = await inView([...NIX_FEATURES, "print-dev-env", "--json", ...NIX_FIXED_ARGS, "--option", "allowed-uris", allowedUris(lock).join(" "), ref], timeoutMs);
+      const run = await inView([...NIX_FEATURES, "print-dev-env", "--json", ...NIX_FIXED_ARGS, "--option", "allowed-uris", allowedUris(lockText).join(" "), ref], timeoutMs);
       if (run.timedOut) return skip("nix_timeout");
       if (run.code !== 0) return skip("nix_failed");
       let variables: unknown;
@@ -275,9 +286,6 @@ export function createNixShell(deps: NixShellDeps): NixShellStep {
       writeFileSync(temp, JSON.stringify(filtered), { mode: 0o600 });
       renameSync(temp, file);
       return { ok: true, env: filtered, cached: false };
-    } catch {
-      // fx-swallow-ok: the failure is returned as a closed code; the error text could hold a path
-      return skip("nix_failed");
     }
   }
 

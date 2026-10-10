@@ -415,3 +415,51 @@ describe("the handoff allowlist", () => {
   });
 });
 
+describe("several jobs at once (D#6 C43-3)", () => {
+  it("two jobs on one key start one build, and both get its environment (one fresh, one shared)", async () => {
+    writeFileSync(path.join(dir, "delay"), "1");
+    const input = { approved: true, sha: SHA, source: flake() };
+    // Two step objects, as two jobs' wiring would hold: the rule is per cache file, not per object.
+    const [one, two] = await Promise.all([step().prepare(input), step().prepare(input)]);
+    expect(devCalls()).toHaveLength(1);
+    const results = [one, two];
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(results.filter((result) => result.ok && !result.cached)).toHaveLength(1);
+    expect(results.filter((result) => result.ok && result.cached)).toHaveLength(1);
+    expect(one).toMatchObject({ ok: true, env: { PATH: `${STORE}-nodejs/bin:${STORE}-pnpm/bin`, CC: "gcc" } });
+    expect(two).toMatchObject({ ok: true, env: (one as { env: object }).env });
+    expect(readdirSync(path.join(data, "cache")).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("three jobs on one key still start one build", async () => {
+    writeFileSync(path.join(dir, "delay"), "1");
+    const input = { approved: true, sha: SHA, source: flake() };
+    const all = await Promise.all([step().prepare(input), step().prepare(input), step().prepare(input)]);
+    expect(all.every((result) => result.ok)).toBe(true);
+    expect(devCalls()).toHaveLength(1);
+  });
+
+  it("jobs on different keys build at the same time", async () => {
+    writeFileSync(path.join(dir, "delay"), "1");
+    const started = Date.now();
+    const [one, two] = await Promise.all([step().prepare({ approved: true, sha: SHA, source: flake() }), step().prepare({ approved: true, sha: OTHER_SHA, source: flake() })]);
+    expect(one).toMatchObject({ ok: true, cached: false });
+    expect(two).toMatchObject({ ok: true, cached: false });
+    expect(devCalls()).toHaveLength(2);
+    expect(Date.now() - started).toBeLessThan(1900);
+  });
+
+  it("a failed build is shared by the jobs that waited for it, and the next job tries again", async () => {
+    writeFileSync(path.join(dir, "delay"), "1");
+    writeFileSync(path.join(dir, "fail"), "");
+    const input = { approved: true, sha: SHA, source: flake() };
+    const failed = await Promise.all([step().prepare(input), step().prepare(input)]);
+    expect(failed).toEqual([{ ok: false, skip: "nix_failed" }, { ok: false, skip: "nix_failed" }]);
+    expect(devCalls()).toHaveLength(1);
+    rmSync(path.join(dir, "fail"));
+    rmSync(path.join(dir, "delay"));
+    expect(await step().prepare(input)).toMatchObject({ ok: true, cached: false });
+    expect(devCalls()).toHaveLength(2);
+  });
+});
+
