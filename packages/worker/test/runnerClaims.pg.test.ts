@@ -110,7 +110,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(await row(id)).toMatchObject({ status: "running", runner_id: runner });
       await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
       const moved = await pending({ mode: "runner_verified" });
-      const second = await claim();
+      const second = await claim(await newRunner()); // the first runner still holds its job, and one declaring no capacity holds one at a time
       expect(second).toMatchObject({ kind: "claimed", runId: moved });
       expect(second.kind === "claimed" && second.signedJob.job.mode).toBe("verified");
     });
@@ -148,7 +148,8 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(limit).toBeGreaterThan(0);
       const ids: string[] = [];
       for (let i = 0; i <= limit; i++) ids.push(await pending({ createdAt: T0 - 9000 + i }));
-      for (let i = 0; i < limit; i++) await claimed(ids[i]!);
+      // One runner holds one job at a time when it declares no capacity, so each claim comes from its own runner.
+      for (let i = 0; i < limit; i++) expect(await claim(await newRunner()), ids[i]).toMatchObject({ kind: "claimed", runId: ids[i] });
       expect((await claim(await newRunner())).kind).toBe("idle");
       expect((await row(ids[limit]!)).status).toBe("pending");
     });
@@ -617,7 +618,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
 
   describe("limits come from one function (C21 section 8)", () => {
     it("with a figure of N concurrent jobs, the (N+1)th claim gets no run", async () => {
-      const three = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, randomBetween: (min) => min, limits: () => ({ maxConcurrentRunnerJobs: 3, maxRunWallClockMs: 7_200_000 }) });
+      const three = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => clock, randomBetween: (min) => min, limits: () => ({ maxConcurrentRunnerJobs: 3, maxConcurrentHeavyRunnerJobs: 3, maxRunWallClockMs: 7_200_000 }) });
       const ids = [await pending({ createdAt: T0 - 4000 }), await pending({ createdAt: T0 - 3000 }), await pending({ createdAt: T0 - 2000 }), await pending({ createdAt: T0 - 1000 })];
       const mine = (r: string) => three.claimRunnerRun({ accountId: A.accountId, runnerId: r });
       for (const id of ids.slice(0, 3)) expect(await mine(await newRunner()), id).toMatchObject({ kind: "claimed", runId: id });
@@ -644,13 +645,14 @@ describe("runner claim, heartbeat and events [pg]", () => {
 
       it("gives the plan's two figures, and follows the data when it changes", () => {
         const plan = runnerLimitsFor();
-        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: plan.maxConcurrentRunnerJobs, maxRunWallClockMs: plan.maxRunWallClockMs });
-        withFigures({ maxConcurrentRunnerJobs: 7, maxRunWallClockMs: 123_456 });
-        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 7, maxRunWallClockMs: 123_456 });
+        // The fixture has no heavy figure, so it reads as 1 (fail closed); one with the figure is followed.
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: plan.maxConcurrentRunnerJobs, maxConcurrentHeavyRunnerJobs: plan.maxConcurrentHeavyRunnerJobs ?? 1, maxRunWallClockMs: plan.maxRunWallClockMs });
+        withFigures({ maxConcurrentRunnerJobs: 7, maxConcurrentHeavyRunnerJobs: 3, maxRunWallClockMs: 123_456 });
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 7, maxConcurrentHeavyRunnerJobs: 3, maxRunWallClockMs: 123_456 });
       });
 
       it("with a figure of N, the (N+1)th claim of the real facade gets no run", async () => {
-        withFigures({ maxConcurrentRunnerJobs: 2 });
+        withFigures({ maxConcurrentRunnerJobs: 2, maxConcurrentHeavyRunnerJobs: 2 });
         const ids = [await pending({ createdAt: T0 - 3000 }), await pending({ createdAt: T0 - 2000 }), await pending({ createdAt: T0 - 1000 })];
         for (const id of ids.slice(0, 2)) expect(await claim(await newRunner()), id).toMatchObject({ kind: "claimed", runId: id });
         expect((await claim(await newRunner())).kind).toBe("idle");
@@ -660,7 +662,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       it("with no plan data, or none for the runner tier, nothing is handed out and the wall clock stays at the class constant", async () => {
         delete process.env.FX_PLAN_DATA;
         resetPlanDataCache();
-        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxConcurrentHeavyRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
         const id = await pending({ createdAt: T0 - 1000 });
         expect((await claim(await newRunner())).kind).toBe("idle");
         expect((await row(id)).status).toBe("pending");
@@ -668,7 +670,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
         delete data.runnerPlan;
         process.env.FX_PLAN_DATA = JSON.stringify(data);
         resetPlanDataCache();
-        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
+        expect(runnerLimits(A.accountId)).toEqual({ maxConcurrentRunnerJobs: 0, maxConcurrentHeavyRunnerJobs: 0, maxRunWallClockMs: RUNNER_MAX_RUN_WALL_CLOCK_MS });
       });
     });
 
@@ -677,7 +679,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
       const g = await claimed(id);
       const started = (await row(id)).started_at.getTime();
       await admin.query("UPDATE agent_runs SET lease_expires_at = to_timestamp($2 / 1000.0) WHERE id = $1", [id, started + 3 * 3_600_000]);
-      const short = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => started + 600_001, limits: () => ({ maxConcurrentRunnerJobs: 1, maxRunWallClockMs: 600_000 }) });
+      const short = createRunnerClaimFacade(writerPool, { visibility: { visibility: async () => "private" }, now: () => started + 600_001, limits: () => ({ maxConcurrentRunnerJobs: 2, maxConcurrentHeavyRunnerJobs: 2, maxRunWallClockMs: 600_000 }) });
       expect(await short.heartbeatRunnerRun({ accountId: A.accountId, runnerId: runner, runId: id, leaseGeneration: g })).toEqual({ verdict: "wall_clock", reason: "wall_clock_limit" });
       clock = started + 600_001;
       expect(await hb(id, g)).toMatchObject({ verdict: "ok" });

@@ -3,11 +3,14 @@ import type { Pool, PoolClient } from "pg";
 import {
   CLAIM_IDLE_RETRY_AFTER_SECONDS,
   CLAIM_QUEUED_RETRY_AFTER_SECONDS,
+  LIGHT_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
   RUNNER_LEASE_SECONDS,
   SignedJobSchema,
   canonicalJson,
+  capacityFreeSlots,
   redactDeep,
+  type ClaimCapacity,
   type LocalOnlyEvent,
   type RunEndedReason,
   type SignedJob,
@@ -40,6 +43,11 @@ const CLAIM_CANDIDATES = 5;
 export interface ClaimRunnerRunInput {
   accountId: string;
   runnerId: string;
+  /**
+   * What the runner declared on this claim (D#6 C43-2b). The claim hands it a run only for a class with a free slot, `limit - in_use`
+   * (never below 0), and holds it to the ceilings. Absent counts as one job in total, any class (an older runner).
+   */
+  capacity?: ClaimCapacity;
 }
 
 export type ClaimRunnerRunResult =
@@ -130,8 +138,22 @@ export interface RunnerClaimDeps {
 
 interface CandidateRow {
   id: string;
+  role: string;
   dispatch_repo_id: string;
   job_signed: unknown;
+}
+
+/** The jobs a runner holds as the cloud counts them, per class. */
+interface RunningByClass {
+  light: number;
+  heavy: number;
+}
+
+/** Free slots for one claim: the declared capacity when there is one, else one job in total in any class (an older runner). */
+function freeSlotsFor(capacity: ClaimCapacity | undefined, running: RunningByClass): { light: number; heavy: number; total: number } {
+  if (capacity) return capacityFreeSlots(capacity, running);
+  const free = Math.max(0, 1 - running.light - running.heavy);
+  return { light: free, heavy: free, total: free };
 }
 
 /** What an ending event writes: the run's new status and failure reason, and whether the same transaction makes a follow-up run. */
@@ -287,13 +309,38 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
     });
   }
 
+  /** What the runner holds now, per class, counted from the rows. */
+  async function runningByClass(client: PoolClient, accountId: string, runnerId: string): Promise<RunningByClass> {
+    const { rows } = await client.query<{ light: string; heavy: string }>(
+      "SELECT count(*) FILTER (WHERE role = ANY($3::text[])) AS light, count(*) FILTER (WHERE NOT role = ANY($3::text[])) AS heavy FROM agent_runs WHERE account_id = $1 AND runner_id = $2 AND runtime = 'runner' AND status = 'running'",
+      [accountId, runnerId, LIGHT_JOB_ROLES],
+    );
+    return { light: Number(rows[0]!.light), heavy: Number(rows[0]!.heavy) };
+  }
+
   /** The claim of one candidate, in one transaction. */
-  async function claimOne(accountId: string, runnerId: string, runId: string, runner: { credential_mode: string; registered_by: string }): Promise<{ generation: number } | "at_limit" | "taken"> {
+  async function claimOne(
+    accountId: string,
+    runnerId: string,
+    candidate: { id: string; role: string },
+    runner: { credential_mode: string; registered_by: string },
+    capacity: ClaimCapacity | undefined,
+  ): Promise<{ generation: number } | "at_limit" | "heavy_limit" | "runner_full" | "taken"> {
+    const runId = candidate.id;
+    const heavy = !LIGHT_JOB_ROLES.includes(candidate.role);
     return withTenant(runnerPool, accountId, async (client) => {
-      // One claimer per account at a time, so the concurrency count below cannot be raced past its limit.
+      // One claimer per account at a time, so the counts below cannot be raced past their limits.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`runner_claim:${accountId}`]);
-      const running = await client.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running'", [accountId]);
-      if (Number(running.rows[0]!.n) >= limits(accountId).maxConcurrentRunnerJobs) return "at_limit" as const;
+      const account = await client.query<{ total: string; heavy: string }>(
+        "SELECT count(*) AS total, count(*) FILTER (WHERE NOT role = ANY($2::text[])) AS heavy FROM agent_runs WHERE account_id = $1 AND runtime = 'runner' AND status = 'running'",
+        [accountId, LIGHT_JOB_ROLES],
+      );
+      const caps = limits(accountId);
+      if (Number(account.rows[0]!.total) >= caps.maxConcurrentRunnerJobs) return "at_limit" as const;
+      if (heavy && Number(account.rows[0]!.heavy) >= caps.maxConcurrentHeavyRunnerJobs) return "heavy_limit" as const;
+      // The runner's own cap: its free slots in this run's class, counted under the same lock the account count uses.
+      const free = freeSlotsFor(capacity, await runningByClass(client, accountId, runnerId));
+      if ((heavy ? free.heavy : free.light) <= 0) return "runner_full" as const;
       const locked = await client.query<{ initiated_by: string | null; approved_by: string | null }>(
         "SELECT initiated_by, approved_by FROM agent_runs WHERE account_id = $1 AND id = $2 AND status = 'pending' AND runner_id IS NULL FOR UPDATE SKIP LOCKED",
         [accountId, runId],
@@ -346,11 +393,15 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
 
         const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);
         const tried: string[] = [];
+        let heavyBlocked = false; // the account's heavy cap was met under the lock: stop offering heavy runs this poll
         const seen = new Map<string, "private" | "public" | "unknown">();
         for (let attempt = 0; attempt < CLAIM_CANDIDATES; attempt++) {
+          // Free slots per class, from the declared capacity and the rows. No free slot, no run to offer; a class with none is left out of the query.
+          const free = freeSlotsFor(input.capacity, await withTenant(runnerPool, accountId, (client) => runningByClass(client, accountId, runnerId)));
+          if (free.total <= 0) break;
           const candidates = await withTenant(runnerPool, accountId, async (client) => {
             const { rows } = await client.query<CandidateRow>(
-              `SELECT a.id, a.dispatch_repo_id, a.job_signed
+              `SELECT a.id, a.role, a.dispatch_repo_id, a.job_signed
                  FROM agent_runs a
                  JOIN repos r ON r.account_id = a.account_id AND r.id = a.dispatch_repo_id
                  LEFT JOIN agent_runs p ON p.account_id = a.account_id AND p.id = a.parent_run_id
@@ -360,9 +411,10 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
                   AND a.id <> ALL($6::uuid[])
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
+                  AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy],
             );
             return rows;
           });
@@ -386,8 +438,12 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
             continue;
           }
 
-          const claimed = await claimOne(accountId, runnerId, candidate.id, runner);
-          if (claimed === "taken") continue;
+          const claimed = await claimOne(accountId, runnerId, candidate, runner, input.capacity);
+          if (claimed === "taken" || claimed === "runner_full") continue;
+          if (claimed === "heavy_limit") {
+            heavyBlocked = true;
+            continue;
+          }
           if (claimed === "at_limit") return idle(accountId);
           // Tells the runner sweeper when this lease ends, so its cron tick does not open the database before then (D#454 H3c's
           // marker; best effort, and an earlier marker is never pushed later). Heartbeats do not mark: a tick that connects

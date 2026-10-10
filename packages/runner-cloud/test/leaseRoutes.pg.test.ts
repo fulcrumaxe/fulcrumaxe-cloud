@@ -236,6 +236,73 @@ describe("lease routes [pg]", () => {
       });
     });
 
+    describe("the capacity a claim declares (D#6 C43-2b)", () => {
+      const cap = (light: [number, number], heavy: [number, number]) => ({ capacity: { light: { limit: light[0], in_use: light[1] }, heavy: { limit: heavy[0], in_use: heavy[1] } } });
+      const stored = async () => (await h.admin.query("SELECT declared, light_limit, heavy_limit, limited_by, updated_at FROM runner_capacity WHERE runner_id = $1", [runnerId])).rows[0] ?? null;
+      const again = () => h.admin.query("DELETE FROM runner_claim_stamps WHERE runner_id = $1", [runnerId]);
+      beforeEach(async () => {
+        await h.admin.query("DELETE FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+      });
+
+      it("hands the declared capacity to the worker and stores its two limits", async () => {
+        expect((await run(() => claimRun(deps(), req(CLAIM, cap([3, 1], [1, 0]))))).status).toBe(200);
+        expect(calls[0]!.input).toMatchObject({ accountId: A.accountId, runnerId, capacity: { light: { limit: 3, in_use: 1 }, heavy: { limit: 1, in_use: 0 } } });
+        expect(await stored()).toMatchObject({ declared: true, light_limit: 3, heavy_limit: 1 });
+      });
+
+      it("a claim without capacity reaches the worker without one and is stored as declared nothing", async () => {
+        await run(() => claimRun(deps(), req(CLAIM, cap([3, 0], [1, 0]))));
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect("capacity" in calls[1]!.input).toBe(false);
+        expect(await stored()).toMatchObject({ declared: false, light_limit: null, heavy_limit: null });
+      });
+
+      it("writes only a change: the same limits again leave updated_at alone, new limits move it", async () => {
+        await run(() => claimRun(deps(), req(CLAIM, cap([3, 0], [1, 0]))));
+        const first = (await stored()).updated_at as Date;
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, cap([3, 2], [1, 1])))); // only in_use differs
+        expect((await stored()).updated_at).toEqual(first);
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, cap([2, 0], [1, 0]))));
+        expect(await stored()).toMatchObject({ light_limit: 2 });
+        expect((await stored()).updated_at.getTime()).toBeGreaterThanOrEqual(first.getTime());
+      });
+
+      it("refuses a figure above the ceilings or not whole (400) and stores nothing", async () => {
+        for (const bad of [cap([9, 0], [1, 0]), cap([3, 0], [5, 0]), cap([3.5, 0], [1, 0]), cap([-1, 0], [1, 0]), { capacity: { light: { limit: 1, in_use: 0 } } }]) {
+          await again();
+          expect((await run(() => claimRun(deps(), req(CLAIM, bad)))).status, JSON.stringify(bad)).toBe(400);
+        }
+        expect(await stored()).toBeNull();
+        expect(calls).toEqual([]);
+      });
+
+      it("stores the cause a claim gives for its low limit, accepts null and absence, and refuses a value outside the set (400)", async () => {
+        const withCause = (limited_by: unknown) => ({ capacity: { ...cap([1, 0], [1, 0]).capacity, limited_by } });
+        await run(() => claimRun(deps(), req(CLAIM, withCause("memory"))));
+        expect(await stored()).toMatchObject({ limited_by: "memory" });
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, withCause(null))));
+        expect(await stored()).toMatchObject({ limited_by: null });
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, withCause("memory"))));
+        await again();
+        await run(() => claimRun(deps(), req(CLAIM, cap([1, 0], [1, 0])))); // absent clears it
+        expect(await stored()).toMatchObject({ limited_by: null });
+        for (const bad of ["Memory", "gpu", "", 3]) {
+          await again();
+          expect((await run(() => claimRun(deps(), req(CLAIM, withCause(bad))))).status, String(bad)).toBe(400);
+        }
+      });
+
+      it("a status poll records nothing", async () => {
+        await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "bwrap_missing", ...cap([3, 0], [1, 0]) })));
+        expect(await stored()).toBeNull();
+      });
+    });
+
     it("takes no body: a field is 400", async () => {
       expect((await run(() => claimRun(deps(), req(CLAIM, { account_id: A.accountId })))).status).toBe(400);
       expect(calls).toEqual([]);

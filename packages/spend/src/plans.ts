@@ -108,6 +108,8 @@ export function foregroundBudgetUsd(plan: PlanId): number {
 export interface RunnerLimits {
   maxRunners: number;
   maxConcurrentRunnerJobs: number;
+  /** D#6 C43-2b: of those, how many may be heavy. Absent in data that predates it; the claim then allows 1. */
+  maxConcurrentHeavyRunnerJobs?: number;
   runsPerDay: number;
   maxRunWallClockMs: number;
   fullClonesPerRepoPerDay: number;

@@ -26,7 +26,7 @@ export {
   type LocalOnlyAllowlistEntry,
 } from "./localOnlyGithub.js";
 export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
-export { RUNNER_OFFLINE_AFTER_SECONDS, RUNNER_STATES, RUN_WAIT_REASONS, classifyRunner, getRunWaitReason, getRunnerStates, listRunners, waitReasonOf, type RawRun, type RunWaitReason, type RunnerFacts, type RunnerRow, type RunnerState } from "./readModel.js";
+export { RUNNER_OFFLINE_AFTER_SECONDS, RUNNER_STATES, RUN_WAIT_REASONS, capacityOf, classifyRunner, getRunWait, getRunWaitReason, getRunnerStates, listRunners, loadLabel, waitReasonOf, type RawRun, type RunWaitReason, type RunnerCapacity, type RunnerFacts, type RunnerRow, type RunnerRunning, type RunnerState } from "./readModel.js";
 export { approveRun } from "./approvals.js";
 export { APPROVALS_LIMIT, listApprovals, type ApprovalEntry } from "./approvalsList.js";
 export { setPlanConsent } from "./planConsent.js";

@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { MAX_CREATED_SKEW_SECONDS, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { MAX_CREATED_SKEW_SECONDS, type ClaimCapacity, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 
@@ -112,7 +112,7 @@ export type FailRunnerLeases = (input: { accountId: string; runnerId: string; re
  * package cannot import: the worker depends on it). `accountId` and `runnerId` are always the verified runner's.
  */
 export interface RunnerLeaseOps {
-  claimRunnerRun(input: { accountId: string; runnerId: string }): Promise<
+  claimRunnerRun(input: { accountId: string; runnerId: string; capacity?: ClaimCapacity }): Promise<
     { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number } | { kind: "idle"; retryAfter: number }
   >;
   heartbeatRunnerRun(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<

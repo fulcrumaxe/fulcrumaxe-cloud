@@ -223,8 +223,32 @@ export type SandboxUnavailableReason = z.infer<typeof SandboxUnavailableReason>;
 export const MAX_LIGHT_CAPACITY = 8;
 export const MAX_HEAVY_CAPACITY = 4;
 const classLoad = (max: number) => z.object({ limit: z.number().int().min(0).max(max), in_use: z.number().int().min(0).max(max) }).strict();
-export const ClaimCapacity = z.object({ light: classLoad(MAX_LIGHT_CAPACITY), heavy: classLoad(MAX_HEAVY_CAPACITY) }).strict();
+/**
+ * Why a runner's limit sits below what it could hold, so a run that waits for a slot can say so. Closed. Optional and nullable: a runner
+ * that sends none (an older one, or one with nothing holding it back) leaves the wait unexplained.
+ */
+export const LIMITED_BY = ["memory", "cpu", "disk", "paused", "ceiling"] as const;
+export const LimitedBy = z.enum(LIMITED_BY);
+export type LimitedBy = z.infer<typeof LimitedBy>;
+export const ClaimCapacity = z.object({ light: classLoad(MAX_LIGHT_CAPACITY), heavy: classLoad(MAX_HEAVY_CAPACITY), limited_by: LimitedBy.nullable().optional() }).strict();
 export type ClaimCapacity = z.infer<typeof ClaimCapacity>;
+
+/** The most jobs a runner may hold in all, light and heavy together. The class maxima above are each bounded by it, not added to it. */
+export const MAX_TOTAL_CAPACITY = 8;
+
+/**
+ * D#6 C43-2b: what the cloud holds a runner to on one claim. The class limits it declared, kept inside the ceilings (light 8, heavy 4;
+ * together at most 8 held), and the free slots per class: `limit - in_use`, never below 0. `in_use` is the larger of what the runner says it holds and
+ * what the cloud counts as running for it (`running`), so neither side's lag can open a slot the other has filled.
+ */
+export function capacityFreeSlots(capacity: ClaimCapacity, running: { light: number; heavy: number }): { light: number; heavy: number; total: number } {
+  const light = Math.min(capacity.light.limit, MAX_LIGHT_CAPACITY);
+  const heavy = Math.min(capacity.heavy.limit, MAX_HEAVY_CAPACITY);
+  const freeLight = Math.max(0, light - Math.max(capacity.light.in_use, running.light));
+  const freeHeavy = Math.max(0, heavy - Math.max(capacity.heavy.in_use, running.heavy));
+  const headroom = Math.max(0, MAX_TOTAL_CAPACITY - Math.max(capacity.light.in_use + capacity.heavy.in_use, running.light + running.heavy));
+  return { light: Math.min(freeLight, headroom), heavy: Math.min(freeHeavy, headroom), total: Math.min(freeLight + freeHeavy, headroom) };
+}
 
 export const ClaimMessage = z.object({ sandbox_unavailable: SandboxUnavailableReason.optional(), capacity: ClaimCapacity.optional() }).strict();
 

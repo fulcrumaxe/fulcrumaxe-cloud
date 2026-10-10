@@ -49,6 +49,8 @@ const runnerPlanSchema = z
       .object({
         maxRunners: count,
         maxConcurrentRunnerJobs: count,
+        /** D#6 C43-2b: how many of those may be heavy (builds and full test runs). Optional: data that predates it loads, and the claim reads a missing figure as 1 (fail closed). */
+        maxConcurrentHeavyRunnerJobs: count.optional(),
         runsPerDay: count,
         maxRunWallClockMs: count,
         fullClonesPerRepoPerDay: count,

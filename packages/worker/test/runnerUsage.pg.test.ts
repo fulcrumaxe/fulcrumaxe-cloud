@@ -123,8 +123,9 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       const b = await pending({ createdAt: T0 - 8000 });
       const ga = await claimed(a);
       await send(a, ga, [usageEvent(0, { input: 4000, output: 100 })]);
-      const gb = await claimed(b);
-      await send(b, gb, [usageEvent(0, { input: 4000, output: 100, usd: 1e9 })]);
+      const second = await newRunner(); // a runner that declares no capacity holds one job at a time
+      const gb = await claimed(b, second);
+      await send(b, gb, [usageEvent(0, { input: 4000, output: 100, usd: 1e9 })], second);
       expect(Number((await usageRow(a)).api_equivalent_usd)).toBe(Number((await usageRow(b)).api_equivalent_usd));
     });
 
@@ -467,8 +468,9 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
       expect((await getUsage({ pool: appPool, principal: principal() })).own_plan_api_equivalent_usd).toBe(0);
       expect((await getWorkItem({ pool: appPool, principal: principal() }, A.workItemId)).own_plan_api_equivalent_usd).toBe(0);
       const priced = await pending({ workItem: true });
-      const g2 = await claimed(priced);
-      await send(priced, g2, [usageEvent(0, { input: 1_000_000, output: 0 })]);
+      const second = await newRunner();
+      const g2 = await claimed(priced, second);
+      await send(priced, g2, [usageEvent(0, { input: 1_000_000, output: 0 })], second);
       const want = computeUsd(rate(), { inputTokens: 1_000_000, outputTokens: 0 });
       expect((await getUsage({ pool: appPool, principal: principal() })).own_plan_api_equivalent_usd).toBe(want);
       const B = await seedAccount(admin, randomUUID());

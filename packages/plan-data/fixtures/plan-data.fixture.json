@@ -49,7 +49,7 @@
   "runnerPlan": {
     "foreground": { "kind": "flat", "usdPerMonth": 6 },
     "background": { "kind": "flat", "usdPerMonth": 0 },
-    "limits": { "maxRunners": 3, "maxConcurrentRunnerJobs": 2, "runsPerDay": 7, "maxRunWallClockMs": 5400000, "fullClonesPerRepoPerDay": 4, "previews": false },
+    "limits": { "maxRunners": 3, "maxConcurrentRunnerJobs": 2, "maxConcurrentHeavyRunnerJobs": 2, "runsPerDay": 7, "maxRunWallClockMs": 5400000, "fullClonesPerRepoPerDay": 4, "previews": false },
     "provisional": true,
     "source": "fixture"
   },
