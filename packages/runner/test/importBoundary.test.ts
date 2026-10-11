@@ -52,6 +52,8 @@ const FORBIDDEN_MODULE_FILES = new Set([
   // D#2 H14c-2: the real `SandboxPort` implements sandboxPort.ts and
   // reuses fakeSandbox.ts's env assertion -- the same internal edges.
   "vercelSandboxPort.ts",
+  // D#6 C44-6b: the install phase's fixed scripts and env; it imports sandboxEnv.ts's CA variables and is used only by the real port.
+  "depsInstall.ts",
   // D#66 correction C3: githubForwardConfig.ts imports
   // STRICT_HOSTNAME_RE/RESERVED_FORWARD_HOST_NAMES from networkPolicy.ts
   // rather than keeping a pinned duplicate. Its only consumers are

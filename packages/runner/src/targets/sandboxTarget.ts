@@ -48,6 +48,8 @@ import { pauseQueuedRuns, recordLimitExtended, writeRunStatus } from "../runStat
 import type { ExtensionPolicy, ExtensionPolicyInput } from "../runLimitDecision.js";
 import { BACKENDS } from "../backends.js";
 import { buildSandboxEnv } from "../sandboxEnv.js";
+import { registryOnly } from "../depsInstall.js";
+import type { NetworkPolicyRule } from "../networkPolicy.js";
 import { isPersistentRole, retentionPolicyFor, sandboxNameFor } from "../sandboxNaming.js";
 import {
   SandboxBusyError,
@@ -376,7 +378,7 @@ export class SandboxTarget implements ExecutionTarget {
     // model host's header transform BEFORE any sandbox exists, so a tenant
     // with no usable key is refused with nothing created and nothing to
     // clean up.
-    const { networkPolicyRules, env } = await this.buildRunMaterials(run, payerAccountId);
+    const { networkPolicyRules, env, installPolicy } = await this.buildRunMaterials(run, payerAccountId);
 
     await this.markRequested(run, sandboxName);
     let handle: SandboxHandle;
@@ -464,6 +466,8 @@ export class SandboxTarget implements ExecutionTarget {
       ...(run.cloneRepo && { clone: run.cloneRepo }),
       capUsd: perSpawnCapUsd(run),
       networkPolicy: networkPolicyRules,
+      installPolicy,
+      onInstall: onInstallOf(),
       env,
       ...this.extensionOf(run, bk),
       onModelCalls: (n) => (bk.meteredModelCalls += n),
@@ -651,7 +655,7 @@ export class SandboxTarget implements ExecutionTarget {
     const handle: SandboxHandle = { runId: run.id, sandboxName };
     bk.handle = handle;
 
-    const { networkPolicyRules, env } = await this.buildRunMaterials(run, payerAccountId);
+    const { networkPolicyRules, env, installPolicy } = await this.buildRunMaterials(run, payerAccountId);
     const { onEvent, onStage, getSessionId } = await this.buildMeteredOnEvent(run, payerAccountId, handle, bk);
 
     let startResult: StartDetachedResult;
@@ -668,6 +672,8 @@ export class SandboxTarget implements ExecutionTarget {
         workdir: run.workdir,
         capUsd: perSpawnCapUsd(run),
         networkPolicy: networkPolicyRules,
+        installPolicy,
+        onInstall: onInstallOf(),
         env,
         ...this.extensionOf(run, bk),
         onModelCalls: (n) => (bk.meteredModelCalls += n),
@@ -723,7 +729,7 @@ export class SandboxTarget implements ExecutionTarget {
     bk: RunBookkeeping,
   ): Promise<{
     onEvent: (event: NormalizedEvent) => Promise<void>;
-    onStage: (stage: "sandbox_ready" | "cloned") => void;
+    onStage: (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed") => void;
     getSessionId: () => string | undefined;
   }> {
     let sessionId: string | undefined;
@@ -874,19 +880,17 @@ export class SandboxTarget implements ExecutionTarget {
   private async buildRunMaterials(
     run: ExecutionRun,
     payerAccountId: string,
-  ): Promise<{ networkPolicyRules: Awaited<ReturnType<typeof buildFirewallPolicy>>; env: Record<string, string> }> {
+  ): Promise<{ networkPolicyRules: Awaited<ReturnType<typeof buildFirewallPolicy>>; env: Record<string, string>; installPolicy: () => Promise<NetworkPolicyRule[]> }> {
     // The operator exception: our own subscription, for our own accounts only. The token lives in this
     // local for the length of the policy build; the sandbox gets a placeholder and no connection row is read.
     const operatorToken = this.deps.operatorToken?.(run.accountId, payerAccountId);
     const bk = this.bookkeeping(run.id);
     if (operatorToken !== undefined) {
-      const networkPolicyRules = await buildOperatorFirewallPolicy(
-        operatorToken,
-        { role: run.role, product: run.product, phase: "run" },
-        { githubForward: this.deps.githubForward, lookup: this.deps.lookup },
-      );
+      const operatorPolicy = (phase: "run" | "install") =>
+        buildOperatorFirewallPolicy(operatorToken, { role: run.role, product: run.product, phase }, { githubForward: this.deps.githubForward, lookup: this.deps.lookup });
+      const networkPolicyRules = await operatorPolicy("run");
       bk.operatorSubscription = true;
-      return { networkPolicyRules, env: buildSandboxEnv(run.role, "operator_subscription") };
+      return { networkPolicyRules, env: buildSandboxEnv(run.role, "operator_subscription"), installPolicy: async () => registryOnly(await operatorPolicy("install")) };
     }
     bk.operatorSubscription = false;
     const { provider, encryptedKey, connectionId } = await this.deps.modelConnection.get(payerAccountId);
@@ -904,13 +908,16 @@ export class SandboxTarget implements ExecutionTarget {
         // fx-swallow-ok: the outside check is an audit; the run goes untagged rather than not at all
       }
     }
-    const networkPolicyRules = await buildFirewallPolicy(
-      this.deps.decryptTenantKey,
-      { role: run.role, product: run.product, provider, encryptedKey, keyContext: { accountId: payerAccountId, connectionId }, phase: "run", ...(reportTag !== undefined && { reportTag }) },
-      { githubForward: this.deps.githubForward, lookup: this.deps.lookup },
-    );
+    const tenantPolicy = (phase: "run" | "install") =>
+      buildFirewallPolicy(
+        this.deps.decryptTenantKey,
+        { role: run.role, product: run.product, provider, encryptedKey, keyContext: { accountId: payerAccountId, connectionId }, phase, ...(reportTag !== undefined && { reportTag }) },
+        { githubForward: this.deps.githubForward, lookup: this.deps.lookup },
+      );
+    const networkPolicyRules = await tenantPolicy("run");
     const env = buildSandboxEnv(run.role);
-    return { networkPolicyRules, env };
+    // D#6 C44-6b: built only if the workspace has a lockfile whose install is due (the port calls it then).
+    return { networkPolicyRules, env, installPolicy: async () => registryOnly(await tenantPolicy("install")) };
   }
 
   /**
@@ -1760,6 +1767,14 @@ interface SandboxState {
 }
 
 /** The per-session figures the cost tiers price: the provider's usage, with the counters and own wall time attached. */
+/** D#6 C44-6b: a failed dependency install is told to the operator (a closed stage name; the capped tail stays in the port). The run goes on: the agent was told too. */
+function onInstallOf(): (r: { outcome: "installed" | "skipped" | "failed"; exitCode?: number | null; tail?: string }) => void {
+  return (r) => {
+    if (r.outcome !== "failed") return;
+    reportError(new Error("deps_install_failed"), { stage: "run.deps_install" });
+  };
+}
+
 function figuresOf(ids: readonly string[], usage: readonly SandboxSessionUsage[], own: PersistedCounters | null | undefined): SandboxSessionFigures[] {
   const last = ids[ids.length - 1];
   return ids.map((id): SandboxSessionFigures => ({

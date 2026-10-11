@@ -38,6 +38,11 @@ describe('lineFor: fixed templates only', () => {
     expect(lineFor(STAGE_KIND, { stage: 'sandbox_ready' })).toBe('The secure sandbox is ready');
     expect(lineFor(STAGE_KIND, { stage: 'cloned' })).toBe('Repository cloned');
     expect(lineFor(STAGE_KIND, { stage: 'writing_result' })).toBe('Writing up the result');
+    expect(lineFor(STAGE_KIND, { stage: 'deps_install_failed' })).toBe('Dependencies did not install');
+    expect(lineFor(STAGE_KIND, { stage: 'deps_installed' })).toBe('Dependencies installed');
+    // An absent or unknown stage shows nothing, never null/undefined text.
+    expect(lineFor(STAGE_KIND, { stage: null })).toBeNull();
+    expect(lineFor(STAGE_KIND, { stage: 'deps_other' })).toBeNull();
     expect(lineFor(STAGE_KIND, { stage: 'something else' })).toBeNull();
     expect(lineFor(STATUS_KIND, { to: 'running' })).toBe('The run started');
     expect(lineFor(STATUS_KIND, { to: 'failed', failureReason: 'sandbox_error' })).toBeNull();

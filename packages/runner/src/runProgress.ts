@@ -12,7 +12,7 @@ import { recordAgentActivity, recordAgentActivityCapped, recordRunStage } from "
  * D#2 PREVIEW-RUNNER-EVENTS: what a run's tool use and launch become in `run_events`, for the preview's live progress view.
  *
  * Two kinds of row, both through the same tenant-scoped, redacting writer every other run event uses:
- *   - `run.stage`      { stage: 'sandbox_ready' | 'cloned' | 'writing_result' }, at most once each per run;
+ *   - `run.stage`      { stage: 'sandbox_ready' | 'cloned' | 'deps_installed' | 'deps_install_failed' | 'writing_result' }, at most once each per run;
  *   - `agent.activity` { tool: 'read' | 'list' | 'search' | 'test' | 'command', path?, pattern?, command? }.
  *
  * An activity row holds ONLY a coarse kind plus a repo-relative path or a short search term, and a value that does not
@@ -38,7 +38,7 @@ export const RUN_PROGRESS_LIMITS = {
   flushTimeoutMs: 2000,
 } as const;
 
-export type RunStage = "sandbox_ready" | "cloned" | "writing_result";
+export type RunStage = "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed" | "writing_result";
 
 export interface ProgressClock extends Timers {
   now(): number;

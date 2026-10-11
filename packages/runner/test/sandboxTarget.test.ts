@@ -128,6 +128,36 @@ describe("SandboxTarget", () => {
     expect(tagsSeen.slice(1)).toEqual([undefined, undefined]);
   });
 
+  it("D#6 C44-6b: the install-phase policy handed to the port holds package-registry rules only (tenant key and operator subscription, start and resume)", async () => {
+    const OPERATOR_TOKEN = "sk-ant-oat01-FAKE-OPERATOR-TOKEN-FOR-TEST-ONLY";
+    for (const operator of [false, true]) {
+      const harness = createSandboxTargetHarness(db.runWriterPool);
+      const port = harness.deps.sandboxPort;
+      const seen: Array<{ call: string; run: StartDetachedOptions["networkPolicy"]; install: StartDetachedOptions["installPolicy"] }> = [];
+      const spied: SandboxPort = {
+        ...port,
+        startDetached: (h, o) => (seen.push({ call: "startDetached", run: o.networkPolicy, install: o.installPolicy }), port.startDetached(h, o)),
+        resume: (h, s, p, o) => (seen.push({ call: "resume", run: o.networkPolicy, install: o.installPolicy }), port.resume(h, s, p, o)),
+      };
+      const target = new SandboxTarget({ ...harness.deps, sandboxPort: spied, ...(operator ? { operatorToken: () => OPERATOR_TOKEN } : {}) });
+      const run = await seedRun();
+      await target.admit(run, db.admin);
+      await target.dispatch(run);
+      await target.resume(run, "sess-1");
+      expect(seen.map((s) => s.call)).toEqual(["startDetached", "resume"]);
+      for (const s of seen) {
+        // The run policy does carry the model host and the proxy: the install policy must not.
+        expect(s.run.map((r) => r.purpose)).toEqual(expect.arrayContaining(["model", "github_proxy"]));
+        expect(s.install).toBeTypeOf("function");
+        const rules = await s.install!();
+        expect(rules.length).toBeGreaterThan(0);
+        expect(rules.map((r) => r.purpose), `operator=${operator} ${s.call}`).toEqual(rules.map(() => "package_registry"));
+        expect(rules.map((r) => r.host)).toContain("registry.npmjs.org");
+        for (const forbidden of s.run.filter((r) => r.purpose === "model" || r.purpose === "github_proxy")) expect(rules.map((r) => r.host)).not.toContain(forbidden.host);
+      }
+    }
+  });
+
   it("H14c-3-2d-1: the run's limits reach startDetached and resume; a run without limits passes none", async () => {
     const limits = { maxTurns: 17, maxModelCalls: 40, maxRunMs: 9 * 60_000, meteringSilenceMs: 11 * 60_000 };
     const seen: Array<{ call: "startDetached" | "resume"; limits: StartDetachedOptions["limits"]; hasKey: boolean }> = [];
