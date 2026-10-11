@@ -133,6 +133,7 @@ export type DiscussionsErrorCode =
   | "invalid_file_scope" // 422 (D#6 R4d-5a, C34): a Spec was offered without a readable list of the files it allows
   | "spec_has_file_list" // 409 (D#6 R4d-5b, C34): a Re-spec of a Spec whose newest version already has a readable file list
   | "spec_changed" // 409 (D#6 R4d-5b): the Spec's newest version is not the one a Re-spec was made from
+  | "correction_not_accepted" // 409 (D#597 CC-2b): an amendment's correction was rejected or already delivered before the version was written
   | "kind_not_buildable" // 409 (D#2 H27a): a question or project never starts a build
   | "illegal_transition"; // 409 (DS-2 PR-b): not one of D#45 S1's legal stage edges
 

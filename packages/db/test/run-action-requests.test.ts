@@ -503,6 +503,34 @@ describe('run_action_requests (0658)', () => {
     });
   });
 
+  describe('0791: amend_spec_work_item (D#597 CC-2b)', () => {
+    it('the CHECK accepts the new kind and still refuses an unknown one', async () => {
+      await expect(seedRow({ kind: 'amend_spec_work_item' })).resolves.toEqual(expect.any(String));
+      await expect(seedRow({ kind: 'amend_spec_work_items' })).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+    });
+
+    it('an owner session requests it for a work item of the account: accepted, audited, a second request returns the live action', async () => {
+      const before = await auditCount(a.accountId);
+      const first = await request(a, 'amend_spec_work_item', a.workItemId, 'as-1');
+      expect(first).toMatchObject({ state: 'accepted', replayed: false });
+      expect(await auditCount(a.accountId)).toBe(before + 1);
+      const { rows } = await admin.query('SELECT kind, target_id, principal_kind FROM run_action_requests WHERE id = $1', [first.action_id]);
+      expect(rows[0]).toEqual({ kind: 'amend_spec_work_item', target_id: a.workItemId, principal_kind: 'session' });
+      expect(await request(a, 'amend_spec_work_item', a.workItemId, 'as-2')).toMatchObject({ action_id: first.action_id, replayed: true });
+    });
+
+    it("another account's work item, a random id and a run id all raise P0002; a token is refused whatever its scope; a plain member is refused and an admin accepted", async () => {
+      for (const target of [b.workItemId, randomUUID(), a.runId]) await expect(request(a, 'amend_spec_work_item', target)).rejects.toMatchObject({ code: 'P0002' });
+      const tok = await mintToken(a, ['runs:cancel', 'read']);
+      await expect(request(a, 'amend_spec_work_item', a.workItemId, null, HASH, tok)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      const m = await seedAccount(admin, randomUUID());
+      await admin.query("UPDATE account_members SET role = 'member' WHERE account_id = $1 AND user_id = $2", [m.accountId, m.userId]);
+      await expect(request(m, 'amend_spec_work_item', m.workItemId)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await admin.query("UPDATE account_members SET role = 'admin' WHERE account_id = $1 AND user_id = $2", [m.accountId, m.userId]);
+      await expect(request(m, 'amend_spec_work_item', m.workItemId)).resolves.toMatchObject({ state: 'accepted' });
+    });
+  });
+
   describe('0708: advance_work_item', () => {
     it('the CHECK accepts the new kind and still refuses an unknown one', async () => {
       await expect(seedRow({ kind: 'advance_work_item' })).resolves.toEqual(expect.any(String));
