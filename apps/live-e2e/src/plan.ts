@@ -6,6 +6,7 @@ import type { Pack, Tier } from "./manifest.js";
 import { firstUnmetNeed, type NeedsContext } from "./needs.js";
 import { select, triggerRule, type SelectInput, type Trigger } from "./select.js";
 import type { RouteRecord, RoutingResult } from "./routing.js";
+import type { StagingOnlyTest } from "./staging-only.js";
 import { isProdSafe, targetGuard, type Target } from "./targets.js";
 
 export type PackOutcome =
@@ -23,9 +24,11 @@ export interface Plan {
   /** Every selected pack with its outcome, in pack-id order. */
   packs: PackOutcome[];
   /** Packs that will run, with what the runner needs to schedule them. */
-  selected: { id: string; tier: Tier; projects: string[]; est_usd: number; est_sandbox_min: number }[];
+  selected: { id: string; tier: Tier; projects: string[]; est_usd: number; est_sandbox_min: number; prod_safe: boolean; probes: number }[];
   skipped: { id: string; need: string }[];
   refused: { id: string; reason: string; named: boolean }[];
+  /** Tests of packs that run, left out because the target is production and they are tagged `@staging-only`. */
+  tests_skipped: { pack: string; test: string; reason: "staging-only" }[];
   /** The validated `--changed-from` range, or null when routing was not asked for. */
   changed_from: string | null;
   /** Per-file routing records (every (file, pack, glob) match); empty without `--changed-from` or on a fallback. */
@@ -41,6 +44,8 @@ export interface PlanInput extends Omit<SelectInput, "routed"> {
   routing?: RoutingResult;
   trigger?: Trigger;
   needs: NeedsContext;
+  /** Every `@staging-only` test under the packs (src/staging-only.ts); only consulted for the production target. */
+  stagingOnly?: StagingOnlyTest[];
   /**
    * The layer-2 refusal reason (`identityGuard`), when the origin was asked who it is; null when it answered as
    * staging; absent when nothing was asked (`plan` is offline). Applied to every pack that is not prod-safe.
@@ -75,6 +80,8 @@ export function buildPlan(input: PlanInput): Plan {
         projects: [...pack.projects],
         est_usd: pack.cost.est_usd,
         est_sandbox_min: pack.cost.est_sandbox_min,
+        prod_safe: isProdSafe(pack),
+        probes: pack.probes.length,
       });
     } else if (o.outcome === "SKIPPED-NEED") {
       skipped.push({ id: o.id, need: o.need });
@@ -93,6 +100,10 @@ export function buildPlan(input: PlanInput): Plan {
     selected,
     skipped,
     refused,
+    tests_skipped:
+      input.target.name === "production"
+        ? (input.stagingOnly ?? []).filter((t) => selected.some((s) => s.id === t.pack)).map((t) => ({ ...t, reason: "staging-only" as const }))
+        : [],
     changed_from: input.routing?.changed_from ?? null,
     routing: input.routing?.files ?? [],
     routing_fallback: input.routing?.fallback ?? null,
