@@ -27,7 +27,12 @@ export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest)
   try {
     recorded = await withRunnerSession(deps.appUserPool, runner, async (client) => {
       const { rows } = await client.query<{ ok: boolean }>("SELECT runner_hello_record($1, $2, $3) AS ok", [message.protocol_version, message.binary_version, message.isolation]);
-      return rows[0]?.ok === true;
+      if (rows[0]?.ok !== true) return false;
+      // D#605 FL-2: the machine's facts, when this runner sent them, through the definer that names the runner from the session. Same transaction as
+      // the hello: a refusal rolls both back. No authorization path (request verification, the ticket, the job signer) reads them back.
+      const facts = message.facts;
+      if (facts !== undefined) await client.query("SELECT runner_facts_record($1, $2, $3::int, $4::int, $5)", [facts.os, facts.arch, facts.mem_gb_bucket, facts.cpus, facts.sandbox_engine]);
+      return true;
     });
   } catch (error) {
     // Revoked, or its account suspended, between the verification and here: the same answer as any later request.

@@ -4,12 +4,13 @@
  * list is never sent and a reply it does not describe is never believed: it is an error with a closed code.
  */
 import {
-  ClaimMessage, ClaimRateLimitedReply, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
+  ClaimMessage, ClaimRateLimitedReply, HelloMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type ClaimCapacity, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
 
+export const HELLO_PATH = "/api/runner/hello";
 export const CLAIM_PATH = "/api/runner/claim";
 export const HEARTBEAT_PATH = "/api/runner/heartbeat";
 export const eventsPath = (runId: string): string => `/api/runner/runs/${runId}/events`;
@@ -47,6 +48,8 @@ export interface DoneInput {
 }
 
 export interface RunnerClient {
+  /** D#605 FL-2: says what this build and machine are. Best effort: the caller keeps going on any answer, and a cloud that predates `facts` answers 400. */
+  hello(message: HelloMessage): Promise<{ kind: "ok" } | CallError>;
   /**
    * Asks for a run. With `sandboxUnavailable` it is the status poll of a runner that cannot sandbox a job (C16 section 1.3): the reply is
    * `retry_after` only, and a reply that carries a job is an error, never a claim, so nothing a misbehaving cloud sends can be run.
@@ -83,6 +86,11 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
   };
 
   return {
+    async hello(message) {
+      const reply = await send(HELLO_PATH, HelloMessage.parse(message));
+      return reply?.status === 200 ? { kind: "ok" } : fail(reply);
+    },
+
     async claim(sandboxUnavailable, capacity) {
       // A status poll (closed sandbox) takes no job, so it declares no capacity; every other claim says what the runner could take now (D#6 C43-4).
       const reply = await send(CLAIM_PATH, ClaimMessage.parse(sandboxUnavailable !== undefined ? { sandbox_unavailable: sandboxUnavailable } : capacity === undefined ? {} : { capacity }));
