@@ -128,8 +128,12 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: bash scripts/ci/publish-denylist.sh "origin/${BASE_REF}"
 
+  # Not on a push to the PRIVATE repository: since the two-plane cutover each parity sync lands on private main as
+  # a push, and that run would only repeat what the public repository already tested for the same tree (and
+  # trip private-only doc checks whose doc PR merges minutes later). Private pull requests (overlay changes)
+  # and every public run, push to main included, are unaffected.
   check:
-    if: vars.CI_DISABLED != 'true'
+    if: vars.CI_DISABLED != 'true' && !(github.event_name == 'push' && github.event.repository.private == true)
     runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
     permissions:
       contents: read
