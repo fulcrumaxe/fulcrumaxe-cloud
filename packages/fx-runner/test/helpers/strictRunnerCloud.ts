@@ -1,12 +1,12 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
-  CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
+  CLAIM_IDLE_RETRY_AFTER_SECONDS, ClaimMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage, HelloMessage,
   HeartbeatReply, SeqNotIncreasingReply, StopReply, jwkThumbprint, verifyRunnerRequest, type Ed25519Jwk, type LocalOnlyEvent, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 
 /**
- * A stand-in for the cloud's claim, heartbeat, events and done routes (runner-cloud's claim, heartbeat and ingestEvents; `done`
+ * A stand-in for the cloud's hello, claim, heartbeat, events and done routes (runner-cloud's claim, heartbeat and ingestEvents; `done`
  * is not built yet, so its half follows the reply set in runner-protocol/src/replies.ts alone), reached over real HTTP. It
  * refuses what the protocol does not allow, as the real routes do: only POST on the four paths (a run id in the path must be a
  * uuid and equal the body's); the 256 KiB body cap; the RFC 9421 signature, checked with the protocol's `verifyRunnerRequest`
@@ -44,7 +44,7 @@ export interface StrictRunnerCloud {
   /** Queues a job for the next claim. */
   enqueue(signed: SignedJob): void;
   /** Forced replies per route name, consumed in order, before any real handling. */
-  force: Record<"claim" | "heartbeat" | "events" | "done", Forced[]>;
+  force: Record<"hello" | "claim" | "heartbeat" | "events" | "done", Forced[]>;
   runs: Map<string, RunState>;
   /** From now on this run's heartbeat, events and done answer the stop. */
   stopRun(runId: string, reason: StopReason): void;
@@ -83,7 +83,7 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       jwks.set(jwkThumbprint(jwk), jwk);
     },
     enqueue: (signed) => void queue.push(signed),
-    force: { claim: [], heartbeat: [], events: [], done: [] },
+    force: { hello: [], claim: [], heartbeat: [], events: [], done: [] },
     runs: new Map(),
     stopRun(runId, reason) {
       const run = state.runs.get(runId);
@@ -101,9 +101,9 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
     const refuse = (status: number, code: string): void => send(status, { error: { code, message: code } });
     void (async () => {
       const path = req.url ?? "";
-      const match = /^\/api\/runner\/(?:(claim|heartbeat)|runs\/([^/]+)\/(events|done))$/.exec(path);
+      const match = /^\/api\/runner\/(?:(hello|claim|heartbeat)|runs\/([^/]+)\/(events|done))$/.exec(path);
       if (req.method !== "POST" || !match) return refuse(404, "not_found");
-      const route = (match[1] ?? match[3]) as "claim" | "heartbeat" | "events" | "done";
+      const route = (match[1] ?? match[3]) as "hello" | "claim" | "heartbeat" | "events" | "done";
       const pathRunId = match[2];
       if (pathRunId !== undefined && !UUID.test(pathRunId)) return refuse(404, "not_found");
       const raw = await readBody(req);
@@ -116,7 +116,7 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
         return refuse(401, "unauthorized");
       }
       if (!keys.has(verified.keyid)) return refuse(401, "unauthorized");
-      if (route !== "heartbeat") {
+      if (route !== "heartbeat" && route !== "hello") {
         if (!verified.nonce || nonces.has(verified.nonce)) return refuse(409, "nonce_reused");
         nonces.add(verified.nonce);
       }
@@ -131,9 +131,10 @@ export async function startStrictRunnerCloud(): Promise<StrictRunnerCloud> {
       const forced = state.force[route].shift();
       if (forced) return send(forced.status, forced.body, forced.headers);
 
-      const schemas = { claim: ClaimMessage, heartbeat: HeartbeatMessage, events: EventsMessage, done: DoneMessage } as const;
+      const schemas = { hello: HelloMessage, claim: ClaimMessage, heartbeat: HeartbeatMessage, events: EventsMessage, done: DoneMessage } as const;
       const message = schemas[route].safeParse(json);
       if (!message.success) return refuse(400, "invalid_message");
+      if (route === "hello") return send(200, { protocol_version: 1 });
       if (route === "claim") {
         // As the real route: a poll that names `sandbox_unavailable` takes no job, whatever is queued, and answers retry_after only.
         if ((message.data as { sandbox_unavailable?: string }).sandbox_unavailable !== undefined) {

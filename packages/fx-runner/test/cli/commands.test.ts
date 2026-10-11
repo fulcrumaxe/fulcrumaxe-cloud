@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { KEY_FILE, REGISTRATION_FILE } from "../../src/config.js";
@@ -28,8 +28,9 @@ describe("register (R4a.1)", () => {
     expect(result.code).toBe(0);
     const sent = rig.cloud.seen[0]!;
     expect(sent.path).toBe("/api/runner/register");
-    const body = JSON.parse(sent.body) as { code: string; public_key_jwk: Record<string, string> };
-    expect(Object.keys(body).sort()).toEqual(["code", "public_key_jwk"]);
+    const body = JSON.parse(sent.body) as { code: string; name: string; public_key_jwk: Record<string, string> };
+    expect(Object.keys(body).sort()).toEqual(["code", "name", "public_key_jwk"]);
+    expect(body.name).toBe("studio-mac.local");
     expect(Object.keys(body.public_key_jwk).sort()).toEqual(["crv", "kty", "x"]);
     expect(sent.body).not.toMatch(/"d"/);
     expect(sent.body).not.toMatch(/PRIVATE|BEGIN/);
@@ -38,6 +39,27 @@ describe("register (R4a.1)", () => {
     expect(secretBody.length).toBeGreaterThan(20);
     expect(result.out + result.err).not.toContain(secretBody);
     expect(JSON.stringify(sent.headers)).not.toContain(secretBody);
+  });
+
+  it("sends no name when the host name has nothing printable, and cuts one over 64 characters (D#605 FL-2)", async () => {
+    rig.cloud.codeModes.set(CODE, "api_key");
+    const attempt = (hostname: string) => rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { hostname });
+    expect((await attempt("​\u0007 ")).code).toBe(0);
+    expect(JSON.parse(rig.cloud.seen[0]!.body)).not.toHaveProperty("name");
+    rmSync(rig.dir, { recursive: true, force: true });
+    rig.cloud.validCodes.add(CODE);
+    expect((await attempt(`${"h".repeat(70)}‮`)).code).toBe(0);
+    expect((JSON.parse(rig.cloud.seen[1]!.body) as { name: string }).name).toBe("h".repeat(64));
+  });
+
+  it("says the cloud is too old, not that fx-runner is, when a cloud that predates names refuses the register", async () => {
+    rig.cloud.codeModes.set(CODE, "api_key");
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ error: { code: "invalid_message", message: "invalid_message" } }), { status: 400, headers: { "content-type": "application/json" } }));
+    const result = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn: fetchFn as unknown as typeof fetch });
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("this cloud does not support runner names yet; ask your admin to update");
+    expect(result.err).not.toContain("update fx-runner");
+    expect(existsSync(path.join(rig.dir, REGISTRATION_FILE))).toBe(false);
   });
 
   it("the signature covers the method, the full URI and the body digest, and the cloud verified it", async () => {

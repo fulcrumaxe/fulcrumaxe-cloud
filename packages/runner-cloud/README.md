@@ -168,6 +168,15 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   (`agent_run_list_runner_runs_owing_notice`, owned by the NOLOGIN role `runner_notice_lister`), so runs that have both
   notices cannot hide newer ones. The cron keeps the earliest due time of the notices and the queue time as its marker.
 
+## Facts on `hello` and the name on `register` (D#605 FL-2)
+
+- `hello` may carry `facts` (os, arch, memory bucket, cpu count, sandbox engine: closed enums and bounded integers). They are written by
+  `runner_facts_record` (0783), which names the runner from `app.runner_id`, in the same transaction as the hello. `register` may carry
+  `name` (1 to 64 printable characters), written by `runner_name_initial` (0789), which accepts only a runner this very transaction created and
+  never overwrites a name. Both fields are optional and both replies are unchanged, so an older runner keeps working; a runner that sends them to a
+  cloud that predates them is refused as an unknown key, which is why the cloud deploys first.
+- Neither value is read by request verification, the git ticket route or the job signer (a test follows their import graphs).
+
 ## Provisioning tokens (D#605 FL-6)
 
 A machine with no browser registers with a token an owner or admin minted in the workspace, through the same `POST /api/runner/register` as a one-time code. The prefix picks the kind of secret: `fxrr_` is the code of `registrationCodes.ts`, `fxrp_` is a provisioning token (`provisioningTokens.ts`). Both are 40 random characters of 62, and only the SHA-256 of either is stored.
