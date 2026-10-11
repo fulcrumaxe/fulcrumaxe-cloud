@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "template": "fx-agent",
+  "base_image": "docker.io/library/ubuntu@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78",
+  "arches": ["amd64", "arm64"],
+  "kernel": {
+    "version": "6.1.155",
+    "note": "Firecracker CI guest kernel: USER_NS, PID_NS, NET_NS, VIRTIO_VSOCKETS, EXT4 and DEVTMPFS are built in",
+    "amd64": {
+      "url": "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.14/x86_64/vmlinux-6.1.155",
+      "sha256": "e41c7048bd2475e7e788153823fcb9166a7e0b78c4c443bd6446d015fa735f53"
+    },
+    "arm64": {
+      "url": "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.14/aarch64/vmlinux-6.1.155",
+      "sha256": "61baeae1ac6197be4fc5c71fa78df266acdc33c54570290d2f611c2b42c105be"
+    }
+  },
+  "firecracker": {
+    "version": "1.16.2",
+    "amd64": {
+      "url": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.2/firecracker-v1.16.2-x86_64.tgz",
+      "sha256": "32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda"
+    },
+    "arm64": {
+      "url": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.2/firecracker-v1.16.2-aarch64.tgz",
+      "sha256": "751365040ca3dde7616c5a1d97cc1304674fae469ce02993104eab22f5961950"
+    }
+  },
+  "artifacts": {
+    "node": {
+      "version": "24.21.0",
+      "amd64": {
+        "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz",
+        "sha256": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6"
+      },
+      "arm64": {
+        "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz",
+        "sha256": "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2"
+      }
+    },
+    "claude": {
+      "version": "2.1.296",
+      "amd64": {
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.296/linux-x64/claude",
+        "sha256": "24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de"
+      },
+      "arm64": {
+        "url": "https://downloads.claude.ai/claude-code-releases/2.1.296/linux-arm64/claude",
+        "sha256": "f1f6e96e0d8342b9dbf41d7e88255397a6a52ce3d8736ad6a4c6b59c9b62fefa"
+      }
+    },
+    "pnpm": {
+      "version": "11.27.0",
+      "amd64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-linux-x64.tar.gz",
+        "sha256": "14ed04e631e4563abf3570dda1a365316683149a482b741a2db37e495f6b9cdb"
+      },
+      "arm64": {
+        "url": "https://github.com/pnpm/pnpm/releases/download/v11.27.0/pnpm-linux-arm64.tar.gz",
+        "sha256": "1f3c5dbdfe20b011ea86950b4fd61b5918cbde874c099032fe9064f7a53816bf"
+      }
+    }
+  },
+  "tools": {
+    "crane": {
+      "version": "0.22.1",
+      "url": "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz",
+      "sha256": "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0"
+    },
+    "e2fsprogs": {
+      "version": "1.47.2",
+      "url": "https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.2/e2fsprogs-1.47.2.tar.gz",
+      "sha256": "7a959221c1b1cc6e28b7d7a4e204a2ffd8ec6d8a2de4461c482b64c5f4463cca"
+    }
+  },
+  "containers": {
+    "registry": "docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+    "binfmt": "docker.io/tonistiigi/binfmt@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6",
+    "buildkit": "docker.io/moby/buildkit@sha256:ddd1ca44b21eda906e81ab14a3d467fa6c39cd73b9a39df1196210edcb8db59e"
+  },
+  "rootfs": {
+    "source_date_epoch": 1700000000,
+    "fs_uuid": "4c1f0a52-9b7e-4d63-8a1d-5e2c7b9f3a10",
+    "hash_seed": "b8d3e1a4-27c6-4f95-9e08-61a7d4c2f3b5",
+    "label": "fxroot"
+  }
+}

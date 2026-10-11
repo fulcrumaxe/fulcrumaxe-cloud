@@ -14,6 +14,7 @@ import { API_KEY_MAX_BYTES } from "../src/credentials.js";
 import { readSecret } from "../src/secretInput.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
+import { vmBuildHost } from "../scripts/vm-host.mjs";
 
 const engine = createClaudeKit(spawn);
 const shellVars = [];
@@ -92,6 +93,7 @@ runCli({
     },
   },
   doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
+  vmHost: vmBuildHost,
   serviceHost: {
     home: process.env.HOME,
     platform: process.platform,
