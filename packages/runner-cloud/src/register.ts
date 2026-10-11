@@ -48,6 +48,9 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
       const maxRunners = plan === RUNNER_PLAN ? maxRunnersOf(deps) : null;
       const result = await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
       const id = result.rows[0]!.id;
+      // D#605 FL-2: the runner's own name, as the default name of the row this registration just made. The definer accepts only a runner created by
+      // this very transaction (migration 0789), so it is never a rename. No name: nothing is written, and the row reads as an unnamed runner.
+      if (message.name !== undefined) await client.query("SELECT runner_name_initial($1::uuid, $2)", [id, message.name]);
       const row = await client.query<{ credential_mode: string }>("SELECT credential_mode FROM runners WHERE id = $1 AND account_id = $2", [id, accountId]);
       // Parsed inside the transaction: a reply that does not fit the protocol rolls the registration back.
       return RegisterResponse.parse({ runner_id: id, account_id: accountId, credential_mode: row.rows[0]?.credential_mode });

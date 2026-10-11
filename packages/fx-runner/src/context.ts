@@ -13,6 +13,8 @@ export interface CommandContext {
   bypassFile?: string | undefined;
   /** The user id the program runs as, looked up by the caller: the API key file and the directories above it must belong to it. */
   uid?: number | undefined;
+  /** The machine's host name, looked up by the caller; `os.hostname()` when left out. Tests set it. */
+  hostname?: string | undefined;
 }
 
 /** The flags a command was given, by name without the leading dashes. A flag with no value is `true`. */

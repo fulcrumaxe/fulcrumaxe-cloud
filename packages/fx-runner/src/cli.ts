@@ -34,6 +34,8 @@ export interface CliIo {
   protectionBypassFile?: string | undefined;
   /** The user id the process runs as, for the owner check on that file. */
   uid?: number | undefined;
+  /** The machine's host name, looked up by the caller (`os.hostname()`); tests set it. */
+  hostname?: string | undefined;
   /** The platform and `XDG_CACHE_HOME`, looked up by name by the caller: where the runner's cache directories are, which that file must stay out of. */
   platform?: NodeJS.Platform | undefined;
   xdgCacheHome?: string | undefined;
@@ -158,6 +160,7 @@ export async function runCli(io: CliIo): Promise<number> {
       bypass: loadBypass(io.protectionBypassFile, io.uid, { home: io.home, platform: io.platform ?? "linux", xdgCacheHome: io.xdgCacheHome }),
       bypassFile: io.protectionBypassFile,
       uid: io.uid,
+      hostname: io.hostname,
     };
     // A bypass file that cannot be used stops a command that calls the cloud before any request; `doctor` reports it instead.
     if (command === "register" || command === "revoke" || command === "run") requireUsable(ctx.bypass);

@@ -203,8 +203,31 @@ export const LocalOnlyEvent = z
   });
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
+/** The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one. */
+export const CURRENT_PROTOCOL_VERSION = 1;
+
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;
+
+/**
+ * D#605 FL-2: the facts a runner reports about its machine on `hello`. Closed enums and bounded numbers, no free text. They are claims by a
+ * semi-trusted machine, used to narrow or reorder routing and never as an input to any authorization decision. The same sets are the CHECK
+ * constraints of `runner_facts` (migration 0783); a value outside them is a 400 here and could not be stored there either.
+ */
+export const RUNNER_OS = ["linux", "macos"] as const;
+export const RUNNER_ARCH = ["x64", "arm64"] as const;
+export const RUNNER_MEM_GB_BUCKETS = [4, 8, 16, 32, 64, 128] as const;
+export const RUNNER_SANDBOX_ENGINES = ["os_sandbox", "microvm"] as const;
+export const RunnerFacts = z
+  .object({
+    os: z.enum(RUNNER_OS),
+    arch: z.enum(RUNNER_ARCH),
+    mem_gb_bucket: z.union([z.literal(4), z.literal(8), z.literal(16), z.literal(32), z.literal(64), z.literal(128)]),
+    cpus: safeInt.min(1).max(256),
+    sandbox_engine: z.enum(RUNNER_SANDBOX_ENGINES),
+  })
+  .strict();
+export type RunnerFacts = z.infer<typeof RunnerFacts>;
 
 export const HelloMessage = z
   .object({
@@ -214,8 +237,11 @@ export const HelloMessage = z
     // Whether a model login is present. Never an email, organisation or account name.
     model_auth_present: z.boolean(),
     isolation: IsolationTier,
+    // D#605 FL-2: what this machine is, read from the operating system. Optional: a runner built before this sends none, and the cloud accepts both.
+    facts: RunnerFacts.optional(),
   })
   .strict();
+export type HelloMessage = z.infer<typeof HelloMessage>;
 
 /**
  * D#6 R4a-6 (correction C16 section 1.3): why a runner's sandbox cannot start, a closed set and the only detail about it that leaves the
@@ -318,7 +344,24 @@ export const DoneMessage = z
 /** A registration code is `fxrr_` and 32 to 128 letters or digits. The cap keeps a hostile body from reaching the hash. */
 export const REGISTRATION_CODE_PATTERN = /^fxrr_[A-Za-z0-9]{32,128}$/;
 
-export const RegisterMessage = z.object({ code: z.string().max(133).regex(REGISTRATION_CODE_PATTERN), public_key_jwk: Ed25519PublicJwk }).strict();
+/** The longest runner name, in characters (code points), as in `runner_settings` (migration 0783). */
+export const RUNNER_NAME_MAX = 64;
+// The name rule of `runner_name_valid` (0783), written the same way: no control character (C0, DEL, C1), no Unicode Default_Ignorable_Code_Point
+// (soft hyphen, zero-width and bidirectional marks, variation selectors, tag characters ...), and at least one character that is none of those,
+// whitespace, or the blank braille cell, so a name cannot render as nothing. The database repeats the test; this one only gives a clean 400.
+const RUNNER_NAME_FORBIDDEN = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/u;
+const RUNNER_NAME_VISIBLE = /[^\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028-\u2029\u202f\u205f\u2800\u3000]/u;
+// No `u` flag on purpose: with it a lone surrogate is one code point and the pair test below would not see it.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/** True for a name the cloud stores: 1 to 64 printable characters, nothing invisible or controlling. Never trims or repairs. */
+export function isValidRunnerName(name: string): boolean {
+  // A lone UTF-16 surrogate cannot be written as UTF-8: the database driver would store U+FFFD in its place, which is not what was sent. Refused here, so the stored name is exactly the sent one.
+  return !LONE_SURROGATE.test(name) && [...name].length >= 1 && [...name].length <= RUNNER_NAME_MAX && !RUNNER_NAME_FORBIDDEN.test(name) && RUNNER_NAME_VISIBLE.test(name);
+}
+export const RunnerName = z.string().max(RUNNER_NAME_MAX * 2).refine(isValidRunnerName, { message: "a runner name is 1 to 64 printable characters" });
+
+// `name` (D#605 FL-2) is optional: a runner built before it sends none, and its row then reads as an unnamed runner.
+export const RegisterMessage = z.object({ code: z.string().max(133).regex(REGISTRATION_CODE_PATTERN), public_key_jwk: Ed25519PublicJwk, name: RunnerName.optional() }).strict();
 
 /**
  * The cloud's 201 reply to a registration (cloud to runner, so it is not one of `RUNNER_MESSAGES`). `account_id` and

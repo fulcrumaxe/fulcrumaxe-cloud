@@ -10,6 +10,7 @@ import { requireUsable } from "../protectionBypass.js";
 import { REGISTER_PATH, REVOKE_PATH, errorCodeOf, normaliseOrigin, refusalError, signedPost } from "../cloud.js";
 import { loadRegistration, saveRegistration, withRegisterLock } from "../config.js";
 import type { CommandContext, Flags } from "../context.js";
+import { defaultRunnerName, readHostname } from "../hostFacts.js";
 import { generateRunnerKey, saveRunnerKey, type RunnerKey } from "../keys.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -41,7 +42,9 @@ export async function registerCommand(flags: Flags, ctx: CommandContext): Promis
   const origin = normaliseOrigin(stringFlag(flags, "cloud-url"));
 
   const key = generateRunnerKey();
-  const message = RegisterMessage.safeParse({ code, public_key_jwk: key.publicJwk });
+  // D#605 FL-2: the host name is the default runner name (the person renames it in the workspace). Without a usable one the request carries no name.
+  const name = defaultRunnerName(ctx.hostname ?? readHostname());
+  const message = RegisterMessage.safeParse({ code, public_key_jwk: key.publicJwk, ...(name === undefined ? {} : { name }) });
   if (!message.success) throw new CliError("the registration code is not in the form fxrr_ followed by letters and digits", 2);
 
   // One registration per machine, whatever its mode or account: a machine that holds one cannot hold two accounts, which
@@ -59,6 +62,11 @@ export async function registerCommand(flags: Flags, ctx: CommandContext): Promis
     }
 
     const reply = await signedPost({ origin, path: REGISTER_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
+    // A cloud that predates runner names refuses the unknown `name` key as an invalid message. The name was checked against the same rule here, so
+    // that answer means the cloud is older than this runner: the fix is on the cloud's side, not a newer fx-runner.
+    if (reply.status === 400 && errorCodeOf(reply.body) === "invalid_message" && name !== undefined) {
+      throw new CliError("this cloud does not support runner names yet; ask your admin to update the cloud, then register again");
+    }
     if (reply.status !== 201) throw refusalError(reply);
     const parsed = RegisterResponse.safeParse(reply.body);
     if (!parsed.success) {

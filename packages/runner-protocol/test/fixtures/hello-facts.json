@@ -1,0 +1,1 @@
+{ "protocol_version": 1, "binary_version": "0.5.0", "model_auth_present": true, "isolation": "host_sandbox", "facts": { "os": "macos", "arch": "arm64", "mem_gb_bucket": 32, "cpus": 12, "sandbox_engine": "os_sandbox" } }

@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HelloMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../../src/cliError.js";
+import { readHostFacts } from "../../src/hostFacts.js";
+import { RUNNER_VERSION } from "../../src/version.js";
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
 import type { CommandContext } from "../../src/context.js";
@@ -149,6 +152,30 @@ describe("1. the keyring is pinned in the build", () => {
     expect(fake.spawnCount()).toBe(0);
     expect(existsSync(path.join(stateDir, "jobs"))).toBe(false);
     expect(existsSync(path.join(home, ".cache", "fx-runner", "workspaces"))).toBe(false);
+  });
+});
+
+describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () => {
+  const hellos = (): Array<{ path: string; body: unknown }> => cloud.seen.filter((s) => s.path === "/api/runner/hello");
+
+  it("sends one hello before the first claim, in the strict protocol shape, with facts read from this machine", async () => {
+    const run = start();
+    await until(() => claims() >= 1);
+    expect(hellos()).toHaveLength(1);
+    expect(cloud.seen.findIndex((s) => s.path === "/api/runner/hello")).toBeLessThan(cloud.seen.findIndex((s) => s.path === "/api/runner/claim"));
+    const sent = HelloMessage.parse(hellos()[0]!.body);
+    expect(sent).toMatchObject({ protocol_version: 1, isolation: "host_sandbox", binary_version: RUNNER_VERSION });
+    expect(sent.facts).toEqual(readHostFacts());
+    expect(sent.facts).toMatchObject({ os: "linux", sandbox_engine: "os_sandbox" });
+    expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  it("keeps claiming when the cloud refuses the hello (a cloud that predates facts answers 400, an older still 404)", async () => {
+    cloud.force.hello.push({ status: 400, body: { error: { code: "invalid_message", message: "invalid_message" } } });
+    const run = start();
+    await until(() => claims() >= 1);
+    expect(hellos()).toHaveLength(1);
+    expect(await stop(run)).toMatchObject({ code: 0 });
   });
 });
 
@@ -436,7 +463,8 @@ describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)"
     const result = await stop(run);
     expect(result).toMatchObject({ code: 0 });
     expect(cloud.runs.size).toBe(0);
-    expect(cloud.seen.filter((s) => !s.path.endsWith("/claim"))).toEqual([]);
+    // Nothing but the status polls and the one hello (D#605 FL-2: the machine says what it is even when its sandbox is down); no heartbeat, events or done.
+    expect(cloud.seen.filter((s) => !s.path.endsWith("/claim") && !s.path.endsWith("/hello"))).toEqual([]);
     const said = (await run.done).out.join("\n");
     expect(said).toContain("the sandbox does not work on this machine (apparmor_userns_restricted)");
     expect(said).toContain("fx-runner doctor");
