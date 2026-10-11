@@ -20,3 +20,4 @@ export * from "./review/localReviewOptIn.js";
 export * from "./review/roundDecision.js";
 export * from "./advance/lightSpec.js";
 export * from "./advance/respec.js";
+export * from "./advance/amend.js";

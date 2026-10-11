@@ -17011,7 +17011,7 @@
       "post": {
         "operationId": "acceptCorrection",
         "summary": "Accept a proposed correction",
-        "description": "Owner or admin session only; a token is refused (403 `session_required`), including one that proposed this correction. An optional `content_hash` must equal the stored text's hash. Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note or Spec amendment stays `accepted` until a run uses it. Answers 200 with the correction.",
+        "description": "Owner or admin session only; a token is refused (403 `session_required`), including one that proposed this correction. An optional `content_hash` must equal the stored text's hash. Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note stays `accepted` until a run uses it. A Spec amendment stays `accepted` until the platform publishes the next Spec version (the old text plus the amendment under a labelled heading, with control tokens stripped); it is refused 409 `already_running` while an agent run of the item is live, and `action_not_available` outside Spec ready or Needs a person. Answers 200 with the correction.",
         "security": [
           {
             "session": []
@@ -17258,7 +17258,7 @@
             }
           },
           "503": {
-            "description": "Error `run_actions_unavailable` for a pause: nothing was decided.",
+            "description": "Error `run_actions_unavailable` for a pause or a Spec amendment: nothing was decided.",
             "content": {
               "application/json": {
                 "schema": {

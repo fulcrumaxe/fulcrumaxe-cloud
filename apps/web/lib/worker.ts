@@ -1,7 +1,7 @@
 import { waitUntil } from "@vercel/functions";
 import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type InvariantSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
 import type { SandboxReapWorker } from "@fx/reconcile";
-import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, publishRespec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
+import { buildPreviewPrompt, markBuildNeedsHuman, publishLightSpec, publishAmendment, publishRespec, runPanelForItem, runSpecForItem, startBuildForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createAppContinuationBase } from "./github/runnerPullRequest";
@@ -50,7 +50,7 @@ export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 const productionProvider: WorkerOptionsProvider = () => {
   const env = process.env;
   if (!env.VERCEL_TEAM_ID?.trim() || !env.VERCEL_PROJECT_ID?.trim()) return null;
-  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase() }, previewPrompt: buildPreviewPrompt, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: startBuildForItem, buildFailed: markBuildNeedsHuman, review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
+  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase() }, previewPrompt: buildPreviewPrompt, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: startBuildForItem, buildFailed: markBuildNeedsHuman, review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
 };
 
 let provider: WorkerOptionsProvider = productionProvider;
