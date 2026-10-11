@@ -48,7 +48,8 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keys.ts": ["crypto"],
   "src/credentials.ts": ["crypto", "fs", "path"], // D#6 R5b-3: the API key file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/protectionBypass.ts": ["fs", "path"], // the Vercel protection bypass secret file: one no-follow open judged by the open handle, a bounded read, and a real-path check that it lies under the home directory
-  "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
+  "src/codeSource.ts": ["fs"], // D#605 FL-7: the registration code file: one no-follow open judged by the open handle (regular file, mode 0600, owner), a bounded read
+  "src/keyring.ts": ["crypto"],// SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
   "src/daemon/resources.ts": ["fs", "os", "path"], // D#6 C43-4: what the machine has free: os.freemem (MemAvailable), load average and core count, and statfs of the workspace and cache volumes; no process is started and no process-table file is read
   "src/daemon/footprints.ts": ["fs", "path"], // D#6 C43-4: the learned per-repo, per-role memory estimates: lstat and a bounded read of one small file in the state directory, written through the private-file writer
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
@@ -106,6 +107,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#6 R6-2b, applying updates. The installed layout under the state directory: a random name for a staging directory and a link, lstat/readlink/symlink/rename for the atomic switch of the stable link, a copy of the verified file with exclusive create, and SHA-256 of the staged file. No process is started here: the entry point hands in the one function that runs a program for the start check.
   "src/update/versions.ts": ["crypto", "fs", "path"],
   "src/update/updater.ts": ["crypto", "fs", "path"],
+  // D#587 B-1, the microVM image build (`fx-runner vm build-image`). It reads no environment and starts no process itself: crane, tar and mke2fs run through the injected host (scripts/vm-main.mjs).
+  "src/vm/buildImage.ts": ["crypto", "fs", "path"], // SHA-256 of the root disk and the guest files, a work directory per architecture, a sparse disk file of the computed size, and the staged guest files
+  "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
 };
 
 /**

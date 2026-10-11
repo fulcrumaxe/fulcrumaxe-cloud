@@ -1,11 +1,12 @@
 /**
- * `fx-runner register --code fxrr_... --credential-mode subscription|api_key --cloud-url https://...`
+ * `fx-runner register (--code-stdin | --code-file <path>) [--name <name>] --credential-mode subscription|api_key --cloud-url https://...`
  *
  * Generates the runner's key on this machine, signs the registration with it and, once the cloud accepts, saves the key
  * (0600) and the registration. The request body holds the code and the public JWK only.
  */
 import { CredentialMode, RegisterMessage, RegisterResponse, RevokeMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../cliError.js";
+import { readRegistrationCode } from "../codeSource.js";
 import { requireUsable } from "../protectionBypass.js";
 import { REGISTER_PATH, REVOKE_PATH, errorCodeOf, normaliseOrigin, refusalError, signedPost } from "../cloud.js";
 import { loadRegistration, saveRegistration, withRegisterLock } from "../config.js";
@@ -18,6 +19,16 @@ function stringFlag(flags: Flags, name: string): string {
   const value = flags.get(name);
   if (typeof value !== "string" || value === "") throw new CliError(`--${name} is required`, 2);
   return value;
+}
+
+const RUNNER_NAME_MAX = 64;
+
+/** The same shape the cloud stores: 1 to 64 characters, nothing that controls or hides (control and format characters), and not only blanks. Never trims or repairs. */
+function checkRunnerName(name: string): string {
+  if ([...name].length < 1 || [...name].length > RUNNER_NAME_MAX || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name) || name.trim() === "") {
+    throw new CliError(`--name must be 1 to ${RUNNER_NAME_MAX} printable characters`, 2);
+  }
+  return name;
 }
 
 /** Revokes the runner that `key` just registered, signed with that key. True once the cloud says it is revoked. */
@@ -35,14 +46,17 @@ async function selfRevoke(origin: string, key: RunnerKey, ctx: CommandContext, r
 }
 
 export async function registerCommand(flags: Flags, ctx: CommandContext): Promise<number> {
-  const code = stringFlag(flags, "code");
+  const code = await readRegistrationCode(flags, ctx);
   const mode = CredentialMode.safeParse(stringFlag(flags, "credential-mode"));
   if (!mode.success) throw new CliError("--credential-mode must be subscription or api_key", 2);
   const origin = normaliseOrigin(stringFlag(flags, "cloud-url"));
+  // D#605 FL-7: `--name` overrides the runner name. It is added to the body after the parse, so this works with the protocol as it is; the cloud checks it again.
+  const name = flags.has("name") ? checkRunnerName(stringFlag(flags, "name")) : undefined;
 
   const key = generateRunnerKey();
   const message = RegisterMessage.safeParse({ code, public_key_jwk: key.publicJwk });
-  if (!message.success) throw new CliError("the registration code is not in the form fxrr_ followed by letters and digits", 2);
+  if (!message.success) throw new CliError("the registration code is not in the form fxrr_ (a code) or fxrp_ (a token) followed by letters and digits", 2);
+  const body = name === undefined ? message.data : { ...message.data, name };
 
   // One registration per machine, whatever its mode or account: a machine that holds one cannot hold two accounts, which
   // is what keeps a subscription login to one person. Re-registering needs a revoke first. The lock makes the check and
@@ -58,7 +72,11 @@ export async function registerCommand(flags: Flags, ctx: CommandContext): Promis
       );
     }
 
-    const reply = await signedPost({ origin, path: REGISTER_PATH, body: message.data, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
+    const reply = await signedPost({ origin, path: REGISTER_PATH, body, key, now: ctx.now(), fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
+    // A cloud that predates runner names refuses the unknown `name` key as an invalid message; the name passed the same rule here.
+    if (reply.status === 400 && errorCodeOf(reply.body) === "invalid_message" && name !== undefined) {
+      throw new CliError("this cloud does not support --name yet; ask your admin to update the cloud, or register without --name");
+    }
     if (reply.status !== 201) throw refusalError(reply);
     const parsed = RegisterResponse.safeParse(reply.body);
     if (!parsed.success) {

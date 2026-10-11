@@ -95,7 +95,8 @@ describe("register (R4a.1)", () => {
   it("a network failure and a redirect are reported without a path or a stack", async () => {
     const down = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", "http://127.0.0.1:1"]);
     expect(down.code).toBe(1);
-    expect(down.err).toBe("fx-runner: could not reach the cloud; check --cloud-url and your network, then try again\n");
+    // The one deprecation line for --code (D#605 FL-7) comes first; the failure itself is unchanged.
+    expect(down.err.split("\n").slice(1).join("\n")).toBe("fx-runner: could not reach the cloud; check --cloud-url and your network, then try again\n");
     const fetchFn = vi.fn(async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
     const odd = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", rig.cloud.origin], { fetchFn });
     expect(odd.code).toBe(1);

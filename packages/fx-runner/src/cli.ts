@@ -51,13 +51,16 @@ export interface CliIo {
   updateHost?: UpdateHost;
   /** Reads the API key from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
   readSecret?: () => Promise<string>;
+  /** Reads the registration code or token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
+  readCode?: () => Promise<string>;
 }
 
 const USAGE = `Usage: fx-runner <command> [options]
 
 Commands:
-  register --code <code> --credential-mode <subscription|api_key> --cloud-url <url>
-                     Register this machine as a runner. The code comes from the workspace, works once and expires in 10 minutes.
+  register (--code-stdin | --code-file <path>) [--name <name>] --credential-mode <subscription|api_key> --cloud-url <url>
+                     Register this machine as a runner. The code (fxrr_) or provisioning token (fxrp_) comes from the workspace; read it from standard input or
+                     from a file at mode 0600 that you own. --name sets the runner's name. --code <value> still works for one release but is deprecated: it shows in the process list.
   status             Show this machine's registration. Makes no network call.
   run                Claim and run jobs from the cloud on this machine until stopped (Ctrl-C).
   attach [<run|short id>|--latest] [--take-over]
@@ -70,8 +73,9 @@ Commands:
   logs <run id>      Print the local transcript of a run on this machine.
   credentials set-api-key | clear-api-key | status
                      Store (from standard input only), remove or check the API key of an api_key runner. status prints "stored" or "not stored".
-  service install | uninstall
+  service install | uninstall [--system --user <account>]
                      Write (or remove) the per-user service file that keeps "fx-runner run" going: a systemd user unit on Linux, a launchd agent on macOS.
+                     --system writes a system service instead (a systemd system unit, a LaunchDaemon) that runs as the dedicated non-root account --user names and starts at boot. Needs root.
   update --check | --pin <version> | --unpin | --rollback
                      --check shows the current and the available version. --pin holds a version (installing it now, older ones included). --rollback returns to the kept previous version.
   config set auto-update on|off
@@ -87,7 +91,7 @@ Commands:
 
 /** Which flags each command takes, and which of them are switches. */
 const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: readonly string[]; positionals?: number }>> = {
-  register: { flags: ["code", "credential-mode", "cloud-url"], switches: [] },
+  register: { flags: ["code", "code-file", "name", "credential-mode", "cloud-url"], switches: ["code-stdin"] },
   status: { flags: [], switches: [] },
   run: { flags: [], switches: [] },
   revoke: { flags: ["reason"], switches: ["local"] },
@@ -97,7 +101,7 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   __takeover: { flags: [], switches: [], positionals: 1 },
   doctor: { flags: [], switches: ["sandbox-only"] },
   logs: { flags: [], switches: [], positionals: 1 },
-  service: { flags: [], switches: [], positionals: 1 },
+  service: { flags: ["user"], switches: ["system"], positionals: 1 },
   update: { flags: ["pin"], switches: ["check", "unpin", "rollback"] },
   config: { flags: [], switches: [], positionals: 3 },
   pause: { flags: [], switches: [] },
@@ -155,6 +159,7 @@ export async function runCli(io: CliIo): Promise<number> {
       err: (line) => io.stderr(`${line}\n`),
       now: io.now ?? (() => new Date()),
       fetchFn: io.fetchFn ?? fetch,
+      readCode: io.readCode,
       bypass: loadBypass(io.protectionBypassFile, io.uid, { home: io.home, platform: io.platform ?? "linux", xdgCacheHome: io.xdgCacheHome }),
       bypassFile: io.protectionBypassFile,
       uid: io.uid,
@@ -191,7 +196,9 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "logs") return logsCommand(positionals[0], ctx);
     if (command === "service") {
       if (io.serviceHost === undefined) throw new CliError("service is only available from the fx-runner program");
-      return serviceCommand(positionals[0], ctx, io.serviceHost);
+      const user = flags.get("user");
+      if (user !== undefined && (typeof user !== "string" || !flags.has("system"))) throw new CliError("--user names the service account and goes with --system", 2);
+      return serviceCommand(positionals[0], ctx, io.serviceHost, { system: flags.has("system"), user: typeof user === "string" ? user : undefined });
     }
     return await statusCommand(ctx);
   } catch (error) {

@@ -624,3 +624,69 @@ describe("doctor --sandbox-only (the probe install.sh runs, C16 section 2)", () 
     expect(result.code).toBe(0);
   });
 });
+
+describe("lingering (D#605 FL-7)", () => {
+  const WARNING = "Stops when you log out: run loginctl enable-linger alex or use service install --system";
+  /** A fake machine whose `loginctl show-user` answers in the real output format (`Linger=yes` or `Linger=no`, one line); every other command passes. */
+  function machine(loginctl: { code: number | null; stdout: string; timedOut?: boolean }) {
+    const base = fakeSandboxHost();
+    const loginctlCalls: Array<{ args: readonly string[]; env: Record<string, string> }> = [];
+    const sandbox = {
+      ...base,
+      run: async (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => {
+        if (command !== "loginctl") return base.run(command, args, env, timeoutMs);
+        loginctlCalls.push({ args, env });
+        return { code: loginctl.code, stdout: loginctl.stdout, stderr: "", timedOut: loginctl.timedOut ?? false };
+      },
+    };
+    return { sandbox, loginctlCalls };
+  }
+  const installUserUnit = (): void => {
+    const unit = path.join(root, ".config", "systemd", "user", "fx-runner.service");
+    mkdirSync(path.dirname(unit), { recursive: true });
+    writeFileSync(unit, "# Managed by fx-runner service install. Run it again to rewrite this file; fx-runner service uninstall removes it.\n[Unit]\n");
+  };
+
+  it("warns when a user unit is installed and the user does not linger", async () => {
+    register();
+    installUserUnit();
+    const { sandbox, loginctlCalls } = machine({ code: 0, stdout: "Linger=no\n" });
+    const result = await doctor({ host: { sandbox, uid: 1234, userName: "alex" } });
+    expect(levelOf(result.out, "Service")).toBe("WARN");
+    expect(result.out).toContain(WARNING);
+    expect(result.code).toBe(0);
+    expect(loginctlCalls).toHaveLength(1);
+    expect(loginctlCalls[0]!.args).toEqual(["show-user", "1234", "--property=Linger"]);
+  });
+
+  it("passes when lingering is on", async () => {
+    register();
+    installUserUnit();
+    const result = await doctor({ host: { sandbox: machine({ code: 0, stdout: "Linger=yes\n" }).sandbox, uid: 1234, userName: "alex" } });
+    expect(levelOf(result.out, "Service")).toBe("PASS");
+    expect(result.out).not.toContain("Stops when you log out");
+  });
+
+  it("says it could not check, and does not pass, when loginctl fails or answers something else", async () => {
+    register();
+    installUserUnit();
+    for (const answer of [{ code: 1, stdout: "" }, { code: 0, stdout: "Linger=maybe\n" }, { code: null, stdout: "", timedOut: true }]) {
+      const result = await doctor({ host: { sandbox: machine(answer).sandbox, uid: 1234, userName: "alex" } });
+      expect(levelOf(result.out, "Service")).toBe("INFO");
+      expect(result.out).not.toContain("Stops when you log out");
+    }
+  });
+
+  it("asks nothing when no user unit was installed, when the unit is not ours, or off Linux", async () => {
+    register();
+    const none = machine({ code: 0, stdout: "Linger=no\n" });
+    await doctor({ host: { sandbox: none.sandbox, uid: 1234, userName: "alex" } });
+    const unit = path.join(root, ".config", "systemd", "user", "fx-runner.service");
+    mkdirSync(path.dirname(unit), { recursive: true });
+    writeFileSync(unit, "[Unit]\nDescription=someone else's\n");
+    await doctor({ host: { sandbox: none.sandbox, uid: 1234, userName: "alex" } });
+    installUserUnit();
+    await doctor({ host: { sandbox: none.sandbox, uid: 1234, userName: "alex", platform: "darwin" } });
+    expect(none.loginctlCalls).toEqual([]);
+  });
+});

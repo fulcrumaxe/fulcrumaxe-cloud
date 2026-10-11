@@ -68,7 +68,8 @@ It only calls out (no listening socket).
 `bin/fx-runner.mjs` is the entry point; it looks up `HOME`, `FX_RUNNER_HOME`, `FX_RUNNER_PROTECTION_BYPASS_FILE` and `XDG_CACHE_HOME` by name and hands everything else to
 `runCli` in `src/cli.ts`. It runs from a build of `src/`, not from the TypeScript directly: see "Build from source".
 
-- `fx-runner register --code <code> --credential-mode subscription|api_key --cloud-url <url>`: makes an Ed25519 key on
+- `fx-runner register --code-stdin --credential-mode subscription|api_key --cloud-url <url>` (the code is read from standard input; see
+  `--code-file` and `--name` below): makes an Ed25519 key on
   this machine and registers it. The code comes from the workspace, works once and expires after 10 minutes. The request
   carries the code and the public key only. The private key is saved at mode 0600 in `~/.fx-runner` (mode 0700), next to
   `registration.json`, which holds no secret. A machine holds one registration; a second one is refused until the first
@@ -138,6 +139,20 @@ It only calls out (no listening socket).
   second copy on the same state directory. A file at that path that `service` did not write is never overwritten or removed.
   The unit carries your shell's `PATH` (so it finds Claude Code) and, if you use `FX_RUNNER_HOME`, that too; a path with a
   space or another unusual character is refused.
+- `fx-runner service install --system --user <account>` (and `uninstall --system`): the same, as a system service that starts at
+  boot with nobody logged in: `/etc/systemd/system/fx-runner.service` on Linux, `/Library/LaunchDaemons/dev.fulcrumaxe.fx-runner.plist`
+  on macOS. It needs root, starts nothing and prints the steps. `--user` is required: a dedicated, existing, non-root account (never
+  root, never a default). The Linux unit has `User=`, `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`,
+  `PrivateTmp=yes` and one writable place, `StateDirectory=fx-runner` (`/var/lib/fx-runner`, mode 0700, also the service's `HOME` and
+  `FX_RUNNER_HOME`); the LaunchDaemon has `UserName` and `/usr/local/var/fx-runner`. A system service cannot see `/home` or `/root`,
+  so a program installed there is refused (install it under `/opt/fx-runner`), and so is a protection bypass file there. The unit runs
+  the program as given, not through the installing user's `~/.fx-runner/bin` path, so it does not follow that user's self-update.
+  Register as the account with `sudo -u <account> env FX_RUNNER_HOME=/var/lib/fx-runner fx-runner register --code-stdin ...`.
+- `fx-runner register` reads the code or token from standard input (`--code-stdin`) or from a file (`--code-file <path>`, which must
+  be a regular file owned by you with no access for group or others, opened without following a link), so the secret is never in the
+  process list. `--code <value>` still works for one release and prints a deprecation line on the error stream. `--name <name>` sets
+  the runner's name (1 to 64 printable characters; it needs a cloud that accepts names). `doctor` warns when a per-user unit is
+  installed and the account does not linger (`loginctl show-user` says `Linger=no`): the service would stop at logout.
 
 ## Build from source
 
