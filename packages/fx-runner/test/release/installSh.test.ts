@@ -30,7 +30,29 @@ const SHELLCHECK = findOnPath("shellcheck", HOST_PATH);
 const PYTHON = findOnPath("python3", HOST_PATH);
 const REAL_CURL = findOnPath("curl", HOST_PATH);
 const SHA256SUM = findOnPath("sha256sum", HOST_PATH);
-const SHASUM = findOnPath("shasum", HOST_PATH);
+// Nix's ci shell has coreutils but no shasum (there it only comes with perl). When the host has no real shasum the tests supply a
+// shim over sha256sum, so a host that has the real one (macOS, hosted runners) still exercises it. install.sh calls only
+// `shasum -a 256 FILE`; the shim does exactly that and fails loudly on anything else.
+const REAL_SHASUM = findOnPath("shasum", HOST_PATH);
+const SHIM_DIR = REAL_SHASUM === undefined && SHA256SUM !== undefined ? mkdtempSync(path.join(tmpdir(), "fxr64-shasum-")) : undefined;
+const SHASUM = REAL_SHASUM ?? (SHIM_DIR === undefined ? undefined : writeShasumShim(SHIM_DIR, SHA256SUM ?? ""));
+function writeShasumShim(dir: string, sha256sum: string): string {
+  const shim = path.join(dir, "shasum");
+  const body = [
+    "#!" + "/bin/sh",
+    'if [ "$#" -ne 3 ] || [ "$1" != "-a" ] || [ "$2" != "256" ]; then',
+    '  echo "shasum shim: unsupported arguments: $*" >&2',
+    "  exit 2",
+    "fi",
+    `exec '${sha256sum.replace(/'/g, "'\\''")}' "$3"`,
+    "",
+  ].join("\n");
+  writeFileSync(shim, body, { mode: 0o755 });
+  return shim;
+}
+afterAll(() => {
+  if (SHIM_DIR !== undefined) rmSync(SHIM_DIR, { recursive: true, force: true });
+});
 const BASE_TOOLS = ["grep", "sed", "tr", "cut", "head", "mktemp", "mkdir", "rmdir", "rm", "mv", "ln", "chmod", "cat"] as const;
 
 type Platform = "darwin-arm64" | "darwin-x64" | "linux-x64" | "linux-arm64";

@@ -30,7 +30,8 @@ export function jobFor(over: Partial<Job> = {}): Job {
     branch_prefix: "fx/",
     model_hint: null,
     issued_at: "2026-10-08T11:00:00.000Z",
-    expires_at: "2026-10-11T11:00:00.000Z",
+    // relative to the real clock: the daemon checks expiry against Date.now(), so a fixed date here is a time bomb
+    expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     key_id: KEY_ID,
     ...over,
   };
