@@ -1,0 +1,32 @@
+#!/bin/bash
+# PID 1 of the fx-agent microVM (D#587 B-1). The root disk is read-only, so everything that must be written is a tmpfs.
+# It brings up /proc, /sys, /dev (with the /dev/fd links bash needs), /etc/hosts and loopback, then starts the agent.
+# There is no network device: the only way in is the agent's vsock port.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mountpoint -q /dev || mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+ln -sfn /proc/self/fd /dev/fd
+ln -sfn /proc/self/fd/0 /dev/stdin
+ln -sfn /proc/self/fd/1 /dev/stdout
+ln -sfn /proc/self/fd/2 /dev/stderr
+mount -t tmpfs -o mode=0755 tmpfs /run
+for d in /tmp /var/tmp; do mount -t tmpfs -o mode=1777 tmpfs "$d"; done
+for d in /var/log /var/cache; do mount -t tmpfs -o mode=0755 tmpfs "$d"; done
+# The home directory and the work directory: owned by ubuntu (uid 1000), empty at every boot.
+mount -t tmpfs -o mode=0755,uid=1000,gid=1000 tmpfs /vercel
+install -d -o 1000 -g 1000 /vercel/sandbox
+printf '127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n' > /run/hosts
+mount --bind /run/hosts /etc/hosts
+echo fx-agent > /proc/sys/kernel/hostname
+ip link set lo up
+echo "FXMARK init_done uptime=$(cut -d' ' -f1 /proc/uptime)"
+/usr/bin/python3 -I /usr/lib/fx/agent.py &
+agent=$!
+# bash reaps orphaned children as PID 1; when the agent ends there is nothing left to serve, so stop the machine.
+wait "$agent"
+sync
+echo b > /proc/sysrq-trigger

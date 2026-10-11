@@ -106,6 +106,9 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   // D#6 R6-2b, applying updates. The installed layout under the state directory: a random name for a staging directory and a link, lstat/readlink/symlink/rename for the atomic switch of the stable link, a copy of the verified file with exclusive create, and SHA-256 of the staged file. No process is started here: the entry point hands in the one function that runs a program for the start check.
   "src/update/versions.ts": ["crypto", "fs", "path"],
   "src/update/updater.ts": ["crypto", "fs", "path"],
+  // D#587 B-1, the microVM image build (`fx-runner vm build-image`). It reads no environment and starts no process itself: crane, tar and mke2fs run through the injected host (scripts/vm-main.mjs).
+  "src/vm/buildImage.ts": ["crypto", "fs", "path"], // SHA-256 of the root disk and the guest files, a work directory per architecture, a sparse disk file of the computed size, and the staged guest files
+  "src/vm/command.ts": ["fs"], // reads the image lock file named on the command line
 };
 
 /**

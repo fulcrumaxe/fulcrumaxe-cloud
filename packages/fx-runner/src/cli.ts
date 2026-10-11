@@ -12,6 +12,8 @@ import { SETTING_KEYS } from "./runnerSettings.js";
 import { registerCommand } from "./commands/register.js";
 import { loadBypass, requireUsable } from "./protectionBypass.js";
 import { credentialsCommand } from "./commands/credentials.js";
+import type { BuildHost } from "./vm/buildImage.js";
+import { vmCommand } from "./vm/command.js";
 import { revokeCommand } from "./commands/revoke.js";
 import { doctorCommand, type DoctorHost } from "./commands/doctor.js";
 import { versionLine } from "./version.js";
@@ -47,6 +49,8 @@ export interface CliIo {
   doctorHost?: DoctorHost;
   /** What `service` needs from the machine. Only `bin/fx-runner.mjs` supplies it. */
   serviceHost?: ServiceHost;
+  /** What `vm build-image` needs from the machine (crane, tar and mke2fs, started by name). Only `bin/fx-runner.mjs` supplies it. */
+  vmHost?: BuildHost;
   /** What `update`, `config` and the daemon's self-update need from the machine. Only `bin/fx-runner.mjs` supplies it. */
   updateHost?: UpdateHost;
   /** Reads the API key from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it. */
@@ -68,6 +72,8 @@ Commands:
                      Check this machine: registration, cloud, the Claude CLI (version, flags, login) and shell variables. Makes no model request. --sandbox-only runs only the sandbox test.
   --version          Print the version.
   logs <run id>      Print the local transcript of a run on this machine.
+  vm build-image --template fx-agent --image <repository@sha256:...> --out <dir> [--arch amd64|arm64]
+                     Make the read-only root disk of the microVM guest from a digest-pinned image, for amd64 and arm64, and print the sha256 of each. Needs crane, tar and mke2fs 1.47.1 or newer; no root.
   credentials set-api-key | clear-api-key | status
                      Store (from standard input only), remove or check the API key of an api_key runner. status prints "stored" or "not stored".
   service install | uninstall
@@ -103,6 +109,8 @@ const COMMANDS: Readonly<Record<string, { flags: readonly string[]; switches: re
   pause: { flags: [], switches: [] },
   resume: { flags: [], switches: [] },
   credentials: { flags: [], switches: [] },
+  // Its own words, parsed in src/vm/command.ts.
+  vm: { flags: [], switches: [] },
 };
 
 function parseFlags(command: string, rest: readonly string[]): { flags: Flags; positionals: string[] } {
@@ -148,7 +156,7 @@ export async function runCli(io: CliIo): Promise<number> {
       return command === undefined ? 2 : 0;
     }
     if (!Object.hasOwn(COMMANDS, command)) throw new CliError(`unknown command ${command.slice(0, 40)}; run fx-runner --help`, 2);
-    const parsed = command === "credentials" ? undefined : parseFlags(command, rest);
+    const parsed = command === "credentials" || command === "vm" ? undefined : parseFlags(command, rest);
     const ctx: CommandContext = {
       stateDir: stateDirFor(io.home, io.stateDirOverride),
       out: (line) => io.stdout(`${line}\n`),
@@ -163,6 +171,10 @@ export async function runCli(io: CliIo): Promise<number> {
     if (command === "register" || command === "revoke" || command === "run") requireUsable(ctx.bypass);
     // Its words are never echoed or parsed as options: one of them could be a key typed in the wrong place.
     if (command === "credentials") return await credentialsCommand(rest, ctx, io.readSecret);
+    if (command === "vm") {
+      if (io.vmHost === undefined) throw new CliError("vm is only available from the fx-runner program");
+      return await vmCommand(rest, io.vmHost, ctx.out);
+    }
     const { flags, positionals } = parsed!;
     if (command === "register") return await registerCommand(flags, ctx);
     if (command === "revoke") return await revokeCommand(flags, ctx);
