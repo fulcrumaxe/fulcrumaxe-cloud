@@ -145,7 +145,7 @@ interface RawRunner {
 /** A repo's display name, the same text the approvals list uses: "owner/name", else a fixed fallback, never null or an id. */
 const REPO_NAME_SQL = "COALESCE(NULLIF(gh_owner || '/' || gh_name, ''), 'a repository')";
 
-async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
+export async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
   const now = (deps.now ?? (() => new Date()))();
   const current = deps.currentProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
   const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string> }> => {

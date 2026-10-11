@@ -10,7 +10,7 @@ type ComputeBudget = Extract<Budget, 'foreground_compute' | 'background_compute'
 
 export interface ReserveParams {
   accountId: string;
-  runId: string;
+  runId: string | null; // null only for a handoff's reservation, taken before the new run exists (D#599 HO-2a)
   workItemId?: string | null;
   workItemKind?: WorkItemKind;
   /** Default 'run'. 'preview' skips the accounts.status gate (H05

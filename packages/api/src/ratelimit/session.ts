@@ -95,6 +95,8 @@ export const SESSION_LIMITS = {
   webhookTest: { name: "webhook-test", account: TEN_PER_MINUTE },
   /** Queues a new run (compute); a run is also allowed only one retry. */
   runRetry: { name: "run-retry", account: TEN_PER_MINUTE },
+  /** Moving a running run asks GitHub for the repository's visibility and reserves spend; cancelling it is the same budget. */
+  runHandoff: { name: "run-handoff", account: TEN_PER_MINUTE },
   /** The GitHub App install return and the repo-create return both call GitHub on each visit. */
   githubReturn: { name: "github-return", account: TEN_PER_MINUTE },
   /** Starting a plan import reads a repository through the code host (up to 400 requests): 20 an hour per account. The database holds the per-repository 6 an hour. */

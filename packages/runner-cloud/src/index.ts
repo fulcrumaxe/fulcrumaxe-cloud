@@ -31,6 +31,7 @@ export { approveRun } from "./approvals.js";
 export { APPROVALS_LIMIT, listApprovals, type ApprovalEntry } from "./approvalsList.js";
 export { setPlanConsent } from "./planConsent.js";
 export { PLACEMENTS, auditPlacementChange, cancelPendingRunsOnLeftSide, type Placement } from "./itemPlacement.js";
+export { HANDOFF_DEADLINE_MS, HANDOFF_PROTOCOL_VERSION, cancelHandoff, handoffDeadlineFor, requestHandoff, type HandoffCloudTarget, type HandoffDeps, type HandoffReservations } from "./handoff.js";
 export { getPlanApprovalDial, setPlanApprovalDial } from "./planApprovalDial.js";
 export {
   CHANGE_TYPES,
