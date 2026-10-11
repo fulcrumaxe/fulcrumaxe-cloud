@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import https from "node:https";
@@ -11,6 +11,7 @@ import { MIN_CLAUDE_VERSION } from "../../src/engines/claude/pin.js";
 import { MACOS_PREVIEW_NOTICE, WINDOWS_UNSUPPORTED_NOTICE } from "../../src/platformSupport.js";
 import { INSTALL_COMMAND, NIXOS_CONFIG_LINE } from "../../src/sandbox/sandboxFix.js";
 import { findOnPath } from "../helpers/findOnPath.js";
+import { killAllGroups, runGrouped } from "../helpers/spawnGroup.js";
 import { generateSelfSignedCert } from "../helpers/selfSignedCert.js";
 
 // D#6 R6-4: install.sh run by real shells (bash and dash) against a real local HTTPS server, with the real curl and a real
@@ -53,6 +54,7 @@ function writeShasumShim(dir: string, sha256sum: string): string {
 afterAll(() => {
   if (SHIM_DIR !== undefined) rmSync(SHIM_DIR, { recursive: true, force: true });
 });
+const SPAWN_TIMEOUT_MS = 20_000; // under the 30 s case timeout, so a hang is killed and reported by the harness, not left to vitest
 const BASE_TOOLS = ["grep", "sed", "tr", "cut", "head", "mktemp", "mkdir", "rmdir", "rm", "mv", "ln", "chmod", "cat"] as const;
 
 type Platform = "darwin-arm64" | "darwin-x64" | "linux-x64" | "linux-arm64";
@@ -126,6 +128,7 @@ afterAll(() => {
   rmSync(certDir, { recursive: true, force: true });
 });
 afterEach(() => {
+  killAllGroups(); // anything a timed-out or failed case left running
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   served.clear();
   requests = [];
@@ -165,8 +168,11 @@ function fixture(options: Options = {}): Fixture {
   const realSum = checksum === "sha256sum" ? SHA256SUM : SHASUM;
   if (realSum === undefined) throw new Error(`${checksum} not found on the host`);
   symlinkSync(realSum, path.join(tools, checksum));
-  // curl is a wrapper that records its arguments and then runs the real curl, so the flags the script uses are proven, not assumed
-  writeFileSync(path.join(tools, "curl"), script("curl", `echo "$*" >> "$FX_TEST_LOG_DIR/curl.log"\nexec ${REAL_CURL ?? "curl"} "$@"`), { mode: 0o755 });
+  // curl is a wrapper that records its arguments and then runs the real curl, so the flags the script uses are proven, not assumed.
+  // It names the real curl by absolute path: tools/ is the only PATH entry, so a bare `curl` is this wrapper again, and with no curl
+  // on the host it re-executed itself forever at full speed (seen on the self-hosted runner). The deadlines bound a stalled transfer.
+  if (REAL_CURL === undefined) throw new Error("tool curl not found on the host");
+  writeFileSync(path.join(tools, "curl"), script("curl", `echo "$*" >> "$FX_TEST_LOG_DIR/curl.log"\nexec '${REAL_CURL.replace(/'/g, "'\\''")}' --connect-timeout 10 --max-time 15 "$@"`), { mode: 0o755 });
   writeFileSync(path.join(tools, "uname"), script("uname", `case "$1" in -m) echo "$FX_TEST_UNAME_M" ;; *) echo "$FX_TEST_UNAME_S" ;; esac`), { mode: 0o755 });
   writeFileSync(path.join(tools, "id"), script("id", `[ "$1" = -u ] && echo "$FX_TEST_UID"`), { mode: 0o755 });
   writeFileSync(path.join(tools, "sudo"), script("sudo", `echo "$*" >> "$FX_TEST_LOG_DIR/sudo.log"\nexec "$@"`), { mode: 0o755 });
@@ -258,20 +264,11 @@ sys.exit(os.waitstatus_to_exitcode(status))
 function runPiped(f: Fixture, shell: string, text: string, args: string[] = [], over?: Fixture["env"]): Promise<Result> {
   return spawnIt(shell, ["-s", "--", ...args], { ...f.env, ...over }, text);
 }
-function spawnIt(file: string, args: string[], env: Record<string, string>, stdin?: string): Promise<Result> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { env, detached: true, stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
-    if (stdin !== undefined) {
-      child.stdin?.on("error", () => undefined); // the shell may exit before it has read everything
-      child.stdin?.end(stdin);
-    }
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr, out: stdout + stderr }));
-  });
+async function spawnIt(file: string, args: string[], env: Record<string, string>, stdin?: string): Promise<Result> {
+  // A per-spawn deadline well under the case timeout; the whole process group is killed when it ends, either way.
+  const r = await runGrouped(file, args, env, { stdin, timeoutMs: SPAWN_TIMEOUT_MS });
+  const stderr = r.timedOut ? `${r.stderr}\n[test harness: killed after ${SPAWN_TIMEOUT_MS} ms]\n` : r.stderr;
+  return { code: r.code, stdout: r.stdout, stderr, out: r.stdout + stderr };
 }
 const installed = (f: Fixture, v = VERSION): string => path.join(f.home, ".fx-runner", "versions", v, "fx-runner");
 const link = (f: Fixture): string => path.join(f.home, ".fx-runner", "bin", "fx-runner");
