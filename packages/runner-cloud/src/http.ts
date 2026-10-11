@@ -9,6 +9,8 @@ export interface RunnerHttpRequest {
   /** Header fields by lower-case name. */
   headers: Readonly<Record<string, string | undefined>>;
   body: Uint8Array;
+  /** The client address the edge saw (display only, never an identity): set by the route from the same headers the rate limit reads. Absent in a test that sends none. */
+  clientIp?: string;
 }
 
 export interface RunnerHttpResponse {

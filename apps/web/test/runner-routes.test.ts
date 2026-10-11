@@ -7,6 +7,8 @@ import { jwkThumbprint, signRequest, type Ed25519Jwk } from "@fulcrumaxe/runner-
 import { MAX_BODY_BYTES, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { handleRunnerRequest, readCappedBody } from "../lib/runnerRoutes";
 import { mintCodeHandler } from "../app/api/runners/registration-codes/handler";
+import { listTokensHandler, mintTokenHandler } from "../app/api/runners/provisioning-tokens/handler";
+import { revokeTokenHandler } from "../app/api/runners/provisioning-tokens/[id]/handler";
 import { revokeRunnerHandler } from "../app/api/runners/[id]/revoke/handler";
 import { revokeAllHandler } from "../app/api/runners/revoke-all/handler";
 import { listRunnersHandler } from "../app/api/runners/handler";
@@ -136,6 +138,10 @@ describe("a runner-signed request is not a session (every route outside api/runn
   it("the session routes under api/runners answer 401 to a runner signature, with or without a bearer token", async () => {
     const calls: Array<() => Promise<Response>> = [
       () => mintCodeHandler(signedNext(`${ORIGIN}/api/runners/registration-codes`)),
+      // D#605 FL-6: the provisioning-token routes are session routes too.
+      () => mintTokenHandler(signedNext(`${ORIGIN}/api/runners/provisioning-tokens`)),
+      () => listTokensHandler(signedNext(`${ORIGIN}/api/runners/provisioning-tokens`)),
+      () => revokeTokenHandler(signedNext(`${ORIGIN}/api/runners/provisioning-tokens/x`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => revokeRunnerHandler(signedNext(`${ORIGIN}/api/runners/x/revoke`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => revokeAllHandler(signedNext(`${ORIGIN}/api/runners/revoke-all`)),
       () => revokeAllHandler(signedNext(`${ORIGIN}/api/runners/revoke-all`, { authorization: "Bearer fxat_notarealtoken" })),

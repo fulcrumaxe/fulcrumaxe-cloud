@@ -341,6 +341,11 @@ describe("hostile input fails closed (D#6 R2a follow-ups 1, 2 and 4)", () => {
     expect(register(`fxrr_${"a".repeat(128)}`)).toBe(true);
     expect(register(`fxrr_${"a".repeat(129)}`)).toBe(false);
     expect(register(`fxrr_${"a".repeat(1_000_000)}`)).toBe(false);
+    // D#605 FL-6: a provisioning token (fxrp_) is the other registration secret, with the same bounds; any other prefix is refused.
+    expect(register(`fxrp_${"a".repeat(40)}`)).toBe(true);
+    expect(register(`fxrp_${"a".repeat(129)}`)).toBe(false);
+    expect(register(`fxrp_${"a".repeat(31)}`)).toBe(false);
+    expect(register(`fxrx_${"a".repeat(40)}`)).toBe(false);
   });
 });
 

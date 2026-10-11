@@ -3,6 +3,18 @@ export * from "./http.js";
 export { isUsableEd25519Key } from "./strictEd25519.js";
 export { signedUrl, verifyRunnerRequest, verifySelfSignedRequest, withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js";
 export { CODE_TTL_MINUTES, hashRegistrationCode, mintRegistrationCode, newRegistrationCode } from "./registrationCodes.js";
+export {
+  MAX_OUTSTANDING_PROVISIONING_TOKENS,
+  PROVISIONING_TOKEN_DEFAULT_TTL_SECONDS,
+  PROVISIONING_TOKEN_MAX_TTL_SECONDS,
+  PROVISIONING_TOKEN_PREFIX,
+  hashProvisioningToken,
+  listProvisioningTokens,
+  mintProvisioningToken,
+  newProvisioningToken,
+  revokeProvisioningToken,
+  type ProvisioningTokenEntry,
+} from "./provisioningTokens.js";
 export { REGISTER_PATH, registerRunner } from "./register.js";
 export { ROTATE_PATH, rotateRunnerKey } from "./rotate.js";
 export { REVOKE_PATH, revokeAllRunners, revokeRunner, selfRevokeRunner } from "./revoke.js";
