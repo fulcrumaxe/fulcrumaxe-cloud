@@ -64,9 +64,10 @@ describe("createRunnerGitResolver on the narrow login (0765)", () => {
     await admin.query(`UPDATE runners SET revoked_at = NULL, revoked_reason = NULL WHERE id = $1`, [runner]);
   });
 
-  it(`allows ${FULL_CLONES_PER_REPO_PER_DAY} full clones a day and then answers clone_limited`, async () => {
+  it(`allows ${FULL_CLONES_PER_REPO_PER_DAY} counted full clones a day, after the runner's exempt first one, and then answers clone_limited`, async () => {
     const resolve = createRunnerGitResolver(proxyPool);
-    for (let i = 0; i < FULL_CLONES_PER_REPO_PER_DAY; i++) expect((await resolve({ ...request, fullClone: true }))?.verdict).toBe("ok");
+    // 0784 (D#605 FL-12a): a runner's first full clone of a repo is not counted, so the first of these is the exempt one.
+    for (let i = 0; i < FULL_CLONES_PER_REPO_PER_DAY + 1; i++) expect((await resolve({ ...request, fullClone: true }))?.verdict).toBe("ok");
     expect(await resolve({ ...request, fullClone: true })).toEqual({ verdict: "clone_limited" });
   });
 

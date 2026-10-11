@@ -49,7 +49,7 @@ describe('the optional runners block of a hosted plan', () => {
   });
 
   it('a plan without one still parses', () => {
-    const data = load(() => undefined);
+    const data = load((d) => delete d.plans.team.runners);
     expect((data.plans.team as Json).runners).toBeUndefined();
   });
 
