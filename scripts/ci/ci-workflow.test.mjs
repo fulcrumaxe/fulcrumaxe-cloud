@@ -41,6 +41,7 @@ const stepNamed = (steps, name) => {
 // names the owner's machine (which already has Nix), so it does not count.
 const GUARD = "${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}";
 const EPHEMERAL = "(runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))";
+const OVERLAY_OFF = "env.CI_SCOPE_OVERLAY != 'true'";
 const ifOf = (step) => (/^ {8}if: (.*)$/m.exec(step.text) ?? [, null])[1];
 
 // ---- the file is valid YAML --------------------------------------------------
@@ -370,7 +371,8 @@ test("push to main: the classifier is not consulted and check.sh runs with no af
   const run = stepNamed(checkSteps, "Run checks");
   assert.match(run.text, /if \[ "\$GITHUB_EVENT_NAME" != pull_request \]; then unset FX_CHECK_AFFECTED; fi\n\s+nix develop \.#ci --command bash scripts\/check\.sh/);
   assert.doesNotMatch(run.text.split("env:")[1]?.split("run:")[0] ?? "", /FX_CHECK_AFFECTED/, "not set from the step's own env");
-  assert.equal(ifOf(run), null, "the checks always run");
+  // The checks run on every event but an overlay-only pull request on the private repository (see "overlay-only" below).
+  assert.equal(ifOf(run), OVERLAY_OFF, "the checks run unless the classifier answered overlay");
   // the only mention of the classifier in the job is the pull-request step
   assert.equal(checkSteps.filter((s) => /affected\.mjs/.test(s.text.replace(/node --test.*/g, ""))).length, 1);
 });
@@ -388,6 +390,8 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
     "Install Nix (hosted)",
     "Allow Chromium's user-namespace sandbox (hosted)",
     "Nix store cache (hosted)",
+    "Overlay checks",
+    "Run checks",
     "Runner protocol tests on Node 22",
     "pnpm store cache (hosted)",
   ].sort());
@@ -450,7 +454,9 @@ test("e2e-runner job: runs on every pull request and push (only CI_DISABLED stan
   assert.equal(job.needs, undefined);
   assert.ok(job["timeout-minutes"] > 0 && job["timeout-minutes"] <= 60);
   const text = noComments(runnerE2eJob);
-  assert.doesNotMatch(text, /CI_SCOPE|affected\.mjs/, "the job must not depend on the scope classifier");
+  // The one narrowing: an overlay-only pull request on the private repository (no product code changed).
+  // Nothing else of the classifier's answer is read, so a package change never skips the test.
+  assert.deepEqual([...new Set(text.match(/CI_SCOPE_[A-Z0-9_]+/g))], ["CI_SCOPE_OVERLAY"], "only the overlay answer is read");
   assert.doesNotMatch(text, /secrets\./);
 });
 
@@ -460,7 +466,7 @@ test("e2e-runner job: no model call and no secret: the workflow forbids model ca
   assert.equal(steps[0].text.includes("actions/checkout@v4"), true);
   assert.match(steps[0].text, /persist-credentials: false/);
   const run = stepNamed(steps, "Run the end-to-end runner test");
-  assert.equal(ifOf(run), null, "the test step always runs");
+  assert.equal(ifOf(run), OVERLAY_OFF, "the test step runs unless the classifier answered overlay");
   assert.doesNotMatch(run.text, /continue-on-error/);
   assert.match(run.text, /\n {8}run: nix develop \.#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'\n?$/);
   assert.equal(steps[steps.length - 1].name, run.name, "nothing runs after the test, so its result is the job's");
@@ -1593,4 +1599,56 @@ test("macos spike script: a failed or unverified download sets a flag, records n
   assert.equal((fetchFn.match(/DOWNLOAD_FAILED=1/g) ?? []).length, 2, "both the curl failure and the mismatch set the flag");
   assert.match(src, /if \[ "\$DOWNLOAD_FAILED" = 1 \]; then VM_BOOTED=not_tested; fi\nrec result\.vm_booted/);
   assert.match(src, /\nrm -rf "\$WORK"\n[\s\S]*if \[ "\$DOWNLOAD_FAILED" = 1 \]; then[\s\S]*exit 1\nfi\nexit 0\n$/);
+});
+
+// ---- overlay-only pull requests (private repository) -------------------------------------------------
+const OVERLAY_LIST_EXPR = "${{ github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}";
+
+/** GitHub's `a && b || c` for the one shape used here: the list when private is true, '' otherwise. */
+const overlayListFor = (isPrivate) => (isPrivate ? "scripts/ci/publish-denylist.local" : "");
+
+test("overlay-only: the check job's scope step gets the overlay list only on a private repository", () => {
+  const s = stepNamed(checkSteps, "CI scope");
+  assert.ok(s.text.includes(`CI_OVERLAY_LIST: ${OVERLAY_LIST_EXPR}`));
+  assert.equal(overlayListFor(false), "", "public: empty, so the classifier cannot answer overlay");
+  assert.equal(overlayListFor(true), "scripts/ci/publish-denylist.local");
+  // the command line itself is unchanged: the list travels through the environment
+  assert.match(s.text, CLASSIFIER);
+  assert.doesNotMatch(s.text.split("run:")[1], /overlay/i);
+});
+
+test("overlay-only: only Run checks and the Node 22 step are narrowed, and an overlay check takes Run checks' place", () => {
+  assert.equal(ifOf(stepNamed(checkSteps, "Run checks")), OVERLAY_OFF);
+  const o = stepNamed(checkSteps, "Overlay checks");
+  assert.equal(ifOf(o), "env.CI_SCOPE_OVERLAY == 'true'");
+  assert.match(o.text, /run: nix develop \.#ci --command bash scripts\/ci\/overlay-checks\.sh\s*$/);
+  assert.doesNotMatch(o.text, /continue-on-error/);
+  const idx = (n) => checkSteps.findIndex((x) => x.name === n);
+  assert.ok(idx("CI scope") < idx("Run checks") && idx("Run checks") < idx("Overlay checks"));
+  // job level: nothing skips the job, so the required check `check` concludes success
+  const head = noComments(checkJob.slice(0, checkJob.indexOf("\n    steps:")));
+  assert.equal(head.split("\n").filter((l) => /^ {4}if:/.test(l)).length, 1);
+  assert.doesNotMatch(head, /CI_SCOPE|overlay/i);
+});
+
+test("overlay-only: a public run's environment cannot be overlay (no step sets CI_SCOPE_OVERLAY outside the classifier)", () => {
+  assert.doesNotMatch(noComments(ci), /CI_SCOPE_OVERLAY[:=]/);
+  assert.doesNotMatch(noComments(ci), /GITHUB_ENV.*CI_SCOPE_OVERLAY/);
+});
+
+test("overlay-only: the e2e-runner scope step is private-only, pull-request-only, reads labels from the API, and fetches HEAD^1 only there", () => {
+  const s = stepNamed(runnerE2eSteps, "Overlay scope");
+  assert.equal(ifOf(s), "github.event_name == 'pull_request' && github.event.repository.private");
+  assert.match(s.text, CLASSIFIER);
+  assert.match(s.text, /CI_OVERLAY_LIST: scripts\/ci\/publish-denylist\.local/);
+  assertReadsLabelsFromApi(s.text);
+  assert.equal(ifOf(s).includes("private"), true);
+  assert.match(runnerE2eSteps[0].text, /fetch-depth: \$\{\{ github\.event\.repository\.private && 2 \|\| 1 \}\}/);
+  const order = runnerE2eSteps.map((x) => x.name);
+  assert.ok(order.indexOf("Overlay scope") < order.indexOf("Run the end-to-end runner test"));
+});
+
+test("overlay-only: the merge gate needs `check` green, and a job-level skip would be refused, so no job is skipped for this", () => {
+  // scripts/lib/ci-status-check.sh counts `skipped` as did-not-run. Every job keeps its if: free of the overlay answer.
+  for (const job of Object.values(ciDoc.jobs)) assert.doesNotMatch(String(job.if ?? ""), /overlay|CI_SCOPE/i);
 });

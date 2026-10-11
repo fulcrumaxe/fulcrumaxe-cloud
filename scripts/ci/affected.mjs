@@ -10,12 +10,19 @@
 // when `--labels-api` is given.
 //
 // Prints one JSON object:
-//   {"mode":"full"|"affected","reason":"...","trigger":"<glob>"|null,"packages":["apps/web",...],"e2e":true|false,"lint":["scripts/ci"]|[]}
+//   {"mode":"full"|"affected"|"overlay","reason":"...","trigger":"<glob>"|null,"packages":["apps/web",...],"e2e":true|false,"lint":["scripts/ci"]|[]}
 //
 //   full      run everything, exactly as a push to main does. `trigger` names the glob that forced it
 //             (or null when the cause is something else, which `reason` then states).
 //   affected  run only `packages` (workspace package directories): the packages the change touches plus
 //             every package that depends on one of them, directly or through others.
+//
+//   overlay   PRIVATE PLANE ONLY, and only when an overlay list is given (`--overlay-list <path in the repo>`
+//             or the CI_OVERLAY_LIST variable; ci.yml passes it only where `github.event.repository.private`).
+//             Every changed file is an overlay path, so no product code changed: the private tree's product
+//             code is the code plane's main, which already runs the product suites on hosted runners. The job
+//             runs scripts/ci/overlay-checks.sh instead and finishes green. See overlayOnly below. Without the
+//             option nothing here can answer `overlay`, which is what keeps the public plane unchanged.
 //
 // A full run no longer implies e2e. `e2e` is true only when a changed file matches `e2e_paths`, or the change
 // touches the e2e job of ci.yml (see ciWorkflowEffect); a run that fails closed still says true.
@@ -334,11 +341,62 @@ export function ciWorkflowEffect(repoRoot, base, head, cw) {
 }
 
 /**
+ * Authorities in the overlay list whose files own product-suite tests of their own (a private workspace
+ * package, and vitest files that import an overlay script). A change to one of them is NOT skippable: the
+ * ordinary classification selects its package and the suites that cover it.
+ */
+export const OVERLAY_NOT_SKIPPABLE = new Set(["private-package", "tests-an-overlay-script"]);
+
+/**
+ * Parses the overlay list (scripts/ci/publish-denylist.local): `<path><TAB><authority>` per line, `#` comments
+ * and blank lines ignored; a trailing `/` makes a prefix, anything else is an exact path. Any malformed line
+ * throws FailClosed, so a damaged list can never narrow a run.
+ */
+export function parseOverlayList(text) {
+  const entries = [];
+  for (const raw of text.split("\n")) {
+    if (raw.trim() === "" || raw.startsWith("#")) continue;
+    const parts = raw.split("\t");
+    const [entry, authority] = parts;
+    if (parts.length < 2 || !entry || !authority || !authority.trim() || /^\/|(^|\/)\.\.(\/|$)|[*?\\\s]/.test(entry)) {
+      throw new FailClosed("overlay list has a malformed line");
+    }
+    entries.push({ path: entry, prefix: entry.endsWith("/"), authority: authority.trim() });
+  }
+  if (entries.length === 0) throw new FailClosed("overlay list is empty");
+  return entries;
+}
+
+/**
+ * Are ALL of `changed` overlay paths whose change the product suites cannot see? The list is read from the
+ * BASE commit, never the head: the list is itself an overlay path, so a pull request that edited it could
+ * otherwise widen its own exemption. A file whose entry carries a not-skippable authority makes the answer no.
+ * Returns the overlay files, or null.
+ */
+export function overlayOnly(repoRoot, base, changed, listPath) {
+  if (changed.length === 0) return null;
+  let text;
+  try {
+    [text] = readBlobs(repoRoot, [`${base}:${listPath}`]);
+  } catch {
+    throw new FailClosed("overlay list unreadable at the base commit");
+  }
+  if (text === null) throw new FailClosed(`overlay list ${listPath} is missing at the base commit`);
+  const entries = parseOverlayList(text);
+  for (const f of changed) {
+    const hits = entries.filter((e) => (e.prefix ? f.startsWith(e.path) : f === e.path));
+    if (hits.length === 0) return null;
+    if (hits.some((h) => OVERLAY_NOT_SKIPPABLE.has(h.authority))) return null;
+  }
+  return changed;
+}
+
+/**
  * Classifies a change. `input`: { repoRoot, base, head, forceFull, labels, triggerFile }.
  * Never throws; any failure is a full run with the cause in `reason`.
  */
 export function classify(input) {
-  const { repoRoot = DEFAULT_REPO_ROOT, base, head, forceFull = "", labels = [], labelsError = null, triggerFile = DEFAULT_TRIGGER_FILE } = input;
+  const { repoRoot = DEFAULT_REPO_ROOT, base, head, forceFull = "", labels = [], labelsError = null, triggerFile = DEFAULT_TRIGGER_FILE, overlayList = "" } = input;
   try {
     if (forceFull === "true") return full("CI_FORCE_FULL");
     // The labels could not be read, so `ci:full` cannot be ruled out: widen.
@@ -358,6 +416,22 @@ export function classify(input) {
       changed = git(repoRoot, ["diff", "--name-only", "-z", "--no-renames", base, head]).split("\0").filter(Boolean).sort();
     } catch (err) {
       throw new FailClosed(`git diff failed: ${String(err.message).split("\n")[0]}`);
+    }
+
+    // Private plane only (the caller passes an overlay list only there): no product path changed.
+    if (overlayList) {
+      const overlay = overlayOnly(repoRoot, base, changed, overlayList);
+      if (overlay) {
+        return {
+          mode: "overlay",
+          reason: `${overlay.length} changed file${overlay.length === 1 ? "" : "s"}, all overlay paths`,
+          trigger: null,
+          packages: [],
+          e2e: false,
+          lint: [],
+          overlay,
+        };
+      }
     }
 
     // Content rules: what a changed file actually changed (D#507 follow-up).
@@ -423,6 +497,7 @@ export function classify(input) {
 
 /** The one line a pull-request run shows for a result. */
 export function scopeLine(result) {
+  if (result.mode === "overlay") return `CI scope: overlay-only — ${result.overlay.length} overlay files; product suites skipped (the code plane's main already ran them)`;
   if (result.mode === "full") return `CI scope: full (${result.trigger ?? result.reason})`;
   if (result.packages.length === 0) return "CI scope: affected — 0 packages (ignored paths only)";
   return `CI scope: affected — ${result.packages.length} packages: ${result.packages.join(", ")}`;
@@ -524,6 +599,7 @@ async function main() {
       labels,
       labelsError,
       triggerFile: args.triggers ?? DEFAULT_TRIGGER_FILE,
+      overlayList: args["overlay-list"] ?? process.env.CI_OVERLAY_LIST ?? "",
     });
   } catch (err) {
     // Even a bad command line must not turn into a quiet "affected": say full and why.
@@ -538,6 +614,8 @@ async function main() {
     if (process.env.GITHUB_ENV) {
       exportEnv(process.env.GITHUB_ENV, {
         CI_SCOPE_MODE: result.mode,
+        // Only an overlay answer sets it, so a public run's environment file is exactly what it was.
+        ...(result.mode === "overlay" ? { CI_SCOPE_OVERLAY: "true" } : {}),
         // check.sh runs the full suite unless this is set (comma-separated directories; `none` = no package).
         ...(result.mode === "affected" ? { FX_CHECK_AFFECTED: result.packages.length > 0 ? result.packages.join(",") : "none" } : {}),
         // Extra paths check.sh lints in an affected run (a standalone CI test is in no package).
