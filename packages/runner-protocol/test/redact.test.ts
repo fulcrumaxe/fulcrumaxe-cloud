@@ -20,6 +20,8 @@ describe("G2: redaction of credential shapes", () => {
     ["github_pat_", t("github", "_pat_", LONG_TAIL, "_x")],
     ["fxrr_", t("fx", "rr_", LONG_TAIL)],
     ["fxrr_ with a short tail", t("fx", "rr_", "AbCdEfGhIj")],
+    ["fxrp_ (a provisioning token)", t("fx", "rp_", LONG_TAIL)],
+    ["fxrp_ with a short tail", t("fx", "rp_", "AbCdEfGhIj")],
     ["fxat_", t("fx", "at_", LONG_TAIL)],
     ["whsec_", t("wh", "sec_", LONG_TAIL)],
     ["a JWT-shaped string", t("ey", "J", "hbGciOiJFZERTQSJ9", ".", "ey", "J", "zdWIiOiJ4In0", ".", "c2ln", "bmF0dXJl")],

@@ -18,7 +18,14 @@ import { createPool } from '../src/pool.js';
  * and needs the reviewer's sign-off. (SECURITY DEFINER work belongs in a platform_ops-owned helper that an
  * invoker trigger function calls, never in the trigger function itself.)
  */
-const ALLOWLIST: ReadonlyArray<{ fn: string; owner: string; reason: string }> = [];
+const ALLOWLIST: ReadonlyArray<{ fn: string; owner: string; reason: string }> = [
+  {
+    fn: 'runner_provisioning_token_revoke_for_member()',
+    owner: 'runner_provisioning_definer',
+    reason:
+      "0786 (D#605 FL-6): stamps a demoted or removed minter's unused provisioning tokens revoked. SECURITY DEFINER, owned by a NOLOGIN role nothing can become. 0720's invoker-plus-helper shape needs EXECUTE for platform_ops, which migration 0765's platform_ops diff test refuses for any later migration.",
+  },
+];
 
 describe('trigger function ownership (all migrations applied)', () => {
   let admin: Pool;

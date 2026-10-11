@@ -318,6 +318,7 @@ describe("the read model [pg]", () => {
             running: { light: 0, heavy: 0 },
             capacity: null,
             load_label: null,
+            provisioning: null,
           },
         ]);
         expect(body.copy).toEqual({
@@ -351,14 +352,14 @@ describe("the read model [pg]", () => {
       expect(((await list(f, f.m1)).body as Body).runners[0]).toMatchObject({ sandbox_unavailable: null, state: "revoked" });
     });
 
-    it("returns none of the excluded fields: the key-set of a runner is exactly the thirteen, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
+    it("returns none of the excluded fields: the key-set of a runner is exactly the fourteen, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
       const f = await fresh();
       const id = await runner(f);
       await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [id, randomUUID()]);
       await h.admin.query("INSERT INTO runner_request_nonces (account_id, runner_id, nonce) VALUES ($1, $2, 'abcdefghijklmnopqrst')", [f.accountId, id]);
       const res = await list(f, f.m1);
       const body = res.body as Body;
-      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "credential_mode", "id", "last_seen_at", "load_label", "plan_consent", "registered_by", "repos", "running", "sandbox_unavailable", "state"]);
+      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "credential_mode", "id", "last_seen_at", "load_label", "plan_consent", "provisioning", "registered_by", "repos", "running", "sandbox_unavailable", "state"]);
       const text = JSON.stringify(res.body);
       const row = (await h.admin.query("SELECT jkt, public_key_jwk, allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0];
       expect(text).not.toContain(row.jkt);

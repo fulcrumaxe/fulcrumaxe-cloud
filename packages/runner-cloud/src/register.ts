@@ -1,6 +1,8 @@
+import { isIP } from "node:net";
 import { RegisterMessage, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { MAX_BODY_BYTES, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { PROVISIONING_TOKEN_PREFIX, hashProvisioningToken } from "./provisioningTokens.js";
 import { hashRegistrationCode } from "./registrationCodes.js";
 import { verifySelfSignedRequest } from "./verifyRunnerRequest.js";
 
@@ -34,9 +36,18 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
   const existing = await deps.appUserPool.query<{ taken: boolean }>("SELECT runner_jkt_registered($1) AS taken", [jkt]);
   if (existing.rows[0]?.taken === true) throw new RunnerHttpError(409, "key_registered", "that key is already registered");
 
+  // Two kinds of secret reach this route: the one-time code (`fxrr_`) and a provisioning token (`fxrp_`, D#605 FL-6). The prefix picks the kind; each is
+  // checked by its own definer for single use, expiry and the minter's role, and every failure answers the same 401.
+  const provisioning = message.code.startsWith(PROVISIONING_TOKEN_PREFIX);
+  const codeHash = provisioning ? hashProvisioningToken(message.code) : hashRegistrationCode(message.code);
+  // A header that is not an address is recorded as unknown. It is for display only and never decides anything.
+  const clientIp = req.clientIp !== undefined && isIP(req.clientIp) !== 0 && !req.clientIp.includes("%") ? req.clientIp : null;
+
   // Before a tenant is known: which account does this code belong to? An unknown code and a used one look the same.
-  const codeHash = hashRegistrationCode(message.code);
-  const { rows } = await deps.appUserPool.query<{ account_id: string | null }>("SELECT runner_code_account($1) AS account_id", [codeHash]);
+  const { rows } = await deps.appUserPool.query<{ account_id: string | null }>(
+    provisioning ? "SELECT runner_provisioning_token_account($1) AS account_id" : "SELECT runner_code_account($1) AS account_id",
+    [codeHash],
+  );
   const accountId = rows[0]?.account_id;
   if (!accountId) throw new RunnerHttpError(401, "invalid_code", "the registration code is not valid");
 
@@ -46,7 +57,9 @@ export async function registerRunner(deps: RunnerCloudDeps, req: RunnerHttpReque
       // An account on the runner plan has the plan data's limit; any other account has none (D#6 R2b criterion 12).
       const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
       const maxRunners = plan === RUNNER_PLAN ? maxRunnersOf(deps) : null;
-      const result = await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
+      const result = provisioning
+        ? await client.query<{ id: string }>("SELECT runner_provisioning_register($1, $2::jsonb, NULL, $3, $4) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners, clientIp])
+        : await client.query<{ id: string }>("SELECT runner_register($1, $2::jsonb, NULL, $3) AS id", [codeHash, JSON.stringify(message.public_key_jwk), maxRunners]);
       const id = result.rows[0]!.id;
       const row = await client.query<{ credential_mode: string }>("SELECT credential_mode FROM runners WHERE id = $1 AND account_id = $2", [id, accountId]);
       // Parsed inside the transaction: a reply that does not fit the protocol rolls the registration back.

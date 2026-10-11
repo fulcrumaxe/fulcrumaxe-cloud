@@ -118,6 +118,11 @@ export interface RunnerRow {
    * work, so it lists none.
    */
   repos: Array<{ id: string; name: string }>;
+  /**
+   * D#605 FL-6: set when the runner was made from a provisioning token: who minted it and the first client address it registered from. The address is shown to an
+   * owner or admin only (null for anyone else, and for a read with no user), and is null when the edge sent none. Null for a runner made from a one-time code.
+   */
+  provisioning: { minted_by: { id: string; name: string }; first_ip: string | null } | null;
 }
 
 interface RawRunner {
@@ -140,6 +145,9 @@ interface RawRunner {
   cap_light_limit: number | null;
   cap_heavy_limit: number | null;
   cap_limited_by: string | null;
+  prov_minted_by: string | null;
+  prov_minted_by_name: string | null;
+  prov_first_ip: string | null;
 }
 
 /** A repo's display name, the same text the approvals list uses: "owner/name", else a fixed fallback, never null or an id. */
@@ -157,8 +165,11 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
                 live.light AS running_light, live.heavy AS running_heavy,
-                cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by
+                cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by,
+                pt.created_by AS prov_minted_by, COALESCE(NULLIF(pu.name, ''), NULLIF(pu.github_login, ''), $3) AS prov_minted_by_name, host(pt.first_ip) AS prov_first_ip
            FROM runners r LEFT JOIN users u ON u.id = r.registered_by
+                LEFT JOIN runner_provisioning_tokens pt ON pt.runner_id = r.id AND pt.account_id = r.account_id
+                LEFT JOIN users pu ON pu.id = pt.created_by
                 LEFT JOIN runner_capacity cap ON cap.runner_id = r.id AND cap.account_id = r.account_id
                 CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
                                       FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
@@ -179,6 +190,7 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     }
     return { runners, repos };
   };
+  let seesAddress = false;
   const { runners: rows, repos } =
     userId === null
       ? await withTenant(deps.appUserPool, accountId, read)
@@ -187,6 +199,7 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
           // closed even if a caller ever pairs a user with an account they are not in.
           const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
           if (role === null || role === undefined) throw new RunnerHttpError(403, "forbidden", "you are not a member of this account");
+          seesAddress = role === "owner" || role === "admin";
           return read(client);
         });
   return rows.map((r) => {
@@ -215,6 +228,7 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
             .filter((id) => repos.has(id))
             .map((id) => ({ id, name: repos.get(id)! }))
             .sort((x, y) => x.name.localeCompare(y.name) || x.id.localeCompare(y.id)),
+    provisioning: r.prov_minted_by === null ? null : { minted_by: { id: r.prov_minted_by, name: r.prov_minted_by_name ?? UNNAMED_MEMBER }, first_ip: seesAddress ? r.prov_first_ip : null },
     };
   });
 }

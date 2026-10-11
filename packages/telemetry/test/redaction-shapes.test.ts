@@ -61,6 +61,7 @@ const ROWS: Row[] = [
   row("sk_ant_family", ["sk", "ant", "zzz42"].join("-") + "-" + alnum(12)),
   row("github_short_token", "gh" + "s_" + alnum(12)),
   row("fxrr", "fx" + "rr_" + alnum(12)),
+  row("fxrp", "fx" + "rp_" + alnum(12)),
   row("aws_access_key", "AK" + "IA" + "ABCDEFGH01234567"),
   row("postgres_uri", "postgres://app_user:" + alnum(14) + "@db.internal:5432/main"),
   row("postgres_uri", "postgresql://app_user:" + alnum(14) + "@db.internal/main?sslmode=require"),
