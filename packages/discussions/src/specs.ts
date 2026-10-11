@@ -106,15 +106,43 @@ export async function respecSpec(ctx: DiscussionsContext, input: RespecSpecInput
   return writeSpecVersion(ctx, input, { basedOnVersion });
 }
 
-async function writeSpecVersion(ctx: DiscussionsContext, input: PublishSpecInput, respec: { basedOnVersion: number } | null): Promise<SpecVersion> {
+/**
+ * D#597 CC-2b: `spec.publish` for an accepted Spec amendment. The caller made the body (version N's text plus the labelled amendment); this adds it as
+ * version N+1 and carries N's file list forward unchanged (the amendment cannot widen what a build may touch). Same checks as a Re-spec (the two stages a
+ * build starts from, `spec_changed` unless N is still the newest, the body limit, HT-3, a question never getting a Spec) except two, both because a
+ * person's click is behind it: the list need not be missing, and a halt does not refuse it (a halt stops agents, and this starts no run). The ids of the
+ * corrections it delivers are stored in the frontmatter (`amended_corrections`) so a replay of the same delivery can tell it already published.
+ */
+export interface AmendSpecInput {
+  workItemId: string;
+  body: string;
+  basedOnVersion: number;
+  correctionIds: readonly string[];
+}
+
+export async function amendSpec(ctx: DiscussionsContext, input: AmendSpecInput): Promise<SpecVersion> {
+  const basedOnVersion: unknown = input.basedOnVersion;
+  if (typeof basedOnVersion !== "number" || !Number.isSafeInteger(basedOnVersion) || basedOnVersion < 1) {
+    throw new DiscussionsError("invalid_input", "an amendment names the version its body was made from");
+  }
+  if (input.correctionIds.length === 0) throw new DiscussionsError("invalid_input", "an amendment names the corrections it delivers");
+  return writeSpecVersion(ctx, { workItemId: input.workItemId, body: input.body, acceptanceFiles: [] }, { basedOnVersion, correctionIds: input.correctionIds, amend: true });
+}
+
+async function writeSpecVersion(
+  ctx: DiscussionsContext,
+  input: PublishSpecInput,
+  respec: { basedOnVersion: number; amend?: true; correctionIds?: readonly string[] } | null,
+): Promise<SpecVersion> {
   rejectAccountIdInInput(input as unknown as Record<string, unknown>);
   const access = assertAllowed(ctx.principal, "spec.publish");
   const workItemId = assertUuidOrNotFound(input.workItemId, "work item");
   const body = redactIfNeeded(ctx.principal, requireBodyWithinLimit(input.body));
   const actor = actorForWrite(ctx.principal);
   // The same parser the done check uses (one copy, in core). An absent key, a non-array, an empty list or any entry it cannot read is refused here.
-  const acceptanceFiles: unknown = Object.hasOwn(input, "acceptanceFiles") ? input.acceptanceFiles : undefined;
-  if (parseAcceptanceScope(acceptanceFiles).kind !== "known") {
+  let acceptanceFiles: unknown = Object.hasOwn(input, "acceptanceFiles") ? input.acceptanceFiles : undefined;
+  const amend = respec?.amend === true;
+  if (!amend && parseAcceptanceScope(acceptanceFiles).kind !== "known") {
     throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
   }
 
@@ -122,7 +150,7 @@ async function writeSpecVersion(ctx: DiscussionsContext, input: PublishSpecInput
     const workItem = await lockWorkItem(client, workItemId);
     // A halted item gets no Spec from the pipeline (a person may still write one). Checked here and not only in recordStage:
     // an item already at spec_ready is not moved, so recordStage would never see it. Nothing is written.
-    if (workItem.halted && actor.kind === "system") throw new WorkItemHaltedError(workItemId);
+    if (workItem.halted && actor.kind === "system" && !amend) throw new WorkItemHaltedError(workItemId);
 
     // D#2 C58 G8: a question is answered in its thread and never gets a Spec,
     // so it can never reach `spec_ready`. Read from the discussion, not the input.
@@ -152,8 +180,21 @@ async function writeSpecVersion(ctx: DiscussionsContext, input: PublishSpecInput
       );
       if (latest.length === 0) throw new DiscussionsError("no_spec_version", "this work item has no Spec version to add a file list to");
       if (Number(latest[0]!.version) !== respec.basedOnVersion) throw new DiscussionsError("spec_changed", "the Spec changed while the file list was being made");
-      if (parseAcceptanceScope(latest[0]!.acceptance_files).kind === "known") {
+      if (amend) {
+        // The list is N's own, carried forward; a Spec with no readable list is re-specced first.
+        if (parseAcceptanceScope(latest[0]!.acceptance_files).kind !== "known") throw new DiscussionsError("invalid_file_scope", "a Spec needs a readable list of the files it allows");
+        acceptanceFiles = latest[0]!.acceptance_files;
+      } else if (parseAcceptanceScope(latest[0]!.acceptance_files).kind === "known") {
         throw new DiscussionsError("spec_has_file_list", "the newest Spec version already has a readable file list");
+      }
+    }
+
+    if (amend) {
+      // Stamp each delivered correction `applied` IN this transaction. The definer locks the row and answers `not_accepted` for one a person rejected (or
+      // that was already delivered) after the caller read it; any such id throws, and the insert below never happens, so a reject always wins.
+      for (const id of respec!.correctionIds ?? []) {
+        const { rows: stamped } = await client.query<{ r: string }>("SELECT work_item_correction_mark_applied($1::uuid, NULL) AS r", [id]);
+        if (stamped[0]?.r !== "applied") throw new DiscussionsError("correction_not_accepted", "an amendment was rejected or already delivered");
       }
     }
 
@@ -171,7 +212,7 @@ async function writeSpecVersion(ctx: DiscussionsContext, input: PublishSpecInput
          (account_id, work_item_id, version, body, body_sha256, created_by_kind, created_by_user_id, frontmatter)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
        RETURNING id, created_at`,
-      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId, JSON.stringify({ acceptance_files: acceptanceFiles })],
+      [accountIdOf(ctx.principal), workItemId, version, body, bodySha256, actor.kind, actor.userId, JSON.stringify(amend ? { acceptance_files: acceptanceFiles, amended_corrections: respec!.correctionIds } : { acceptance_files: acceptanceFiles })],
     );
     const specVersionId = rows[0]!.id;
 

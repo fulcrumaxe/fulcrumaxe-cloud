@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { DISCUSSION_KINDS, createDiscussion } from "@fx/discussions";
 import { CORRECTION_KINDS, CorrectionInputError, createCorrection, type Correction } from "@fx/core/src/corrections/index.js";
+import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import {
+  AmendRefusedError,
   ApplyFailedError,
   ContentChangedError,
   PauseUnavailableError,
@@ -11,7 +13,7 @@ import {
   type DecisionResult,
 } from "@fx/core/src/corrections/accept.js";
 import { listCorrectionHistory, type CorrectionHistoryEntry } from "@fx/core/src/corrections/history.js";
-import { ApiError, RunActionsUnavailableError, SessionRequiredError } from "../errors.js";
+import { ActionNotAvailableError, AlreadyRunningError, ApiError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError, SessionRequiredError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { UUID_RE, mapDbError, notFound, runActionDeps } from "./run-actions.js";
 
@@ -76,6 +78,15 @@ function mapCorrectionError(err: unknown): never {
   if (err instanceof CorrectionInputError) throw invalid("body");
   if (err instanceof ContentChangedError) throw new ApiError(409, "content_changed", "the correction text is not the text you approved");
   if (err instanceof PauseUnavailableError) throw new RunActionsUnavailableError();
+  if (err instanceof AmendRefusedError) {
+    // The same answers Re-spec gives for the same table's verdict. Nothing was decided.
+    const v = err.verdict;
+    if (v.reason === "role") throw new ForbiddenError("not permitted");
+    if (v.reason === "external") throw new ExternalRequiresHumanError(v.message);
+    if (v.reason === "no_repo") throw new NoRepoError(v.message);
+    if (v.reason === "live") throw new AlreadyRunningError(v.message);
+    throw new ActionNotAvailableError(v.message);
+  }
   if (err instanceof ApplyFailedError) throw new ApiError(500, "apply_failed", "the correction could not be applied; for a new item the decision may be recorded without the item, so check the work item before deciding again");
   return mapDbError(err);
 }
@@ -186,10 +197,10 @@ export const correctionRoutes: RouteEntry[] = [
       description:
         `Owner or admin session only; a token is refused (403 \`session_required\`), including one that proposed this correction. An optional \`content_hash\` must equal the stored text's hash. ` +
         (verb === "accept"
-          ? "Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note or Spec amendment stays `accepted` until a run uses it. "
+          ? "Accepting a question, pause, priority or new_item correction applies it through the existing writer and stamps it `applied`: a pause asks for the halt (undone only by a person's resume, never by a token), a priority sets the priority, a new_item creates a Discussion. A run note stays `accepted` until a run uses it. A Spec amendment stays `accepted` until the platform publishes the next Spec version (the old text plus the amendment under a labelled heading, with control tokens stripped); it is refused 409 `already_running` while an agent run of the item is live, and `action_not_available` outside Spec ready or Needs a person. "
           : "Rejecting stays possible while a correction is `proposed` or `accepted` and not yet `applied`. ") +
         "Answers 200 with the correction.",
-      extraResponses: { "409": SHARED, ...(verb === "accept" ? { "503": "Error `run_actions_unavailable` for a pause: nothing was decided." } : {}) },
+      extraResponses: { "409": SHARED, ...(verb === "accept" ? { "503": "Error `run_actions_unavailable` for a pause or a Spec amendment: nothing was decided." } : {}) },
       principals: ["session"],
       minRole: "admin",
       idempotency: "optional",
