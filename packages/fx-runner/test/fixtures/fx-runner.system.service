@@ -1,0 +1,26 @@
+# Managed by fx-runner service install. Run it again to rewrite this file; fx-runner service uninstall --system removes it.
+[Unit]
+Description=fulcrumaxe local runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fxrunner
+ExecStart=/opt/fx-runner/bin/node /opt/fx-runner/bin/fx-runner.mjs run
+Environment="PATH=/usr/bin:/opt/fx-runner/bin"
+Environment="FX_RUNNER_SERVICE=1"
+Environment="HOME=/var/lib/fx-runner"
+Environment="FX_RUNNER_HOME=/var/lib/fx-runner"
+StateDirectory=fx-runner
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

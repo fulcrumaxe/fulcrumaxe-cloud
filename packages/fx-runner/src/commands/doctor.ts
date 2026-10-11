@@ -26,6 +26,7 @@ import { detectDistro, sandboxFixLines } from "../sandbox/sandboxFix.js";
 import { checkJobShell } from "../sandbox/jobShellProbe.js";
 import { toolchainReport } from "../sandbox/toolchain.js";
 import { updatesLine } from "./update.js";
+import { userUnitInstalled } from "./service.js";
 
 const OS_RELEASE = "/etc/os-release";
 const NIXOS_MARKER = "/etc/NIXOS";
@@ -52,6 +53,9 @@ export interface DoctorHost {
   xdgRuntimeDir?: string | undefined;
   /** Replaceable by a test only: the answer to "can scopes be made here" instead of trying a real one. */
   scopeSupport?: ScopeSupport | undefined;
+  /** `XDG_CONFIG_HOME` and the account name, looked up by the caller: where a per-user service unit would be, and the name the lingering advice uses. */
+  xdgConfigHome?: string | undefined;
+  userName?: string | undefined;
   /** This program's version and real path, for the Updates line. Absent in tests that do not care. */
   update?: { version?: string | undefined; execPath?: string | undefined } | undefined;
 }
@@ -98,6 +102,33 @@ async function limitsCheck(host: DoctorHost, line: (level: Level, label: string,
   });
   if (support.ok) line("PASS", "Job limits", "each job runs in its own systemd scope with a memory and a process limit");
   else line("WARN", "Job limits", `${UNENFORCED_LINE} (${support.reason})`);
+}
+
+/** The environment `loginctl` is started with: a fixed search path, no locale. */
+const LOGINCTL_ENV = { PATH: "/usr/bin:/bin:/run/current-system/sw/bin", LC_ALL: "C" };
+const LOGINCTL_TIMEOUT_MS = 5_000;
+const LOGINCTL = "loginctl";
+
+/**
+ * D#605 FL-7: a per-user service stops when its user logs out unless systemd keeps their manager running (lingering). Only when this
+ * command wrote a user unit does it matter, so only then is `loginctl show-user` asked. The reading is `Linger=yes|no`; an answer that is
+ * neither is reported as unchecked, never as a pass.
+ */
+async function lingerCheck(host: DoctorHost, line: (level: Level, label: string, detail: string) => void): Promise<void> {
+  if (host.platform !== "linux" || host.home === undefined || host.uid === undefined) return;
+  let installed = false;
+  try {
+    installed = userUnitInstalled(host.home, host.xdgConfigHome);
+  } catch {
+    // fx-swallow-ok: a location that cannot be read is the same as no unit for this advisory check
+    installed = false;
+  }
+  if (!installed) return;
+  const result = await host.sandbox.run(LOGINCTL, ["show-user", String(host.uid), "--property=Linger"], LOGINCTL_ENV, LOGINCTL_TIMEOUT_MS);
+  const linger = result.code === 0 && !result.timedOut ? result.stdout.match(/^Linger=(yes|no)$/m)?.[1] : undefined;
+  if (linger === "no") line("WARN", "Service", `Stops when you log out: run loginctl enable-linger ${host.userName ?? "<user>"} or use service install --system`);
+  else if (linger === "yes") line("PASS", "Service", "the user service keeps running after you log out (lingering is on)");
+  else line("INFO", "Service", "a user service is installed; whether it survives a logout could not be checked (loginctl did not answer)");
 }
 
 /** The API key file (D#6 R5b-3): whether it is there and safe, never its value. A subscription runner does not use it. */
@@ -156,7 +187,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
     line("FAIL", "Registration", refusal(error));
   }
   if (registration === undefined) {
-    if (!registrationFailed) line("FAIL", "Registration", "not registered; run: fx-runner register --code <code> --credential-mode <mode> --cloud-url <url>");
+    if (!registrationFailed) line("FAIL", "Registration", "not registered; run: fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>");
   } else {
     let key: ReturnType<typeof loadRunnerKey>;
     let keyRefusal: string | undefined;
@@ -238,6 +269,7 @@ export async function doctorCommand(ctx: CommandContext, host: DoctorHost, optio
 
   const sandboxOk = await sandboxCheck(ctx, host, binaryPath, line);
   await limitsCheck(host, line);
+  await lingerCheck(host, line);
 
   // What a job's agent can run for a project's own tests (D#6 R4d-3), on the runner's own PATH. Missing node is a warning, not a failure: not every repository needs it.
   // What the job's login shell finds is the next check (D#6 C44-2), and it only means something when the runner's PATH has node and the sandbox runs.

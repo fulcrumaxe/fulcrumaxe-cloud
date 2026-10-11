@@ -11,7 +11,14 @@ export interface SecretStream extends NodeJS.ReadableStream {
   setRawMode?: ((mode: boolean) => unknown) | undefined;
 }
 
-export function readSecret(stream: SecretStream, say: (text: string) => void, maxBytes: number): Promise<string> {
+export interface SecretOptions {
+  /** What a terminal is asked (default: the API key prompt). */
+  prompt?: string;
+  /** The refusal for input past the limit (default: the API key format refusal). */
+  tooLong?: () => Error;
+}
+
+export function readSecret(stream: SecretStream, say: (text: string) => void, maxBytes: number, options: SecretOptions = {}): Promise<string> {
   const limit = maxBytes + 3;
   const tty = stream.isTTY === true;
   if (tty && typeof stream.setRawMode !== "function") return Promise.reject(new CliError("cannot switch off the terminal's echo, so the key will not be read from it; pipe it on standard input instead", 2));
@@ -41,12 +48,12 @@ export function readSecret(stream: SecretStream, say: (text: string) => void, ma
           else text += char;
         }
       }
-      if (Buffer.byteLength(text) > limit) finish(new ApiKeyError("api_key_format"));
+      if (Buffer.byteLength(text) > limit) finish(options.tooLong?.() ?? new ApiKeyError("api_key_format"));
     };
     const onEnd = (): void => finish();
     const onError = (): void => finish(new CliError("standard input could not be read"));
     if (tty) {
-      say("API key (what you type is not shown): ");
+      say(options.prompt ?? "API key (what you type is not shown): ");
       stream.setRawMode!(true);
     }
     stream.on("data", onData);

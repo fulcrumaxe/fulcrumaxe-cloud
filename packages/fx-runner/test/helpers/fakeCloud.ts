@@ -30,6 +30,10 @@ export interface FakeCloud {
   /** The account every code and runner here belongs to. */
   accountId: string;
   runners: Map<string, { runnerId: string; jwk: Ed25519Jwk; revoked: boolean; credentialMode: CredentialMode }>;
+  /** The `name` of each registration that carried one (D#605 FL-2 adds it to the message). */
+  names: string[];
+  /** False stands in for a cloud that predates runner names: the strict message schema then refuses the unknown `name` key. */
+  acceptNames: boolean;
   /** Next replies to force, consumed in order. */
   force: Array<"rate_limit" | "runner_limit" | "leases_not_failed" | "key_too_old">;
   close: () => Promise<void>;
@@ -49,7 +53,7 @@ async function readBody(req: IncomingMessage): Promise<Buffer | null> {
 }
 
 export async function startFakeCloud(): Promise<FakeCloud> {
-  const state: FakeCloud = { origin: "", seen: [], validCodes: new Set(), codeModes: new Map(), accountId: randomUUID(), runners: new Map(), force: [], close: async () => undefined };
+  const state: FakeCloud = { origin: "", seen: [], validCodes: new Set(), codeModes: new Map(), accountId: randomUUID(), runners: new Map(), names: [], acceptNames: true, force: [], close: async () => undefined };
   const server: Server = createServer((req, res) => {
     const send = (status: number, body: unknown, headers: Record<string, string> = {}): void => {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
@@ -76,7 +80,15 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         json = undefined;
       }
       const isRegister = path === "/api/runner/register";
-      const registerMessage = isRegister ? RegisterMessage.safeParse(json) : undefined;
+      // A cloud with runner names (FL-2) takes an optional `name` beside the rest; this fake checks it is a string and parses the rest with the protocol's own schema.
+      let parsed: unknown = json;
+      if (isRegister && state.acceptNames && typeof json === "object" && json !== null && "name" in json) {
+        const { name, ...rest } = json as Record<string, unknown>;
+        if (typeof name !== "string") return refuse(400, "invalid_message");
+        state.names.push(name);
+        parsed = rest;
+      }
+      const registerMessage = isRegister ? RegisterMessage.safeParse(parsed) : undefined;
       // `registerRunner` parses the message before it looks at the signature, so a bad body is 400 whoever signed it.
       if (isRegister && !registerMessage?.success) return refuse(400, "invalid_message");
       const resolveKey = (keyid: string): Ed25519Jwk | undefined => {

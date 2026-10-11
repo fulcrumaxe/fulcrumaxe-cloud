@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by fx-runner service install. Run it again to rewrite this file; fx-runner service uninstall --system removes it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.fulcrumaxe.fx-runner</string>
+  <key>UserName</key>
+  <string>fxrunner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/fx-runner/bin/node</string>
+    <string>/opt/fx-runner/bin/fx-runner.mjs</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/usr/local/var/fx-runner</string>
+    <key>PATH</key>
+    <string>/usr/bin:/opt/fx-runner/bin</string>
+    <key>FX_RUNNER_SERVICE</key>
+    <string>1</string>
+    <key>FX_RUNNER_HOME</key>
+    <string>/usr/local/var/fx-runner</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/fx-runner/service.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/fx-runner/service.log</string>
+</dict>
+</plist>
