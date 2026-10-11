@@ -14,7 +14,7 @@ const MAX_FAIL_CALLS = 10;
  * with the login that may write `agent_runs.status`. If it cannot, the revoke stays in force and the response is 503
  * `leases_not_failed`; a session revoke can be repeated to finish the job.
  */
-async function failLeases(deps: RunnerCloudDeps, accountId: string, runnerIds: string[]): Promise<number> {
+export async function failLeases(deps: RunnerCloudDeps, accountId: string, runnerIds: string[]): Promise<number> {
   if (runnerIds.length === 0) return 0;
   const fail = deps.failRunnerLeases;
   if (!fail) throw new RunnerHttpError(503, "leases_not_failed", "the runner is revoked but its runs could not be failed yet", { revoked: true });

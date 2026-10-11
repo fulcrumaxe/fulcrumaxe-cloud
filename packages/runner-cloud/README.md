@@ -54,6 +54,17 @@ This package never holds the `platform_ops` login (a test scans the source). `ap
   from `app.runner_id`). Each refuses a `platform_ops` login, and a trigger on the three tables refuses a direct
   `platform_ops` statement. Statements nested in another trigger (the demotion revoke, an account cascade) still run.
 
+## Fleet controls (D#605 FL-8)
+
+Session routes under `/api/runners/:id/`, each a decision by a signed-in person (their user id goes to `withTenant`; a runner signature is 401):
+`pause`, `drain`, `resume`, `rename` (`{name}`), `labels` (`{labels}`), `rank` (`{rank}`), `repos` (`{repo_ids}`) and `remove`. The database
+decides who may do what: `runner_settings_apply` (0783, audit rows added in 0790) for the first six, `runner_repos_set` (0790) for repos
+(owner or admin may set any set of the account's repos, the registrant may only narrow) and the existing `runner_revoke` for remove, which sets
+`runners.revoked_at` (the column the claim, heartbeat, events and the proxy for repository access read) and then fails the live leases (F10).
+Answers: 403 not allowed, 404 no such runner, 400 a body or value refused, and 409 `runner_revoked` for any route on a removed runner (the
+database raises 55000; a removed registrant's own calls are 403, as a non-member). A drain keeps running work running and the claim answers
+idle; once nothing is running the list reads the runner as `paused`. Every action writes one audit row in the same transaction.
+
 ## After a revoke, and operations
 
 Every revoke (self, member, revoke-all, and a demotion or removal of the registrant) fails the runner's live leases through
