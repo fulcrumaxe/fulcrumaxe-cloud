@@ -33,7 +33,10 @@ describe("classifyRunner (criterion 13, one state each)", () => {
   });
   it("shows paused, then draining, before the online test: a paused runner last seen 250 s ago is paused, never offline (D#605 FL-3)", () => {
     expect(classifyRunner(facts({ paused: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
-    expect(classifyRunner(facts({ draining: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("draining");
+    expect(classifyRunner(facts({ draining: true, busy: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("draining");
+    // D#605 FL-8: when the last run ends, a drain reads as paused.
+    expect(classifyRunner(facts({ draining: true, busy: false, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
+    expect(classifyRunner(facts({ draining: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
     expect(classifyRunner(facts({ paused: true, draining: true, lastSeenAt: null }), NOW, 3)).toBe("paused");
     // Busy does not outrank them: a paused runner with a job running still reads paused.
     expect(classifyRunner(facts({ paused: true, busy: true }), NOW, 3)).toBe("paused");
@@ -167,7 +170,12 @@ describe("the read model [pg]", () => {
       await setting(paused, f, { paused: true });
       await setting(draining, f, { draining: true });
       expect(await stateOf(f, paused)).toBe("paused");
-      expect(await stateOf(f, draining)).toBe("draining");
+      // D#605 FL-8: a drain with no run left reads as paused; with a run still going it reads draining.
+      expect(await stateOf(f, draining)).toBe("paused");
+      const finishing = await runner(f, { lastSeen: ago(250) });
+      await setting(finishing, f, { draining: true });
+      await run(f, { status: "running", runnerId: finishing, leaseEnds: new Date(NOW.getTime() + 60_000) });
+      expect(await stateOf(f, finishing)).toBe("draining");
       expect(await stateOf(f, quiet)).toBe("offline");
       await h.admin.query("UPDATE runner_settings SET paused_at = NULL, paused_by = NULL WHERE runner_id = $1", [paused]);
       expect(await stateOf(f, paused)).toBe("offline"); // derived from the row now, never stamped

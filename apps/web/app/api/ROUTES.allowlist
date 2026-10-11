@@ -30,7 +30,15 @@ runner/revoke/route.ts
 runner/rotate/route.ts
 runner/runs/[id]/done/route.ts
 runner/runs/[id]/events/route.ts
+runners/[id]/drain/route.ts
+runners/[id]/labels/route.ts
+runners/[id]/pause/route.ts
 runners/[id]/plan-consent/route.ts
+runners/[id]/rank/route.ts
+runners/[id]/remove/route.ts
+runners/[id]/rename/route.ts
+runners/[id]/repos/route.ts
+runners/[id]/resume/route.ts
 runners/[id]/revoke/route.ts
 runners/approvals/route.ts
 runners/registration-codes/route.ts
