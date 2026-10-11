@@ -82,7 +82,7 @@ describe("G1: no credential channel", () => {
 describe("hello", () => {
   it("carries model_auth_present as a boolean and has no email, organisation or account name", () => {
     const keys = Object.keys(RUNNER_MESSAGES.hello.shape).sort();
-    expect(keys).toEqual(["binary_version", "isolation", "model_auth_present", "protocol_version"]);
+    expect(keys).toEqual(["binary_version", "facts", "isolation", "model_auth_present", "protocol_version"]);
     expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), model_auth_present: "yes" }).success).toBe(false);
     for (const extra of ["email", "org", "organization", "account_name", "account"]) {
       expect(RUNNER_MESSAGES.hello.safeParse({ ...(VALID.hello as object), [extra]: "x" }).success, extra).toBe(false);
@@ -236,8 +236,8 @@ describe("LocalOnlyEvent", () => {
 });
 
 describe("the other messages", () => {
-  it("register takes only a registration code and an Ed25519 public key", () => {
-    expect(Object.keys(RUNNER_MESSAGES.register.shape).sort()).toEqual(["code", "public_key_jwk"]);
+  it("register takes a registration code, an Ed25519 public key and an optional name", () => {
+    expect(Object.keys(RUNNER_MESSAGES.register.shape).sort()).toEqual(["code", "name", "public_key_jwk"]);
     for (const code of ["", "fxrr_short", "abc", `fxrr_${"A".repeat(31)}`, `fxat_${"A".repeat(40)}`, `fxrr_${"A".repeat(32)}!`]) {
       expect(RUNNER_MESSAGES.register.safeParse({ ...(VALID.register as object), code }).success, code).toBe(false);
     }

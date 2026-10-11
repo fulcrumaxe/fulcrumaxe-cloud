@@ -10,7 +10,7 @@ export const CODE = `fxrr_${"A1b2C3d4".repeat(5)}`;
 export interface Rig {
   cloud: FakeCloud;
   dir: string;
-  run: (argv: string[], over?: { fetchFn?: typeof fetch; now?: () => Date }) => Promise<{ code: number; out: string; err: string }>;
+  run: (argv: string[], over?: { fetchFn?: typeof fetch; now?: () => Date; hostname?: string }) => Promise<{ code: number; out: string; err: string }>;
   /** `serverMode` is the mode the code was minted for (default: the same as `mode`). */
   register: (mode?: string, serverMode?: "subscription" | "api_key") => Promise<{ code: number; out: string; err: string }>;
 }
@@ -27,7 +27,7 @@ export function useRig(): Rig {
     rig.run = async (argv, over = {}) => {
       let out = "";
       let err = "";
-      const code = await runCli({ argv, home: undefined, stateDirOverride: rig.dir, stdout: (t) => (out += t), stderr: (t) => (err += t), ...over });
+      const code = await runCli({ argv, home: undefined, stateDirOverride: rig.dir, hostname: "studio-mac.local", stdout: (t) => (out += t), stderr: (t) => (err += t), ...over });
       return { code, out, err };
     };
     rig.register = (mode = "api_key", serverMode) => {
