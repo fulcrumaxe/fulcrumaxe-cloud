@@ -5,6 +5,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
 import { isRunnerMode, runsInOurSandbox } from "@fx/runner";
+import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { sanitize } from "@fx/trust";
 import { agentOutputBlock } from "../plan/envelope.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -51,7 +52,12 @@ export interface ExecutorPromptInput {
   rebuild?: boolean;
   /** Absent is the sandbox: its text is unchanged. */
   runtime?: PromptRuntime;
+  /** D#597 CC-3: accepted run notes, already rendered (each sanitised and fenced). Absent or empty: the prompt is unchanged. */
+  runNotes?: string;
 }
+
+/** The notes' lines for a prompt, after the Spec. */
+const notesLines = (input: ExecutorPromptInput): string[] => (input.runNotes ? ["", input.runNotes] : []);
 
 /**
  * The executor's prompt. The Spec body was assembled by the pipeline around text the panel and the PM wrote from a
@@ -87,6 +93,7 @@ export function buildExecutorPrompt(input: ExecutorPromptInput): string {
     "",
     `SPEC (version ${version}):`,
     sanitize(input.spec),
+    ...notesLines(input),
     "",
     "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
     ...agentOutputBlock(`{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
@@ -120,6 +127,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput): string {
     "",
     `SPEC (version ${version}):`,
     sanitize(input.spec),
+    ...notesLines(input),
     "",
     "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
     ...agentOutputBlock('{"verdict":"done","tests":"passed","summary":"<plain-text summary for the repository owner>"}'),
@@ -196,10 +204,20 @@ export async function startBuildForItem(
   // run exists: nothing is recorded, no job is issued, the item stays where it is, and the customer's machine spends nothing. It is the row `readFacts` just read
   // (the latest unerased version, the one the run will pin), through the same parser the done check uses. Hosted (sandbox) builds are not checked and still start.
   if (isRunnerMode(executionMode) && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
-  const prompt = buildExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode) });
-  const started = await ports.startRun({ step: `build:v${facts.version}:${approvalId}`, role: "executor", prompt, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+  // D#597 CC-3: the accepted run notes ride on this run. Their ids are pinned into the step key, so a replay of this step names the same run. A replay whose
+  // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
+  const baseStep = `build:v${facts.version}:${approvalId}`;
+  const prior = (await ports.findStep?.(baseStep)) ?? null;
+  const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
+  const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
+  const prompt = buildExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes) });
+  const started = await ports.startRun({ step, role: "executor", prompt, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
   // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
   if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
+
+  // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
+  // that died in between finds the stamp missing and makes it.
+  await attachRunNotes(pool, accountId, workItemId, started.runId, prior ? { suffix: prior.step.slice(baseStep.length) } : { ids: notes.map((n) => n.id) });
 
   if (facts.stage === "spec_ready" || facts.stage === "needs_human") {
     try {
