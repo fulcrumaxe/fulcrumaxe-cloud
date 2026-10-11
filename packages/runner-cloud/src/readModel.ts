@@ -92,7 +92,8 @@ export function classifyRunner(facts: RunnerFacts, now: Date, current: number = 
   if (facts.revokedAt !== null) return "revoked";
   if (facts.protocolVersion !== null && facts.protocolVersion < current - 1) return "outdated";
   if (facts.paused === true) return "paused";
-  if (facts.draining === true) return "draining";
+  // D#605 FL-8: a drain lets running work finish, and when the last run ends the runner reads as paused (it still takes nothing new until resumed).
+  if (facts.draining === true) return facts.busy ? "draining" : "paused";
   if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_ONLINE_SECONDS * 1000) return "offline";
   return facts.busy ? "busy" : "online_idle";
 }
