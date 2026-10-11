@@ -41,7 +41,8 @@ const stepNamed = (steps, name) => {
 // names the owner's machine (which already has Nix), so it does not count.
 const GUARD = "${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}";
 const EPHEMERAL = "(runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))";
-const OVERLAY_OFF = "env.CI_SCOPE_OVERLAY != 'true'";
+const PRIVATE_PUSH = "github.event_name == 'push' && github.event.repository.private";
+const OVERLAY_OFF = `env.CI_SCOPE_OVERLAY != 'true' && !(${PRIVATE_PUSH})`;
 const ifOf = (step) => (/^ {8}if: (.*)$/m.exec(step.text) ?? [, null])[1];
 
 // ---- the file is valid YAML --------------------------------------------------
@@ -365,7 +366,7 @@ test("check job: the scope tests run in the same step as the migration lint test
 test("push to main: the classifier is not consulted and check.sh runs with no affected list", () => {
   assert.equal(ifOf(stepNamed(checkSteps, "CI scope")), "github.event_name == 'pull_request'");
   const push = stepNamed(checkSteps, "CI scope (push to main)");
-  assert.equal(ifOf(push), "github.event_name != 'pull_request'");
+  assert.equal(ifOf(push), "github.event_name != 'pull_request' && !github.event.repository.private");
   assert.match(push.text, /CI scope: full \(push to main\)/);
   assert.doesNotMatch(push.text, /affected\.mjs/);
   const run = stepNamed(checkSteps, "Run checks");
@@ -379,7 +380,7 @@ test("push to main: the classifier is not consulted and check.sh runs with no af
 
 test("check job: the Node 22 runner-protocol step runs on push and when the package is affected", () => {
   const s = stepNamed(checkSteps, "Runner protocol tests on Node 22");
-  assert.equal(ifOf(s), "github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false'");
+  assert.equal(ifOf(s), `(github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(${PRIVATE_PUSH})`);
 });
 
 test("check job: nothing is narrowed outside Run checks and the Node 22 step", () => {
@@ -387,6 +388,7 @@ test("check job: nothing is narrowed outside Run checks and the Node 22 step", (
   assert.deepEqual(guarded, [
     "CI scope",
     "CI scope (push to main)",
+    "CI scope (push to private main)",
     "Install Nix (hosted)",
     "Allow Chromium's user-namespace sandbox (hosted)",
     "Nix store cache (hosted)",
@@ -1770,7 +1772,7 @@ test("overlay-only: the check job's scope step gets the overlay list only on a p
 test("overlay-only: only Run checks and the Node 22 step are narrowed, and an overlay check takes Run checks' place", () => {
   assert.equal(ifOf(stepNamed(checkSteps, "Run checks")), OVERLAY_OFF);
   const o = stepNamed(checkSteps, "Overlay checks");
-  assert.equal(ifOf(o), "env.CI_SCOPE_OVERLAY == 'true'");
+  assert.equal(ifOf(o), `env.CI_SCOPE_OVERLAY == 'true' || (${PRIVATE_PUSH})`);
   assert.match(o.text, /run: nix develop \.#ci --command bash scripts\/ci\/overlay-checks\.sh\s*$/);
   assert.doesNotMatch(o.text, /continue-on-error/);
   const idx = (n) => checkSteps.findIndex((x) => x.name === n);
@@ -1801,4 +1803,59 @@ test("overlay-only: the e2e-runner scope step is private-only, pull-request-only
 test("overlay-only: the merge gate needs `check` green, and a job-level skip would be refused, so no job is skipped for this", () => {
   // scripts/lib/ci-status-check.sh counts `skipped` as did-not-run. Every job keeps its if: free of the overlay answer.
   for (const job of Object.values(ciDoc.jobs)) assert.doesNotMatch(String(job.if ?? ""), /overlay|CI_SCOPE/i);
+});
+
+// ---- push to main on the private repository: overlay checks only --------------------------------------------
+// Every case below evaluates the real `if:` of the step with GitHub's `&&` / `||` / `!` semantics.
+const ctxFor = (event, isPrivate, overlay = "") => ({
+  "github.event_name": event,
+  "github.event.repository.private": isPrivate,
+  "env.CI_SCOPE_OVERLAY": overlay,
+  "env.CI_SCOPE_RUNNER_PROTOCOL": "",
+});
+const runs = (step, ctx) => Boolean(evalExpr(ifOf(step), ctx));
+
+test("private main push: only the overlay checks run; the full suite, Node 22 step and runner e2e are skipped", () => {
+  const ctx = ctxFor("push", true);
+  assert.equal(runs(stepNamed(checkSteps, "Run checks"), ctx), false);
+  assert.equal(runs(stepNamed(checkSteps, "Runner protocol tests on Node 22"), ctx), false);
+  assert.equal(runs(stepNamed(checkSteps, "Overlay checks"), ctx), true);
+  assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), ctx), false);
+  assert.equal(runs(stepNamed(checkSteps, "CI scope (push to private main)"), ctx), true);
+  assert.equal(runs(stepNamed(checkSteps, "CI scope (push to main)"), ctx), false);
+  // the always-on steps stay unconditional, so the scan, the migration lint and the CI script tests still run
+  for (const n of ["Secret scan of the change", "Migration compatibility lint", "Migration lint and secret scan tests"]) assert.equal(ifOf(stepNamed(checkSteps, n)), null, n);
+  // the overlay step limits itself to overlay files on a push
+  assert.match(stepNamed(checkSteps, "Overlay checks").text, /OVERLAY_CHECKS_ONLY_OVERLAY: \$\{\{ github\.event_name == 'push' && '1' \|\| '' \}\}/);
+});
+
+test("private main push: no job is skipped at job level, so `check` reports success; workspace-e2e stays pull-request only", () => {
+  for (const name of ["check", "e2e-runner"]) assert.equal(Boolean(evalExpr(ciDoc.jobs[name].if, { "vars.CI_DISABLED": "false" })), true, name);
+  assert.doesNotMatch(String(ciDoc.jobs.check.if), /push|private/);
+  assert.match(ciDoc.jobs["workspace-e2e"].if, /github\.event_name == 'pull_request'/);
+});
+
+test("private pull request: unchanged (full checks unless the classifier answered overlay)", () => {
+  const full = ctxFor("pull_request", true);
+  assert.equal(runs(stepNamed(checkSteps, "Run checks"), full), true);
+  assert.equal(runs(stepNamed(checkSteps, "Overlay checks"), full), false);
+  assert.equal(runs(stepNamed(checkSteps, "Runner protocol tests on Node 22"), full), true);
+  assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), full), true);
+  const overlay = ctxFor("pull_request", true, "true");
+  assert.equal(runs(stepNamed(checkSteps, "Run checks"), overlay), false);
+  assert.equal(runs(stepNamed(checkSteps, "Overlay checks"), overlay), true);
+  assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), overlay), false);
+  assert.equal(runs(stepNamed(checkSteps, "CI scope (push to private main)"), full), false);
+});
+
+test("public repository: unchanged on push and pull request (full suite, never the overlay step)", () => {
+  for (const event of ["push", "pull_request"]) {
+    const ctx = ctxFor(event, false);
+    assert.equal(runs(stepNamed(checkSteps, "Run checks"), ctx), true, event);
+    assert.equal(runs(stepNamed(checkSteps, "Runner protocol tests on Node 22"), ctx), true, event);
+    assert.equal(runs(stepNamed(checkSteps, "Overlay checks"), ctx), false, event);
+    assert.equal(runs(stepNamed(runnerE2eSteps, "Run the end-to-end runner test"), ctx), true, event);
+    assert.equal(runs(stepNamed(checkSteps, "CI scope (push to private main)"), ctx), false, event);
+  }
+  assert.equal(runs(stepNamed(checkSteps, "CI scope (push to main)"), ctxFor("push", false)), true);
 });

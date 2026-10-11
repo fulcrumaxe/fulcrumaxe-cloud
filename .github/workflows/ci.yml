@@ -57,9 +57,17 @@ env:
 # its test. The jobs still run and finish `success` under their real names, because the merge gate refuses a
 # required check that concluded `skipped`. The secret scan, the migration lint and the CI script tests still
 # run. The list is read from the base commit; `ci:full` and CI_FORCE_FULL still force a full run. The public
-# repository never passes the list (the expression below is empty there), so its runs are unchanged. A push to
-# main on the private repository stays full: it is the record that the whole tree (public plus overlay) is
-# green, and it gates nothing.
+# repository never passes the list (the expression below is empty there), so its runs are unchanged.
+#
+# PUSHES TO MAIN ON THE PRIVATE REPOSITORY. Each merge on the public code plane is followed by a sync push that
+# lands the same product tree plus the overlay on private main. The public repository already ran the full
+# suite and the e2e on that tree, so repeating it here only spends the owner's machine. On such a push `check`
+# runs the secret scan, the migration lint and the CI script tests, then scripts/ci/overlay-checks.sh (limited
+# to overlay files by OVERLAY_CHECKS_ONLY_OVERLAY, so product files in the sync never pick product tests); it
+# skips "Run checks" and the Node 22 step, and `e2e-runner` skips its test. The jobs still finish `success`
+# under their real names, so the merge wrapper's main-health read and the required `check` keep working. Private
+# pull requests and every public run (push included) are unchanged. Private is told apart the same way as
+# everywhere in this file, by github.event.repository.private.
 #
 # The e2e jobs never skip at job level. A matrix job skipped by its own `if:` reports under the unexpanded
 # name `workspace-e2e (${{ matrix.project }})` and as skipped, so the three named checks would be missing.
@@ -300,9 +308,14 @@ jobs:
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
 
       - name: CI scope (push to main)
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !github.event.repository.private
         run: |
           echo "CI scope: full (push to main)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: CI scope (push to private main)
+        if: github.event_name == 'push' && github.event.repository.private
+        run: |
+          echo "CI scope: overlay checks only (push to private main; the public repository ran the full suite on this tree)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # node, pnpm and postgresql (initdb/pg_ctl/createdb) all come from flake.nix's
       # `ci` devShell (D#507: lean, no Python tooling, so a fresh runner fetches it
@@ -310,7 +323,7 @@ jobs:
       # the `default` shell a developer runs locally, so it cannot drift from it. packages/db's own vitest globalSetup provisions and tears down its own
       # throwaway Postgres cluster; nothing else needs configuring here.
       - name: Run checks
-        if: env.CI_SCOPE_OVERLAY != 'true'
+        if: env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
         env:
           # The browser tier runs on every event, push included, with Chromium's
           # sandbox on. check.sh still refuses FX_BROWSER_TIER=skip on pull_request.
@@ -326,8 +339,13 @@ jobs:
 
       # Overlay-only pull request (private repository): the checks that cover overlay content, in place of the
       # product suites above. Fails closed: the script exits non-zero if any selected check fails.
+      #
+      # Also runs on a push to the private repository (a sync from the code plane), in place of the full suite. There
+      # only overlay files are considered, so a sync that changes product files runs the denylist check alone.
       - name: Overlay checks
-        if: env.CI_SCOPE_OVERLAY == 'true'
+        if: env.CI_SCOPE_OVERLAY == 'true' || (github.event_name == 'push' && github.event.repository.private)
+        env:
+          OVERLAY_CHECKS_ONLY_OVERLAY: ${{ github.event_name == 'push' && '1' || '' }}
         run: nix develop .#ci --command bash scripts/ci/overlay-checks.sh
 
       # The runner protocol package and the local runner (packages/fx-runner) are installed on customers' machines,
@@ -338,7 +356,7 @@ jobs:
       #   - It uses the dependencies "Run checks" just installed, and starts vitest's entry file with that `node`
       #     directly, not through pnpm, so the root `engines.node >= 24` check is not involved.
       - name: Runner protocol tests on Node 22
-        if: github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false'
+        if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private)
         run: |
           set -euo pipefail
           nix shell --inputs-from . nixpkgs#nodejs_22 --command node --version
@@ -506,5 +524,5 @@ jobs:
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
 
       - name: Run the end-to-end runner test
-        if: env.CI_SCOPE_OVERLAY != 'true'
+        if: env.CI_SCOPE_OVERLAY != 'true' && !(github.event_name == 'push' && github.event.repository.private)
         run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'

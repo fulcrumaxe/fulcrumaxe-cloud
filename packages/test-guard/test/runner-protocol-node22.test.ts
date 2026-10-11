@@ -38,11 +38,15 @@ describe("the Node 22 step in CI", () => {
     expect(step).not.toMatch(/^\s*(continue-on-error|runs-on|strategy):/m);
   });
 
-  it("is skipped only by the pull-request scope decision: it runs on every push, and on a pull request unless the scope step said the package is unaffected", () => {
+  it("is skipped only by the pull-request scope decision and by a push to the private repository: it runs on every public push, and on a pull request unless the scope step said the package is unaffected", () => {
     // D#507: an affected-only pull request run leaves the step out when packages/runner-protocol is not in
-    // scripts/ci/affected.mjs's answer. Any other condition would be a quiet way to stop checking Node 22.
+    // scripts/ci/affected.mjs's answer. The one other exception is a push to the private repository, which runs
+    // only the overlay checks because the public repository already ran the full suite on the same tree. Any
+    // other condition would be a quiet way to stop checking Node 22.
     const conditions = step.split("\n").filter((line) => /^\s*if:/.test(line));
-    expect(conditions.map((line) => line.trim())).toEqual(["if: github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false'"]);
+    expect(conditions.map((line) => line.trim())).toEqual([
+      "if: (github.event_name != 'pull_request' || env.CI_SCOPE_RUNNER_PROTOCOL != 'false') && !(github.event_name == 'push' && github.event.repository.private)",
+    ]);
   });
 
   it("takes Node 22 from the flake's locked nixpkgs and fails below 22.22.2", () => {
