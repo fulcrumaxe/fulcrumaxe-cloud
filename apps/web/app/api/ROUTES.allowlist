@@ -47,4 +47,5 @@ v1/[...path]/route.ts
 v1/events/route.ts
 v1/openapi.json/route.ts
 v1/runs/[id]/events/route.ts
+v1/runs/[id]/handoff/route.ts
 v1/repos/[id]/plan-imports/route.ts
