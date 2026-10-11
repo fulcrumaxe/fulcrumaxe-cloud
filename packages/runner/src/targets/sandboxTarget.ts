@@ -58,6 +58,8 @@ import {
   type StartDetachedResult,
 } from "../sandboxPort.js";
 import { reportError } from "@fx/telemetry";
+import { mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection } from "@fulcrumaxe/runner-protocol";
+import { recordContextLedger } from "../contextLedgerWriter.js";
 import { modelIdForCliName } from "../vercelSandboxPort.js";
 import type { BrokenConnectionCode, ConnectionStatusPort } from "../connectionStatusPort.js";
 import type { ModelProvider, NormalizedEvent } from "../types.js";
@@ -231,6 +233,8 @@ interface RunBookkeeping {
   extensionsUsed: number;
   /** D#221 OM-1: distinct model responses the run guard counted, summed over this run's commands (a resume starts a new guard). */
   meteredModelCalls: number;
+  /** D#600 CX-1a: what this run's streams said about its context, merged over its commands; recorded once at finalize. */
+  contextLedger?: ContextLedgerMeasure;
   /** The metered token total (W3) and the plausibility flags (MP-PLAUS), both for the terminal report. */
   meteredTokens: TokenTotals;
   /** The same tokens by the model each message was priced at (W2). */
@@ -467,6 +471,7 @@ export class SandboxTarget implements ExecutionTarget {
       env,
       ...this.extensionOf(run, bk),
       onModelCalls: (n) => (bk.meteredModelCalls += n),
+      onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
       ...(run.limits && { limits: run.limits }),
       onEvent,
       onStage,
@@ -671,6 +676,7 @@ export class SandboxTarget implements ExecutionTarget {
         env,
         ...this.extensionOf(run, bk),
         onModelCalls: (n) => (bk.meteredModelCalls += n),
+        onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
         ...(run.limits && { limits: run.limits }),
         onEvent,
         onStage,
@@ -927,6 +933,23 @@ export class SandboxTarget implements ExecutionTarget {
    * connection broken (401/403 only) and pauses the tenant's other queued
    * runs -- sec-criteria/H09 pass/fail 5's own wording.
    */
+  /**
+   * D#600 CX-1a: writes the context ledger row from what this instance's streams measured. Once per run (the measure is taken off the
+   * bookkeeping), and never fatal: a ledger is information, so a failure is reported and the run still ends as it would have.
+   */
+  private async recordContext(run: ExecutionRun): Promise<void> {
+    const bk = this.runs.get(run.id);
+    const measure = bk?.contextLedger;
+    if (bk === undefined || measure === undefined) return;
+    bk.contextLedger = undefined;
+    const sections: readonly ContextSection[] = run.contextSections ?? [];
+    try {
+      await this.withAccount(run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure }));
+    } catch (err) {
+      reportError(err, { stage: "run.context_ledger" });
+    }
+  }
+
   async finalize(run: ExecutionRun, report: TerminalReport): Promise<CancelResult> {
     const payerAccountId = this.payerFor(run);
 
@@ -936,6 +959,7 @@ export class SandboxTarget implements ExecutionTarget {
     // H14c-3-2c: output rows (and the one "capped" row, if any) land before the terminal status row.
     await this.runs.get(run.id)?.output?.finish();
     await this.runs.get(run.id)?.progress?.finish();
+    await this.recordContext(run);
 
     const operatorRun = this.isOperatorRun(run, payerAccountId);
     const metering = report.metering ?? { meteredUsd: null, reportedUsd: null, flags: ["no_metering"] };

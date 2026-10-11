@@ -46,6 +46,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "internal_error",
   "invalid_cursor",
   "invalid_input",
+  "invalid_message",
   "invalid_model_key",
   "invalid_plan",
   "invalid_request",

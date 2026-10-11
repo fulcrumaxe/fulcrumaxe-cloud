@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import type { Product, Role } from "./types.js";
+import type { ContextSection } from "@fulcrumaxe/runner-protocol";
 import type { DenyReason, ReserveParams } from "@fx/spend";
 import type { RunFunding } from "./funding.js";
 import type { ModelFailureCode } from "./modelFailure.js";
@@ -239,6 +240,8 @@ export interface ExecutionRun {
    */
   continuesBranch?: string;
   workdir?: string;
+  /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
+  contextSections?: readonly ContextSection[];
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
   cloneRepo?: { owner: string; name: string };
   capUsd: number;

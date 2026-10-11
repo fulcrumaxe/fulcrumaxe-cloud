@@ -4,7 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ModelId } from "@fx/spend";
-import { CLI_MODEL_NAMES, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import { CLI_MODEL_NAMES, ContextLedgerCapture, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail } from "./repoClone.js";
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { NormalizedEvent } from "./types.js";
@@ -976,6 +976,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         },
         extension,
       );
+      // D#600 CX-1a: measures this command's context from the same lines the meter reads; integers only.
+      const ledger = new ContextLedgerCapture();
       const deliver = async (line: string): Promise<void> => {
         if (run.stopped || limitHit !== undefined) return;
         let parsed: unknown;
@@ -991,6 +993,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         // An assistant line with a malformed body, or usage it cannot key by
         // message id, is dropped and counted; it never reaches the meter.
         if (isMalformedAssistant(parsed)) return reportInvalid("shape");
+        ledger.observe(parsed);
         const event = dropInvalidUsage(normalizeMessage({ ...opts, backend: backend.name }, parsed, seq++, opts.workdir), reportInvalid);
         if (parsed.type === "result") {
           lastResult = event;
@@ -1054,6 +1057,11 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             opts.onModelCalls?.(guard.modelCalls());
           } catch {
             // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
+          }
+          try {
+            opts.onContextLedger?.(ledger.snapshot());
+          } catch {
+            // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
           }
           clearTimeout(timeWarning);
           // Not awaited: on a stream blocked mid-read the close would wait

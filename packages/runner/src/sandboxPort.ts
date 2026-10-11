@@ -4,6 +4,7 @@ import type { SandboxRetentionPolicy } from "./sandboxNaming.js";
 import type { ExtensionPolicy } from "./runLimitDecision.js";
 import type { RunLimits } from "./meteringGuard.js";
 import { SANDBOX_PINNED_VCPUS } from "@fx/spend";
+import type { ContextLedgerMeasure } from "@fulcrumaxe/runner-protocol";
 
 /**
  * H09a's sandbox lifecycle port. H04 (`@fx/runtime`) owns starting an
@@ -101,6 +102,9 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   /** D#221 OM-1: called once when this command's stream ends, however it ends, with the run guard's count of distinct
    * assistant message ids for this command. The runner's own number; the caller adds it to the run's total. */
   onModelCalls?: (count: number) => void;
+  /** D#600 CX-1a: called once when this command's stream ends, with what the stream said about the run's context (turn sizes,
+   * cache tokens, tool output bytes, compactions). Integers only; the caller merges the measures of a run's commands. Best effort. */
+  onContextLedger?: (measure: ContextLedgerMeasure) => void;
   /** D#2 H14c-3-2d-1 (C56 s1): this run's limits. Fields left out take the port's
    * own defaults, so nothing one run sets reaches another. The port refuses a launch
    * whose `maxRunMs` is not below its sandbox's `timeoutMs` (MP-CLOCK). */
