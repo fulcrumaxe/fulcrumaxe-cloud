@@ -160,6 +160,25 @@ describe("the Dockerfile and what the runner runs, together", () => {
     expect(dockerfile).toContain("/opt/fx/bin/node");
   });
 
+  it("ships pnpm pinned by url and sha256 at the version the repo's packageManager field names, checked by the Dockerfile, and npm and npx from the verified node tarball", () => {
+    const pkg = JSON.parse(readFileSync(`${ROOT}package.json`, "utf8")) as { packageManager: string };
+    const pnpm = (lock.artifacts as Record<string, { version: string; url: string; sha256: string }>).pnpm!;
+    expect(pkg.packageManager).toBe(`pnpm@${pnpm.version}`);
+    expect(pnpm.url).toBe(`https://github.com/pnpm/pnpm/releases/download/v${pnpm.version}/pnpm-linux-x64.tar.gz`);
+    expect(pnpm.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const text = dockerLines.join("\n");
+    expect(text).toContain('echo "$PNPM_SHA256  /tmp/dl/pnpm.tar.gz" | sha256sum -c -');
+    expect(text).toContain("ln -s ../pnpm/pnpm /opt/fx/bin/pnpm");
+    // The pnpm binary needs libatomic at run time; a built image without it fails with "cannot open shared object file".
+    expect(text).toMatch(/apt-get install [^\n]*\blibatomic1\b/);
+    // npm and npx come out of the same tarball whose sha256 the Dockerfile already checked, as links into /opt/fx/lib.
+    expect(text.indexOf('echo "$NODE_SHA256 ')).toBeLessThan(text.indexOf("*/lib/node_modules/npm"));
+    expect(text).toContain("ln -s ../lib/node_modules/npm/bin/npm-cli.js /opt/fx/bin/npm");
+    expect(text).toContain("ln -s ../lib/node_modules/npm/bin/npx-cli.js /opt/fx/bin/npx");
+    // The links must not point out of the root-owned tree.
+    for (const l of dockerLines.filter((x) => /\bln -s\b/.test(x))) expect(l, l).toMatch(/ln -s \.\.\/[\w./-]+ \/opt\/fx\/bin\/\w+/);
+  });
+
   it("the runner's shell commands (clone, counters, prompt wrapper, hook) run under /bin/sh, which the base image has", () => {
     expect(readFileSync(new URL("../src/agentConfig.ts", import.meta.url), "utf8")).toContain("`/bin/sh ${FX_LIMIT_HOOK_PATH}`");
   });

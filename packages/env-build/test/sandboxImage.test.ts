@@ -17,7 +17,7 @@ const lock = JSON.parse(readFileSync(join(ROOT, "infra/sandbox-image/versions.lo
 };
 const lines = dockerfile.split("\n").filter((l) => !l.trim().startsWith("#"));
 const instructions = (name: string) => lines.filter((l) => new RegExp(`^${name}\\b`, "i").test(l.trim()));
-const NAMES = ["node", "claude", "codex", "opencode"];
+const NAMES = ["node", "claude", "codex", "opencode", "pnpm"];
 
 describe("Dockerfile base images", () => {
   it("pins every external FROM by sha256 digest, never a tag", () => {
@@ -41,7 +41,7 @@ describe("Dockerfile base images", () => {
 });
 
 describe("lockfile and downloads", () => {
-  it("records a version, an https url naming it, and a sha256 for node, claude, codex and opencode", () => {
+  it("records a version, an https url naming it, and a sha256 for node, claude, codex, opencode and pnpm", () => {
     expect(Object.keys(lock.artifacts).sort()).toEqual([...NAMES].sort());
     for (const n of NAMES) {
       const a = lock.artifacts[n]!;
@@ -72,6 +72,7 @@ describe("verify before use", () => {
     claude: "chmod 0755 /opt/fx/bin/node /opt/fx/bin/claude",
     codex: "tar -xzf /tmp/dl/codex.tar.gz",
     opencode: "tar -xzf /tmp/dl/opencode.tar.gz",
+    pnpm: "tar -xzf /tmp/dl/pnpm.tar.gz",
   };
   it("runs each sha256sum -c before that artifact is extracted, moved or made executable", () => {
     for (const n of NAMES) {
