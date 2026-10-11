@@ -1,0 +1,100 @@
+name: microVM image
+
+# Builds the fx-agent microVM root disk for amd64 and arm64 from infra/microvm-image, builds it a second time to show the bytes are
+# the same, and then BOOTS the amd64 disk under the pinned Firecracker on this hosted runner: the answer to "does Firecracker run
+# on a free hosted x64 Linux runner with KVM" (D#587 B-1, acceptance 9). The arm64 disk is built, not booted (a hosted x64 runner
+# cannot). Started by hand only (Actions tab, or `gh workflow run microvm-image.yml`); it never runs on a pull request or a push.
+# The build steps are the local action .github/actions/microvm-image, which microvm-image-release.yml shares.
+#
+# No secrets, no inputs, a read-only token, and the job runs only on the public plane, so the private plane never queues it.
+# Nothing is cached or published: the disks live on the runner and are gone when it is. Every download is checked against the
+# sha256 in infra/microvm-image/lock.json, and the only actions are GitHub's own and this repository's. To undo, delete this file.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a failing command in front of `| tee` fails the step
+defaults:
+  run:
+    shell: bash
+
+env:
+  FX_FORBID_MODEL_CALLS: "1"
+  # The large disk of a hosted runner: two root disks, two tars and the image layers do not fit beside the checkout.
+  W: /mnt/fxvm
+
+jobs:
+  image:
+    name: root disks and the Firecracker probe
+    if: vars.CI_DISABLED != 'true' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Build the root disks, twice, and compare
+        uses: ./.github/actions/microvm-image
+      - name: Pinned kernel and Firecracker (x86_64)
+        run: |
+          cd "$W"
+          bash "$GITHUB_WORKSPACE/infra/microvm-image/fetch-pin.sh" .kernel.amd64 vmlinux
+          bash "$GITHUB_WORKSPACE/infra/microvm-image/fetch-pin.sh" .firecracker.amd64 firecracker.tgz
+          tar -xzf firecracker.tgz
+          {
+            echo "FX_VM_FIRECRACKER=$(echo "$W"/release-v*-x86_64/firecracker-v*-x86_64)"
+            echo "FX_VM_KERNEL=$W/vmlinux"
+            echo "FX_VM_ROOTFS=$W/a/amd64/rootfs.ext4"
+          } >> "$GITHUB_ENV"
+      - name: Make /dev/kvm usable by this user, and record what the host offers
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          { ls -l /dev/kvm; lscpu | grep -E 'Model name|Virtualization|Hypervisor vendor'; echo "load: $(cat /proc/loadavg)"; } 2>&1 | tee "$W/host.txt"
+      - name: Boot the guest under Firecracker and run the probes (the whole vm test directory)
+        run: pnpm --filter @fulcrumaxe/fx-runner exec vitest run test/vm 2>&1 | tee "$W/vitest.txt"
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## microVM image and Firecracker probe"
+            echo
+            echo "Host (hosted runner, nested):"
+            echo '```'
+            cat "$W/host.txt" 2>/dev/null || echo "not reached"
+            echo '```'
+            echo "Root disks (amd64 and arm64), built from one image digest with $(cat "$W/mke2fs.txt" 2>/dev/null):"
+            echo '```'
+            cat "$W/report-a.txt" 2>/dev/null || echo "not built"
+            echo '```'
+            echo "Second build: $(diff <(grep '^rootfs' "$W/report-a.txt") <(grep '^rootfs' "$W/report-b.txt") > /dev/null 2>&1 && echo identical || echo "different, or not run")"
+            echo
+            echo "Boot and probes (hosted-nested; the time is information only):"
+            echo '```'
+            grep -E 'first agent answer|Test Files|Tests |FAIL|✓|×|Error' "$W/vitest.txt" 2>/dev/null || echo "not run"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: microvm-image-reports
+          path: |
+            /mnt/fxvm/host.txt
+            /mnt/fxvm/mke2fs.txt
+            /mnt/fxvm/report-a.txt
+            /mnt/fxvm/report-b.txt
+            /mnt/fxvm/vitest.txt
+            /mnt/fxvm/a/build.json
+          if-no-files-found: warn
+      - name: Remove the registry
+        if: always()
+        run: docker rm -f fx-registry || true

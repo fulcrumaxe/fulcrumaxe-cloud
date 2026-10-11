@@ -1051,9 +1051,10 @@ function untrustedInRun(doc) {
  * (an unknown environment name is created on first use, unprotected), so a job may read a secret only if it is listed here with exactly
  * its environment and exactly these secrets: the two signing jobs of D#6 R6-5, whose environments the owner restricts to protected main.
  */
-const RELEASE_PUBLISHERS = { "runner-release.yml": ["draft", "sign"], "tuf-timestamp.yml": ["refresh"] };
+const RELEASE_PUBLISHERS = { "runner-release.yml": ["draft", "sign"], "microvm-image-release.yml": ["draft", "sign"], "tuf-timestamp.yml": ["refresh"] };
 const SECRET_ALLOWLIST = {
   "runner-release.yml": { sign: { environment: "release", secrets: ["TUF_ONLINE_KEY", "TUF_TARGETS_KEY"] } },
+  "microvm-image-release.yml": { sign: { environment: "release", secrets: ["TUF_ONLINE_KEY", "TUF_TARGETS_KEY"] } },
   "tuf-timestamp.yml": { refresh: { environment: "tuf-timestamp", secrets: ["TUF_ONLINE_KEY"] } },
 };
 /** The text of every `${{ }}` expression under a node, and of every `if:` value (which needs no braces). Plain words in names and comments do not count. */
@@ -1599,6 +1600,155 @@ test("macos spike script: a failed or unverified download sets a flag, records n
   assert.equal((fetchFn.match(/DOWNLOAD_FAILED=1/g) ?? []).length, 2, "both the curl failure and the mismatch set the flag");
   assert.match(src, /if \[ "\$DOWNLOAD_FAILED" = 1 \]; then VM_BOOTED=not_tested; fi\nrec result\.vm_booted/);
   assert.match(src, /\nrm -rf "\$WORK"\n[\s\S]*if \[ "\$DOWNLOAD_FAILED" = 1 \]; then[\s\S]*exit 1\nfi\nexit 0\n$/);
+});
+
+// ---- the microVM image workflow (D#587 B-1) ---------------------------------------------------------------------
+// Builds the guest root disks and boots one under Firecracker on a free hosted x64 runner. Started by hand only, read-only, no secret,
+// public plane only; every download is checked against infra/microvm-image/lock.json.
+const microvm = workflows.find((w) => w.file === "microvm-image.yml");
+
+test("microvm image: workflow_dispatch is the only trigger and takes no input", () => {
+  assert.ok(microvm, "microvm-image.yml is missing");
+  assert.deepEqual(Object.keys(triggersOf(microvm.doc)), ["workflow_dispatch"]);
+  assert.equal(triggersOf(microvm.doc).workflow_dispatch?.inputs, undefined);
+});
+
+test("microvm image: read-only, no secrets, a literal hosted runner, a bounded timeout, public repositories only, GitHub's own pinned actions", () => {
+  assert.deepEqual(microvm.doc.permissions, { contents: "read" });
+  assert.doesNotMatch(noComments(microvm.text), /secrets\./);
+  const jobs = jobsOf(microvm.doc);
+  assert.ok(jobs.length >= 1);
+  for (const [name, job] of jobs) {
+    assert.equal(job.permissions, undefined, `${name} asks for its own permissions`);
+    assert.match(job["runs-on"], /^ubuntu-24\.04$/, `${name} runs-on`);
+    assert.ok(job["timeout-minutes"] <= 75, `${name} timeout`);
+    const ctx = (isPrivate) => ({ "vars.CI_DISABLED": "", "github.event.repository.private": isPrivate });
+    assert.equal(Boolean(evalExpr(job.if, ctx(false))), true, `${name} must run on the public plane`);
+    assert.equal(Boolean(evalExpr(job.if, ctx(true))), false, `${name} must not run on the private plane`);
+    for (const step of job.steps ?? []) {
+      const uses = String(step.uses ?? "");
+      if (uses) assert.match(uses, /^actions\/[a-z-]+@[0-9a-f]{40}( |$)|^\.\/\.github\/actions\/microvm-image$/, `${name}: ${uses} is neither a GitHub action at a full sha nor this repository's own action`);
+      if (typeof step.run === "string") assert.doesNotMatch(step.run, /\$\{\{\s*(inputs|github\.event)\./, `${name}: event data in a run block`);
+    }
+  }
+});
+
+const composite = readFileSync(path.join(repoRoot, ".github/actions/microvm-image/action.yml"), "utf8");
+const microvmRelease = workflows.find((w) => w.file === "microvm-image-release.yml");
+
+test("microvm image: the shared build action is a composite with no secret, no event data and no download of its own", () => {
+  const doc = parseYamlText(composite);
+  assert.equal(doc.runs.using, "composite");
+  assert.doesNotMatch(noComments(composite), /secrets\.|\$\{\{\s*(inputs|github\.event)\.|\b(curl|wget)\b/);
+  for (const step of doc.runs.steps) {
+    assert.equal(step.shell, "bash", `${step.name}: every composite run step names its shell`);
+    assert.equal(step.uses, undefined, `${step.name}: no further action`);
+  }
+  // both workflows use it, and the order the build needs holds: the image is built before the disks are
+  const names = doc.runs.steps.map((s) => s.name);
+  assert.ok(names.indexOf("Build the template image for both architectures") < names.indexOf("Build both root disks, twice, and compare"));
+  for (const w of [microvm, microvmRelease]) assert.match(w.text, /uses: \.\/\.github\/actions\/microvm-image\n/);
+});
+
+test("microvm release: dispatch only, with one boolean input that never reaches a run block, from main on the public repository", () => {
+  assert.ok(microvmRelease, "microvm-image-release.yml is missing");
+  assert.deepEqual(Object.keys(triggersOf(microvmRelease.doc)), ["workflow_dispatch"]);
+  assert.deepEqual(Object.keys(triggersOf(microvmRelease.doc).workflow_dispatch.inputs), ["first_release"]);
+  assert.equal(triggersOf(microvmRelease.doc).workflow_dispatch.inputs.first_release.type, "boolean");
+  for (const [name, job] of jobsOf(microvmRelease.doc)) {
+    for (const step of job.steps ?? []) if (typeof step.run === "string") assert.doesNotMatch(step.run, /\$\{\{/, `${name}: an expression inside a run block`);
+    assert.equal(job.if, "vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'", name);
+  }
+});
+
+test("microvm release: only draft and sign write, only sign reads the two signing secrets, in the release environment, after the draft", () => {
+  const jobs = Object.fromEntries(jobsOf(microvmRelease.doc));
+  assert.deepEqual(Object.keys(jobs), ["build", "draft", "sign"]);
+  assert.equal(jobs.build.permissions, undefined);
+  assert.deepEqual(jobs.draft.permissions, { contents: "write" });
+  assert.deepEqual(jobs.sign.permissions, { contents: "write" });
+  assert.equal(jobs.draft.needs, "build");
+  assert.equal(jobs.sign.needs, "draft");
+  assert.equal(jobs.sign.environment, "release");
+  assert.equal(jobs.draft.environment, undefined);
+  assert.deepEqual([...new Set(secretUse(jobs.sign).names)].sort(), ["TUF_ONLINE_KEY", "TUF_TARGETS_KEY"]);
+  assert.equal(secretUse(jobs.build).used || secretUse(jobs.draft).used, false);
+  // the release is a draft until the signing job has checked it; it never becomes the repository's "latest" release
+  assert.match(jobs.draft.steps.at(-1).run, /gh release create "\$tag" files\/"\$tag"\/\* [^\n]*--draft --latest=false/);
+  assert.match(jobs.sign.steps.at(-1).run, /gh release edit "\$tag" --draft=false --latest=false\n\s*sh "\$SCRIPTS\/release-metadata\.sh" publish meta/);
+});
+
+test("every job that reads, signs and publishes the shared tuf-metadata release is in one concurrency group that does not cancel a running job (GitHub keeps one waiting job per group)", () => {
+  const writers = { "runner-release.yml": "sign", "microvm-image-release.yml": "sign", "tuf-timestamp.yml": "refresh" };
+  for (const [file, name] of Object.entries(writers)) {
+    const job = Object.fromEntries(jobsOf(workflows.find((w) => w.file === file).doc))[name];
+    assert.deepEqual(job.concurrency, { group: "tuf-metadata", "cancel-in-progress": false }, `${file}: ${name}`);
+  }
+  // and no other workflow job publishes that release: anything that runs release-metadata.sh publish must be listed above
+  for (const { file, text } of workflows) if (/release-metadata\.sh" publish/.test(text)) assert.ok(file in writers, `${file} publishes the metadata outside the group`);
+});
+
+test("microvm release: the header and the README say how a signed image is withdrawn, and the release records what built it", () => {
+  const header = microvmRelease.text.slice(0, microvmRelease.text.indexOf("\non:"));
+  // once `sign` has run, deleting the draft is not an undo; the vm --drop is
+  assert.match(header, /AFTER `sign` has run, deleting the release\s+# is NOT an undo/);
+  assert.match(header, /release --drop <vm tag>/);
+  assert.doesNotMatch(header, /queued, never cancelled/);
+  assert.match(header, /at most ONE waiting\s+# job per group/);
+  const readme = readFileSync(path.join(repoRoot, "infra/microvm-image/README.md"), "utf8");
+  assert.match(readme, /deleting the release is \*\*not\*\* an\s+undo/);
+  assert.match(readme, /tuf-release\.mjs release [^\n]*--drop <vm tag>/);
+  // the template image digest and the commit go into the release notes, from a file the build job wrote
+  const jobs = Object.fromEntries(jobsOf(microvmRelease.doc));
+  const list = jobs.build.steps.find((st) => st.name?.startsWith("List the kernel")).run;
+  assert.match(list, /template image digest: \$\{IMAGE_REF#\*@\}/);
+  assert.match(list, /commit: \$GITHUB_SHA/);
+  assert.match(jobs.draft.steps.at(-1).run, /--notes-file files\/build-info\.txt/);
+});
+
+test("microvm release: the sign job checks the secrets first, signs the vm manifest, checks every new file and the draft, and publishes the metadata last", () => {
+  const steps = Object.fromEntries(jobsOf(microvmRelease.doc)).sign.steps.map((s) => s.name ?? s.uses);
+  const at = (name) => {
+    const i = steps.findIndex((n) => n.startsWith(name));
+    assert.ok(i >= 0, `no step "${name}"`);
+    return i;
+  };
+  assert.ok(at("Require the signing secrets") < at("Install dependencies"));
+  assert.ok(at("Fetch the current metadata") < at("Sign the release"));
+  assert.ok(at("Sign the release") < at("Check the signed metadata"));
+  assert.ok(at("Check the signed metadata") < at("Require the draft"));
+  assert.ok(at("Require the draft") < at("Publish the release"));
+  const run = (name) => Object.fromEntries(jobsOf(microvmRelease.doc)).sign.steps[at(name)].run;
+  assert.match(run("Sign the release"), /--manifest files\/vm-manifest\.json --targets-key-env TUF_TARGETS_KEY --online-key-env TUF_ONLINE_KEY/);
+  assert.match(run("Check the signed metadata"), /--artifacts files/);
+  assert.match(run("Check the signed metadata"), /artifacts checked: \$\(jq length files\/vm-manifest\.json\)/);
+  assert.match(run("Check the signed metadata"), /! grep "not found \(not checked\):" [^\n]* \| grep -F "\$tag\/"/);
+});
+
+test("microvm image: nothing is downloaded or piped into a shell by the workflow itself, and the pin fetcher refuses a wrong sha256", () => {
+  assert.doesNotMatch(noComments(microvm.text), /\b(curl|wget)\b/, "downloads go through infra/microvm-image/fetch-pin.sh");
+  const script = path.join(repoRoot, "infra/microvm-image/fetch-pin.sh");
+  assert.equal(spawnSync("bash", ["-n", script], { encoding: "utf8" }).status, 0);
+  const dir = mkdtempSync(path.join(tmpdir(), "fetch-pin-"));
+  try {
+    mkdirSync(path.join(dir, "d"));
+    const payload = path.join(dir, "payload");
+    writeFileSync(payload, "pinned bytes");
+    const sha = spawnSync("sha256sum", [payload], { encoding: "utf8" }).stdout.split(" ")[0];
+    copyFileSync(script, path.join(dir, "d", "fetch-pin.sh"));
+    const lock = (digest) => writeFileSync(path.join(dir, "d", "lock.json"), JSON.stringify({ a: { url: `file://${payload}`, sha256: digest } }));
+    lock(sha);
+    const ok = spawnSync("bash", [path.join(dir, "d", "fetch-pin.sh"), ".a", path.join(dir, "got")], { encoding: "utf8" });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(readFileSync(path.join(dir, "got"), "utf8"), "pinned bytes");
+    lock("0".repeat(64));
+    const bad = spawnSync("bash", [path.join(dir, "d", "fetch-pin.sh"), ".a", path.join(dir, "got2")], { encoding: "utf8" });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /sha256 mismatch/);
+    assert.equal(existsSync(path.join(dir, "got2")), false, "a file that failed its check is deleted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- overlay-only pull requests (private repository) -------------------------------------------------

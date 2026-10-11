@@ -1,0 +1,177 @@
+name: microVM image release
+
+# Builds the fx-agent root disks (the steps of microvm-image.yml, through the same local action), lists the kernel, root disk and agent
+# digests of both architectures, puts the files in a DRAFT release on the public repository, and signs the update metadata that lists
+# them (D#587 B-1, acceptance 2). Started by hand only (Actions tab, or `gh workflow run microvm-image-release.yml`); it never runs on a
+# pull request or a push, and only from main. The files are GitHub release assets, not a cache and not a metered store.
+#
+# The logic lives in packages/fx-runner/scripts/ (vm-manifest.mjs, tuf-release.mjs, release-check.mjs, release-metadata.sh,
+# release-verify-draft.sh), where it is tested. The `sign` job is the runner release's, step for step: it runs in the `release`
+# environment, which needs the owner's approval, and with the signing secrets absent it fails "release signing not configured" and the
+# release stays a draft. The update metadata is the same `tuf-metadata` release the runner's own releases sign into, so the `sign` jobs
+# of this workflow, runner-release.yml and tuf-timestamp.yml share one concurrency group (`tuf-metadata`, cancel-in-progress false):
+# only one reads, signs and publishes the metadata at a time, and a running job is never cancelled. GitHub keeps at most ONE waiting
+# job per group, so a newer arrival replaces a waiting one: a `sign` job waiting behind another can be dropped by a later run (a
+# scheduled timestamp refresh, say). It is then cancelled, not failed, and the release stays a draft. Safe, but silent: re-run the
+# `sign` job (or this workflow) once the group is free.
+#
+# To undo BEFORE the `sign` job has run: delete the draft by hand, or disable this workflow. AFTER `sign` has run, deleting the release
+# is NOT an undo: the image's digests are in the signed metadata and stay bootable, and deleting the files does not remove the listing.
+# Withdraw the image by signing it out of the metadata: `tuf-release.mjs release --drop <vm tag>` (the tag is the release name,
+# vm-<template>-<12 hex>), the same offline signing path as withdrawing a runner release (docs/release-keys.md), then publish the
+# metadata. See infra/microvm-image/README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      first_release:
+        description: Set only for the very first release, when no update metadata has been published yet. Otherwise a missing metadata release stops the job.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# bash with pipefail, so a failing command in front of `| tee` fails the step
+defaults:
+  run:
+    shell: bash
+
+env:
+  FX_FORBID_MODEL_CALLS: "1"
+  W: /mnt/fxvm
+  SCRIPTS: packages/fx-runner/scripts
+  # The owner's 1.root.json, committed on main by the wiring step (R6-W). It never comes from the downloaded metadata.
+  TRUSTED_ROOT: packages/fx-runner/tuf/1.root.json
+
+jobs:
+  build:
+    name: build and list the files
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --filter "@fulcrumaxe/fx-runner..."
+      - name: Build the root disks, twice, and compare
+        uses: ./.github/actions/microvm-image
+      - name: List the kernel, root disk and agent digests of both architectures
+        run: |
+          cd "$W"
+          for arch in amd64 arm64; do bash "$GITHUB_WORKSPACE/infra/microvm-image/fetch-pin.sh" ".kernel.$arch" "kernel-$arch"; done
+          agent="$GITHUB_WORKSPACE/infra/microvm-image/guest/agent.py"
+          test "$(sed -n 's/^agent sha256://p' report-a.txt)" = "$(sha256sum "$agent" | cut -d' ' -f1)"
+          node "$GITHUB_WORKSPACE/$SCRIPTS/vm-manifest.mjs" --template fx-agent --out "$W/release" \
+            --file kernel:amd64=kernel-amd64 --file kernel:arm64=kernel-arm64 \
+            --file rootfs:amd64=a/amd64/rootfs.ext4 --file rootfs:arm64=a/arm64/rootfs.ext4 \
+            --file "agent:amd64=$agent" --file "agent:arm64=$agent" | tee tag.txt
+          cp release/vm-manifest.json "release/$(cat tag.txt)/"
+          # What produced these files, for the release notes. The apt layer of the template is not pinned, so the image is not
+          # reproducible across runs: without this record a signed root disk cannot be traced back to what built it.
+          {
+            echo "Files of one microVM image, listed in the signed update metadata only after the signing job has succeeded."
+            echo
+            echo "template image digest: ${IMAGE_REF#*@}"
+            echo "commit: $GITHUB_SHA"
+            echo "workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > release/build-info.txt
+          ls -l "release/$(cat tag.txt)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vm-release
+          path: /mnt/fxvm/release
+          retention-days: 1
+          if-no-files-found: error
+      - name: Remove the registry
+        if: always()
+        run: docker rm -f fx-registry || true
+
+  draft:
+    name: draft release
+    needs: build
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: vm-release
+          path: files
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(jq -er '.[0].target | split("/")[0]' files/vm-manifest.json)"
+          gh release create "$tag" files/"$tag"/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --target "$GITHUB_SHA" --title "microVM image $tag" --notes-file files/build-info.txt
+
+  sign:
+    name: sign and publish
+    needs: draft
+    if: vars.CI_DISABLED != 'true' && github.repository == 'fulcrumaxe/fulcrumaxe-cloud' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    # One writer of the shared tuf-metadata release at a time: runner-release.yml and tuf-timestamp.yml use the same group.
+    concurrency:
+      group: tuf-metadata
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.11.0
+      - name: Require the signing secrets and the trusted root
+        env:
+          TUF_TARGETS_KEY: ${{ secrets.TUF_TARGETS_KEY }}
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/release-check.mjs" signing-configured "$TRUSTED_ROOT" TUF_TARGETS_KEY TUF_ONLINE_KEY
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts --filter "@fulcrumaxe/fx-runner..."
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: vm-release
+          path: files
+      - name: Fetch the current metadata and verify it against the trusted root, before signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIRST_RELEASE: ${{ inputs.first_release }}
+        run: |
+          sh "$SCRIPTS/release-metadata.sh" fetch meta "$FIRST_RELEASE"
+          node "$SCRIPTS/release-check.mjs" prepare-metadata meta "$TRUSTED_ROOT"
+          if [ -f meta/timestamp.json ]; then node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT"; fi
+      - name: Sign the release
+        env:
+          TUF_TARGETS_KEY: ${{ secrets.TUF_TARGETS_KEY }}
+          TUF_ONLINE_KEY: ${{ secrets.TUF_ONLINE_KEY }}
+        run: node "$SCRIPTS/tuf-release.mjs" release --dir meta --trusted-root "$TRUSTED_ROOT" --manifest files/vm-manifest.json --targets-key-env TUF_TARGETS_KEY --online-key-env TUF_ONLINE_KEY
+      - name: Check the signed metadata against the built files, every one of them
+        run: |
+          tag="$(jq -er '.[0].target | split("/")[0]' files/vm-manifest.json)"
+          node "$SCRIPTS/tuf-release.mjs" check --dir meta --trusted-root "$TRUSTED_ROOT" --artifacts files | tee "$RUNNER_TEMP/check.out"
+          grep -q "^artifacts checked: $(jq length files/vm-manifest.json)," "$RUNNER_TEMP/check.out"
+          ! grep "not found (not checked):" "$RUNNER_TEMP/check.out" | grep -F "$tag/"
+      - name: Require the draft to be exactly what was built and signed for
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(jq -er '.[0].target | split("/")[0]' files/vm-manifest.json)"
+          sh "$SCRIPTS/release-verify-draft.sh" "$tag" "files/$tag" "$RUNNER_TEMP/draft-assets"
+      - name: Publish the release, then the metadata (timestamp last)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(jq -er '.[0].target | split("/")[0]' files/vm-manifest.json)"
+          gh release edit "$tag" --draft=false --latest=false
+          sh "$SCRIPTS/release-metadata.sh" publish meta

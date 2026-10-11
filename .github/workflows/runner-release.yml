@@ -122,6 +122,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: release
+    # One writer of the shared tuf-metadata release at a time: microvm-image-release.yml and tuf-timestamp.yml use the same group.
+    concurrency:
+      group: tuf-metadata
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
