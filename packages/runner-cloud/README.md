@@ -91,8 +91,12 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   `accounts.plan` is `runner`), under the account's advisory lock; any other account has no limit. `RunnerTarget.admit`
   reads the day's cap through its `limits` port.
 - **The list.** `GET /api/runners` (session, any member) returns each runner's id, credential mode, who registered it,
-  binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below N-1), `offline` (no request for
-  120 s), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that order of precedence. It selects
+  binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below N-1), `paused` or `draining` (a person set it in
+  `runner_settings`; the claim answers it idle with `retry_after` 300, so it is shown before the online test and never reads `offline`;
+  `state_note` says "Resumes within 5 min"), `offline` (no request for `RUNNER_ONLINE_SECONDS` = 120 s, the one figure the covering
+  test of a waiting run and the waiting notice share), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that
+  order of precedence. A runner revoked by its registrant leaving reads `state_note` "Revoked: registrant left". A paused or draining
+  runner does not cover a waiting run in the read model. It selects
   no key, thumbprint, repo list or nonce. `getRunWaitReason(runId)` derives why a run waits (`waiting_for_runner`,
   `waiting_for_approval`, `runner_lost_retrying`, `timed_out_waiting`, `paused_usage_limit`) from the rows. Nothing is stored.
   `waiting_for_runner` means no live runner for the run's repo: live, and the repo in the runner's own `allowed_repo_ids` (an

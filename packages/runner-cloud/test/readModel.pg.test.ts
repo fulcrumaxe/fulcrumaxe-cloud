@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { RUNNER_OFFLINE_AFTER_SECONDS, classifyRunner, getRunWaitReason, getRunnerStates, listRunners, type RunnerFacts } from "../src/index.js";
+import { RUNNER_ONLINE_SECONDS } from "@fx/runner";
+import { classifyRunner, getRunWaitReason, getRunnerStates, listRunners, type RunnerFacts } from "../src/index.js";
 import { harness, respond, type Harness } from "./helpers.js";
 
 const NOW = new Date("2026-10-08T12:00:00.000Z");
@@ -18,7 +19,7 @@ describe("classifyRunner (criterion 13, one state each)", () => {
     expect(classifyRunner(facts({ busy: true }), NOW, 3)).toBe("busy");
   });
   it("is offline after 120 seconds without a request, and not at exactly 120", () => {
-    expect(RUNNER_OFFLINE_AFTER_SECONDS).toBe(120);
+    expect(RUNNER_ONLINE_SECONDS).toBe(120);
     expect(classifyRunner(facts({ lastSeenAt: ago(120) }), NOW, 3)).toBe("online_idle");
     expect(classifyRunner(facts({ lastSeenAt: ago(121) }), NOW, 3)).toBe("offline");
     expect(classifyRunner(facts({ lastSeenAt: null }), NOW, 3)).toBe("offline");
@@ -29,6 +30,22 @@ describe("classifyRunner (criterion 13, one state each)", () => {
     expect(classifyRunner(facts({ protocolVersion: 2 }), NOW, 3)).toBe("online_idle");
     expect(classifyRunner(facts({ protocolVersion: 0 }), NOW)).toBe("online_idle");
     expect(classifyRunner(facts({ protocolVersion: null }), NOW, 3)).toBe("online_idle");
+  });
+  it("shows paused, then draining, before the online test: a paused runner last seen 250 s ago is paused, never offline (D#605 FL-3)", () => {
+    expect(classifyRunner(facts({ paused: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
+    expect(classifyRunner(facts({ draining: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("draining");
+    expect(classifyRunner(facts({ paused: true, draining: true, lastSeenAt: null }), NOW, 3)).toBe("paused");
+    // Busy does not outrank them: a paused runner with a job running still reads paused.
+    expect(classifyRunner(facts({ paused: true, busy: true }), NOW, 3)).toBe("paused");
+    expect(classifyRunner(facts({ paused: false, draining: false, lastSeenAt: ago(250) }), NOW, 3)).toBe("offline");
+  });
+  it("keeps the order revoked, outdated, paused, draining, offline, busy, online_idle (D#605 FL-3)", () => {
+    expect(classifyRunner(facts({ revokedAt: ago(1), paused: true, draining: true, protocolVersion: 1 }), NOW, 3)).toBe("revoked");
+    expect(classifyRunner(facts({ protocolVersion: 1, paused: true, draining: true }), NOW, 3)).toBe("outdated");
+  });
+  it("has one online window for every test: 100 s ago is online, 130 s ago is offline (D#605 FL-3)", () => {
+    expect(classifyRunner(facts({ lastSeenAt: ago(100) }), NOW, 3)).toBe("online_idle");
+    expect(classifyRunner(facts({ lastSeenAt: ago(130) }), NOW, 3)).toBe("offline");
   });
   it("is revoked whatever else is true", () => {
     expect(classifyRunner(facts({ revokedAt: ago(1), protocolVersion: 0, lastSeenAt: null, busy: true }), NOW, 3)).toBe("revoked");
@@ -132,6 +149,79 @@ describe("the read model [pg]", () => {
       const g = await fresh();
       await runner(g);
       expect(await getRunnerStates(deps(), f.accountId)).toEqual([]);
+    });
+  });
+
+  describe("pause and drain in the read model (D#605 FL-3)", () => {
+    const setting = (id: string, f: F2Fixture, over: { paused?: boolean; draining?: boolean }) =>
+      h.admin.query("INSERT INTO runner_settings (runner_id, account_id, paused_at, paused_by, draining, drained_by) VALUES ($1, $2, $3, $4, $5, $6)", [
+        id, f.accountId, over.paused ? ago(10) : null, over.paused ? f.a1 : null, over.draining === true, over.draining ? f.a1 : null,
+      ]);
+    const stateOf = async (f: F2Fixture, id: string) => (await getRunnerStates(deps(), f.accountId)).find((r) => r.id === id)!.state;
+
+    it("reads paused and draining, and never offline, for a runner last seen 250 s ago; resume (the row cleared) puts the derived state back", async () => {
+      const f = await fresh();
+      const paused = await runner(f, { lastSeen: ago(250) });
+      const draining = await runner(f, { lastSeen: ago(250) });
+      const quiet = await runner(f, { lastSeen: ago(250) });
+      await setting(paused, f, { paused: true });
+      await setting(draining, f, { draining: true });
+      expect(await stateOf(f, paused)).toBe("paused");
+      expect(await stateOf(f, draining)).toBe("draining");
+      expect(await stateOf(f, quiet)).toBe("offline");
+      await h.admin.query("UPDATE runner_settings SET paused_at = NULL, paused_by = NULL WHERE runner_id = $1", [paused]);
+      expect(await stateOf(f, paused)).toBe("offline"); // derived from the row now, never stamped
+    });
+
+    it("the runner list words them 'Resumes within 5 min' and a registrant-left revocation 'Revoked: registrant left', and no state_note is null text", async () => {
+      const f = await fresh();
+      const paused = await runner(f, { lastSeen: ago(250) });
+      const fine = await runner(f);
+      const gone = await runner(f, { revoked: true });
+      const other = await runner(f, { revoked: true });
+      await setting(paused, f, { paused: true });
+      await h.admin.query("UPDATE runners SET revoked_reason = 'member_demoted' WHERE id = $1", [gone]);
+      await h.admin.query("UPDATE runners SET revoked_reason = 'runner_self' WHERE id = $1", [other]);
+      const res = await respond(() => listRunners(deps(), { accountId: f.accountId, userId: f.a1 }));
+      const rows = new Map((res.body as { runners: Array<{ id: string; state: string; state_note: string | null; revoked_reason: string | null }> }).runners.map((r) => [r.id, r]));
+      expect(rows.get(paused)).toMatchObject({ state: "paused", state_note: "Resumes within 5 min", revoked_reason: null });
+      expect(rows.get(fine)).toMatchObject({ state: "online_idle", state_note: null, revoked_reason: null });
+      expect(rows.get(gone)).toMatchObject({ state: "revoked", state_note: "Revoked: registrant left", revoked_reason: "registrant_left" });
+      expect(rows.get(other)).toMatchObject({ state: "revoked", state_note: null, revoked_reason: null });
+    });
+
+    it("one online window: a runner last seen 100 s ago is online in the state and for the covering test, 130 s ago offline in both", async () => {
+      const f = await fresh();
+      const id = await runner(f, { lastSeen: ago(100) });
+      const pending = await run(f, { initiatedBy: f.a1 });
+      expect(await stateOf(f, id)).toBe("online_idle");
+      expect(await reason(f, pending)).toBeNull();
+      await h.admin.query("UPDATE runners SET last_seen_at = $2 WHERE id = $1", [id, ago(130)]);
+      expect(await stateOf(f, id)).toBe("offline");
+      expect(await reason(f, pending)).toBe("waiting_for_runner");
+    });
+
+    it("a paused or draining runner does not cover a run: the run reads waiting_for_runner until a runner that can take it is there", async () => {
+      const f = await fresh();
+      const id = await runner(f);
+      const pending = await run(f, { initiatedBy: f.a1 });
+      expect(await reason(f, pending)).toBeNull();
+      await setting(id, f, { paused: true });
+      expect(await reason(f, pending)).toBe("waiting_for_runner");
+      await h.admin.query("UPDATE runner_settings SET paused_at = NULL, paused_by = NULL, draining = true, drained_by = $2 WHERE runner_id = $1", [id, f.a1]);
+      expect(await reason(f, pending)).toBe("waiting_for_runner");
+      const second = await runner(f);
+      expect(second).not.toBe(id);
+      expect(await reason(f, pending)).toBeNull();
+    });
+
+    it("another account's settings never reach this account's runner", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const mine = await runner(f);
+      const theirs = await runner(g);
+      await setting(theirs, g, { paused: true });
+      expect(await stateOf(f, mine)).toBe("online_idle");
     });
   });
 
@@ -311,6 +401,8 @@ describe("the read model [pg]", () => {
             binary_version: "0.9.1",
             last_seen_at: ago(5).toISOString(),
             state: "online_idle",
+            state_note: null,
+            revoked_reason: null,
             sandbox_unavailable: null,
             plan_consent: { granted: false, changed_at: null },
             can_change_plan_consent: false,
@@ -351,14 +443,14 @@ describe("the read model [pg]", () => {
       expect(((await list(f, f.m1)).body as Body).runners[0]).toMatchObject({ sandbox_unavailable: null, state: "revoked" });
     });
 
-    it("returns none of the excluded fields: the key-set of a runner is exactly the thirteen, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
+    it("returns none of the excluded fields: the key-set of a runner is exactly the fifteen, and no key, thumbprint, raw repo id list or nonce appears anywhere", async () => {
       const f = await fresh();
       const id = await runner(f);
       await h.admin.query("UPDATE runners SET allowed_repo_ids = ARRAY[$2::uuid] WHERE id = $1", [id, randomUUID()]);
       await h.admin.query("INSERT INTO runner_request_nonces (account_id, runner_id, nonce) VALUES ($1, $2, 'abcdefghijklmnopqrst')", [f.accountId, id]);
       const res = await list(f, f.m1);
       const body = res.body as Body;
-      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "credential_mode", "id", "last_seen_at", "load_label", "plan_consent", "registered_by", "repos", "running", "sandbox_unavailable", "state"]);
+      expect(Object.keys(body.runners[0]!).sort()).toEqual(["binary_version", "can_change_plan_consent", "capacity", "credential_mode", "id", "last_seen_at", "load_label", "plan_consent", "registered_by", "repos", "revoked_reason", "running", "sandbox_unavailable", "state", "state_note"]);
       const text = JSON.stringify(res.body);
       const row = (await h.admin.query("SELECT jkt, public_key_jwk, allowed_repo_ids FROM runners WHERE id = $1", [id])).rows[0];
       expect(text).not.toContain(row.jkt);

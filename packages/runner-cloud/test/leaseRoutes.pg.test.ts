@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaimRateLimitedReply, ClaimReply, EventsReply, HeartbeatReply, MAX_EVENTS_PER_BATCH, STOP_REASONS, SeqNotIncreasingReply, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { MAX_BODY_BYTES, claimRun, eventsPath, heartbeatRun, ingestEvents, toResponse, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerLeaseOps } from "../src/index.js";
 import { harness, newKey, registerKey, signed, type Harness, type TestKey } from "./helpers.js";
 
@@ -365,6 +366,103 @@ describe("lease routes [pg]", () => {
         const res = await run(() => claimRun(deps(), req(CLAIM, {}, other)));
         expect(res.body).toMatchObject({ run_id: RUN });
         expect(calls[0]!.input).toMatchObject({ runnerId: otherId });
+      });
+    });
+
+    describe("a pause or drain a person set (D#605 FL-3)", () => {
+      const set = (over: { paused?: boolean; draining?: boolean }) =>
+        h.admin.query(
+          "INSERT INTO runner_settings (runner_id, account_id, paused_at, paused_by, draining, drained_by) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (runner_id) DO UPDATE SET paused_at = EXCLUDED.paused_at, paused_by = EXCLUDED.paused_by, draining = EXCLUDED.draining, drained_by = EXCLUDED.drained_by",
+          [runnerId, A.accountId, over.paused ? new Date() : null, over.paused ? A.userId : null, over.draining === true, over.draining ? A.userId : null],
+        );
+      beforeEach(async () => {
+        await h.admin.query("DELETE FROM runner_settings WHERE runner_id = $1", [runnerId]);
+        await h.admin.query("DELETE FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+        claimResult = { kind: "claimed", signedJob: signJob(job, generateKeyPairSync("ed25519").privateKey), runId: RUN, leaseGeneration: 1 };
+      });
+
+      for (const [name, over] of [["paused", { paused: true }], ["draining", { draining: true }]] as const) {
+        it(`a ${name} runner is answered idle with retry_after 300, offered nothing with a run queued, and the worker is not asked`, async () => {
+          await set(over);
+          const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+          expect(res.status).toBe(200);
+          expect(ClaimReply.safeParse(res.body).success).toBe(true);
+          expect(res.body).toEqual({ retry_after: PAUSED_RETRY_AFTER_SECONDS });
+          expect(PAUSED_RETRY_AFTER_SECONDS).toBe(300);
+          expect(res.headers?.["retry-after"]).toBe("300");
+          expect(calls).toEqual([]);
+        });
+      }
+
+      it("a pending run the paused runner covers stays pending, untouched, after its claim", async () => {
+        await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
+        await h.admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[] WHERE id = $1", [runnerId, [A.repoId]]);
+        const pendingId = randomUUID();
+        await h.admin.query("INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, initiated_by) VALUES ($1, $2, 'executor', 'runner', 'pending', 'runner_local', $3, $4)", [pendingId, A.accountId, A.repoId, A.userId]);
+        await set({ paused: true });
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).body).toEqual({ retry_after: 300 });
+        const { rows } = await h.admin.query("SELECT status, runner_id, lease_generation FROM agent_runs WHERE id = $1", [pendingId]);
+        expect(rows[0]).toEqual({ status: "pending", runner_id: null, lease_generation: 0 });
+        await h.admin.query("DELETE FROM agent_runs WHERE id = $1", [pendingId]);
+      });
+
+      it("its running run is untouched: a heartbeat still reaches the worker and answers 200", async () => {
+        await set({ paused: true });
+        const lease = { run_id: RUN, lease_generation: 1 };
+        const hb = await run(() => heartbeatRun(deps(), req(HEARTBEAT, lease)));
+        expect(hb.status).toBe(200);
+        expect(calls.map((c) => c.method)).toEqual(["heartbeat"]);
+      });
+
+      it("resume takes effect on the next claim, with no cleanup: the cleared row lets the worker be asked again", async () => {
+        await set({ paused: true });
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).body).toEqual({ retry_after: 300 });
+        await h.admin.query("DELETE FROM runner_claim_stamps WHERE runner_id = $1", [runnerId]);
+        await set({});
+        const res = await run(() => claimRun(deps(), req(CLAIM, {})));
+        expect(res.body).toMatchObject({ run_id: RUN, lease_generation: 1 });
+        expect(calls.map((c) => c.method)).toEqual(["claim"]);
+      });
+
+      it("a runner with no settings row, and one whose row is neither paused nor draining, claim as before", async () => {
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).body).toMatchObject({ run_id: RUN });
+        await h.admin.query("DELETE FROM runner_claim_stamps WHERE runner_id = $1", [runnerId]);
+        await set({});
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).body).toMatchObject({ run_id: RUN });
+        expect(calls).toHaveLength(2);
+      });
+
+      it("one runner's pause does not hold another runner of the same account", async () => {
+        await set({ paused: true });
+        const other = newKey();
+        const otherId = await registerKey(h.admin, A.accountId, A.userId, other);
+        const res = await run(() => claimRun(deps(), req(CLAIM, {}, other)));
+        expect(res.body).toMatchObject({ run_id: RUN });
+        expect(calls[0]!.input).toMatchObject({ runnerId: otherId });
+      });
+
+      it("keeps the longer wait when a usage-limit pause runs past 5 minutes, and keeps recording the capacity it declares", async () => {
+        await set({ draining: true });
+        await h.admin.query("INSERT INTO runner_capacity (runner_id, account_id, declared, claim_paused_until) VALUES ($1, $2, false, now() + interval '20 minutes')", [runnerId, A.accountId]);
+        const res = await run(() => claimRun(deps(), req(CLAIM, { capacity: { light: { limit: 2, in_use: 0 }, heavy: { limit: 1, in_use: 0 } } })));
+        const retryAfter = (res.body as { retry_after: number }).retry_after;
+        expect(retryAfter).toBeGreaterThan(1100);
+        expect(retryAfter).toBeLessThanOrEqual(1200);
+        const { rows } = await h.admin.query("SELECT declared, light_limit FROM runner_capacity WHERE runner_id = $1", [runnerId]);
+        expect(rows[0]).toMatchObject({ declared: true, light_limit: 2 });
+      });
+
+      it("a status poll that names a sandbox problem is still answered as before (60), whatever the pause", async () => {
+        await set({ paused: true });
+        const res = await run(() => claimRun(deps(), req(CLAIM, { sandbox_unavailable: "bwrap_missing" })));
+        expect(res.body).toEqual({ retry_after: 60 });
+      });
+
+      it("a revoked runner is 401, as before", async () => {
+        await set({ paused: true });
+        await h.admin.query("UPDATE runners SET revoked_at = now() WHERE id = $1", [runnerId]);
+        expect((await run(() => claimRun(deps(), req(CLAIM, {})))).status).toBe(401);
+        expect(calls).toEqual([]);
       });
     });
 

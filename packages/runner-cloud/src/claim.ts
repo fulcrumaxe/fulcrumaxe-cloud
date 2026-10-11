@@ -1,4 +1,5 @@
 import { CLAIM_IDLE_RETRY_AFTER_SECONDS, CLAIM_MIN_INTERVAL_SECONDS, ClaimMessage, ClaimReply, ClaimRateLimitedReply } from "@fulcrumaxe/runner-protocol";
+import { PAUSED_RETRY_AFTER_SECONDS } from "@fx/runner";
 import { asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
@@ -19,6 +20,8 @@ const CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS = 3600;
  * It passes steps 1 and 2 like any claim, the reason is stored (step 3 is skipped, so no run is leased and no job can leave), and the answer
  * is `retry_after` only. Every ordinary claim clears the stored reason, so a fixed machine needs nothing more than its next poll.
  * A runner held back by its plan's usage limit (D#6 C43-6) gets the idle answer whatever is queued, with a `retry_after` up to the end of the pause.
+ * So does a runner a person paused or set to drain (D#605 FL-3, `runner_settings`): idle with `retry_after` 300, enforced here in the cloud whatever the
+ * runner's own marker says. The runs it already holds are untouched.
  * A claim may declare its capacity per job class (D#6 C43-2b): the cloud stores the limits and hands the runner a run only for a class
  * with a free slot. A claim without one is an older runner and holds one job in total.
  * The reply is parsed against the protocol's schema before it is sent, so a field that should not be there is a 500, not a leak.
@@ -46,7 +49,14 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
         const paused = await client.query<{ secs: number }>("SELECT CEIL(EXTRACT(EPOCH FROM (claim_paused_until - now())))::int AS secs FROM runner_capacity WHERE runner_id = $1 AND claim_paused_until > now()", [runner.runnerId]);
         pausedFor = paused.rows[0]?.secs ?? 0;
       }
-      return { waited, pausedFor };
+      // D#605 FL-3: a person's pause or drain, worked out from the settings row on every claim (no flag in the runner's own marker is trusted or needed).
+      // Running runs are untouched: only this claim answers idle, so a heartbeat or an event batch for a run it already holds goes on as before.
+      let heldByPerson = false;
+      if (waited <= 0 && message.sandbox_unavailable === undefined) {
+        const held = await client.query<{ held: boolean }>("SELECT (paused_at IS NOT NULL OR draining) AS held FROM runner_settings WHERE runner_id = $1", [runner.runnerId]);
+        heldByPerson = held.rows[0]?.held === true;
+      }
+      return { waited, pausedFor, heldByPerson };
     }),
   );
   const wait = gate.waited;
@@ -62,8 +72,9 @@ export async function claimRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): P
 
   // A runner whose plan has hit its usage limit is offered nothing until the reported reset: the answer is idle, and it tells the runner to ask again
   // when the pause ends (at most an hour from now, the longest an idle answer may say).
-  if (gate.pausedFor > 0) {
-    const retryAfter = Math.min(gate.pausedFor, CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS);
+  // A runner a person paused or set to drain (D#605 FL-3) is told to ask again in 5 minutes; if a usage pause runs longer, that longer time stands.
+  if (gate.pausedFor > 0 || gate.heldByPerson) {
+    const retryAfter = Math.min(Math.max(gate.pausedFor, gate.heldByPerson ? PAUSED_RETRY_AFTER_SECONDS : 0), CLAIM_PAUSED_RETRY_AFTER_MAX_SECONDS);
     return { status: 200, body: ClaimReply.parse({ retry_after: retryAfter }), headers: { "retry-after": String(retryAfter) } };
   }
 

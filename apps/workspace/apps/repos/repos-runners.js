@@ -19,7 +19,7 @@ export const dialUrl = (repoId) => RUNNERS_URL + "/repos/" + encodeURIComponent(
 export const DISPOSITIONS = ["ask", "announce", "act"];
 const DIAL_KEYS = { ask: "dialRunnerRunsAsk", announce: "dialRunnerRunsAnnounce", act: "dialRunnerRunsAct" };
 const NEEDED_COPY = ["planConsentText", "dialRunnerRuns", ...Object.values(DIAL_KEYS)];
-export const STATE_WORDS = { online_idle: "Online", busy: "Busy", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
+export const STATE_WORDS = { online_idle: "Online", busy: "Busy", paused: "Paused", draining: "Draining", offline: "Offline", outdated: "Needs an update", revoked: "Revoked" };
 export const MODE_WORDS = { subscription: "Claude subscription", api_key: "API key" };
 export const SWITCH_LABEL = "Run work without asking each time";
 export const CONSENT_SENTENCES = {
@@ -46,6 +46,7 @@ export function readRunner(r) {
     id: r.id,
     mode: r.credential_mode,
     state: typeof r.state === "string" ? r.state : "",
+    note: typeof r.state_note === "string" && r.state_note.trim() !== "" ? r.state_note.trim() : "",
     person: named(r.registered_by),
     repos: (Array.isArray(r.repos) ? r.repos : []).map(named).filter(Boolean),
     granted: !!pc && pc.granted === true,
@@ -191,6 +192,7 @@ export function runnerRow(r, flow) {
     { class: "repos-runner", "data-testid": "repos-runner", "data-state": r.state },
     h("p", { class: "repos-runner-head" }, h("strong", null, h("bdi", null, r.person ? r.person + "'s runner" : "A runner")), " ",
       h("span", { class: "repos-state", "data-testid": "repos-runner-state" }, [MODE_WORDS[r.mode], STATE_WORDS[r.state]].filter(Boolean).join(" · "))),
+    r.note ? h("p", { class: "repos-muted repos-runner-line", "data-testid": "repos-runner-note" }, r.note) : null,
     r.repos.length ? h("p", { class: "repos-muted repos-runner-line", "data-testid": "repos-runner-repos" }, "Repos: ", h("bdi", null, r.repos.join(", "))) : h("p", { class: "repos-muted repos-runner-line", "data-testid": "repos-runner-repos" }, "No repos"),
     ...consentParts(r, flow)
   );

@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { COPY, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
 import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -8,19 +9,21 @@ import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type R
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
  *
  * Every state here is derived from rows at read time, never stored, so it cannot go stale and has no stamp to clear:
- *  - a runner is exactly one of `online_idle`, `busy`, `offline`, `outdated` or `revoked`;
+ *  - a runner is exactly one of `online_idle`, `busy`, `paused`, `draining`, `offline`, `outdated` or `revoked`;
  *  - a run waiting on something is exactly one of five reasons, or none.
  * Both read through the caller's tenant context, so another account's runner or run does not exist here.
  */
 
-export const RUNNER_STATES = ["online_idle", "busy", "offline", "outdated", "revoked"] as const;
+export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
 export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
-/** A runner that has made no request for this long is `offline` (criterion 13). */
-export const RUNNER_OFFLINE_AFTER_SECONDS = 120;
+/** A runner that has made no request for `RUNNER_ONLINE_SECONDS` (120) is `offline` (criterion 13; D#605 FL-3: one figure for every online test). */
+
+/** C-605-1: what a runner revoked because its registrant was removed or demoted reads. */
+export const REVOKED_REGISTRANT_LEFT_NOTE = "Revoked: registrant left";
 
 /** What the classifier needs of one runner. `busy` is "holds a running run whose lease has not run out". */
 export interface RunnerFacts {
@@ -28,6 +31,10 @@ export interface RunnerFacts {
   protocolVersion: number | null;
   lastSeenAt: Date | null;
   busy: boolean;
+  /** D#605 FL-3: `runner_settings.paused_at` is set. Absent reads as not paused. */
+  paused?: boolean;
+  /** D#605 FL-3: `runner_settings.draining` is true. Absent reads as not draining. */
+  draining?: boolean;
 }
 
 /** The light roles as an SQL array literal. The list is a constant of the protocol (role names), never input, and the pattern below keeps it so. */
@@ -77,13 +84,16 @@ export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: 
 /**
  * The one state of a runner. Precedence, highest first: `revoked` (nothing else matters once the key is dead),
  * `outdated` (below N-1: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
- * `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
+ * `paused` and `draining` (D#605 FL-3: set by a person, answered idle by the claim, and shown BEFORE the online test, because a runner told to
+ * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
  * version and is not outdated: it is offline until it is heard from.
  */
 export function classifyRunner(facts: RunnerFacts, now: Date, current: number = CURRENT_PROTOCOL_VERSION): RunnerState {
   if (facts.revokedAt !== null) return "revoked";
   if (facts.protocolVersion !== null && facts.protocolVersion < current - 1) return "outdated";
-  if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_OFFLINE_AFTER_SECONDS * 1000) return "offline";
+  if (facts.paused === true) return "paused";
+  if (facts.draining === true) return "draining";
+  if (facts.lastSeenAt === null || now.getTime() - facts.lastSeenAt.getTime() > RUNNER_ONLINE_SECONDS * 1000) return "offline";
   return facts.busy ? "busy" : "online_idle";
 }
 
@@ -96,6 +106,13 @@ export interface RunnerRow {
   binary_version: string | null;
   last_seen_at: string | null;
   state: RunnerState;
+  /**
+   * D#605 FL-3: the words under the state, derived on read: "Resumes within 5 min" for a paused or draining runner (the claim answers it idle for
+   * 300 s at a time), "Revoked: registrant left" for a runner the 0712/0720 triggers revoked, null otherwise. Never null text on a screen.
+   */
+  state_note: string | null;
+  /** D#605 FL-3 (C-605-1): why a revoked runner is revoked, as a closed code derived from `runners.revoked_reason`; null for any other state or reason. */
+  revoked_reason: "registrant_left" | null;
   /** D#6 R4a-6 (C16 section 1.3): why the runner's sandbox does not work, from its last poll; null while it works. A closed code, never text from the machine. */
   sandbox_unavailable: SandboxUnavailableReason | null;
   /**
@@ -129,6 +146,9 @@ interface RawRunner {
   protocol_version: number | null;
   last_seen_at: Date | null;
   revoked_at: Date | null;
+  revoked_reason: string | null;
+  paused: boolean;
+  draining: boolean;
   sandbox_unavailable: SandboxUnavailableReason | null;
   consent_granted: boolean | null;
   consent_changed_at: Date | null;
@@ -152,7 +172,8 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     const runners = (
       await client.query<RawRunner>(
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
-                r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, s.reason AS sandbox_unavailable,
+                r.binary_version, r.protocol_version, r.last_seen_at, r.revoked_at, r.revoked_reason, s.reason AS sandbox_unavailable,
+                COALESCE(st.paused_at IS NOT NULL, false) AS paused, COALESCE(st.draining, false) AS draining,
                 pc.granted AS consent_granted, pc.created_at AS consent_changed_at, r.allowed_repo_ids,
                 EXISTS (SELECT 1 FROM agent_runs a
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
@@ -163,6 +184,7 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
                 CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE a.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT a.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
                                       FROM agent_runs a WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) live
                 LEFT JOIN runner_sandbox_status s ON s.runner_id = r.id AND s.account_id = r.account_id
+                LEFT JOIN runner_settings st ON st.runner_id = r.id AND st.account_id = r.account_id
                 LEFT JOIN LATERAL (SELECT c.granted, c.created_at FROM runner_plan_consents c
                                     WHERE c.account_id = r.account_id AND c.runner_id = r.id ORDER BY c.version DESC LIMIT 1) pc ON true
           WHERE r.account_id = $1
@@ -193,7 +215,8 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
-    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy }, now, current);
+    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining }, now, current);
+    const revokedReason = r.revoked_at !== null && r.revoked_reason === "member_demoted" ? ("registrant_left" as const) : null;
     return {
     id: r.id,
     credential_mode: r.credential_mode,
@@ -203,6 +226,8 @@ async function readRunners(deps: ReadDeps, accountId: string, userId: string | n
     // A revoked runner polls no more, so a stale reason is not shown for it.
     sandbox_unavailable: r.revoked_at === null ? r.sandbox_unavailable : null,
     state,
+    state_note: state === "paused" || state === "draining" ? RESUMES_WITHIN_NOTE : revokedReason === "registrant_left" && state === "revoked" ? REVOKED_REGISTRANT_LEFT_NOTE : null,
+    revoked_reason: state === "revoked" ? revokedReason : null,
     running,
     capacity,
     load_label: loadLabel(state, running, capacity),
@@ -280,7 +305,7 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
                     AND r.credential_mode = 'subscription') AS needs_approval_possible,
          EXISTS (SELECT 1 FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
-                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)) AS runner_online,
+                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_online,
          -- A covering live runner with room for this run's class. Mirrors the claim's own arithmetic (capacityFreeSlots in runner-protocol) on the
          -- rows: an older runner (declared nothing) holds one job in total; a declared one has its class limit and the total ceiling, less what it
          -- holds. A runner with no row has not claimed yet, so nothing says it is full.
@@ -289,14 +314,14 @@ const WAIT_FACTS = (filter: string, tail: string): string => `
                    CROSS JOIN LATERAL (SELECT count(*) FILTER (WHERE x.role = ANY(${LIGHT_ROLES_SQL})) AS light, count(*) FILTER (WHERE NOT x.role = ANY(${LIGHT_ROLES_SQL})) AS heavy
                                          FROM agent_runs x WHERE x.account_id = r.account_id AND x.runner_id = r.id AND x.status = 'running') held
                   WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
-                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids)
+                    AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))
                     AND (c.runner_id IS NULL
                          OR (NOT c.declared AND held.light + held.heavy < 1)
                          OR (c.declared AND ${MAX_TOTAL_CAPACITY} - held.light - held.heavy > 0
                              AND CASE WHEN a.role = ANY(${LIGHT_ROLES_SQL}) THEN LEAST(c.light_limit, ${MAX_LIGHT_CAPACITY}) - held.light ELSE LEAST(c.heavy_limit, ${MAX_HEAVY_CAPACITY}) - held.heavy END > 0))) AS runner_slot_free,
          (SELECT c.limited_by FROM runners r JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
            WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
-             AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL
+             AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND c.limited_by IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))
            ORDER BY array_position(ARRAY['paused', 'usage_limit', 'memory', 'cpu', 'disk', 'ceiling'], c.limited_by), r.id LIMIT 1) AS slot_limited_by,
          -- What the claim counts under its account lock: runner runs 'running' in all (no lease test: the claim has none), and the heavy ones.
          (SELECT count(*) FROM agent_runs x WHERE x.account_id = a.account_id AND x.runtime = 'runner' AND x.status = 'running') AS account_running_total,
@@ -358,7 +383,7 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
  *    runner runs running in all have reached the plan's total, or this is a heavy run and its heavy runs have reached the heavy figure. A free slot
  *    on a runner does not help: the claim answers `at_limit` / `heavy_limit` before it looks at the runner. The caps come from `deps.accountRunnerCaps`
  *    (plan data); without them, or when they cannot be read, this reason is never given;
- *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, heard from within 120 seconds, and with the
+ *  - `waiting_for_runner`: pending and no live runner FOR THE RUN'S REPO: not revoked, not paused or draining (D#605 FL-3), heard from within 120 seconds, and with the
  *    run's repo in its `allowed_repo_ids`. A live runner whose list leaves the repo out can never claim the run (the claim returns
  *    idle for it), so it does not count; neither does one with an empty list, because the claim reads an empty repo list as
  *    "no repo" (only `allowed_roles` reads empty as "all"). The waiting notice in the worker uses the same test, so the two agree.
@@ -367,7 +392,7 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
 export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId: string): Promise<RunWaitReason | null> {
   const now = (deps.now ?? (() => new Date()))();
   const row = await withTenant(deps.appUserPool, accountId, async (client) => {
-    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, runId]);
+    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
     return rows[0];
   });
   return row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
@@ -380,7 +405,7 @@ export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId:
 export async function getRunWait(deps: ReadDeps, accountId: string, runId: string): Promise<{ reason: RunWaitReason | null; limited_by: LimitedBy | null }> {
   const now = (deps.now ?? (() => new Date()))();
   const row = await withTenant(deps.appUserPool, accountId, async (client) => {
-    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, runId]);
+    const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
     return rows[0];
   });
   const reason = row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
@@ -389,7 +414,7 @@ export async function getRunWait(deps: ReadDeps, accountId: string, runId: strin
 
 /** The pending, unapproved runner runs of the account, newest first, with their facts. Run on a client already inside the caller's tenant. */
 export async function readUnapprovedRunFacts(client: PoolClient, accountId: string, now: Date, limit: number): Promise<RawRun[]> {
-  const { rows } = await client.query<RawRun>(WAIT_FACTS("a.status = 'pending' AND a.runtime = 'runner' AND a.approved_by IS NULL", "ORDER BY a.created_at DESC, a.id LIMIT $4"), [accountId, now, RUNNER_OFFLINE_AFTER_SECONDS, limit]);
+  const { rows } = await client.query<RawRun>(WAIT_FACTS("a.status = 'pending' AND a.runtime = 'runner' AND a.approved_by IS NULL", "ORDER BY a.created_at DESC, a.id LIMIT $4"), [accountId, now, RUNNER_ONLINE_SECONDS, limit]);
   return rows;
 }
 
