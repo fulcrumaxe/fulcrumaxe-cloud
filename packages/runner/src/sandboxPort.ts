@@ -83,7 +83,16 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
    * D#2 PREVIEW-RUNNER-EVENTS: called once the sandbox is ready for the agent (locked down, prompt and settings written),
    * just before the agent command starts. Best effort: a rejection is swallowed and never fails the launch.
    */
-  onStage?: (stage: "sandbox_ready" | "cloned") => void | Promise<void>;
+  onStage?: (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed") => void | Promise<void>;
+  /**
+   * D#6 C44-6b: builds the install-phase firewall rules. Called only when the workspace has a lockfile whose install is due,
+   * so a run without one never builds (or applies) an install policy. When present and a `workdir` is set, the port runs the
+   * dependency install after the clone and before the agent command, under these rules, and puts `networkPolicy` back before
+   * the agent can exist. A failed install is not a failed launch: the agent is told with a fixed line (`deps_install_failed`).
+   */
+  installPolicy?: () => Promise<NetworkPolicyRule[]>;
+  /** D#6 C44-6b: the install's outcome and, for a failure, the exit code (null when killed at the time limit) plus a redacted, capped tail of its output. For operator logs only. */
+  onInstall?: (result: { outcome: "installed" | "skipped" | "failed"; exitCode?: number | null; tail?: string }) => void;
   /**
    * D#2 PREVIEW-RUNNER-EVENTS: clone this GitHub repository (shallow, default branch) into `workdir` before the agent
    * starts, through the GitHub proxy forward rule. A failed clone fails the launch with a `CloneError`. Ignored on resume.

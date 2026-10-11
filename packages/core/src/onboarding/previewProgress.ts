@@ -129,6 +129,9 @@ export function lineFor(kind: string, f: EventFields): string | null {
   if (kind === STAGE_KIND) {
     if (f.stage === 'sandbox_ready') return 'The secure sandbox is ready';
     if (f.stage === 'cloned') return 'Repository cloned';
+    // D#6 C44-6b: the closed install outcomes of a run. Fixed text only; an absent stage shows nothing.
+    if (f.stage === 'deps_installed') return 'Dependencies installed';
+    if (f.stage === 'deps_install_failed') return 'Dependencies did not install';
     if (f.stage === 'writing_result') return 'Writing up the result';
     return null;
   }

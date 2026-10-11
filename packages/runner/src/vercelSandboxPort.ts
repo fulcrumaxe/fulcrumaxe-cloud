@@ -5,6 +5,20 @@ import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ModelId } from "@fx/spend";
 import { CLI_MODEL_NAMES, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import {
+  DETECT_NONE,
+  DETECT_NPM,
+  DETECT_PNPM,
+  DETECT_SCRIPT,
+  DETECT_SKIP,
+  INSTALL_OUTPUT_BUFFER_CHARS,
+  INSTALL_SCRIPT,
+  INSTALL_TAIL_MAX_CHARS,
+  INSTALL_TIMEOUT_MS,
+  depsPromptLine,
+  installEnv,
+  type DepsOutcome,
+} from "./depsInstall.js";
 import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail } from "./repoClone.js";
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { NormalizedEvent } from "./types.js";
@@ -305,6 +319,8 @@ export interface CreateVercelSandboxPortOptions {
   callTimeoutMs?: number;
   /** D#2 PREVIEW-RUNNER-EVENTS: how long a repository clone may take before it is killed. Default `CLONE_TIMEOUT_MS`. */
   cloneTimeoutMs?: number;
+  /** D#6 C44-6b: how long the dependency install may run before it is killed and counted as failed. Default `INSTALL_TIMEOUT_MS`. */
+  installTimeoutMs?: number;
   /** Called once per dropped stdout line with a fixed reason code, never
    * the line itself (it is attacker-controlled). */
   onInvalidEvent?: (reason: InvalidEventReason) => void;
@@ -533,6 +549,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
   const callTimeoutMs = options.callTimeoutMs ?? DEFAULT_SDK_CALL_TIMEOUT_MS;
   const cloneTimeoutMs = options.cloneTimeoutMs ?? CLONE_TIMEOUT_MS;
   assertPositiveInt(cloneTimeoutMs, "cloneTimeoutMs");
+  const installTimeoutMs = options.installTimeoutMs ?? INSTALL_TIMEOUT_MS;
+  assertPositiveInt(installTimeoutMs, "installTimeoutMs");
   assertPositiveInt(callTimeoutMs, "callTimeoutMs");
   const measureRetryDelayMs = options.measureRetryDelayMs ?? 2_000;
   if (!Number.isSafeInteger(measureRetryDelayMs) || measureRetryDelayMs < 0) {
@@ -741,6 +759,101 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     }
   }
 
+  /** One sh script in the workspace, bounded by `limitMs`; the end of its output is held (bounded). `exitCode` is undefined when it was killed at the limit. */
+  async function runScript(
+    sandbox: SdkSandbox,
+    script: { name: string; text: string; args: string[] },
+    where: { env: Record<string, string> },
+    limitMs: number,
+  ): Promise<{ exitCode: number | undefined; held: string; truncated: boolean }> {
+    const command = await guarded("runCommand", () =>
+      sandbox.runCommand({ cmd: "sh", args: ["-c", script.text, script.name, ...script.args], env: where.env, detached: true, signal: signal() }),
+    );
+    let held = "";
+    let truncated = false;
+    const exit = await bounded(
+      script.name,
+      (async () => {
+        for await (const entry of command.logs()) {
+          if (typeof entry.data !== "string") continue;
+          held += entry.data;
+          if (held.length > INSTALL_OUTPUT_BUFFER_CHARS) {
+            held = held.slice(-INSTALL_OUTPUT_BUFFER_CHARS);
+            truncated = true;
+          }
+        }
+        return command.wait();
+      })(),
+      limitMs,
+    ).catch(async () => {
+      await killQuietly(sandbox.name, command, sandbox.currentSession().sessionId);
+      return undefined;
+    });
+    return { exitCode: exit?.exitCode ?? undefined, held, truncated };
+  }
+
+  /**
+   * D#6 C44-6b: the dependency install between the clone and the agent. Order, always: detect (no network change); then, only
+   * if an install is due, firewall(install), install, firewall(run); the agent command is issued by the caller afterwards.
+   * The run firewall is put back in a `finally`, so a failed or timed-out install never leaves the install rules open; if it
+   * cannot be put back (twice), the launch fails (the agent must not start under the install rules). An install that fails is an
+   * outcome, not an error: `failed`, which the caller names to the agent and the run.
+   */
+  async function installDependencies(
+    sandbox: SdkSandbox,
+    opts: StartDetachedOptions,
+    workdir: string,
+    resuming: boolean,
+  ): Promise<{ outcome: DepsOutcome; exitCode?: number | null; tail?: string }> {
+    const where = { env: installEnv(workdir) };
+    let detected: number | undefined;
+    try {
+      detected = (await runScript(sandbox, { name: "fx-deps-detect", text: DETECT_SCRIPT, args: [workdir, resuming ? "resume" : "fresh"] }, where, callTimeoutMs)).exitCode;
+    } catch {
+      // fx-swallow-ok: a failed detect is reported as a failed install below; nothing was changed
+      detected = undefined;
+    }
+    if (detected === DETECT_NONE) return { outcome: "none" };
+    if (detected === DETECT_SKIP) return { outcome: "skipped" };
+    if (detected !== DETECT_PNPM && detected !== DETECT_NPM) return { outcome: "failed", exitCode: detected ?? null, tail: "" };
+
+    let installRules: NetworkPolicyRule[];
+    try {
+      installRules = await opts.installPolicy!();
+    } catch {
+      // fx-swallow-ok: the install policy could not be built; no rule was applied, so the install is reported as failed
+      return { outcome: "failed", exitCode: null, tail: "" };
+    }
+    const applyRun = async (): Promise<void> => {
+      const runPolicy = sdkNetworkPolicy(opts.networkPolicy);
+      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(runPolicy, { signal: signal() }));
+    };
+    let result: { outcome: DepsOutcome; exitCode?: number | null; tail?: string };
+    try {
+      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(sdkNetworkPolicy(installRules), { signal: signal() }));
+      const ran = await runScript(sandbox, { name: "fx-deps-install", text: INSTALL_SCRIPT, args: [workdir, detected === DETECT_PNPM ? "pnpm" : "npm"] }, where, installTimeoutMs);
+      result =
+        ran.exitCode === 0
+          ? { outcome: "installed" }
+          : {
+              outcome: "failed",
+              exitCode: ran.exitCode ?? null,
+              tail: redactedCloneTail(ran.held, ran.truncated, Object.values(opts.env).filter((v) => v.length >= 12)).slice(-INSTALL_TAIL_MAX_CHARS),
+            };
+    } catch {
+      // fx-swallow-ok: a failed policy change or command is the install failing; the run policy is restored below either way
+      result = { outcome: "failed", exitCode: null, tail: "" };
+    } finally {
+      try {
+        await applyRun();
+      } catch {
+        // fx-swallow-ok: the first restore failed; the retry below is the one whose failure counts
+        await applyRun(); // one more try; a second failure propagates and the launch fails before any agent command
+      }
+    }
+    return result;
+  }
+
   function launch(
     handle: SandboxHandle,
     opts: StartDetachedOptions,
@@ -839,24 +952,29 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
           .then(() => sandbox.writeFiles([{ path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 }], { signal: signal() }))
           .catch(() => undefined);
       };
-      await guarded("writeFiles", () =>
-        sandbox.writeFiles(
-          [
-            { path: promptFile, content: `${opts.roleCard}\n\n${prompt}`, mode: 0o600 },
-            // Rewritten before EVERY agent command (start and resume): an
-            // earlier command runs as the same uid and may have edited them.
-            { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role)), mode: 0o444 },
-            { path: FX_AGENT_MCP_PATH, content: JSON.stringify(FX_AGENT_MCP_CONFIG), mode: 0o444 },
-            // C66: the runner's one hook, and the deadline it warns from (W-1).
-            { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
-            { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
-          ],
-          { signal: signal() },
-        ),
-      );
+      // The prompt and the agent's config, as one batch. Written here, and written again after the dependency install (D#6 C44-6b):
+      // the install runs the repo's lifecycle scripts as the same uid, so it is an "earlier command" in the sense below.
+      let promptBody = `${opts.roleCard}\n\n${prompt}`;
+      const writeAgentFiles = (): Promise<void> =>
+        guarded("writeFiles", () =>
+          sandbox.writeFiles(
+            [
+              { path: promptFile, content: promptBody, mode: 0o600 },
+              // Rewritten before EVERY agent command (start and resume): an
+              // earlier command runs as the same uid and may have edited them.
+              { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role)), mode: 0o444 },
+              { path: FX_AGENT_MCP_PATH, content: JSON.stringify(FX_AGENT_MCP_CONFIG), mode: 0o444 },
+              // C66: the runner's one hook, and the deadline it warns from (W-1).
+              { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
+              { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
+            ],
+            { signal: signal() },
+          ),
+        );
+      await writeAgentFiles();
       // D#2 PREVIEW-RUNNER-EVENTS: the sandbox is up, locked down and loaded; the agent command is next. Best effort:
       // a progress mark that fails to record never fails the launch.
-      const mark = async (stage: "sandbox_ready" | "cloned"): Promise<void> => {
+      const mark = async (stage: "sandbox_ready" | "cloned" | "deps_installed" | "deps_install_failed"): Promise<void> => {
         try {
           await opts.onStage?.(stage);
         } catch {
@@ -869,6 +987,26 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         await cloneRepository(sandbox, opts.clone, opts.workdir, opts.env);
         if (run.stopped) return undefined;
         await mark("cloned");
+      }
+      if (opts.installPolicy !== undefined && opts.workdir !== undefined) {
+        const deps = await installDependencies(sandbox, opts, opts.workdir, resuming);
+        if (run.stopped) return undefined;
+        const line = depsPromptLine(deps.outcome);
+        if (line !== undefined) {
+          // Repo scripts ran as the agent's own user (which can sudo): what the agent will be started from is checked again and
+          // rewritten from the runner's own text, never trusted from before the install. A CLI that no longer matches its pin
+          // refuses the launch (SandboxPortError); changed config files are overwritten, the prompt gains its one fixed line.
+          await checkCliPin(sandbox, opts.env, backend);
+          if (run.stopped) return undefined;
+          promptBody = `${promptBody}\n\n${line}`;
+          await writeAgentFiles();
+          await mark(deps.outcome === "failed" ? "deps_install_failed" : "deps_installed");
+          try {
+            opts.onInstall?.({ outcome: deps.outcome === "failed" ? "failed" : deps.outcome === "skipped" ? "skipped" : "installed", ...(deps.exitCode !== undefined && { exitCode: deps.exitCode }), ...(deps.tail !== undefined && { tail: deps.tail }) });
+          } catch {
+            // fx-swallow-ok: an observer never fails the launch
+          }
+        }
       }
       const command = await guarded("runCommand", () =>
         sandbox.runCommand({
