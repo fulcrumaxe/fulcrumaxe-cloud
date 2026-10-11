@@ -13,7 +13,8 @@
     "./redact": "./src/redact.ts",
     "./envelope": "./src/envelope.ts",
     "./streamJson": "./src/streamJson.ts",
-    "./toolActivity": "./src/toolActivity.ts"
+    "./toolActivity": "./src/toolActivity.ts",
+    "./contextLedger": "./src/contextLedger.ts"
   },
   "engines": {
     "node": ">=22.22.2"
