@@ -1,0 +1,56 @@
+name: Build the microVM root disks
+description: >-
+  Builds the fx-agent template image for amd64 and arm64 into a local registry, then turns it into one read-only ext4 root disk per
+  architecture with `fx-runner vm build-image`, twice, and fails unless the two builds are byte for byte the same. The caller has
+  checked out the repository and run `pnpm install`. The disks end up in $W/a/<arch>/rootfs.ext4 and the report in $W/report-a.txt.
+  Every download is checked against infra/microvm-image/lock.json (see fetch-pin.sh); nothing is cached or published here.
+runs:
+  using: composite
+  steps:
+    - name: Work directory on the large disk
+      shell: bash
+      run: sudo install -d -o "$(id -u)" -g "$(id -g)" "$W" "$W/bin"
+    # mke2fs must read a tar archive, which needs libarchive (loaded at run time) and, to convert a non-ASCII link target, the locale
+    # that mke2fs sets only when it is built with native language support: do not add --disable-nls.
+    - name: Build e2fsprogs from the pinned tarball
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq gettext libarchive13t64
+        cd "$W"
+        bash "$GITHUB_WORKSPACE/infra/microvm-image/fetch-pin.sh" .tools.e2fsprogs e2fsprogs.tar.gz
+        tar -xzf e2fsprogs.tar.gz
+        cd e2fsprogs-*/
+        ./configure --prefix="$W/e2fs" --disable-fuse2fs --disable-uuidd --disable-defrag --disable-e2initrd-helper --with-udev-rules-dir=no --with-crond-dir=no --with-systemd-unit-dir=no > /dev/null
+        make -j"$(nproc)" > /dev/null
+        make install > /dev/null
+        echo "$W/e2fs/sbin" >> "$GITHUB_PATH"
+    - name: Install crane from the pinned release
+      shell: bash
+      run: |
+        cd "$W"
+        bash "$GITHUB_WORKSPACE/infra/microvm-image/fetch-pin.sh" .tools.crane crane.tar.gz
+        tar -xzf crane.tar.gz crane
+        mv crane bin/crane
+        echo "$W/bin" >> "$GITHUB_PATH"
+    - name: Start a local registry and a multi-architecture builder
+      shell: bash
+      run: |
+        pins=infra/microvm-image/lock.json
+        docker run -d --name fx-registry --network host "$(jq -er .containers.registry "$pins")"
+        docker run --privileged --rm "$(jq -er .containers.binfmt "$pins")" --install arm64
+        docker buildx create --name fx --driver docker-container --driver-opt "image=$(jq -er .containers.buildkit "$pins")" --driver-opt network=host --use
+        docker buildx inspect --bootstrap
+    - name: Build the template image for both architectures
+      shell: bash
+      run: |
+        docker buildx build --builder fx --platform linux/amd64,linux/arm64 --provenance=false --sbom=false --push -t localhost:5000/fx-agent:probe -f infra/microvm-image/Dockerfile infra/microvm-image
+        echo "IMAGE_REF=localhost:5000/fx-agent@$(crane digest localhost:5000/fx-agent:probe)" >> "$GITHUB_ENV"
+    - name: Build both root disks, twice, and compare
+      shell: bash
+      run: |
+        pnpm --filter @fulcrumaxe/fx-runner exec esbuild scripts/vm-main.mjs --bundle --platform=node --format=esm --outfile="$W/fx-vm.mjs"
+        mke2fs -V 2>&1 | head -1 | tee "$W/mke2fs.txt"
+        node "$W/fx-vm.mjs" build-image --template fx-agent --image "$IMAGE_REF" --out "$W/a" | tee "$W/report-a.txt"
+        node "$W/fx-vm.mjs" build-image --template fx-agent --image "$IMAGE_REF" --out "$W/b" | tee "$W/report-b.txt"
+        diff <(grep '^rootfs' "$W/report-a.txt") <(grep '^rootfs' "$W/report-b.txt")
