@@ -16,6 +16,9 @@ const DAY_MS = 86_400_000;
 const SPEC_VERSION = "1.0.31";
 const SEMVER = /^\d+\.\d+\.\d+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** The release tag of a microVM image, `vm-<template>-<12 hex>`: every file of one image lives under it. */
+const VM_TAG = /^vm-[a-z][a-z0-9-]{0,30}-[0-9a-f]{12}$/;
+const VM_TARGET = /^vm-[a-z][a-z0-9-]{0,30}-[0-9a-f]{12}\/(?:kernel|rootfs|agent)-(?:amd64|arm64)-([0-9a-f]{64})$/;
 
 /** Days each role lives for, unless a flag says otherwise. The runbook states the re-sign cadence these imply. */
 export const DEFAULT_EXPIRY_DAYS = Object.freeze({ root: 365, targets: 90, snapshot: 14, timestamp: 14 });
@@ -395,6 +398,13 @@ function compareArtifact(artifacts, name, entry) {
 export function targetEntries(manifest) {
   if (!Array.isArray(manifest) || manifest.length === 0) fail("the manifest has no entries");
   return manifest.map((entry) => {
+    if (entry.target !== undefined) {
+      // A microVM image file (D#587 B-1): named by its own digest, so a released file is never replaced and a digest can be looked up by name.
+      const named = VM_TARGET.exec(String(entry.target));
+      if (named === null) fail("a manifest entry has a target that is not vm-<template>-<12 hex>/<kernel|rootfs|agent>-<arch>-<sha256>");
+      if (entry.sha256 !== named[1] || !Number.isSafeInteger(entry.size) || entry.size < 1) fail("a vm manifest entry's sha256 must be the one in its name, and its size a positive integer");
+      return { path: entry.target, length: entry.size, hashes: { sha256: entry.sha256 } };
+    }
     if (typeof entry.version !== "string" || !SEMVER.test(entry.version)) fail("a manifest entry has a version that is not x.y.z");
     if (typeof entry.sha256 !== "string" || !SHA256_HEX.test(entry.sha256)) fail("a manifest entry has a sha256 that is not 64 lowercase hex digits");
     if (!Number.isSafeInteger(entry.size) || entry.size < 1) fail("a manifest entry has a size that is not a positive integer");
@@ -429,7 +439,8 @@ function signTimestampAndSnapshot({ root, onlineSigners, targetsVersion, previou
 
 /**
  * Sign a new targets version, then snapshot and timestamp. The listed targets carry over from the previous targets version, plus the
- * manifest's, minus every file of a version in `drop` (withdrawing a bad release). With neither a manifest nor a drop, `renew: true`
+ * manifest's, minus every file of a release in `drop` (withdrawing a bad one): a runner version `x.y.z`, or a microVM image tag
+ * `vm-<template>-<12 hex>` (all of that image's kernel, root disk and agent entries). With neither a manifest nor a drop, `renew: true`
  * signs the same list again with a new expiry.
  */
 /** @param {Record<string, any>} options */
@@ -443,7 +454,7 @@ export function release({ dir, trustedRoot, artifacts, manifest, drop = [], rene
   checkRoleKeys(root, "snapshot", onlineKeys);
   checkRoleKeys(root, "timestamp", onlineKeys);
   if (manifest === undefined && drop.length === 0 && !renew) fail("nothing to do: give a manifest, a version to drop, or --renew");
-  for (const v of drop) if (!SEMVER.test(v)) fail("a version to drop is not x.y.z");
+  for (const v of drop) if (!SEMVER.test(v) && !VM_TAG.test(v)) fail("a release to drop is neither x.y.z nor a vm-<template>-<12 hex> tag");
 
   // What is carried forward comes only from metadata that verified: the previous targets file is signed by a threshold of targets
   // keys of a root in the verified chain, and is exactly the version the verified snapshot and timestamp point to.
@@ -457,16 +468,16 @@ export function release({ dir, trustedRoot, artifacts, manifest, drop = [], rene
   // each one that is carried forward must match the real artifact before it is signed again. The newest root vouching for the list
   // (no rotation of the targets or online key) needs no such check.
   const carriedUnderOlderRoot = state !== undefined && rootVersion !== chain.length;
-  for (const version of drop) {
-    const prefix = `v${version}/`;
+  for (const tag of drop) {
+    const prefix = VM_TAG.test(tag) ? `${tag}/` : `v${tag}/`;
     const hits = [...listed.keys()].filter((name) => name.startsWith(prefix));
-    if (hits.length === 0) fail(`version ${version} is not listed, so there is nothing to drop`);
+    if (hits.length === 0) fail(`${tag} is not listed, so there is nothing to drop`);
     for (const name of hits) listed.delete(name);
   }
   if (carriedUnderOlderRoot) {
-    if (artifacts === undefined) fail(`the earlier targets are vouched for only by root ${rootVersion}, not the newest root ${chain.length} (a key was rotated); give --artifacts <dir> holding v<x.y.z>/fx-runner-<platform> for every release still listed, or --drop the ones you cannot supply`);
+    if (artifacts === undefined) fail(`the earlier targets are vouched for only by root ${rootVersion}, not the newest root ${chain.length} (a key was rotated); give --artifacts <dir> holding every file still listed (v<x.y.z>/fx-runner-<platform> and vm-<template>-<12 hex>/<kind>-<arch>-<sha256>), or --drop the releases you cannot supply (a runner x.y.z, or a microVM image tag; an old root disk is about 1 GiB, so withdraw old images rather than keep them)`);
     for (const [name, entry] of listed) {
-      if (compareArtifact(artifacts, name, entry) === "missing") fail(`the artifact for ${name} is not in --artifacts, so its entry cannot be verified; supply it or --drop that version`);
+      if (compareArtifact(artifacts, name, entry) === "missing") fail(`the artifact for ${name} is not in --artifacts, so its entry cannot be verified; supply it or --drop that release (${name.startsWith("vm-") ? name.split("/")[0] : name.split("/")[0].slice(1)})`);
     }
   }
   if (manifest !== undefined) {
