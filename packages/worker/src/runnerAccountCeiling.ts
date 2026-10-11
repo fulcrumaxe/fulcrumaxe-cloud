@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY } from "@fulcrumaxe/runner-protocol";
-import { RUNNER_OFFLINE_AFTER_SECONDS } from "@fx/runner-cloud";
+import { RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { RUNNER_PLAN_ID, runnerLimitsFor, type HostedRunnerLimits } from "@fx/spend";
 import type { RunnerLimits } from "./runnerLimits.js";
 
@@ -10,7 +10,7 @@ import type { RunnerLimits } from "./runnerLimits.js";
  *
  * - The runner plan has a flat figure from the plan data (`runnerLimits`), whatever its runners declare.
  * - A hosted plan has min(the account's setting, what its LIVE runners can hold). The setting is the account's accepted row, else the plan
- *   data's defaults. A runner is live when it is not revoked, was heard from within `RUNNER_OFFLINE_AFTER_SECONDS` and is not holding back
+ *   data's defaults. A runner is live when it is not revoked, was heard from within `RUNNER_ONLINE_SECONDS` (120, the one online window the read model and the claim share) and is not holding back
  *   its claims; offline, revoked and paused runners add nothing, and adding a runner raises the ceiling only up to the setting, never past it.
  *   A runner's capacity is the one it declared on its claim, clamped to the per-runner 8 in all and 4 heavy, or 1 when it declared none.
  * - Plan data that cannot give the figures, or a plan it does not know, is a ceiling of 0: nothing is handed out (fail closed).
@@ -35,7 +35,7 @@ export const hostedLimitsFromPlanData: HostedLimitsSource = (plan) => {
 
 const FAIL_CLOSED: AccountCeiling = { total: 0, heavy: 0, perRepo: 0 };
 
-/** Which runners hold capacity right now. $1 is the clock, $2 the offline window in seconds, $3 the runner that is claiming (live by being here). */
+/** Which runners hold capacity right now. $1 is the clock, $2 the online window in seconds, $3 the runner that is claiming (live by being here). */
 const LIVE_RUNNER_PREDICATE = `r.revoked_at IS NULL
       AND (r.id = $3::uuid OR r.last_seen_at > $1::timestamptz - make_interval(secs => $2))
       AND (c.claim_paused_until IS NULL OR c.claim_paused_until <= $1::timestamptz)`;
@@ -64,7 +64,7 @@ export async function accountCeiling(
     `SELECT sum(COALESCE(${RUNNER_CAPACITY_SQL}, 1)) AS capacity
        FROM runners r LEFT JOIN runner_capacity c ON c.runner_id = r.id AND c.account_id = r.account_id
       WHERE r.account_id = $4::uuid AND ${LIVE_RUNNER_PREDICATE}`,
-    [new Date(input.nowMs), RUNNER_OFFLINE_AFTER_SECONDS, input.claimingRunnerId, input.accountId],
+    [new Date(input.nowMs), RUNNER_ONLINE_SECONDS, input.claimingRunnerId, input.accountId],
   );
   const capacity = Number(live.rows[0]?.capacity ?? 0);
   const total = Math.min(stored?.total_jobs ?? defaults.defaultAccountJobs, capacity);
