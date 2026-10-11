@@ -49,6 +49,18 @@ env:
 # main always runs the full suite and never consults the classifier. Each run states its scope on its
 # summary page ("CI scope: ..."). Details: docs/ops/ci.md, "Affected-only PR runs".
 #
+# OVERLAY-ONLY PULL REQUESTS (private repository only). The private repository is the public code plane plus a
+# few overlay paths (the list in scripts/ci/publish-denylist.local); its product code is always identical to the
+# code plane's main, where the full product suite already runs on GitHub-hosted runners. When EVERY file a
+# pull request changes is an overlay path, the classifier answers `overlay` (CI_SCOPE_OVERLAY=true): `check`
+# skips "Run checks" and the Node 22 step and runs scripts/ci/overlay-checks.sh instead, and `e2e-runner` skips
+# its test. The jobs still run and finish `success` under their real names, because the merge gate refuses a
+# required check that concluded `skipped`. The secret scan, the migration lint and the CI script tests still
+# run. The list is read from the base commit; `ci:full` and CI_FORCE_FULL still force a full run. The public
+# repository never passes the list (the expression below is empty there), so its runs are unchanged. A push to
+# main on the private repository stays full: it is the record that the whole tree (public plus overlay) is
+# green, and it gates nothing.
+#
 # The e2e jobs never skip at job level. A matrix job skipped by its own `if:` reports under the unexpanded
 # name `workspace-e2e (${{ matrix.project }})` and as skipped, so the three named checks would be missing.
 # They always run, and when the change cannot affect the specs they say so in their first step, skip the
@@ -281,6 +293,8 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+          # Empty on the public repository, so the classifier cannot answer `overlay` there.
+          CI_OVERLAY_LIST: ${{ github.event.repository.private && 'scripts/ci/publish-denylist.local' || '' }}
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
         run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
@@ -296,6 +310,7 @@ jobs:
       # the `default` shell a developer runs locally, so it cannot drift from it. packages/db's own vitest globalSetup provisions and tears down its own
       # throwaway Postgres cluster; nothing else needs configuring here.
       - name: Run checks
+        if: env.CI_SCOPE_OVERLAY != 'true'
         env:
           # The browser tier runs on every event, push included, with Chromium's
           # sandbox on. check.sh still refuses FX_BROWSER_TIER=skip on pull_request.
@@ -308,6 +323,12 @@ jobs:
         run: |
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then unset FX_CHECK_AFFECTED; fi
           nix develop .#ci --command bash scripts/check.sh
+
+      # Overlay-only pull request (private repository): the checks that cover overlay content, in place of the
+      # product suites above. Fails closed: the script exits non-zero if any selected check fails.
+      - name: Overlay checks
+        if: env.CI_SCOPE_OVERLAY == 'true'
+        run: nix develop .#ci --command bash scripts/ci/overlay-checks.sh
 
       # The runner protocol package and the local runner (packages/fx-runner) are installed on customers' machines,
       # where the supported minimum is Node 22.22.2, while this repository builds and tests on Node 24. This step runs
@@ -450,7 +471,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          fetch-depth: 1
+          # Two commits on the private repository, where the overlay scope step below needs HEAD^1; one elsewhere.
+          fetch-depth: ${{ github.event.repository.private && 2 || 1 }}
 
       - name: Install Nix (hosted)
         if: (runner.environment == 'github-hosted' || (vars.CI_RUNS_ON != '' && vars.CI_RUNS_ON != 'self-hosted'))
@@ -472,5 +494,17 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
+      # Private repository, pull requests only: is this an overlay-only change? Only that answer is used here; the
+      # test below still runs on every other pull request and on every push, whatever the scope otherwise is.
+      - name: Overlay scope
+        if: github.event_name == 'pull_request' && github.event.repository.private
+        env:
+          CI_FORCE_FULL: ${{ vars.CI_FORCE_FULL }}
+          CI_OVERLAY_LIST: scripts/ci/publish-denylist.local
+          CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix develop .#ci --command node scripts/ci/affected.mjs --base HEAD^1 --head HEAD --force-full "$CI_FORCE_FULL" --labels-api --github
+
       - name: Run the end-to-end runner test
+        if: env.CI_SCOPE_OVERLAY != 'true'
         run: nix develop .#ci --command bash -euo pipefail -c 'pnpm install --frozen-lockfile && pnpm test:e2e-runner'

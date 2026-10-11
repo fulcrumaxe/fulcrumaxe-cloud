@@ -1201,3 +1201,268 @@ test("ci.yml fail-safe: only the exact `nix develop .#ci` form is exempt; the ol
     assert.equal(changeFrom(base, { [CI]: next }).mode, "full", prefix);
   }
 });
+
+// ---- overlay-only pull requests (private repository) ----------------------------------------------------
+// The overlay list is given only on the private repository (ci.yml passes it nowhere else). Its fixture is a
+// SYNTHETIC list: the real one does not exist in the public repository, where this test also runs.
+const LIST_PATH = "scripts/ci/publish-denylist.local";
+// Stands in for a private workspace package (the real one is absent from the public tree): any package the
+// other tests here do not use.
+const PRIV_PKG = [...WORKSPACE.keys()].filter((d) => !["packages/env-spec", "packages/core", "packages/db", "apps/web", "apps/workspace"].includes(d)).at(-1);
+const LIST_TEXT = [
+  "# synthetic overlay list for the classifier tests",
+  ".autonomous-team/\tteam-state",
+  "archive/\tteam-state",
+  "docs/ops/\tops-material",
+  "scripts/ops/\tops-material",
+  "scripts/lib/\tengine-tooling",
+  "tests/\tengine-tooling",
+  "config/private/\tprivate-config",
+  `${PRIV_PKG}/\tprivate-package`,
+  "CLAUDE.md\tteam-state",
+  "scripts/ci/publish-denylist.local\tthe-list-itself",
+  "packages/db/test/pgTls.test.ts\ttests-an-overlay-script",
+  "",
+].join("\n");
+let ov; // { dir, base }
+before(() => {
+  const dir = mkdtempSync(path.join(tmpdir(), "privscope-affected-"));
+  git(dir, "init", "-q", "-b", "main");
+  copyFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), path.join(dir, "pnpm-workspace.yaml"));
+  for (const d of WORKSPACE.keys()) {
+    mkdirSync(path.join(dir, d), { recursive: true });
+    copyFileSync(path.join(repoRoot, d, "package.json"), path.join(dir, d, "package.json"));
+  }
+  writeFileSync(path.join(dir, "pnpm-lock.yaml"), "lockfileVersion: 1\n");
+  mkdirSync(path.join(dir, "scripts/ci"), { recursive: true });
+  writeFileSync(path.join(dir, LIST_PATH), LIST_TEXT);
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "base");
+  ov = { dir, base: git(dir, "rev-parse", "HEAD") };
+});
+after(() => rmSync(ov.dir, { recursive: true, force: true }));
+
+/** Like change(), on the overlay fixture. */
+function overlayChange(files, extra = {}) {
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  for (const [p, content] of Object.entries(files)) {
+    const abs = path.join(ov.dir, p);
+    if (content === null) rmSync(abs, { force: true });
+    else {
+      mkdirSync(path.dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+    }
+  }
+  git(ov.dir, "add", "-A");
+  git(ov.dir, "commit", "-q", "--allow-empty", "-m", "change");
+  const head = git(ov.dir, "rev-parse", "HEAD");
+  const result = classify({ repoRoot: ov.dir, base: ov.base, head, ...extra });
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  return result;
+}
+const WITH_LIST = { overlayList: LIST_PATH };
+
+test("overlay: an overlay-only change gives a no-product scope (no package, no e2e, no lint) and names the files", () => {
+  const files = {
+    "docs/ops/ci.md": "x",
+    "scripts/lib/a.sh": "x",
+    "tests/test_x.sh": "x",
+    "config/private/plan-data.json": "{}",
+    ".autonomous-team/PLAN.md": "x",
+    "CLAUDE.md": "x",
+  };
+  const r = overlayChange(files, WITH_LIST);
+  assert.equal(r.mode, "overlay");
+  assert.deepEqual(r.packages, []);
+  assert.equal(r.e2e, false);
+  assert.deepEqual(r.lint, []);
+  assert.equal(r.trigger, null);
+  assert.deepEqual(r.overlay, Object.keys(files).sort());
+  assert.match(scopeLine(r), /overlay-only — 6 overlay files; product suites skipped/);
+  // the same change without the list (the public plane, and any caller that does not pass it) is what it always was
+  const plain = overlayChange(files);
+  assert.equal(plain.mode, "full", "scripts/lib/** matches scripts/**, a full-run trigger");
+});
+
+test("overlay: a mixed change (overlay plus any product path) keeps today's answer exactly", () => {
+  const overlay = { "docs/ops/ci.md": "x", "tests/test_x.sh": "x" };
+  for (const product of [
+    { "packages/env-spec/src/a.ts": "x" },
+    { "apps/web/app/page.tsx": "x" },
+    { "pnpm-lock.yaml": "x" },
+    { "scripts/ci/affected.mjs": "x" },
+    { "scripts/check.sh": "x" },
+    { "docs/guide.md": "x" }, // an ignored path is still not an overlay path
+    { "README.md": "x" },
+  ]) {
+    const mixed = overlayChange({ ...overlay, ...product }, WITH_LIST);
+    const without = overlayChange({ ...overlay, ...product });
+    assert.notEqual(mixed.mode, "overlay", JSON.stringify(product));
+    assert.deepEqual(mixed, without, `${JSON.stringify(product)} answers differently with the list`);
+  }
+});
+
+test("overlay: without the list nothing can answer overlay, for every glob in the trigger file, the ignore list and the overlay paths", () => {
+  const samples = [
+    ...rules.triggers.map((t) => sampleFor(t.glob)),
+    ...rules.ignore.map((t) => sampleFor(t.glob)),
+    ...rules.e2e_paths.map((t) => sampleFor(t.glob)),
+    "docs/ops/ci.md",
+    "tests/test_x.sh",
+    ".autonomous-team/x",
+    "archive/x/y",
+    "config/private/plan-data.json",
+  ];
+  for (const f of samples) {
+    const a = overlayChange({ [f]: "x" });
+    const b = overlayChange({ [f]: "x" }, { overlayList: "" });
+    assert.notEqual(a.mode, "overlay", f);
+    assert.deepEqual(a, b, f);
+    assertShape(a);
+  }
+});
+
+test("overlay: the public plane's answers are unchanged by the list for every product-only change", () => {
+  const sets = [
+    { "packages/env-spec/src/a.ts": "x" },
+    { "packages/core/src/a.ts": "x" },
+    { "apps/workspace/src/a.ts": "x" },
+    { "scripts/ci/licence.test.mjs": "x" },
+    { "pnpm-lock.yaml": "x" },
+    { ".github/workflows/ci.yml": "x" },
+    { "docs/a.md": "x" },
+    { "wiki/a.md": "x" },
+    {},
+  ];
+  for (const files of sets) {
+    assert.deepEqual(overlayChange(files, WITH_LIST), overlayChange(files), JSON.stringify(files));
+  }
+});
+
+test("overlay: a rename from an overlay path into a product path is not overlay-only (both sides are listed)", () => {
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  mkdirSync(path.join(ov.dir, "tests"), { recursive: true });
+  writeFileSync(path.join(ov.dir, "tests/test_y.sh"), "same\n");
+  git(ov.dir, "add", "-A");
+  git(ov.dir, "commit", "-q", "-m", "seed");
+  const base = git(ov.dir, "rev-parse", "HEAD");
+  mkdirSync(path.join(ov.dir, "apps/web"), { recursive: true });
+  git(ov.dir, "mv", "tests/test_y.sh", "apps/web/test_y.sh");
+  git(ov.dir, "commit", "-q", "-m", "move");
+  const head = git(ov.dir, "rev-parse", "HEAD");
+  const moved = classify({ repoRoot: ov.dir, base, head, ...WITH_LIST });
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  assert.notEqual(moved.mode, "overlay");
+  assert.ok(moved.mode === "full" || moved.packages.includes("apps/web"));
+});
+
+test("overlay: a pull request that edits the list itself is judged by the list at its BASE", () => {
+  // It adds apps/web/ to the list and changes an apps/web file: judged by its own edit this would be overlay.
+  const widened = overlayChange({ [LIST_PATH]: `${LIST_TEXT}apps/web/\tengine-tooling\n`, "apps/web/app/page.tsx": "x" }, WITH_LIST);
+  assert.notEqual(widened.mode, "overlay");
+  assert.equal(widened.mode, "full", "the list is under scripts/**, a full-run trigger, as before");
+  // Editing only the list is an overlay-only change.
+  assert.equal(overlayChange({ [LIST_PATH]: `${LIST_TEXT}docs/more/\tops-material\n` }, WITH_LIST).mode, "overlay");
+});
+
+test("overlay: files that own product-suite tests are not skippable (a private package, a vitest file that imports an overlay script)", () => {
+  const pkg = overlayChange({ [`${PRIV_PKG}/src/a.ts`]: "x", "docs/ops/ci.md": "x" }, WITH_LIST);
+  assert.notEqual(pkg.mode, "overlay");
+  assert.ok(pkg.packages.includes(PRIV_PKG));
+  const t = overlayChange({ "packages/db/test/pgTls.test.ts": "x" }, WITH_LIST);
+  assert.notEqual(t.mode, "overlay");
+});
+
+test("overlay: ci:full, CI_FORCE_FULL and an unreadable label read still force a full run", () => {
+  const files = { "tests/test_x.sh": "x" };
+  assert.equal(overlayChange(files, { ...WITH_LIST, labels: ["ci:full"] }).mode, "full");
+  assert.equal(overlayChange(files, { ...WITH_LIST, forceFull: "true" }).mode, "full");
+  assert.equal(overlayChange(files, { ...WITH_LIST, labelsError: "GitHub API answered 500" }).mode, "full");
+  assert.equal(overlayChange(files, { ...WITH_LIST, labels: ["bug"] }).mode, "overlay");
+});
+
+test("overlay: an empty change, a missing list, an empty list and a malformed list never narrow", () => {
+  const empty = overlayChange({}, WITH_LIST);
+  assert.notEqual(empty.mode, "overlay");
+  assert.equal(empty.reason, "no changed files");
+  const missing = overlayChange({ "tests/test_x.sh": "x" }, { overlayList: "scripts/ci/no-such-list" });
+  assert.equal(missing.mode, "full");
+  assert.match(missing.reason, /missing at the base commit/);
+  for (const bad of ["", "# only a comment\n", "tests/ no-tab-here\n", "tests/\n", "/abs/\tx\n", "../up/\tx\n", "te*sts/\tx\n"]) {
+    git(ov.dir, "reset", "-q", "--hard", ov.base);
+    writeFileSync(path.join(ov.dir, "bad-list"), bad);
+    git(ov.dir, "add", "-A");
+    git(ov.dir, "commit", "-q", "-m", "bad list");
+    const base = git(ov.dir, "rev-parse", "HEAD");
+    mkdirSync(path.join(ov.dir, "tests"), { recursive: true });
+    writeFileSync(path.join(ov.dir, "tests/test_z.sh"), "x");
+    git(ov.dir, "add", "-A");
+    git(ov.dir, "commit", "-q", "-m", "change");
+    const head = git(ov.dir, "rev-parse", "HEAD");
+    const r = classify({ repoRoot: ov.dir, base, head, overlayList: "bad-list" });
+    git(ov.dir, "reset", "-q", "--hard", ov.base);
+    assert.equal(r.mode, "full", JSON.stringify(bad));
+    assert.match(r.reason, /overlay list/);
+  }
+});
+
+test("overlay: the real overlay list, when this tree has one, parses and is never empty", { skip: !existsSync(path.join(repoRoot, LIST_PATH)) }, async () => {
+  const { parseOverlayList } = await import("./affected.mjs");
+  const entries = parseOverlayList(readFileSync(path.join(repoRoot, LIST_PATH), "utf8"));
+  assert.ok(entries.length > 10);
+  assert.ok(entries.every((e) => e.authority.length > 0));
+});
+
+// ---- the GitHub step with the overlay list ----
+function overlayStep(files, env = {}, args = []) {
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  for (const [p, c] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(ov.dir, p)), { recursive: true });
+    writeFileSync(path.join(ov.dir, p), c);
+  }
+  git(ov.dir, "add", "-A");
+  git(ov.dir, "commit", "-q", "-m", "c");
+  const envFile = path.join(aux, "ov-env");
+  writeFileSync(envFile, "");
+  const clean = { ...process.env };
+  for (const k of ["CI_OVERLAY_LIST", "GITHUB_API_URL", "GITHUB_REPOSITORY", "CI_PR_NUMBER", "GH_TOKEN"]) delete clean[k];
+  const out = spawnSync(process.execPath, [CLI, "--repo", ov.dir, "--base", "HEAD^1", "--head", "HEAD", "--github", ...args], {
+    encoding: "utf8",
+    cwd: ov.dir,
+    env: { ...clean, GITHUB_ENV: envFile, ...env },
+  });
+  const lines = readFileSync(envFile, "utf8").split("\n").filter(Boolean);
+  const vars = Object.fromEntries(lines.map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+  rmSync(envFile, { force: true });
+  git(ov.dir, "reset", "-q", "--hard", ov.base);
+  return { out, vars, lines };
+}
+
+test("--github: an overlay answer exports CI_SCOPE_OVERLAY=true, turns every product part off and sets no package list", () => {
+  const s = overlayStep({ "tests/test_x.sh": "x" }, { CI_OVERLAY_LIST: LIST_PATH });
+  assert.equal(JSON.parse(s.out.stdout).mode, "overlay");
+  assert.equal(s.vars.CI_SCOPE_OVERLAY, "true");
+  assert.equal(s.vars.CI_SCOPE_MODE, "overlay");
+  assert.equal(s.vars.CI_SCOPE_E2E, "false");
+  assert.equal(s.vars.CI_SCOPE_RUNNER_PROTOCOL, "false");
+  assert.equal("FX_CHECK_AFFECTED" in s.vars, false);
+  assert.ok(s.out.stderr.includes("CI scope: overlay-only"));
+  // --overlay-list on the command line does the same
+  assert.equal(overlayStep({ "tests/test_x.sh": "x" }, {}, ["--overlay-list", LIST_PATH]).vars.CI_SCOPE_OVERLAY, "true");
+});
+
+test("--github: with no list (the public plane) the same change never exports CI_SCOPE_OVERLAY, and the other variables are the old ones", () => {
+  for (const files of [{ "tests/test_x.sh": "x" }, { "packages/env-spec/src/a.ts": "x" }, { "pnpm-lock.yaml": "x" }]) {
+    const s = overlayStep(files, { CI_OVERLAY_LIST: "" });
+    assert.equal("CI_SCOPE_OVERLAY" in s.vars, false, JSON.stringify(files));
+    assert.deepEqual(Object.keys(s.vars).sort(), ["CI_SCOPE_E2E", "CI_SCOPE_MODE", "CI_SCOPE_RUNNER_PROTOCOL", ...(s.vars.FX_CHECK_AFFECTED ? ["FX_CHECK_AFFECTED"] : [])].sort());
+    assert.notEqual(s.vars.CI_SCOPE_MODE, "overlay");
+  }
+});
+
+test("--github: a product change on the private plane (list given) exports no overlay flag", () => {
+  const s = overlayStep({ "packages/env-spec/src/a.ts": "x", "tests/test_x.sh": "x" }, { CI_OVERLAY_LIST: LIST_PATH });
+  assert.equal("CI_SCOPE_OVERLAY" in s.vars, false);
+  // tests/ belongs to no package and is not ignored, so today's answer for the mixed set is full
+  assert.equal(s.vars.CI_SCOPE_MODE, "full");
+});
