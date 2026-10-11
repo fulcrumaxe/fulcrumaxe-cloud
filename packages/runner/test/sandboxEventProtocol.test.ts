@@ -957,3 +957,55 @@ describe("H14c-5b-2a: the runner's own limits on the port (MP-TURNS, MP-CLOCK, M
     expect(args.slice(args.indexOf("--max-turns"), args.indexOf("--model"))).toEqual(["--max-turns", "7", "--max-budget-usd", "2.5"]);
   });
 });
+
+describe("D#600 CX-1a: the context measure of the command's own stream", () => {
+  const turn = (id: string, input: number, write: number, read: number, ...blocks: unknown[]) =>
+    JSON.stringify({ type: "assistant", message: { id, content: blocks, usage: { input_tokens: input, cache_creation_input_tokens: write, cache_read_input_tokens: read } } });
+  const toolResult = (id: string, content: unknown) => JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content }] } });
+
+  it("reports peak, first turn, cache tokens, tool bytes and compactions once, when the stream ends", async () => {
+    const measures: unknown[] = [];
+    const { last } = await run(
+      [
+        turn("m1", 9, 4875, 7622, { type: "tool_use", id: "t1", name: "Bash", input: { command: "cat big" } }),
+        toolResult("t1", "x".repeat(100_000)),
+        JSON.stringify({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 150000 } }),
+        turn("m2", 3, 100, 12_506),
+        result(envelope("pass")),
+      ],
+      0,
+      { onContextLedger: (m) => void measures.push(m) },
+    );
+    expect(last?.type).toBe("result");
+    expect(measures).toEqual([
+      {
+        basis: "measured",
+        first_turn_input_tokens: 12_506,
+        peak_context_tokens: 12_609,
+        cache_read_tokens: 20_128,
+        cache_write_tokens: 4_975,
+        tool_output_bytes: { Bash: 100_000 },
+        compactions: 1,
+      },
+    ]);
+  });
+
+  it("a line the port drops (non-JSON, unknown type, malformed assistant) adds nothing to the measure", async () => {
+    const measures: Array<{ basis: string; peak_context_tokens: number | null }> = [];
+    await run(
+      ["not json", JSON.stringify({ type: "tool_use" }), JSON.stringify({ type: "assistant", message: { id: "bad", content: "x", usage: { input_tokens: 999 } } }), asst("hi"), result(envelope("pass"))],
+      0,
+      { onContextLedger: (m) => void measures.push(m) },
+    );
+    expect(measures).toEqual([expect.objectContaining({ basis: "partial", peak_context_tokens: null })]);
+  });
+
+  it("a callback that throws does not fail the run", async () => {
+    const { last } = await run([turn("m1", 1, 1, 1), result(envelope("pass"))], 0, {
+      onContextLedger: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(last?.type).toBe("result");
+  });
+});
