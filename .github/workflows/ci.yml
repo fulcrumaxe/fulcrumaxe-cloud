@@ -110,7 +110,7 @@ jobs:
     runs-on: ${{ github.event.repository.private && (vars.CI_RUNS_ON || 'self-hosted') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           # The denylist diffs origin/<base>...HEAD, which needs the merge base.
@@ -137,7 +137,7 @@ jobs:
     # Backstop so a hung step cannot hold the single runner indefinitely.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # actions/checkout defaults to persisting the GITHUB_TOKEN as a git
           # credential helper in .git/config. This job never pushes, comments, or
@@ -371,7 +371,7 @@ jobs:
       matrix:
         project: [desktop, phone, tablet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           # HEAD^1 is the base tip (GitHub's merge commit), as in the check job; two commits is enough.
@@ -468,7 +468,7 @@ jobs:
       pull-requests: read
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           # Two commits on the private repository, where the overlay scope step below needs HEAD^1; one elsewhere.
