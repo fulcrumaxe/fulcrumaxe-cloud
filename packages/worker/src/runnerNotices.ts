@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import type { ReportContext } from "@fx/telemetry";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { isRunnerMode, RUNNER_TTL_REMINDER_MS, RUNNER_WAITING_NOTICE_MS, RUN_EVENTS_SEQ_LOCK_SQL, recordRunnerNotice, runEventsSeqLockKey } from "@fx/runner";
+import { isRunnerMode, RUNNER_ONLINE_SECONDS, RUNNER_TTL_REMINDER_MS, RUNNER_WAITING_NOTICE_MS, RUN_EVENTS_SEQ_LOCK_SQL, recordRunnerNotice, runEventsSeqLockKey } from "@fx/runner";
 
 /**
  * D#6 R2b (correction C14 section 4): the two notices a run waiting for a runner can raise.
@@ -97,7 +97,7 @@ export function runnerNoticeReports(io: { report: (err: unknown, ctx: ReportCont
 /** Package-internal: `pool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerNoticeSweeper(pool: Pool, deps: RunnerNoticeDeps = {}): RunnerNoticeSweeper {
   const now = deps.now ?? Date.now;
-  const onlineWithinMs = deps.onlineWithinMs ?? 120_000;
+  const onlineWithinMs = deps.onlineWithinMs ?? RUNNER_ONLINE_SECONDS * 1000;
   return {
     async sweepRunnerNotices() {
       const result: RunnerNoticeResult = { listed: 0, waitingEmitted: 0, reminderEmitted: 0, skippedMode: 0, failed: 0, nextDueAt: null };

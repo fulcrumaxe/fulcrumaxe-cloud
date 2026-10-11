@@ -2386,6 +2386,27 @@ check_runner_fleet_exception_shape() {
   echo "$oids"
 }
 
+# D#605 FL-3 (0785): the two partial indexes the runner claim reads through exist, are valid and ready, are on agent_runs, and carry exactly their
+# keys and predicates (a predicate that drifted would stop the planner using them). The migration adds no grant, so there is no privilege to check.
+check_runner_claim_index_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN p.oid IS NULL THEN 'agent_runs_claim_pending is missing' WHEN NOT (p.indisvalid AND p.indisready) THEN 'agent_runs_claim_pending is not valid' WHEN pg_get_indexdef(p.indexrelid) NOT LIKE 'CREATE INDEX agent_runs_claim_pending ON public.agent_runs USING btree (account_id, created_at, id) WHERE %' OR pg_get_expr(p.indpred, p.indrelid) <> '((status = ''pending''::text) AND (runtime = ''runner''::text) AND (runner_id IS NULL))' THEN 'agent_runs_claim_pending has the wrong keys or predicate' END,
+      CASE WHEN r.oid IS NULL THEN 'agent_runs_claim_running is missing' WHEN NOT (r.indisvalid AND r.indisready) THEN 'agent_runs_claim_running is not valid' WHEN pg_get_indexdef(r.indexrelid) NOT LIKE 'CREATE INDEX agent_runs_claim_running ON public.agent_runs USING btree (account_id, runner_id) WHERE %' OR pg_get_expr(r.indpred, r.indrelid) <> '(status = ''running''::text)' THEN 'agent_runs_claim_running has the wrong keys or predicate' END)
+    FROM (SELECT 1) x
+    LEFT JOIN LATERAL (SELECT i.*, i.indexrelid AS oid FROM pg_index i WHERE i.indexrelid = to_regclass('public.agent_runs_claim_pending') AND i.indrelid = 'public.agent_runs'::regclass) p ON true
+    LEFT JOIN LATERAL (SELECT i.*, i.indexrelid AS oid FROM pg_index i WHERE i.indexrelid = to_regclass('public.agent_runs_claim_running') AND i.indrelid = 'public.agent_runs'::regclass) r ON true;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'runner-claim-index-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): runner claim index shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # runner_facts and runner_settings: row security enabled and forced; platform_ops, partner_user and agent_run_writer hold nothing on them; app_user
 # reads and cannot write; runners has no column for any of it.
 check_runner_fleet_table_shape() {
@@ -2939,6 +2960,7 @@ check_sandbox_net_role_shape fx_neon runner_facts_definer RUNNER_FACTS_DEFINER
 check_sandbox_net_role_shape fx_neon runner_settings_definer RUNNER_SETTINGS_DEFINER
 check_runner_fleet_table_shape fx_neon runner_facts
 check_runner_fleet_table_shape fx_neon runner_settings
+check_runner_claim_index_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"

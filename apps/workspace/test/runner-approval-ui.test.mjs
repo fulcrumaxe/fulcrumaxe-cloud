@@ -292,6 +292,20 @@ describe("Repos: the runners read", () => {
     plan_consent: { granted: false, changed_at: null }, can_change_plan_consent: true, repos: [{ id: REPO, name: "acme/web" }], ...over,
   });
 
+  it("words the paused and draining states with the resume note, never undefined (D#605 FL-3)", () => {
+    for (const [state, word] of [["paused", "Paused"], ["draining", "Draining"]]) {
+      const row = readRunner(raw({ state, state_note: "Resumes within 5 min" }));
+      expect(row).toMatchObject({ state, note: "Resumes within 5 min" });
+      const el = runnerRow(row, { begin: vi.fn() });
+      expect(byTest([el], "repos-runner-state").textContent).toContain(word);
+      expect(byTest([el], "repos-runner-note").textContent).toBe("Resumes within 5 min");
+      expect(el.textContent).not.toMatch(/undefined|null/);
+    }
+    // No note, no line: a runner without one shows nothing extra.
+    expect(byTest([runnerRow(readRunner(raw()), { begin: vi.fn() })], "repos-runner-note")).toBeUndefined();
+    expect(readRunner(raw({ state_note: null })).note).toBe("");
+  });
+
   it("reads a row, leaves an unnamed person unnamed, and drops what is not a runner", () => {
     expect(readRunner(raw())).toMatchObject({ id: "r1", person: "Ada Admin", repos: ["acme/web"], granted: false, canChange: true });
     expect(readRunner(raw({ registered_by: { id: ME, name: "" } })).person).toBe("");
