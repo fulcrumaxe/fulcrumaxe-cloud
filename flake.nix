@@ -137,7 +137,8 @@
         # PyYAML, and the staging-reset tests drive a pty with python3.
         # pkgs.actionlint: ci-workflow.test.mjs validates every workflow file with it.
         # pkgs.dash and pkgs.shellcheck: the runner's installSh test requires both under CI=1 (it runs install.sh under dash and lints it).
-        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint pkgs.dash pkgs.shellcheck ];
+        # pkgs.curl: infra/microvm-image/fetch-pin.sh calls curl (ci-workflow.test.mjs runs it with a wrong sha256).
+        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint pkgs.dash pkgs.shellcheck pkgs.curl ];
         LD_LIBRARY_PATH = sharedLdLibraryPath;
         # The nix-provided browsers, as a derivation attribute (see sharedShellHook).
         PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";
