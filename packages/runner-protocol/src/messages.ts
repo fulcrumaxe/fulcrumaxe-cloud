@@ -315,8 +315,11 @@ export const DoneMessage = z
   })
   .strict();
 
-/** A registration code is `fxrr_` and 32 to 128 letters or digits. The cap keeps a hostile body from reaching the hash. */
-export const REGISTRATION_CODE_PATTERN = /^fxrr_[A-Za-z0-9]{32,128}$/;
+/**
+ * A registration secret is `fxrr_` (the one-time code a signed-in person copies) or `fxrp_` (a provisioning token for a machine with no browser, D#605 FL-6), then 32 to 128
+ * letters or digits. The cap keeps a hostile body from reaching the hash.
+ */
+export const REGISTRATION_CODE_PATTERN = /^fxr[rp]_[A-Za-z0-9]{32,128}$/;
 
 export const RegisterMessage = z.object({ code: z.string().max(133).regex(REGISTRATION_CODE_PATTERN), public_key_jwk: Ed25519PublicJwk }).strict();
 
