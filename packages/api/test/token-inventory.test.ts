@@ -150,7 +150,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
       'listWebhookEndpoints', 'getWebhookEndpoint', 'listWebhookDeliveries', 'listEvents', 'listRunEvents',
       'getModelConnection', 'listRepos', 'getRepo', 'getRepoSettings', 'listRoles', 'getUsage', 'getBudgets',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',
-      'listComments', 'getLatestPlanImport', 'getRepoPlan',
+      'listComments', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency',
     ].map((id) => `${id}:read`);
     expect([...tokenRoutes].sort()).toEqual(
       [

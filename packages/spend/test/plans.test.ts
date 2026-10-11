@@ -65,7 +65,7 @@ describe('plans: compute split read from the plan data', () => {
 
 describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
   it('reads the six limits, the compute split and the provisional mark from the data (invented fixture figures)', () => {
-    expect(runnerLimitsFor()).toEqual({
+    expect(runnerLimitsFor('runner')).toEqual({
       maxRunners: 4,
       maxConcurrentRunnerJobs: 3,
       maxConcurrentHeavyRunnerJobs: 3,
@@ -83,6 +83,33 @@ describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
     expect(plan.source.length).toBeGreaterThan(0);
   });
 
+  it('a hosted plan gets its own runner figures, every plan has a maxRunners, and the runner plan is not a hosted one (D#605 FL-12a)', () => {
+    expect(runnerLimitsFor('starter')).toEqual({ hosted: true, maxRunners: 9, defaultAccountJobs: 4, defaultPerRepoJobs: 2 });
+    for (const plan of planIds()) {
+      const limits = runnerLimitsFor(plan);
+      expect(Number.isInteger(limits.maxRunners), plan).toBe(true);
+    }
+    expect('hosted' in runnerLimitsFor('runner')).toBe(false);
+    expect(runnerLimitsFor('runner').maxRunners).toBe(4);
+  });
+
+  it('a plan the data does not know, or a hosted plan without runner figures, answers "unavailable", never a default or an unlimited one (D#605 FL-12a)', () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      expect(() => runnerLimitsFor('mystery')).toThrow(PlanDataMissingError);
+      expect(() => runnerLimitsFor('constructor')).toThrow(PlanDataMissingError);
+      const without = JSON.parse(saved ?? '{}') as { plans: Record<string, Record<string, unknown>> };
+      delete without.plans.team!.runners;
+      process.env.FX_PLAN_DATA = JSON.stringify(without);
+      resetPlanDataCache();
+      expect(() => runnerLimitsFor('team')).toThrow(PlanDataMissingError);
+      expect(runnerLimitsFor('scale').maxRunners).toBeGreaterThan(0);
+    } finally {
+      process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
   it('plan data that predates the runner tier answers "unavailable", never a default', () => {
     const saved = process.env.FX_PLAN_DATA;
     try {
@@ -90,7 +117,7 @@ describe('plans: the runner tier (D#6 R2b criterion 12)', () => {
       delete without.runnerPlan;
       process.env.FX_PLAN_DATA = JSON.stringify(without);
       resetPlanDataCache();
-      expect(() => runnerLimitsFor()).toThrow(PlanDataMissingError);
+      expect(() => runnerLimitsFor('runner')).toThrow(PlanDataMissingError);
       expect(planIds()).toEqual(['starter', 'team', 'scale']);
     } finally {
       process.env.FX_PLAN_DATA = saved;

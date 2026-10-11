@@ -93,11 +93,11 @@ export interface RunnerCloudDeps {
   /** The protocol version `hello` is judged against. Defaults to the constant. */
   currentProtocolVersion?: number;
   /**
-   * The most active runners an account on the runner plan may hold, read from the plan data (D#6 R2b criterion 12).
-   * Throws while the plan data is unavailable: registering then answers 503 and registers nothing. Absent is the same
-   * as unavailable. An account that is not on the runner plan is never asked.
+   * The most active runners an account on this plan may hold, read from the plan data (D#6 R2b criterion 12; every plan
+   * has one since D#605 FL-12a). Throws while the plan data is unavailable or has no figure for the plan: registering then
+   * answers 503 and registers nothing. Absent is the same as unavailable. Never a null: no plan is unlimited.
    */
-  maxRunners?: () => number;
+  maxRunners?: (plan: string) => number;
   /**
    * D#6 C42-3: the most runner runs an account may have running at once, in all and of the heavy class (plan data; the figures the claim refuses
    * against). Read only to tell a waiting run that an account cap holds it. Absent, or throwing while the plan data is unavailable, it names no cap.

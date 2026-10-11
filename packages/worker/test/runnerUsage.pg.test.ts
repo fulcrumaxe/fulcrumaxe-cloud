@@ -53,8 +53,9 @@ describe("runner run usage (API-equivalent figure) [pg]", () => {
   });
 
   async function newRunner(mode = "subscription"): Promise<string> {
-    const id = await insertRunner(admin, A.accountId, A.userId, { credentialMode: mode });
-    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [id, [A.repoId], ["executor", "code-reviewer"]]);
+    const id = await insertRunner(admin, A.accountId, A.userId, { credentialMode: mode, keepPlan: true });
+    // Heard from at the facade's clock, so it counts as an online runner for the hosted account ceiling (D#605 FL-12a).
+    await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[], last_seen_at = $4 WHERE id = $1", [id, [A.repoId], ["executor", "code-reviewer"], new Date(T0)]);
     return id;
   }
   /** A pending runner run with a real signed job, on `model`, optionally under the account's seeded work item. */

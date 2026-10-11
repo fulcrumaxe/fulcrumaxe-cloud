@@ -139,7 +139,32 @@ export function runnerPlanFor(): RunnerPlan {
   return { id: RUNNER_PLAN_ID, ...runnerPlan };
 }
 
-/** The one place the runner routes and the runner target read their limits from. */
-export function runnerLimitsFor(): RunnerLimits {
-  return runnerPlanFor().limits;
+/**
+ * D#605 FL-12a: a hosted plan's local-runner figures. `maxRunners` caps the active runners of an account; the two defaults are the
+ * runner jobs the account may have running at once, in all and on one repository, until an owner or admin accepts a raise (the
+ * account's own setting, read by the claim). They are defaults, not ceilings: the claim also never exceeds what the account's live
+ * runners can hold.
+ */
+export interface HostedRunnerLimits {
+  hosted: true;
+  maxRunners: number;
+  defaultAccountJobs: number;
+  defaultPerRepoJobs: number;
+}
+
+/**
+ * The one place the runner routes and the runner target read their limits from, for the account's plan. The runner plan gets its
+ * flat figures; a hosted plan gets its `runners` figures. Throws PlanDataMissingError for a plan the data does not give runner
+ * figures for (an unknown plan id, a plan without `runners`, data without the runner tier): a caller refuses, and a missing
+ * figure never becomes an unlimited one.
+ */
+export function runnerLimitsFor(plan: typeof RUNNER_PLAN_ID): RunnerLimits;
+export function runnerLimitsFor(plan: string): RunnerLimits | HostedRunnerLimits;
+export function runnerLimitsFor(plan: string): RunnerLimits | HostedRunnerLimits {
+  if (plan === RUNNER_PLAN_ID) return runnerPlanFor().limits;
+  const data = loadPlanData().plans;
+  if (!Object.hasOwn(data, plan)) throw new PlanDataMissingError(`the plan data has no plan ${JSON.stringify(plan)}`);
+  const runners = data[plan as PlanId].runners;
+  if (runners === undefined) throw new PlanDataMissingError(`the plan data has no runner figures for plan ${JSON.stringify(plan)}`);
+  return { hosted: true, ...runners };
 }
