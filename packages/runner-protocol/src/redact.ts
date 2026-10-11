@@ -142,6 +142,7 @@ export const TELEMETRY_SHAPES: readonly TelemetryShape[] = [
   // G2: GitHub app and personal tokens with a short tail (the shape above needs 36+), and the runner registration code.
   { name: "github_short_token", source: "gh[ps]_[A-Za-z0-9]{10,}", flags: "g", replacement: REDACTED },
   { name: "fxrr", source: "fxrr_[A-Za-z0-9_-]{10,}", flags: "g", replacement: REDACTED },
+  { name: "fxrp", source: "fxrp_[A-Za-z0-9_-]{10,}", flags: "g", replacement: REDACTED },
   // OpenAI: `sk-proj-...`, and legacy `sk-` + 32+ alphanumerics after a non-token char ("task-force" never matches).
   { name: "openai_proj_key", source: "sk-proj-[A-Za-z0-9_-]{20,}", flags: "g", replacement: REDACTED },
   { name: "openai_legacy_key", source: "(?<![A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}", flags: "g", replacement: REDACTED },

@@ -49,10 +49,10 @@ describe('runner tables: row level security and tenant isolation (0711)', () => 
       const { rows } = await admin.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = $1::regclass`, [table]);
       expect(rows[0], table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
       const policies = await admin.query<{ roles: string[] }>(`SELECT roles::text[] AS roles FROM pg_policies WHERE schemaname = 'public' AND tablename = $1`, [table]);
-      // guard_definer (0720), runner_lease_definer (0754) runner_approval_definer (0757), runner_sandbox_status_definer (0763), runner_git_definer (0765), runner_consent_definer and runner_auto_approve_definer (0767) and runner_usage_definer (0768) runner_capacity_definer (0777), runner_facts_definer and runner_settings_definer (0783) have their own narrow policies on runners; the
+      // guard_definer (0720), runner_lease_definer (0754) runner_approval_definer (0757), runner_sandbox_status_definer (0763), runner_git_definer (0765), runner_consent_definer and runner_auto_approve_definer (0767) and runner_usage_definer (0768) runner_capacity_definer (0777), runner_facts_definer and runner_settings_definer (0783), runner_provisioning_definer (0786) have their own narrow policies on runners; the
       // first is checked in guard-trigger-functions-platform-ops.pg.test.ts, the others in runner-lease-definer.pg.test.ts and
       // runner-approval-definer.pg.test.ts.
-      const roles = policies.rows.flatMap((r) => r.roles).filter((r) => r !== 'guard_definer' && r !== 'runner_lease_definer' && r !== 'runner_approval_definer' && r !== 'runner_sandbox_status_definer' && r !== 'runner_git_definer' && r !== 'runner_consent_definer' && r !== 'runner_auto_approve_definer' && r !== 'runner_usage_definer' && r !== 'runner_capacity_definer' && r !== 'runner_facts_definer' && r !== 'runner_settings_definer').sort();
+      const roles = policies.rows.flatMap((r) => r.roles).filter((r) => r !== 'guard_definer' && r !== 'runner_lease_definer' && r !== 'runner_approval_definer' && r !== 'runner_sandbox_status_definer' && r !== 'runner_git_definer' && r !== 'runner_consent_definer' && r !== 'runner_auto_approve_definer' && r !== 'runner_usage_definer' && r !== 'runner_capacity_definer' && r !== 'runner_facts_definer' && r !== 'runner_settings_definer' && r !== 'runner_provisioning_definer').sort();
       expect(roles, table).toEqual(['app_user', 'platform_ops']);
     }
   });

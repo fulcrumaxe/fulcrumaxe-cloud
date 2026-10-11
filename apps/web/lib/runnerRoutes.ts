@@ -119,7 +119,7 @@ export async function handleRunnerRequest(
       if (refused) return refused;
       const body = await readCappedBody(req, MAX_BODY_BYTES);
       if (!body) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
-      return run(deps(), { method: req.method, headers: Object.fromEntries(req.headers), body });
+      return run(deps(), { method: req.method, headers: Object.fromEntries(req.headers), body, clientIp: clientIpFromRequest(req) });
     }),
   );
 }

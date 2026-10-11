@@ -163,3 +163,19 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   is also the marker that it was sent. The tick reads the runs that still owe a notice, soonest due first
   (`agent_run_list_runner_runs_owing_notice`, owned by the NOLOGIN role `runner_notice_lister`), so runs that have both
   notices cannot hide newer ones. The cron keeps the earliest due time of the notices and the queue time as its marker.
+
+## Provisioning tokens (D#605 FL-6)
+
+A machine with no browser registers with a token an owner or admin minted in the workspace, through the same `POST /api/runner/register` as a one-time code. The prefix picks the kind of secret: `fxrr_` is the code of `registrationCodes.ts`, `fxrp_` is a provisioning token (`provisioningTokens.ts`). Both are 40 random characters of 62, and only the SHA-256 of either is stored.
+
+| Route (session, owner or admin) | What it does |
+|---|---|
+| `POST /api/runners/provisioning-tokens` | Mints one. Body: `credential_mode`, optional `allowed_repo_ids`, `labels`, `name`, `ttl_seconds` (60 to 86400, default 3600). The 201 reply carries the secret once and is `no-store`. At most 5 unused tokens per account, else 409 `token_limit`. |
+| `GET /api/runners/provisioning-tokens` | Lists the unused, unexpired tokens whose minter is still an owner or admin. Never the secret or its hash. |
+| `DELETE /api/runners/provisioning-tokens/:id` | Revokes an unused token at once. A used, revoked, unknown or other account's token is 404. A used token cannot be revoked: remove the runner. |
+
+Redemption is `runner_provisioning_register` (0786), one definer: the token row is taken `FOR UPDATE`, and it must be unused, unrevoked and unexpired; its minter must still be an owner or admin (their membership row is locked until commit, as 0732 does for codes); every bound repo must still be the account's; then the plan limit, the runner row, its name and labels, `used_at`, the first client address and one audit row. Every way of failing answers the same 401 `invalid_code`. `used_at` is write-once in the database (a trigger), so single use does not rest on this package. Minting, revoking and registering each write an audit row; none carries the secret or its hash.
+
+The first client address comes from the same headers the register route's rate limit reads (`clientIp` on the request). It is for display only: the runner list shows it, with who minted the token, to an owner or admin, and `null` to a member. A header that is not an address is recorded as unknown.
+
+The secret leaves the cloud in the mint reply and nowhere else: not in a URL, a log line, an audit row or any later reply. The `fxrp_` shape is also in the redaction patterns of `@fulcrumaxe/runner-protocol`.
