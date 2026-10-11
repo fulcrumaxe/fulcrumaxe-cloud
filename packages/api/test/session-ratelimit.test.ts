@@ -340,6 +340,8 @@ describe('session rate limits', () => {
         testWebhookEndpoint: 'webhook-test',
         retryRun: 'run-retry',
         startPlanImport: 'plan-import',
+        requestRunHandoff: 'run-handoff',
+        cancelRunHandoff: 'run-handoff',
       });
     });
   });

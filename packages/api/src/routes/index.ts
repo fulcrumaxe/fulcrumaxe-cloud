@@ -26,6 +26,7 @@ import { siteRoutes } from "./sites.js";
 import { sitekitBillingRoutes } from "./sitekitBilling.js";
 import { planRoutes } from "./plan.js";
 import { correctionRoutes } from "./corrections.js";
+import { runHandoffRoutes } from "./run-handoff.js";
 
 /**
  * The one array every other piece of API-1 reads from: the catch-all's
@@ -76,6 +77,7 @@ export const ROUTES: RouteEntry[] = [
   ...sitekitBillingRoutes,
   ...planRoutes,
   ...correctionRoutes,
+  ...runHandoffRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`

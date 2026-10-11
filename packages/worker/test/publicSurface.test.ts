@@ -142,7 +142,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
   });
 
   it("the package entry exports no way to get at the pools or the internal builder", () => {
-    expect(Object.keys(entry).sort()).toEqual(["RunActionForbiddenError", "RunActionInputError", "RunActionRefusedError", "RunActionUnavailableError", "StartupGuardError", "VercelCredentialsUnavailableError", "assertWorkdirAllowed", "createGithubRepoVisibility", "createVercelKeepAlive", "createWorker", "followStatusBody", "followTimeoutBody", "operatorMode", "productionVercelCredentials", "runnerLimitsFor"]);
+    expect(Object.keys(entry).sort()).toEqual(["RunActionForbiddenError", "RunActionInputError", "RunActionRefusedError", "RunActionUnavailableError", "StartupGuardError", "VercelCredentialsUnavailableError", "assertWorkdirAllowed", "createGithubRepoVisibility", "createHandoffCloudTarget", "createVercelKeepAlive", "createWorker", "followStatusBody", "followTimeoutBody", "operatorMode", "productionVercelCredentials", "runnerJobsConfigured", "runnerLimitsFor"]);
   });
 
   it("is safe to call from many routes: one build, one set of pools, one run of the guards", async () => {
