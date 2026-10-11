@@ -25,7 +25,16 @@ function walk(dir: string, out: string[] = []): string[] {
  * through core's `acceptCorrection`, in the person's own session).
  */
 describe('the userless correction path is the driver\'s alone (D#597 CC-3)', () => {
-  const handlerDirs = [path.join(ROOT, 'packages', 'api', 'src'), path.join(ROOT, 'apps', 'web', 'app'), path.join(ROOT, 'apps', 'web', 'pages')];
+  // Every tree that answers a request or serves a page. apps/web/lib holds the workflow step bodies and the worker wiring (they reach the driver
+  // only through @fx/worker's facade), apps/workspace is the workspace app and apps/gh-proxy the GitHub proxy (D#597 CC-2b, from CC-3's review).
+  const handlerDirs = [
+    path.join(ROOT, 'packages', 'api', 'src'),
+    path.join(ROOT, 'apps', 'web', 'app'),
+    path.join(ROOT, 'apps', 'web', 'pages'),
+    path.join(ROOT, 'apps', 'web', 'lib'),
+    path.join(ROOT, 'apps', 'workspace'),
+    path.join(ROOT, 'apps', 'gh-proxy'),
+  ];
   const files = handlerDirs.flatMap((d) => {
     try {
       return walk(d);
@@ -38,6 +47,10 @@ describe('the userless correction path is the driver\'s alone (D#597 CC-3)', () 
   it('scans the request-handler trees', () => {
     expect(files.length).toBeGreaterThan(20);
     expect(files.some((f) => f.endsWith(path.join('routes', 'corrections.ts')))).toBe(true);
+    for (const dir of [['apps', 'web', 'lib'], ['apps', 'workspace'], ['apps', 'gh-proxy']]) {
+      const prefix = path.join(ROOT, ...dir) + path.sep;
+      expect(files.filter((f) => f.startsWith(prefix)).length, dir.join('/')).toBeGreaterThan(0);
+    }
   });
 
   it('no request handler imports the driver module or calls the stamp directly', () => {

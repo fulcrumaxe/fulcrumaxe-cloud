@@ -6,6 +6,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
+import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -135,6 +136,14 @@ export interface AdvanceTriageInput {
 /** What triage answers, as plain data. `status` is the pipeline's own word ("triaged", "unclassified", "refused", ...). */
 export type AdvanceTriageResult = { status: string; reason?: string; category?: string; stage?: string; workItemId?: string; discussionId?: string };
 
+/** One accepted Spec amendment as the pipeline's `publishAmendment` takes it. */
+export interface AmendSpecItem {
+  id: string;
+  text: string;
+  name: string;
+  date: Date;
+}
+
 export interface AdvanceModuleDeps {
   starter: RunStarter | null;
   resolveRunSeat: (request: SeatRequest) => Promise<SeatResult>;
@@ -148,6 +157,8 @@ export interface AdvanceModuleDeps {
   build?: ((pool: Pool, accountId: string, workItemId: string, approvalId: string, ports: AdvanceStepPorts, options: { expectedVersion?: number }) => Promise<AdvanceStepResult>) | null;
   /** D#6 R4d-5b, injected from apps/web the same way: the pipeline's `publishRespec`, the next Spec version (the same text plus the file list) from the project manager's result. */
   respec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown, expectedVersion: number) => Promise<{ status: string; reason?: string; version?: number }>) | null;
+  /** D#597 CC-2b, injected from apps/web the same way: the pipeline's `publishAmendment`, the next Spec version (the old text plus the accepted amendments). `status` is published | already_published | refused. */
+  amendSpec?: ((pool: Pool, accountId: string, workItemId: string, items: readonly AmendSpecItem[]) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** D#483 P3, injected from apps/web: the pipeline's `publishLightSpec`: a small, bug or doc item's short Spec from the PM's result. */
   lightSpec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** Records a build that ended without a pull request (in_progress -> needs_human). */
@@ -338,6 +349,13 @@ export interface AdvanceFacade {
    * newest Spec that has no readable file list (`not_advanceable` otherwise, `spec_has_file_list` when it has one), and the first seat is the project manager's.
    */
   performRespecWorkItem(actionId: string): Promise<PerformResult>;
+  /**
+   * D#597 CC-2b: performs a CLAIMED `amend_spec_work_item` action: publishes the next Spec version for the item's accepted `spec_amend` corrections (oldest
+   * first, one section each) and stamps each `applied`. No agent runs. Refuses `already_running` while an agent run of the item is live (the route refused
+   * it first; this is the race), and with the publish's own fixed code otherwise (`spec_frozen`, `spec_changed`, `spec_too_large`, ...), leaving the
+   * corrections `accepted` so a person can still reject them. A replay never adds a second version.
+   */
+  performAmendSpec(actionId: string): Promise<PerformResult>;
   advanceLoadItem(accountId: string, workItemId: string): Promise<AdvanceItem | null>;
   /** Starts one run of `req.role` for the item, keyed `advance:<item>:<step>`. Never throws for a refusal: it answers `{ ok: false, reason }`. */
   advanceStartRun(req: AdvanceRunRequest): Promise<AdvanceRunStart>;
@@ -486,6 +504,64 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), ...(respec ? { respec: true } : {}) });
     console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId }));
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
+  }
+
+  /** A publish, a look for amendments accepted meanwhile, and room for one retry after a reject that raced a publish. */
+  const AMEND_ROUNDS = 3;
+  async function performAmendSpec(actionId: string): Promise<PerformResult> {
+    if (typeof actionId !== "string" || !UUID_RE.test(actionId)) throw new RunActionInputError();
+    const { rows } = await runnerPool.query<PrincipalRow>("SELECT * FROM run_action_perform_principal($1::uuid)", [actionId]);
+    const who = rows[0];
+    if (!who || !who.allowed || who.user_id === null || who.principal_kind !== "session") return refused("principal_not_authorised");
+    if (who.kind !== "amend_spec_work_item") return refused("kind_mismatch");
+    if (!deps.amendSpec) return refused("amend_unavailable");
+    const { account_id: accountId, user_id: userId, target_id: workItemId } = who;
+
+    let amended = 0;
+    let lastVersion: number | null = null;
+    for (let round = 0; round < AMEND_ROUNDS; round += 1) {
+      const read = await withTenant(runnerPool, accountId, userId, async (client) => {
+        const role = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, userId]);
+        const item = await client.query<{ provenance: string }>("SELECT provenance FROM work_items WHERE id = $1 AND account_id = $2", [workItemId, accountId]);
+        const live = await client.query<{ n: string }>(
+          "SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND NOT (status = ANY($3::text[]))",
+          [accountId, workItemId, [...ADVANCE_TERMINAL_STATUSES]],
+        );
+        const pending = await client.query<{ id: string; body: string; decided_at: Date; name: string | null }>(
+          `SELECT c.id, c.body, c.decided_at, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, '')) AS name
+             FROM work_item_corrections c LEFT JOIN users u ON u.id = c.decided_by
+            WHERE c.account_id = $1 AND c.work_item_id = $2 AND c.kind = 'spec_amend' AND c.status = 'accepted' AND c.decided_at IS NOT NULL
+            ORDER BY c.decided_at, c.id`,
+          [accountId, workItemId],
+        );
+        return { role: role.rows[0]?.role, item: item.rows[0], live: Number(live.rows[0]?.n ?? 0), pending: pending.rows };
+      });
+      if (read.role !== "owner" && read.role !== "admin") return refused("principal_not_authorised");
+      if (!read.item) return refused("target_not_found");
+      // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
+      if (read.item.provenance !== "internal") return refused("external_requires_human");
+      if (read.live > 0) return refused("already_running");
+      // Nothing accepted any more (each was rejected or already delivered): done, nothing published.
+      if (read.pending.length === 0) break;
+
+      const items: AmendSpecItem[] = read.pending.map((p) => ({ id: p.id, text: p.body, name: p.name ?? "a former member", date: new Date(p.decided_at) }));
+      const out = await deps.amendSpec(runnerPool, accountId, workItemId, items);
+      if (out.status !== "published" && out.status !== "already_published") {
+        const code = typeof out.reason === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(out.reason) ? out.reason : "publish_failed";
+        // A person rejected one between the read and the publish: the publish wrote nothing, so read again without it.
+        if (code === "correction_not_accepted" && round < AMEND_ROUNDS - 1) continue;
+        console.info(JSON.stringify({ event: "advance.amend_refused", work_item_id: workItemId, reason: code }));
+        return refused(code);
+      }
+      // A fresh publish stamped its corrections in its own transaction (a reject can no longer be overridden). This only finishes a version that was published
+      // before that was so (already_published); on the rest it is a no-op.
+      for (const item of items) await withTenant(runnerPool, accountId, userId, (client) => markCorrectionApplied(client, { id: item.id, runId: null }));
+      amended += items.length;
+      lastVersion = out.version ?? lastVersion;
+      // The loop reads again: an amendment accepted while this one published joined this (already claimed) request and would otherwise wait for a later accept.
+    }
+    console.info(JSON.stringify({ event: "advance.amended", work_item_id: workItemId, version: lastVersion, amended }));
+    return { result: "done", outcome: amended === 0 ? { work_item_id: workItemId, amended: 0 } : { work_item_id: workItemId, amended, version: lastVersion } };
   }
 
   /** The item's repository mode and, for a runner repository, the pull request its run recorded. Read in the item's tenant. */
@@ -1086,6 +1162,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   return {
     performAdvanceWorkItem,
     performRespecWorkItem,
+    performAmendSpec,
     advanceLoadItem,
     advanceStartRun,
     advanceRunOutcome,

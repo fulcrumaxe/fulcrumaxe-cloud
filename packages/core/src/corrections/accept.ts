@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { announceNewRunAction, type RunActionSignal } from '../runActions/index.js';
+import { announceNewRunAction, type RunActionKind, type RunActionSignal } from '../runActions/index.js';
 import { requireOwnerOrAdmin, type MembershipRole } from '../tenancy/authorize.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { WORK_ITEM_PRIORITIES } from '../work-items/read.js';
 import { setWorkItemPriorityIn } from '../work-items/priority.js';
+import { operatorVerdict, readOperatorFacts, type OperatorVerdict } from '../work-items/operatorActions.js';
 import {
   CorrectionInputError,
   decideCorrection,
@@ -69,7 +70,18 @@ export class ContentChangedError extends Error {
   }
 }
 
-/** Maps to 503: pausing needs the run-action worker. Nothing was decided. */
+/**
+ * Maps to 409: a Spec amendment cannot be accepted now. `reason` is the operator table's own (`live` is `already_running`, the same refusal as
+ * Re-spec; the rest are `action_not_available` or the table's other fixed codes). Nothing was decided.
+ */
+export class AmendRefusedError extends Error {
+  constructor(public readonly verdict: Extract<OperatorVerdict, { ok: false }>) {
+    super(verdict.message);
+    this.name = 'AmendRefusedError';
+  }
+}
+
+/** Maps to 503: pausing, and delivering a Spec amendment, need the run-action worker. Nothing was decided. */
 export class PauseUnavailableError extends Error {
   constructor() {
     super('pause unavailable');
@@ -109,11 +121,24 @@ function assertHash(c: Correction, given: string | undefined): void {
 }
 
 /** The caller is acting as a person: a person's user id on the transaction, and an owner or admin role. Never the userless driver path. */
-async function requireDeciderIn(client: PoolClient, ctx: CorrectionCtx): Promise<void> {
+async function requireDeciderIn(client: PoolClient, ctx: CorrectionCtx): Promise<MembershipRole> {
   const { accountId, userId } = ctx.principal;
   await assertActiveMembership(client, accountId, userId);
   const { rows } = await client.query<{ role: MembershipRole }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
   requireOwnerOrAdmin(rows[0]?.role ?? null);
+  return rows[0]!.role;
+}
+
+/**
+ * Whether an amendment can be delivered to the item now, asked of the same table Re-spec asks (the owner/admin role, an internal item with a repository and
+ * an issue, no live run, and a stage a build starts from: Spec ready or Needs a person). The row is locked, as Re-spec's check does. The "file list is
+ * missing" rule is Re-spec's own reason for existing, so it is set aside here: an amendment goes onto a Spec that has its list.
+ */
+async function assertAmendableIn(client: PoolClient, workItemId: string, role: MembershipRole): Promise<void> {
+  const facts = await readOperatorFacts(client, workItemId, role, true);
+  if (!facts) throw new NotFoundError('work item not found');
+  const verdict = operatorVerdict('respec', { ...facts, spec_file_list_known: false });
+  if (!verdict.ok) throw new AmendRefusedError(verdict);
 }
 
 /** The database decide function on the caller's transaction (it re-checks owner or admin and takes the row lock). */
@@ -137,7 +162,8 @@ export async function rejectCorrection(ctx: CorrectionCtx, input: DecideInput): 
 
 /**
  * Accepts a correction and, for question, pause, priority and new_item, applies it through the existing writers and stamps it
- * `applied`. A run note or Spec amendment stays `accepted` for the driver to deliver. Everything that can be refused is
+ * `applied`. A run note stays `accepted` for the driver to attach to a run. A Spec amendment stays `accepted` until the amend run action publishes
+ * the next Spec version (CC-2b); accepting it asks for that action in the same transaction as the decision. Everything that can be refused is
  * refused before anything is written.
  *
  * Question, pause and priority run decision, effect and stamp in ONE transaction: any failure rolls all of it back and the
@@ -152,7 +178,7 @@ export async function acceptCorrection(ctx: CorrectionCtx, input: DecideInput, d
   assertHash(before, input.contentHash);
   if (before.status !== 'proposed') return { outcome: 'already_decided', correction: before };
   checkBody(before.kind, before.body, deps.itemKinds);
-  if (before.kind === 'pause' && deps.signal === null) throw new PauseUnavailableError();
+  if ((before.kind === 'pause' || before.kind === 'spec_amend') && deps.signal === null) throw new PauseUnavailableError();
 
   if (before.kind === 'new_item') {
     const decided = await decideCorrection(ctx, { id: input.id, to: 'accepted', via: input.via });
@@ -167,21 +193,34 @@ export async function acceptCorrection(ctx: CorrectionCtx, input: DecideInput, d
     return { outcome: 'decided', correction: await getCorrection(ctx, before.id) };
   }
 
-  let announce: { actionId: string } | null = null;
+  let announce: { actionId: string; kind: RunActionKind } | null = null;
   let outcome: 'decided' | 'already_decided';
   try {
     outcome = await withTenant(ctx.pool, accountId, userId, async (client: PoolClient) => {
-      await requireDeciderIn(client, ctx);
+      const role = await requireDeciderIn(client, ctx);
+      // Refused BEFORE the decision, so a refusal leaves the correction `proposed` and writes nothing.
+      if (before.kind === 'spec_amend') await assertAmendableIn(client, before.workItemId, role);
       const r = await decideIn(client, before.id, 'accepted', input.via);
       if (r !== 'decided') return r;
-      if (before.kind === 'run_note' || before.kind === 'spec_amend') return r;
+      if (before.kind === 'run_note') return r;
+      if (before.kind === 'spec_amend') {
+        // Delivered by the amend run action, which publishes the Spec version and then stamps this row `applied`. Until then it is `accepted`, and a
+        // person may still reject it. Keyed by the correction, so a repeat is the same request.
+        const requestHash = createHash('sha256').update(`amend_spec_work_item:${before.workItemId.toLowerCase()}`).digest('hex');
+        const { rows } = await client.query<{ action_id: string; replayed: boolean }>(
+          'SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
+          ['amend_spec_work_item', before.workItemId, `correction:${before.id}`, requestHash],
+        );
+        if (!rows[0]!.replayed) announce = { actionId: rows[0]!.action_id, kind: 'amend_spec_work_item' };
+        return r;
+      }
       if (before.kind === 'pause') {
         const requestHash = createHash('sha256').update(`cancel_work_item:${before.workItemId.toLowerCase()}`).digest('hex');
         const { rows } = await client.query<{ action_id: string; replayed: boolean }>(
           'SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
           ['cancel_work_item', before.workItemId, `correction:${before.id}`, requestHash],
         );
-        if (!rows[0]!.replayed) announce = { actionId: rows[0]!.action_id };
+        if (!rows[0]!.replayed) announce = { actionId: rows[0]!.action_id, kind: 'cancel_work_item' };
       } else if (before.kind === 'priority') {
         const { priority } = parsePriorityBody(before.body);
         await setWorkItemPriorityIn(client, ctx.principal, {
@@ -194,7 +233,7 @@ export async function acceptCorrection(ctx: CorrectionCtx, input: DecideInput, d
       return r;
     });
   } catch (err) {
-    if (err instanceof ApplyFailedError) throw err;
+    if (err instanceof ApplyFailedError || err instanceof AmendRefusedError) throw err;
     if (err instanceof ForbiddenError || err instanceof NotFoundError) throw mapDecideError(err);
     const mapped = mapDecideError(err);
     if (mapped !== err) throw mapped;
@@ -202,7 +241,7 @@ export async function acceptCorrection(ctx: CorrectionCtx, input: DecideInput, d
     throw new ApplyFailedError();
   }
   if (outcome !== 'decided') return { outcome: 'already_decided', correction: await getCorrection(ctx, before.id) };
-  const done = announce as { actionId: string } | null;
-  if (done && deps.signal) await announceNewRunAction({ signal: deps.signal }, { actionId: done.actionId, accountId, kind: 'cancel_work_item' });
+  const done = announce as { actionId: string; kind: RunActionKind } | null;
+  if (done && deps.signal) await announceNewRunAction({ signal: deps.signal }, { actionId: done.actionId, accountId, kind: done.kind });
   return { outcome: 'decided', correction: await getCorrection(ctx, before.id) };
 }

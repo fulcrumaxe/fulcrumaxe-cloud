@@ -99,6 +99,20 @@ describe('D#597 CC-2a: correction routes', () => {
     await admin.query(`INSERT INTO work_items (id, account_id, kind, provenance, stage, priority) VALUES ($1, $2, 'feature', 'internal', $3, 2)`, [id, accountId, stage]);
     return id;
   }
+  /** An item as the pipeline's card is: a repository, an issue, a discussion and one Spec with a file list (what a Spec amendment can be delivered to). */
+  let specNumber = 31000;
+  let specDiscussion = 9000;
+  async function seedSpecItem(accountId: string, stage = 'spec_ready'): Promise<string> {
+    const id = randomUUID();
+    const repo = randomUUID();
+    await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 'team', 'acme', 'widgets')`, [repo, accountId, Math.floor(Math.random() * 1_000_000_000) + 1]);
+    await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage) VALUES ($1, $2, $3, 'feature', $4, 'internal', $5)`, [id, accountId, repo, specNumber++, stage]);
+    const d = randomUUID();
+    await admin.query(`INSERT INTO discussions (id, account_id, number, kind, title, root_work_item_id, provenance, created_by_kind) VALUES ($1, $2, $3, 'feature', 't', $4, 'internal', 'user')`, [d, accountId, specDiscussion++, id]);
+    await admin.query(`UPDATE work_items SET discussion_id = $1 WHERE id = $2`, [d, id]);
+    await admin.query(`INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind, frontmatter) VALUES ($1, $2, 1, 'spec', encode(sha256(convert_to('spec', 'UTF8')), 'hex'), 'system', '{"acceptance_files":["src/**"]}'::jsonb)`, [accountId, id]);
+    return id;
+  }
   async function propose(who: Identity | string, item: string, kind: string, body: string): Promise<Corr> {
     const res = await call(who, 'POST', `/work-items/${item}/corrections`, { kind, body });
     expect(res.status).toBe(201);
@@ -249,9 +263,66 @@ describe('D#597 CC-2a: correction routes', () => {
     const note = await propose(o, item, 'run_note', 'Mind the flaky test.');
     expect((await call(o, 'POST', `/corrections/${note.id}/accept`)).status).toBe(200);
     expect((await row(note.id)).status).toBe('accepted');
-    const spec = await propose(o, item, 'spec_amend', 'Add a rollback step.');
+    const specItem = await seedSpecItem(o.accountId);
+    const spec = await propose(o, specItem, 'spec_amend', 'Add a rollback step.');
     expect((await call(o, 'POST', `/corrections/${spec.id}/accept`)).status).toBe(200);
     expect((await row(spec.id)).status).toBe('accepted');
+  });
+
+  it('spec_amend (D#597 CC-2b): accepting asks for amend_spec_work_item and the answer is the correction, still accepted; a repeat is already_decided', async () => {
+    const o = await owner();
+    const item = await seedSpecItem(o.accountId);
+    const c = await propose(o, item, 'spec_amend', 'Add a rollback step.');
+    expect((await call(o, 'POST', `/corrections/${c.id}/accept`)).status).toBe(200);
+    expect(signal.sent).toEqual([{ actionId: expect.any(String), accountId: o.accountId, kind: 'amend_spec_work_item' }]);
+    expect((await admin.query(`SELECT kind, target_id, principal_kind FROM run_action_requests WHERE account_id = $1`, [o.accountId])).rows).toEqual([{ kind: 'amend_spec_work_item', target_id: item, principal_kind: 'session' }]);
+    const again = await call(o, 'POST', `/corrections/${c.id}/accept`);
+    expect(again.status).toBe(409);
+    expect(await err(again)).toBe('already_decided');
+    expect(signal.sent).toHaveLength(1);
+  });
+
+  it('spec_amend while a run is live is 409 already_running, the same refusal as re-spec; nothing is decided or requested, and it goes through once the run ends', async () => {
+    const o = await owner();
+    const item = await seedSpecItem(o.accountId);
+    await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'local', 'running')`, [randomUUID(), o.accountId, item]);
+    const c = await propose(o, item, 'spec_amend', 'Add a rollback step.');
+    const refused = await call(o, 'POST', `/corrections/${c.id}/accept`);
+    expect(refused.status).toBe(409);
+    expect(await err(refused)).toBe('already_running');
+    expect((await row(c.id)).status).toBe('proposed');
+    expect((await admin.query(`SELECT 1 FROM run_action_requests WHERE account_id = $1`, [o.accountId])).rowCount).toBe(0);
+    expect(signal.sent).toEqual([]);
+    await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE work_item_id = $1`, [item]);
+    expect((await call(o, 'POST', `/corrections/${c.id}/accept`)).status).toBe(200);
+    expect((await row(c.id)).status).toBe('accepted');
+  });
+
+  it('spec_amend outside Spec ready and Needs a person is 409 action_not_available; with no worker registered it is 503; neither decides anything', async () => {
+    const o = await owner();
+    const building = await seedSpecItem(o.accountId, 'in_progress');
+    const c = await propose(o, building, 'spec_amend', 'x');
+    const refused = await call(o, 'POST', `/corrections/${c.id}/accept`);
+    expect(refused.status).toBe(409);
+    expect(await err(refused)).toBe('action_not_available');
+    expect((await row(c.id)).status).toBe('proposed');
+
+    const ready = await seedSpecItem(o.accountId);
+    const d = await propose(o, ready, 'spec_amend', 'y');
+    runActionDeps.getRunActionSignal = () => null;
+    expect((await call(o, 'POST', `/corrections/${d.id}/accept`)).status).toBe(503);
+    expect((await row(d.id)).status).toBe('proposed');
+  });
+
+  it('a token cannot accept a spec_amend, whatever its scope and hash (session_required); nothing is decided', async () => {
+    const o = await owner();
+    const item = await seedSpecItem(o.accountId);
+    const c = await propose(o, item, 'spec_amend', 'x');
+    const t = await tokenFor(o, ['corrections:write', 'read']);
+    const res = await call(t, 'POST', `/corrections/${c.id}/accept`, { content_hash: c.content_hash });
+    expect(res.status).toBe(403);
+    expect(await err(res)).toBe('session_required');
+    expect((await row(c.id)).status).toBe('proposed');
   });
 
   it('undo: reject works on proposed and on accepted-not-applied, changes nothing else, and shows in the history', async () => {
