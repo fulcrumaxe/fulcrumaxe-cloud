@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '../src/pool.js';
@@ -325,7 +325,7 @@ describe(`migration 0787: run_handoffs and ${ROLE} (D#599 HO-2a)`, () => {
     it('signal returns nothing for a run that is no longer running, and leaves the handoff as it was', async () => {
       const x = await fixtures(f.accountId);
       const runnerId = randomUUID();
-      await admin.query("INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 2)", [runnerId, f.accountId, f.o1, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: Buffer.alloc(32, 7).toString('base64url') }), Buffer.alloc(32, 9).toString('base64url')]);
+      await admin.query("INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', 2)", [runnerId, f.accountId, f.o1, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: randomBytes(32).toString('base64url') }), randomBytes(32).toString('base64url')]);
       await admin.query('UPDATE agent_runs SET runner_id = $2 WHERE id = $1', [x.run, runnerId]);
       await admin.query("INSERT INTO run_handoffs (account_id, run_id, item_id, from_side, to_side, deadline, reserve_until, requested_by) VALUES ($1, $2, $3, 'runner', 'cloud', now() + interval '5 minutes', now() + interval '20 minutes', $4)", [f.accountId, x.run, x.item, f.o1]);
       const signal = () => asApp(null, f.accountId, async () => (await admin.query('SELECT run_handoff_signal($1, 2) AS d', [x.run])).rows[0].d as Date | null, 'app_user', runnerId);
@@ -343,7 +343,7 @@ describe(`migration 0787: run_handoffs and ${ROLE} (D#599 HO-2a)`, () => {
       const runnerId = randomUUID();
       const stranger = randomUUID();
       for (const [id, version] of [[runnerId, 2], [stranger, 2]] as const) {
-        await admin.query("INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', $6)", [id, f.accountId, f.o1, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: Buffer.alloc(32, id.charCodeAt(0)).toString('base64url') }), Buffer.alloc(32, id.charCodeAt(1)).toString('base64url'), version]);
+        await admin.query("INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode, protocol_version) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription', $6)", [id, f.accountId, f.o1, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: randomBytes(32).toString('base64url') }), randomBytes(32).toString('base64url'), version]);
       }
       await admin.query('UPDATE agent_runs SET runner_id = $2 WHERE id = $1', [x.run, runnerId]);
       await asApp(f.o1, f.accountId, async () => {

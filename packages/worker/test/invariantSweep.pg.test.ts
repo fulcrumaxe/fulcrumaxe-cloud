@@ -33,6 +33,15 @@ describe("platform invariant sweep [pg]", () => {
       windowSeconds: 3600,
     });
 
+  /** One sweep returns at most `limit` hits per rule, and the database is shared with other suites' runs, so sweep until a pass raises nothing. */
+  const drain = async (o: { i2?: boolean } = {}): Promise<void> => {
+    for (let i = 0; i < 100; i++) {
+      const out = await sweep(o);
+      if (Object.values(out.raised).every((n) => n === 0)) return;
+    }
+    throw new Error("the sweep never ran dry");
+  };
+
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
     admin = await adminPool.connect();
@@ -40,7 +49,7 @@ describe("platform invariant sweep [pg]", () => {
     A = await seedAccount(admin, randomUUID());
     B = await seedAccount(admin, randomUUID());
     // The database is shared with other suites' runs: alert whatever is already due once, so each case below counts only its own fixtures.
-    await sweep({ i2: true });
+    await drain({ i2: true });
     reports.length = 0;
     warns.length = 0;
   });
@@ -126,23 +135,24 @@ describe("platform invariant sweep [pg]", () => {
     it("a finished runner run with no activity row raises one alert and one item fact, once", async () => {
       const r = await run(A, { item: await item(A, "pr_opened"), runtime: "runner" });
       await event(A, r, "runner.event", { type: "tool_use" });
-      expect((await sweep({ i2: true })).raised.no_activity).toBe(1);
+      await drain({ i2: true });
       expect(await alerts(r)).toEqual(["no_activity"]);
       expect((await facts(r)).map((f) => f.code)).toEqual(["no_activity"]);
-      expect((await sweep({ i2: true })).raised.no_activity).toBe(0);
+      await drain({ i2: true });
       expect((await alerts(r)).length).toBe(1);
     });
 
     it("healthy: a run with an activity row raises nothing", async () => {
       const r = await run(A, { runtime: "runner" });
       await event(A, r, "agent.activity", { tool: "read", path: "a.ts" });
-      expect((await sweep({ i2: true })).raised.no_activity).toBe(0);
+      await drain({ i2: true });
+      expect(await alerts(r)).toEqual([]);
     });
 
     it("healthy: a run that is not a runner run (a sandbox run has its own recorder), and one that did not succeed, raise nothing", async () => {
       const sandbox = await run(A, { runtime: "local" });
       const failed = await run(A, { runtime: "runner", status: "failed" });
-      expect((await sweep({ i2: true })).raised.no_activity).toBe(0);
+      await drain({ i2: true });
       expect([...(await alerts(sandbox)), ...(await alerts(failed))]).toEqual([]);
     });
 
