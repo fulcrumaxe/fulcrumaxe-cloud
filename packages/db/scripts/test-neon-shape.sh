@@ -2594,6 +2594,72 @@ check_work_item_correction_table_shape() {
   fi
 }
 
+# D#601 MEM-1 (0793): the five SECURITY DEFINER entry points owned by memory_definer (propose, write, decide, edit, delete a memory entry). Prints their
+# oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of the five signatures (matched by regprocedure), pinned to
+# search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant
+# option; SHAPE_FAIL:<count> when any is not; nothing when it owns none. Its three SECURITY INVOKER helpers are not definers; the table-shape check
+# below holds them to owner-only EXECUTE.
+check_memory_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY(ARRAY['public.memory_propose(text,text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_write(text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_decide(uuid,text)'::regprocedure, 'public.memory_edit(uuid,text,text,text,text,text)'::regprocedure, 'public.memory_delete(uuid,boolean)'::regprocedure]::oid[])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'memory_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'memory-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by memory_definer fail the exception shape (not one of its five exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#601 MEM-1 (0793): what memory_definer may hold and own (see the migration header), checked by check_sandbox_net_role_shape.
+MEMORY_DEFINER_FUNCTIONS="'memory_propose', 'memory_write', 'memory_decide', 'memory_edit', 'memory_delete', 'memory_session', 'memory_validate', 'memory_assert_room'"
+MEMORY_DEFINER_PRIVILEGES="'column memory_entries.id SELECT','column memory_entries.account_id SELECT','column memory_entries.scope SELECT','column memory_entries.scope_ref SELECT','column memory_entries.kind SELECT','column memory_entries.body SELECT','column memory_entries.why SELECT','column memory_entries.author_kind SELECT','column memory_entries.provenance SELECT','column memory_entries.status SELECT','column memory_entries.prior_status SELECT','column memory_entries.created_by SELECT','column memory_entries.approved_by SELECT','column memory_entries.approved_at SELECT','column memory_entries.expires_at SELECT','column memory_entries.deleted_at SELECT','column memory_entries.version SELECT','column memory_entries.supersedes_id SELECT','column memory_entries.id INSERT','column memory_entries.account_id INSERT','column memory_entries.scope INSERT','column memory_entries.scope_ref INSERT','column memory_entries.kind INSERT','column memory_entries.body INSERT','column memory_entries.why INSERT','column memory_entries.author_kind INSERT','column memory_entries.provenance INSERT','column memory_entries.status INSERT','column memory_entries.created_by INSERT','column memory_entries.approved_by INSERT','column memory_entries.approved_at INSERT','column memory_entries.expires_at INSERT','column memory_entries.version INSERT','column memory_entries.supersedes_id INSERT','column memory_entries.content_sha256 INSERT','column memory_entries.status UPDATE','column memory_entries.prior_status UPDATE','column memory_entries.approved_by UPDATE','column memory_entries.approved_at UPDATE','column memory_entries.expires_at UPDATE','column memory_entries.deleted_at UPDATE','column memory_entries.updated_at UPDATE','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+
+# D#601 MEM-1 (0793): the shape of memory_entries. Row security enabled and forced; platform_ops, partner_user and agent_run_writer hold nothing on it;
+# app_user reads and cannot write; the definer cannot delete a row or change what is written once (the text, the hash, the author, the scope); the
+# three SECURITY INVOKER helpers are owned by memory_definer and executable by nobody else (no PUBLIC, no app_user, no platform_ops).
+# A no-op when the table does not exist.
+check_memory_table_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN NOT (c.relrowsecurity AND c.relforcerowsecurity) THEN 'row security is not enabled and forced' END,
+      CASE WHEN has_any_column_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_table_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN 'platform_ops holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_any_column_privilege('agent_run_writer', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user or agent_run_writer holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
+      CASE WHEN has_table_privilege('memory_definer', c.oid, 'DELETE, TRUNCATE, TRIGGER')
+                OR has_column_privilege('memory_definer', c.oid, 'body', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'content_sha256', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'author_kind', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'scope', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'scope_ref', 'UPDATE') THEN 'the definer can delete rows or change what is written once' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('memory_session', 'memory_validate', 'memory_assert_room')
+                          AND (p.prosecdef OR pg_get_userbyid(p.proowner) <> 'memory_definer'
+                               OR has_function_privilege('app_user', p.oid, 'EXECUTE') OR has_function_privilege('platform_ops', p.oid, 'EXECUTE')
+                               OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner))) THEN 'a memory helper is a definer, or runs for someone but its owner' END)
+    FROM pg_class c WHERE c.oid = to_regclass('public.memory_entries');" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'memory_entries-table-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): memory_entries table shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
 # (discussion_eraser) and the three D#7 receipt_writer definers
@@ -2875,6 +2941,15 @@ if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" 
   echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
   exit 1
 fi
+MEMORY_RESULT="$(check_memory_exception_shape fx_neon)"
+if [[ "$MEMORY_RESULT" == SHAPE_FAIL:* ]]; then
+  echo "neon-shape: ${MEMORY_RESULT#SHAPE_FAIL:}" >&2
+  exit 1
+fi
+if [ -n "$MEMORY_RESULT" ] && ! [[ "$MEMORY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
+  echo "neon-shape: internal error -- memory_definer exempt function oids were not numeric: $MEMORY_RESULT" >&2
+  exit 1
+fi
 RUNNER_FACTS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_facts_definer 'public.runner_facts_record(text,text,integer,integer,text)')"
 RUNNER_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_settings_definer 'public.runner_settings_apply(uuid,text,text,text[],integer)')"
 for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT"; do
@@ -2887,7 +2962,7 @@ for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT"; do
     exit 1
   fi
 done
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${MEMORY_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -2939,6 +3014,8 @@ check_sandbox_net_role_shape fx_neon runner_facts_definer RUNNER_FACTS_DEFINER
 check_sandbox_net_role_shape fx_neon runner_settings_definer RUNNER_SETTINGS_DEFINER
 check_runner_fleet_table_shape fx_neon runner_facts
 check_runner_fleet_table_shape fx_neon runner_settings
+check_sandbox_net_role_shape fx_neon memory_definer MEMORY_DEFINER
+check_memory_table_shape fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
