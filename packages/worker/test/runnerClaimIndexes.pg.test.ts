@@ -220,14 +220,36 @@ describe("the claim reads through its two partial indexes [pg] (D#605 FL-3)", ()
   it("the account really holds the history: 50k finished runs, and only the live ones are in the two indexes", async () => {
     const total = await admin.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs WHERE account_id = $1", [A.accountId]);
     expect(Number(total.rows[0]!.n)).toBeGreaterThanOrEqual(HISTORY);
-    const sizes = await admin.query<{ pending: string; running: string; ever: string }>(
-      "SELECT pg_relation_size('agent_runs_claim_pending') AS pending, pg_relation_size('agent_runs_claim_running') AS running, pg_relation_size('idx_agent_runs_runner_id') AS ever",
-    );
-    // The partial indexes hold the queue and the live runs; the 0711 index holds every run that ever had a runner.
-    // The database is shared with this package's other tests, which leave their own pending runs behind, so the bound is a fifth, not a tenth.
-    console.info(`fl3-sizes ${JSON.stringify(sizes.rows[0])}`);
-    expect(Number(sizes.rows[0]!.pending)).toBeLessThan(Number(sizes.rows[0]!.ever) / 5);
-    expect(Number(sizes.rows[0]!.running)).toBeLessThan(Number(sizes.rows[0]!.ever) / 5);
+    // Sizes of the real indexes would include every other test file's rows in the shared database, so measure a private copy instead: a temp
+    // table made LIKE agent_runs with all its indexes (same definitions, same partial predicates) holding only this account's rows, whose mix
+    // this file controls. The temp table dies with the session.
+    await admin.query("DROP TABLE IF EXISTS pg_temp.fl3_runs_copy");
+    await admin.query("CREATE TEMP TABLE fl3_runs_copy (LIKE agent_runs INCLUDING INDEXES)");
+    try {
+      // An explicit column list (read from the copy, which has the same columns), not a star select: app_user holds column grants on agent_runs.
+      const cols = await admin.query<{ list: string }>(
+        "SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) AS list FROM pg_attribute WHERE attrelid = 'pg_temp.fl3_runs_copy'::regclass AND attnum > 0 AND NOT attisdropped",
+      );
+      await admin.query(`INSERT INTO fl3_runs_copy (${cols.rows[0]!.list}) SELECT ${cols.rows[0]!.list} FROM agent_runs WHERE account_id = $1`, [A.accountId]);
+      await admin.query("ANALYZE fl3_runs_copy");
+      const sizeOf = async (predicate: RegExp): Promise<number> => {
+        const { rows } = await admin.query<{ def: string; size: string }>(
+          "SELECT pg_get_indexdef(i.indexrelid) AS def, pg_relation_size(i.indexrelid) AS size FROM pg_index i WHERE i.indrelid = 'pg_temp.fl3_runs_copy'::regclass",
+        );
+        const hits = rows.filter((r) => /WHERE/.test(r.def) && predicate.test(r.def.slice(r.def.indexOf("WHERE"))));
+        expect(hits).toHaveLength(1);
+        return Number(hits[0]!.size);
+      };
+      const pending = await sizeOf(/status = 'pending'/);
+      const running = await sizeOf(/status = 'running'/);
+      const ever = await sizeOf(/runner_id IS NOT NULL/);
+      // The partial indexes hold the queue and the live runs; the 0711 index holds every run that ever had a runner.
+      console.info(`fl3-sizes ${JSON.stringify({ pending, running, ever })}`);
+      expect(pending).toBeLessThan(ever / 5);
+      expect(running).toBeLessThan(ever / 5);
+    } finally {
+      await admin.query("DROP TABLE IF EXISTS pg_temp.fl3_runs_copy");
+    }
   });
 
   it("the migration adds indexes only: no grant, policy, role or function (platform_ops gains nothing)", () => {
