@@ -16,6 +16,8 @@ import { listApprovalsHandler } from "../app/api/runners/approvals/handler";
 import { planConsentHandler } from "../app/api/runners/[id]/plan-consent/handler";
 import { getPlanApprovalDialHandler, putPlanApprovalDialHandler } from "../app/api/runners/repos/[id]/plan-approval-dial/handler";
 import { getSandboxAllowancesHandler, putSandboxAllowancesHandler } from "../app/api/runners/repos/[id]/sandbox-allowances/handler";
+import { fleetRemoveHandler, fleetReposHandler, fleetSettingHandler } from "../app/api/runners/[id]/controls";
+import { FLEET_SETTING_ACTIONS } from "@fx/runner-cloud";
 import { makeRegisterHandler } from "../app/api/runner/register/handler";
 import { REGISTER_LIMIT_PER_IP_PER_MINUTE } from "../lib/runnerRoutes";
 import type { RateLimitStore } from "@fx/api/src/ratelimit/store.js";
@@ -154,6 +156,10 @@ describe("a runner-signed request is not a session (every route outside api/runn
       // D#6 R7a: the sandbox allowances of a repo.
       () => getSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
       () => putSandboxAllowancesHandler(signedNext(`${ORIGIN}/api/runners/repos/x/sandbox-allowances`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      // D#605 FL-8: the fleet controls are session routes too.
+      ...FLEET_SETTING_ACTIONS.map((action) => () => fleetSettingHandler(signedNext(`${ORIGIN}/api/runners/x/${action}`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e", action)),
+      () => fleetReposHandler(signedNext(`${ORIGIN}/api/runners/x/repos`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
+      () => fleetRemoveHandler(signedNext(`${ORIGIN}/api/runners/x/remove`), "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e"),
     ];
     for (const call of calls) expect((await call()).status).toBe(401);
   });
