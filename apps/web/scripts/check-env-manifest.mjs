@@ -11,7 +11,7 @@
 //   the flag at all says "hold this build to the deployed list".
 // - Messages carry variable names and fixed reason codes only, never a value.
 //
-// Run by apps/web's "prebuild" script after copy-workspace and before the
+// Run by apps/web's "build:prepare" script after copy-workspace and before the
 // migrate step, so a build with a bad setting stops before it touches the
 // database. `--write-docs` rewrites the generated settings tables in
 // docs/ops/staging.md from the manifest instead of checking anything.

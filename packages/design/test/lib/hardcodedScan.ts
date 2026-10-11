@@ -68,7 +68,7 @@ async function listFiles(dir: string): Promise<string[]> {
       out.push(...(await listFiles(full)));
     } else if (SCANNED_EXTENSIONS.has(path.extname(entry.name))) {
       // D#37 WS-C2's apps/web/app/_generated/workspace-index.ts: a
-      // committed-but-regenerated dump of the fulcrumaxe workspace's OWN
+      // generated, untracked (D#500; absent on a fresh clone, present after a build) dump of the fulcrumaxe workspace's OWN
       // index.html (third-party markup, re-imported verbatim -- see D#37
       // correction C7's identical reasoning for excluding
       // apps/workspace/shell/** from the repo's ESLint config), which
