@@ -6,6 +6,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
+import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
@@ -85,6 +86,8 @@ export interface AdvanceStartArgs {
  */
 export interface AdvanceStepPorts {
   startRun(req: Omit<AdvanceRunRequest, "accountId" | "workItemId" | "haltEpoch">): Promise<AdvanceRunStart>;
+  /** D#597 CC-3: the run an earlier call of a step started (the step's prefix plus whatever note pin its key carries), or null. */
+  findStep(stepPrefix: string): Promise<{ step: string; runId: string } | null>;
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path, as the approver (so the cancel is audited as theirs and needs their membership to still be active). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
@@ -688,6 +691,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   function portsFor(who: AdvanceStepWho): AdvanceStepPorts {
     return {
       startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId, haltEpoch: who.haltEpoch }),
+      findStep: (stepPrefix) => findStepRun(who, stepPrefix),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
       cancel: (runId) => cancelItemRun(who, runId),
     };
@@ -743,6 +747,29 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return withTenant(runnerPool, who.accountId, (client) => recordDriverEvent(client, who.accountId, full));
   }
 
+  /** D#597 CC-3: the run a step of this item started, found by its key: the exact prefix, or the prefix plus a note pin (`:n<hash>`), and nothing longer. */
+  async function findStepRun(who: AdvanceStepWho, stepPrefix: string): Promise<{ step: string; runId: string } | null> {
+    if (!/^[a-z0-9:_.-]{1,128}$/i.test(stepPrefix)) return null;
+    const keyPrefix = `advance:${who.workItemId}:${stepPrefix}`;
+    return withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ idempotency_key: string; run_id: string }>(
+        "SELECT idempotency_key, run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND (idempotency_key = $2 OR (starts_with(idempotency_key, $3) AND length(idempotency_key) = $4)) ORDER BY created_at LIMIT 1",
+        [who.accountId, keyPrefix, `${keyPrefix}:n`, keyPrefix.length + 18],
+      );
+      const row = r.rows[0];
+      return row ? { step: row.idempotency_key.slice(`advance:${who.workItemId}:`.length), runId: row.run_id } : null;
+    });
+  }
+
+  /** D#597 CC-3: the fixed `correction_applied` fact for a run that carried notes (ids only), read back from the stamps so a replay of the step writes it too. Deduped per run. */
+  async function recordCorrectionsApplied(who: AdvanceStepWho, runId: string): Promise<void> {
+    if (!UUID_RE.test(runId)) return;
+    const ids = await listRunNoteIds(runnerPool, who.accountId, runId);
+    if (ids.length === 0) return;
+    await writeEvent(who, { kind: "correction_applied", dedupeKey: `run:${runId}`, runId, reasons: ids.map(correctionReasonCode) });
+    console.info(JSON.stringify({ event: "advance.correction_applied", work_item_id: who.workItemId, run_id: runId, count: ids.length }));
+  }
+
   async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };
     if (!UUID_RE.test(approvalId) || (expectedVersion !== undefined && !(Number.isSafeInteger(expectedVersion) && expectedVersion > 0))) return { status: "refused", reason: "invalid_input" };
@@ -750,6 +777,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (bad) return bad;
     const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), expectedVersion !== undefined ? { expectedVersion } : {});
     console.info(JSON.stringify({ event: "advance.build", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, run_id: out.runId ?? null }));
+    if (out.status === "started" && out.runId) await recordCorrectionsApplied(who, out.runId);
     // A build that did not start is a fact of the item (its code is a fixed word the start named).
     // A start that met a reaper claim is not a refusal of the build: the workflow waits and starts again, so no fact is recorded.
     if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
@@ -874,21 +902,23 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       return { ok: false, reason };
     };
 
-    // A replay of the same approval on the same head finds the run it started; it never starts a second one.
-    const key = `advance:${who.workItemId}:fix:${attemptKey}`;
-    const claimedRun = async (): Promise<string | null> =>
-      withTenant(runnerPool, who.accountId, async (client) => {
-        const r = await client.query<{ run_id: string }>("SELECT run_id FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key = $2", [who.accountId, key]);
-        return r.rows[0]?.run_id ?? null;
-      });
+    // A replay of the same approval on the same head finds the run it started; it never starts a second one. D#597 CC-3: the key also carries a pin of the
+    // accepted run notes the run was started with, so the replay finds its run through the prefix (the notes accepted since would give another pin).
+    const keyBase = `fix:${attemptKey}`;
+    const claimed = () => findStepRun(who, keyBase);
+    const claimedRun = async (): Promise<string | null> => (await claimed())?.runId ?? null;
     // The fact is written on every path that returns a started run (it is deduped): a step that died between the resume
     // and the event write would otherwise leave the run uncounted, and `fixRoundsStarted` would undercount.
     const started = async (runId: string): Promise<AdvanceRunStart> => {
+      await recordCorrectionsApplied(who, runId);
       await writeEvent(who, { kind: "fix_round_started", dedupeKey: `fix:${attemptKey}`, headSha: req.headSha, round: req.round, runId });
       return { ok: true, runId };
     };
-    const already = await claimedRun();
-    if (already) return started(already);
+    const prior = await claimed();
+    if (prior) {
+      await attachRunNotes(runnerPool, who.accountId, who.workItemId, prior.runId, { suffix: prior.step.slice(keyBase.length) });
+      return started(prior.runId);
+    }
 
     // One executor at a time: a second concurrent resume is refused (the database's one-live-executor-per-PR index is the backstop).
     const state = await withTenant(runnerPool, who.accountId, async (client) => {
@@ -920,6 +950,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       }
     }
 
+    // The accepted run notes ride on this run (sanitised and fenced), and their ids are pinned into the key. They are read once, here, so a note accepted
+    // while the fix starts waits for the next run.
+    const notes = await withTenant(runnerPool, who.accountId, (client) => readPendingRunNotes(client, who.workItemId));
+    const key = `advance:${who.workItemId}:${keyBase}${runNotesStepSuffix(notes.map((n) => n.id))}`;
+    const noteText = renderRunNotes(notes);
+    const prompt = noteText ? `${req.prompt}\n\n${noteText}` : req.prompt;
+
     let out: { id: string; status: string };
     try {
       // The build ran in the sandbox this PR owns, in the checkout it made; a resume continues both: same sandbox, same
@@ -938,7 +975,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           product: "team",
           pr: req.issue,
           parentRunId: parent,
-          prompt: req.prompt,
+          prompt,
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           workdir: PREVIEW_WORKDIR,
           idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
@@ -963,6 +1000,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     }
     if (out.status === "refused_spend") return refuse("refused_spend");
     console.info(JSON.stringify({ event: "advance.resumed", work_item_id: who.workItemId, run_id: out.id, status: out.status, round: req.round }));
+    await attachRunNotes(runnerPool, who.accountId, who.workItemId, out.id, { ids: notes.map((n) => n.id) });
     return started(out.id);
   }
 

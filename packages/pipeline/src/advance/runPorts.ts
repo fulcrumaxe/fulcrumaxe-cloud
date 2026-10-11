@@ -51,6 +51,11 @@ export interface AdvanceRunOutcome {
 export interface AdvanceRunPorts {
   /** Starts the run, or finds the one an earlier call of the same step started. A refusal is data, never a throw. */
   startRun(request: AdvanceRunRequest): Promise<AdvanceRunStart>;
+  /**
+   * D#597 CC-3: the run an earlier call of a step started, whatever pin its key carries: the full step (the prefix plus the pin) and the run's id. A
+   * replay uses it to find its run again even when the notes accepted since would now give a different pin. Absent: no such lookup.
+   */
+  findStep?(stepPrefix: string): Promise<{ step: string; runId: string } | null>;
   /** How a run stands. A run that does not exist reads as `{ status: "missing", done: true }`. */
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path (the same one the Cancel button uses). Safe on a finished run. */
