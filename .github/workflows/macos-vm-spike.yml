@@ -35,7 +35,7 @@ jobs:
         run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-arm64" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw results and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-vm-spike-arm64
           path: ${{ runner.temp }}/macos-vm-spike-arm64
@@ -66,7 +66,7 @@ jobs:
         run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-intel" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw results and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-vm-spike-intel
           path: ${{ runner.temp }}/macos-vm-spike-intel
