@@ -47,6 +47,7 @@ const TEST_FILE = /\.(?:test|spec)\.[a-z]+$|\.d\.ts$/;
  */
 export const NOT_DEPLOYED_PACKAGES: Readonly<Record<string, string>> = {
   "packages/fx-runner": "customer-machine runner, not a deployed app: it reads the host's own environment by name and is never built for or run on Vercel",
+  "packages/cli": "the fx command-line tool runs on the user's machine and is never deployed: its own settings (FX_TOKEN, FX_BASE_URL, FX_PROFILE, XDG_CONFIG_HOME) are documented in its README",
 };
 
 export function listSourceFiles(root: string): string[] {

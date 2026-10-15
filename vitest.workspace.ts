@@ -58,6 +58,7 @@ export default defineWorkspace([
   "packages/api",
   "packages/api-client",
   "packages/billing",
+  "packages/cli",
   "packages/core",
   "packages/db",
   "packages/decisions",
