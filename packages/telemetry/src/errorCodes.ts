@@ -225,6 +225,21 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Cloud runner approval (D#6 R2b-4a): a run approved by someone whose runner cannot take its repo, and a runner-run dial saved over a newer version.
   "runner_not_for_repo",
   "dial_changed",
+  // Paired public repo, executor push routing (D#598 P1c): why a change was not sent. (push_failed is listed above.)
+  "bad_input",
+  "pairing_self",
+  "pairing_changed",
+  "base_diverged",
+  "no_changes",
+  "scan_refused",
+  "scan_identity_mismatch",
+  "public_unavailable",
+  "public_tip_moved",
+  "app_not_installed",
+  "token_scope_mismatch",
+  "branch_exists",
+  "pr_failed",
+  "unsafe_git_config",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

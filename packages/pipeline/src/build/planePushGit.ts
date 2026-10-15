@@ -21,8 +21,8 @@ const MAX_OUTPUT = 256 * 1024 * 1024;
  * a push sends, not what a replace ref says they should be.
  */
 function childEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-  return { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" };
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))) as NodeJS.ProcessEnv;
+  return { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1" } as NodeJS.ProcessEnv;
 }
 
 /**
@@ -46,12 +46,20 @@ const PINNED_CONFIG = [
   "diff.algorithm=myers",
   "diff.interHunkContext=0",
   "diff.context=0",
+  "core.alternateRefsCommand=",
+  // Code that a clone can plant and git would then run as the harness: hooks (reference-transaction fires on every update-ref) and an fsmonitor command.
+  "core.hooksPath=/dev/null",
+  "core.fsmonitor=false",
 ];
 
-function git(repoDir: string, args: string[], input?: string): Promise<Buffer> {
+/**
+ * Runs git in `repoDir` with the pinned environment and config above. `extraEnv` is added after the `GIT_*` scrub, so the
+ * only `GIT_*` variables a child sees are the ones its caller names (a temporary index, an author identity).
+ */
+export function git(repoDir: string, args: string[], input?: string | Buffer, extraEnv?: Readonly<Record<string, string>>): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const pinned = PINNED_CONFIG.flatMap((c) => ["-c", c]);
-    const child = spawn("git", ["--no-replace-objects", "-C", repoDir, ...pinned, ...args], { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("git", ["--no-replace-objects", "-C", repoDir, ...pinned, ...args], { env: { ...childEnv(), ...extraEnv } as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;

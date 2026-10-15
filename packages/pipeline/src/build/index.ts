@@ -33,3 +33,5 @@ export type {
   ContinueWorkItemInput,
 } from "./continuation.js";
 export * from "./planePush.js";
+export * from "./planePushTransport.js";
+export * from "./planePushRoute.js";

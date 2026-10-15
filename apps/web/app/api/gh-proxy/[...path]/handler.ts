@@ -418,7 +418,7 @@ export function buildAccessTokenRequester(deps: {
       if (typeof raw === "string") ghMessage = raw.replace(/[^A-Za-z ]/g, "").slice(0, 80);
       throw Object.assign(new Error("access_token_mint_failed"), { status: response.status, ghMessage });
     }
-    const parsed = JSON.parse(text) as { token?: string; expires_at?: string; permissions?: unknown };
+    const parsed = JSON.parse(text) as { token?: string; expires_at?: string; permissions?: unknown; repositories?: unknown };
     if (!parsed.token || !parsed.expires_at) {
       throw new Error("access_token_mint_failed");
     }
@@ -428,7 +428,10 @@ export function buildAccessTokenRequester(deps: {
       parsed.permissions !== null && typeof parsed.permissions === "object" && !Array.isArray(parsed.permissions)
         ? (parsed.permissions as Record<string, string>)
         : undefined;
-    return { token: parsed.token, expiresAt: parsed.expires_at, ...(reported ? { permissions: reported } : {}) };
+    // The repositories GitHub says the token covers (names only). Only the plane_push mint checks them; a malformed list is left out, which that check refuses.
+    const names = Array.isArray(parsed.repositories) ? parsed.repositories.map((r) => (r !== null && typeof r === "object" ? (r as { name?: unknown }).name : undefined)) : undefined;
+    const covered = names !== undefined && names.every((n): n is string => typeof n === "string") ? names : undefined;
+    return { token: parsed.token, expiresAt: parsed.expires_at, ...(reported ? { permissions: reported } : {}), ...(covered ? { repositories: covered } : {}) };
   };
 }
 

@@ -980,6 +980,27 @@ describe("D#2 Correction C28 §3 item 8: buildAccessTokenRequester's own, tighte
   });
 });
 
+describe("buildAccessTokenRequester: the repositories GitHub says the token covers (D#598 P1c)", () => {
+  const answer = (repositories: unknown) => {
+    const forwardPinned: PinnedRequester = vi.fn(async (): Promise<PinnedResponse> => ({
+      status: 201,
+      headers: {},
+      bodyStream: new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(JSON.stringify({ token: "ghs_x", expires_at: new Date().toISOString(), permissions: { contents: "write" }, repositories })));
+          c.close();
+        },
+      }),
+    }));
+    return buildAccessTokenRequester({ resolveUpstream: async () => ["127.0.0.1"], forwardPinned })({ installationId: 1, appJwt: "jwt", repositories: ["widgets"], permissions: { contents: "write" } });
+  };
+
+  it("passes the names on, and leaves a malformed list out so the plane_push check refuses it", async () => {
+    expect((await answer([{ name: "widgets", id: 1 }])).repositories).toEqual(["widgets"]);
+    for (const bad of [[{ id: 1 }], ["widgets"], "widgets", null]) expect((await answer(bad)).repositories, JSON.stringify(bad)).toBeUndefined();
+  });
+});
+
 describe("buildAccessTokenRequester: the mint request body", () => {
   function harness() {
     const sent: string[] = [];

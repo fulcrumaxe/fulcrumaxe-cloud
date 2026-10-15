@@ -101,6 +101,11 @@ export interface MintedAccessToken {
    * response that does not say (D#483 S3, E2).
    */
   permissions?: Readonly<Record<string, string>>;
+  /**
+   * The repository names GitHub says the token covers (`repositories[].name` of the mint response). Only the `plane_push` purpose
+   * needs it: that purpose refuses a token that covers anything but the one repository asked for.
+   */
+  repositories?: readonly string[];
 }
 
 /**
@@ -205,7 +210,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -231,6 +236,14 @@ export const MERGE_GATE_PERMISSIONS: Readonly<Record<string, "read" | "write">> 
   contents: "write",
   pull_requests: "write",
 });
+
+/**
+ * D#598 P1c: the only permissions a `plane_push` token ever asks for, whatever the caller's scope says: write to the contents and
+ * pull requests of ONE paired public repository. Never `workflows` (the host itself refuses a push that touches workflow files
+ * without it), administration, secrets or issues. GitHub adds `metadata: read` to every token on its own; that is the only
+ * permission the mint response may carry beyond these two (see `assertPlanePushToken`).
+ */
+export const PLANE_PUSH_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write", pull_requests: "write" });
 
 /** The only permission keys a `runner_git` token may ask for. GitHub itself refuses a push that touches .github/workflows/** for want of `workflows`. */
 const RUNNER_GIT_PERMISSION_KEYS: readonly string[] = ["metadata", "contents"];
@@ -261,6 +274,22 @@ export function assertTokenReadOnly(permissions: unknown): asserts permissions i
   if (permissions === null || typeof permissions !== "object" || Array.isArray(permissions)) throw new InstallationTokenError("token_not_read_only");
   const entries = Object.entries(permissions as Record<string, unknown>);
   if (entries.length === 0 || entries.some(([, level]) => level !== "read")) throw new InstallationTokenError("token_not_read_only");
+}
+
+/**
+ * D#598 P1c: GitHub's answer to a `plane_push` mint must say the token covers exactly the one repository asked for, and holds
+ * `contents` and `pull_requests` at `write` and nothing else but the implicit `metadata: read`. A response that does not say
+ * (no permissions, no repository list) is refused: the token is neither cached nor handed out.
+ */
+export function assertPlanePushToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const exact = Object.entries(perms).filter(([k]) => k !== "metadata");
+  const metadataOk = perms.metadata === undefined || perms.metadata === "read";
+  const writes = exact.length === 2 && exact.every(([k, v]) => v === "write" && k in PLANE_PUSH_PERMISSIONS);
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  if (!metadataOk || !writes || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
 export interface GetInstallationTokenParams {
@@ -316,6 +345,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = RUNNER_GIT_PERMISSION_KEYS;
     appKind = params.appKind;
     namespace = "runner_git:";
+  } else if (params.purpose === "plane_push") {
+    // D#598 P1c: the write App, ONE repository (the paired public repo) and a fixed write set. Cached apart from every other purpose.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: PLANE_PUSH_PERMISSIONS };
+    allowed = Object.keys(PLANE_PUSH_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "plane_push:";
   } else if (params.purpose === "plan_read" && (params.appKind === "team_readonly" || params.appKind === "team")) {
     // D#483 S3: a one-repository, fixed, read-only set. An installation-wide token has no business here.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -367,6 +404,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   // E2: a read token must be read-only in fact, not only by request. GitHub's own answer is checked, and a response that
   // does not state the permissions is refused, so the token is neither cached nor handed out.
   if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
+  if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
   params.cache.set(
     params.installationId,
     appKind,
