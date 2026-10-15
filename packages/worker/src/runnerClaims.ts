@@ -24,6 +24,7 @@ import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
 import { accountCeiling, hostedLimitsFromPlanData, type HostedLimitsSource } from "./runnerAccountCeiling.js";
 import { recordRunnerUsage } from "./runnerUsage.js";
+import { ROUTING_JOIN_SQL, ROUTING_WHERE_SQL, loadPollRouting, routingParams } from "./runnerRouting.js";
 import { requestFollowUp, settleFollowUp, type FollowUpOutcome, type FollowUpPorts } from "./runnerFollowUp.js";
 
 /**
@@ -409,6 +410,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         if (runner.allowed_repo_ids.length === 0 || roles.length === 0) return idle(accountId);
 
         const autoRepos = await autoApprovableRepos(accountId, runnerId, runner);
+        // D#605 FL-4: this runner's facts and labels and its available preferred peers, read once for the poll; the rules in the candidate query only narrow what it allows.
+        const routing = await withTenant(runnerPool, accountId, (client) => loadPollRouting(client, { accountId, runnerId, nowMs: now() }));
         const tried: string[] = [];
         let heavyBlocked = false; // the account's heavy cap was met under the lock: stop offering heavy runs this poll
         const seen = new Map<string, "private" | "public" | "unknown">();
@@ -432,6 +435,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                  -- Placement lives on the item, so the claim keys on the effective mode now, not on the mode recorded at creation. Same repo only, as readRunSide does.
                  LEFT JOIN work_items w ON w.account_id = a.account_id AND w.id = a.work_item_id AND w.repo_id = r.id
                  LEFT JOIN agent_runs p ON p.account_id = a.account_id AND p.id = a.parent_run_id
+                 ${ROUTING_JOIN_SQL}
                 WHERE a.account_id = $1 AND a.status = 'pending' AND a.runtime = 'runner' AND a.execution_mode IN (${RUNNER_MODES_SQL})
                   AND a.runner_id IS NULL AND a.job_signed IS NOT NULL
                   AND ${effectiveModeSql("w", "r")} IN (${RUNNER_MODES_SQL})
@@ -442,9 +446,10 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND (a.excluded_runner_id IS NULL OR a.excluded_runner_id <> $7)
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
+                  ${ROUTING_WHERE_SQL}
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing)],
             );
             return rows;
           });

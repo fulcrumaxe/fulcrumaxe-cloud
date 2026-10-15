@@ -19,7 +19,6 @@ describe('token-inventory: generic session-only and scope enforcement over the r
   let platformOpsPool: Pool;
   let accountId: string;
   let userId: string;
-  let allScopesToken: string;
 
   beforeAll(async () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
@@ -30,17 +29,6 @@ describe('token-inventory: generic session-only and scope enforcement over the r
     const seeded = await seedAccountWithMember(admin, { role: 'owner' });
     accountId = seeded.accountId;
     userId = seeded.userId;
-
-    const plaintext = generateToken();
-    await insertApiToken(appUserPool, {
-      accountId,
-      createdBy: userId,
-      tokenHash: hashToken(plaintext),
-      displayHint: displayHint(plaintext),
-      scopes: [...SCOPES],
-      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-    });
-    allScopesToken = plaintext;
   });
 
   afterAll(async () => {
@@ -54,7 +42,22 @@ describe('token-inventory: generic session-only and scope enforcement over the r
     return template.replace(/\{[^}]+\}/g, randomUUID());
   }
 
+  /** A fresh every-scope token per request: the per-token rate limit (60/min on the starter plan) would otherwise trip once the session-only routes outnumber it, and a 429 would hide the 403 under test. */
+  async function mintAllScopesToken(): Promise<string> {
+    const plaintext = generateToken();
+    await insertApiToken(appUserPool, {
+      accountId,
+      createdBy: userId,
+      tokenHash: hashToken(plaintext),
+      displayHint: displayHint(plaintext),
+      scopes: [...SCOPES],
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    });
+    return plaintext;
+  }
+
   async function dispatchAsToken(entry: (typeof ROUTES)[number]): Promise<Response> {
+    const allScopesToken = await mintAllScopesToken();
     const url = `http://localhost${concretePath(entry.path)}`;
     const headers = new Headers({ authorization: `Bearer ${allScopesToken}` });
     if (entry.bodySchema) {
