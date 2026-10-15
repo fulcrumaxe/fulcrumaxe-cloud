@@ -9,6 +9,8 @@ import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { reportError } from "@fx/telemetry";
+import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import type { ContextSection } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
@@ -750,7 +752,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
    */
   async function advanceRunOutcome(accountId: string, runId: string): Promise<AdvanceRunOutcome> {
     if (!UUID_RE.test(accountId) || !UUID_RE.test(runId)) return { status: "missing", done: true, envelope: null };
-    return withTenant(runnerPool, accountId, async (client) => {
+    const outcome = await withTenant(runnerPool, accountId, async (client) => {
       let currentId = runId;
       for (let seen = 1; ; seen++) {
         const r = await client.query<{ status: string; envelope: unknown; runtime: string; running_ms: string | null }>(
@@ -800,6 +802,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         return { status: row.status, done: TERMINAL.has(row.status), envelope, runtime: row.runtime, ...(row.runtime === "runner" ? { runningMs: row.running_ms === null ? null : Math.max(Number(row.running_ms), 0) } : {}), tailRunId: currentId, failureReason: reason };
       }
     });
+    // D#601 MEM-2: a finished run's memory proposals become pending entries, once (the intake is idempotent per run, and never reads a runner run).
+    // After the read's transaction, and never able to change the outcome the driver sees.
+    if (outcome.done && outcome.envelope !== null) {
+      await ingestRunMemoryProposals({ pool: runnerPool, accountId, runId: outcome.tailRunId ?? runId, envelope: outcome.envelope }).catch((err) => reportError(err, { stage: "advance.memory_intake" }));
+    }
+    return outcome;
   }
 
   async function supersededByTriage(accountId: string, workItemId: string): Promise<boolean> {

@@ -77,6 +77,21 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// Cloud runner approval (D#6 R2b-4a)");
   });
 
+  it("keeps the memory store's error codes and the proposal intake's refusal reasons (D#601 MEM-1, MEM-2) instead of folding them into other", () => {
+    const codes = ["invalid_message", "invalid_transition", "secret_detected", "memory_full", "conflict", "over_run_limit", "invalid_proposal", "account_scope_person_only", "role_scope_person_only", "scope_unresolved", "duplicate", "pending_full"];
+    for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// Memory store (D#601 MEM-1, MEM-2)");
+    // The lists in the memory package itself, read as text (telemetry does not depend on core), so a code added there without a line here fails.
+    const listed = (file: string, name: string): string[] => {
+      const m = new RegExp(`export const ${name} = \\[([^\\]]+)\\]`).exec(readFileSync(path.join(REPO_ROOT, "packages", "core", "src", "memory", file), "utf8"));
+      return m === null ? [] : [...m[1]!.matchAll(/'([a-z_]+)'/g)].map((x) => x[1]!);
+    };
+    const fromCore = [...listed("index.ts", "MEMORY_ERROR_CODES"), ...listed("intake.ts", "MEMORY_INTAKE_REASONS")];
+    expect(fromCore.length).toBeGreaterThan(10);
+    for (const code of fromCore) expect(errorCodeOrOther(code), code).toBe(code);
+  });
+
   it("has no duplicate in our own list", () => {
     expect(new Set(OWN_ERROR_CODES).size).toBe(OWN_ERROR_CODES.length);
   });

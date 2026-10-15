@@ -237,6 +237,18 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "sandbox_reaping",
   // Sandbox reaper (D#2 SANDBOX-REAPER-2b): the database mode setting could not be read, so the reap passes ran as off.
   "sandbox_reap_mode_unreadable",
+  // Memory store (D#601 MEM-1, MEM-2): the codes MemoryInputError carries, and the reasons the proposal intake refuses with. (invalid_message is listed above.)
+  "invalid_transition",
+  "secret_detected",
+  "memory_full",
+  "conflict",
+  "over_run_limit",
+  "invalid_proposal",
+  "account_scope_person_only",
+  "role_scope_person_only",
+  "scope_unresolved",
+  "duplicate",
+  "pending_full",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */

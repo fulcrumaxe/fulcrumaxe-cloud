@@ -38,7 +38,7 @@ describe('memory (D#601 MEM-1)', () => {
     await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, $3)`, [accountId, id, role]);
     return id;
   }
-  const as = (accountId: string, userId: string) => ({ pool: appPool, principal: { accountId, userId } });
+  const as = (accountId: string, userId: string) => ({ pool: appPool, principal: { accountId, userId }, liveSecrets: () => [] as string[] });
 
   beforeAll(async () => {
     adminPool = createPool(process.env.DATABASE_URL!);

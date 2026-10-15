@@ -146,6 +146,18 @@ interface CacheEntry {
  * role + repo + the exact permission set, so two different roles (or two
  * different permission scopes for the same role) never collide.
  */
+/**
+ * D#601 MEM-2: every installation token this process has cached and that has not expired, from any cache instance. The memory intake scans
+ * a proposal against these values so a token an agent echoed into a memory is refused. It is a view of this process's own memory, never
+ * persisted, and it holds a value only until its own expiry.
+ */
+const liveTokenExpiries = new Map<string, number>();
+
+export function liveInstallationTokens(nowMs: number = Date.now()): string[] {
+  for (const [token, expiresAtMs] of liveTokenExpiries) if (expiresAtMs <= nowMs) liveTokenExpiries.delete(token);
+  return [...liveTokenExpiries.keys()];
+}
+
 export class InstallationTokenCache {
   private readonly entries = new Map<string, CacheEntry>();
 
@@ -174,6 +186,11 @@ export class InstallationTokenCache {
     namespace = "",
   ): void {
     this.entries.set(InstallationTokenCache.keyFor(installationId, appKind, role, scope, namespace), { token, expiresAtMs });
+    // The cache is given the real expiry minus the refresh margin; the scan keeps the token for its whole real life, so the margin is added back.
+    // Expired values are dropped here too, so a process that only mints (the web proxy) never accumulates them.
+    const now = Date.now();
+    for (const [t, exp] of liveTokenExpiries) if (exp <= now) liveTokenExpiries.delete(t);
+    liveTokenExpiries.set(token, Math.max(expiresAtMs + EXPIRY_SAFETY_MARGIN_MS, liveTokenExpiries.get(token) ?? 0));
   }
 }
 

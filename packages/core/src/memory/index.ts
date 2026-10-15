@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
-import { redactShapes } from '@fx/runtime/src/redact.js';
+import { redactSecrets, redactShapes } from '@fx/runtime/src/redact.js';
 import { stripControlTokens } from '@fx/trust';
 import { ForbiddenError, NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
@@ -69,7 +69,9 @@ export interface MemoryEntry {
   updatedAt: Date;
 }
 
-export type MemoryErrorCode = 'invalid_message' | 'invalid_transition' | 'secret_detected' | 'memory_full' | 'conflict';
+/** Every code a memory call can throw. All are on the telemetry allowlist (packages/telemetry/src/errorCodes.ts); a test pins the two together. */
+export const MEMORY_ERROR_CODES = ['invalid_message', 'invalid_transition', 'secret_detected', 'memory_full', 'conflict'] as const;
+export type MemoryErrorCode = (typeof MEMORY_ERROR_CODES)[number];
 
 /** Maps to 422. */
 export class MemoryInputError extends Error {
@@ -82,9 +84,14 @@ export class MemoryInputError extends Error {
   }
 }
 
+/** The tenant's live token values (an installation token minted for a run, for one). Read at each write, never cached by the caller. */
+export type LiveSecretsSource = () => readonly string[] | Promise<readonly string[]>;
+
 export interface MemoryCtx {
   pool: Pool;
   principal: { accountId: string; userId: string };
+  /** Required on purpose: every writer scans its text against these values, so a caller must say where they come from (an empty list is a choice). */
+  liveSecrets: LiveSecretsSource;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -153,20 +160,49 @@ export function sanitizeMemoryText(text: string): string {
   return stripControlTokens(text).replace(CONTROL_RE, ' ').replace(FENCE_RE, '[removed]').trim();
 }
 
+const INVISIBLE_RE = /[\s\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u2060\ufeff]/g;
+/** Below this length a live value is not tried in encoded or space-stripped forms (too short to tell from ordinary text). */
+const MIN_ENCODED_SECRET_CHARS = 16;
+
+/**
+ * Whether the text holds a live token value: as is, with every space, control and zero-width character removed (a value split across a line or
+ * padded with invisible characters), or encoded as base64 (standard or URL-safe, padded or not), URL-encoded, or percent-encoded byte by byte.
+ * One pass of `includes` per form per value, so the cost is linear in the text.
+ */
+export function holdsLiveSecret(text: string, secrets: readonly (string | undefined)[]): boolean {
+  if (redactSecrets(text, secrets) !== text) return true;
+  const stripped = text.replace(INVISIBLE_RE, '');
+  const lower = stripped.toLowerCase();
+  for (const secret of secrets) {
+    if (!secret) continue;
+    if (secret.length < MIN_ENCODED_SECRET_CHARS) continue;
+    if (stripped.includes(secret)) return true;
+    const b64 = Buffer.from(secret, 'utf8').toString('base64');
+    const forms = [b64, b64.replace(/=+$/, ''), b64.replace(/\+/g, '-').replace(/\//g, '_'), b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), encodeURIComponent(secret)];
+    if (forms.some((f) => stripped.includes(f))) return true;
+    const pct = [...Buffer.from(secret, 'utf8')].map((b) => `%${b.toString(16).padStart(2, '0')}`).join('');
+    if (lower.includes(pct)) return true;
+  }
+  return false;
+}
+
 const bytes = (s: string): number => Buffer.byteLength(s, 'utf8');
 
 /**
  * Cleans and checks a body and its reason. A credential-shaped value is a visible refusal (`secret_detected`), not a silent redaction,
- * so the person sees why nothing was stored. (Redaction over the tenant's live token values joins in at proposal intake.)
+ * so the person sees why nothing was stored. `secrets` are the tenant's live token values: an exact copy of one anywhere in the text is the
+ * same refusal. Every writer (propose, write, edit and the pipeline's intake) calls this, and none stores a byte that skipped it.
  */
-export function prepareMemoryText(body: unknown, why?: string | null): { body: string; why: string | null } {
+export function prepareMemoryText(body: unknown, why?: string | null, secrets: readonly (string | undefined)[] = []): { body: string; why: string | null } {
   if (typeof body !== 'string' || (why !== undefined && why !== null && typeof why !== 'string')) throw new MemoryInputError('invalid_message', 'memory text must be a string');
+  // The raw text is scanned too: cleaning turns a control character into a space, which would hide a value split by one.
+  if (holdsLiveSecret(body, secrets) || (typeof why === 'string' && holdsLiveSecret(why, secrets))) throw new MemoryInputError('secret_detected', 'that text looks like it holds a credential, so it was not stored');
   const cleanBody = sanitizeMemoryText(body);
   const cleanWhy = why === undefined || why === null ? null : sanitizeMemoryText(why);
   if (cleanBody === '' || bytes(cleanBody) > MEMORY_BODY_MAX_BYTES) throw new MemoryInputError('invalid_message', `a memory is 1 to ${MEMORY_BODY_MAX_BYTES} bytes`);
   if (cleanWhy !== null && bytes(cleanWhy) > MEMORY_WHY_MAX_BYTES) throw new MemoryInputError('invalid_message', `a reason is at most ${MEMORY_WHY_MAX_BYTES} bytes`);
   for (const text of [cleanBody, cleanWhy ?? '']) {
-    if (redactShapes(text) !== text) throw new MemoryInputError('secret_detected', 'that text looks like it holds a credential, so it was not stored');
+    if (redactShapes(text) !== text || holdsLiveSecret(text, secrets)) throw new MemoryInputError('secret_detected', 'that text looks like it holds a credential, so it was not stored');
   }
   return { body: cleanBody, why: cleanWhy === '' ? null : cleanWhy };
 }
@@ -208,6 +244,11 @@ async function inSession<T>(ctx: MemoryCtx, fn: (client: PoolClient) => Promise<
   });
 }
 
+/** `prepareMemoryText` over the tenant's live token values, read now. */
+export async function prepareMemoryTextFor(ctx: Pick<MemoryCtx, 'liveSecrets'>, body: unknown, why?: string | null): Promise<{ body: string; why: string | null }> {
+  return prepareMemoryText(body, why, await ctx.liveSecrets());
+}
+
 async function readEntry(client: PoolClient, id: string): Promise<MemoryEntry> {
   const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM memory_entries WHERE id = $1::uuid`, [id]);
   return toEntry(rows[0]!);
@@ -231,7 +272,7 @@ export async function proposeMemory(ctx: MemoryCtx, input: ProposeMemoryInput): 
   assertEnum('kind', MEMORY_KINDS, input.kind);
   const authorKind = input.authorKind ?? 'person';
   assertEnum('author_kind', MEMORY_AUTHOR_KINDS, authorKind);
-  const text = prepareMemoryText(input.body, input.why);
+  const text = await prepareMemoryTextFor(ctx, input.body, input.why);
   return inSession(ctx, async (client) => {
     const { rows } = await client.query<{ id: string }>('SELECT memory_propose($1, $2, $3, $4, $5, $6, $7::jsonb) AS id', [
       input.scope,
@@ -250,7 +291,7 @@ export async function proposeMemory(ctx: MemoryCtx, input: ProposeMemoryInput): 
 export async function writeMemory(ctx: MemoryCtx, input: Omit<ProposeMemoryInput, 'authorKind'>): Promise<MemoryEntry> {
   assertEnum('scope', MEMORY_SCOPES, input.scope);
   assertEnum('kind', MEMORY_KINDS, input.kind);
-  const text = prepareMemoryText(input.body, input.why);
+  const text = await prepareMemoryTextFor(ctx, input.body, input.why);
   return inSession(ctx, async (client) => {
     const { rows } = await client.query<{ id: string }>('SELECT memory_write($1, $2, $3, $4, $5, $6::jsonb) AS id', [
       input.scope,
@@ -288,7 +329,7 @@ export async function editMemory(
   assertUuid('memory entry', input.id);
   if (input.kind !== undefined) assertEnum('kind', MEMORY_KINDS, input.kind);
   if (input.scope !== undefined) assertEnum('scope', MEMORY_SCOPES, input.scope);
-  const text = prepareMemoryText(input.body, input.why);
+  const text = await prepareMemoryTextFor(ctx, input.body, input.why);
   return inSession(ctx, async (client) => {
     const { rows } = await client.query<{ id: string }>('SELECT memory_edit($1::uuid, $2, $3, $4, $5, $6) AS id', [
       input.id,
