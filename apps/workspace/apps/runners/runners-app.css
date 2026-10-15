@@ -1,0 +1,66 @@
+/* D#605 FL-9: Runners app (the fleet page). Theme variables come from the shell; the fallbacks only matter if a theme leaves one out. */
+.runners-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.runners-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.runners-title { margin: 0; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.runners-subtitle { margin: 0 0 8px; font-size: 0.9rem; }
+.runners-muted { color: var(--text-primary, #1aff80); font-size: 0.8rem; } /* quieter by size, not by a faded colour: a faded colour fails contrast on some themes */
+.runners-error { margin: 6px 0 0; color: #ff6b6b; }
+.runners-account { margin: 0 0 8px; font-weight: 600; }
+.runners-note { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.runners-actions, .runners-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.runners-control { display: inline-flex; flex-direction: column; gap: 2px; max-width: 28ch; }
+.runners-reason { font-size: 0.78rem; }
+
+.runners-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.runners-btn:hover:not([aria-disabled="true"]) { border-color: var(--accent, #1aff80); }
+.runners-btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
+.runners-btn:focus-visible, .runners-link:focus-visible, .runners-input:focus-visible, .runners-code:focus-visible, .runners-choice input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.runners-link { padding: 0; background: none; border: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; text-align: left; }
+
+.runners-rows, .runners-tokens { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.runners-row { padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.runners-row[aria-busy="true"] { opacity: 0.85; }
+.runners-row[data-state="revoked"] { border-style: dashed; }
+.runners-name { margin: 0; font-size: 0.95rem; overflow-wrap: anywhere; }
+.runners-row p { margin: 2px 0; }
+.runners-state { font-weight: 600; }
+.runners-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; }
+.runners-facts dt { color: var(--text-primary, #1aff80); }
+.runners-facts dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }
+.runners-controls { margin-top: 8px; }
+
+.runners-dialog { max-width: min(560px, 92vw); max-height: 90vh; overflow: auto; padding: 0; background: var(--bg-surface, #0a0a0a); color: var(--text-primary, #1aff80); border: 1px solid var(--accent, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; }
+.runners-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.runners-dialog-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.runners-dialog-body label { display: block; margin-top: 6px; }
+.runners-input { box-sizing: border-box; width: 100%; min-height: 32px; padding: 4px 8px; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); color: inherit; font: inherit; }
+.runners-fieldset { margin: 6px 0; padding: 6px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); max-height: 200px; overflow: auto; }
+.runners-choice { display: flex; gap: 8px; align-items: flex-start; margin: 2px 0; }
+.runners-code { margin: 0; padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.runners-tokens li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* Narrow windows and phones: the facts stack, one value under its label. */
+@container (max-width: 520px) {
+  .runners-facts { grid-template-columns: 1fr; }
+  .runners-facts dd { margin-bottom: 4px; }
+}
