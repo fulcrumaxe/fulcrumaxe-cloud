@@ -8,7 +8,7 @@ import { getRoleEntry } from "@fx/roles";
 import { loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
-import { runsInOurSandbox, EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
+import { effectiveModeSql, runsInOurSandbox, EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
 import { PINNED_MEMORY_MB, computeComputeUsd, isClaudeModelId, type PlanId } from "@fx/spend";
 
 /**
@@ -154,10 +154,12 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       }
       const repo = (
         await client.query<{ product: Product; app_kind: string | null; execution_mode: string }>(
-          `SELECT r.product, r.execution_mode, i.app_kind FROM repos r
+          // D#599 PL-2: the mode a work item's run goes to is its placement's, else the repository's (a preview has no item).
+          `SELECT r.product, ${effectiveModeSql("w", "r")} AS execution_mode, i.app_kind FROM repos r
+             LEFT JOIN work_items w ON w.account_id = r.account_id AND w.id = $3::uuid AND w.repo_id = r.id
              LEFT JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
             WHERE r.id = $1 AND r.account_id = $2`,
-          [repoId, accountId],
+          [repoId, accountId, preview ? null : ownerId],
         )
       ).rows[0];
       if (repo === undefined) return refuse("no_repo");

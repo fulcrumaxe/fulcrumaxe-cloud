@@ -76,7 +76,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
   // The build: the Spec is in the database, so no issue is read.
   if (verdict.action === "build") return { ok: true, mode: "build", number: item.ghNumber, specVersion: item.specVersion };
-  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: item.ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr };
+  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: item.ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
   if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId };

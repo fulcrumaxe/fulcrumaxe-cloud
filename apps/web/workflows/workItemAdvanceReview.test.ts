@@ -49,7 +49,7 @@ interface World {
   tier: string;
   debaterEnabled: boolean;
   /** (role) -> the verdict the reviewer run ends with. A function of the head the run is for. */
-  verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean };
+  verdict: (role: string, head: string, step: string) => { status?: string; envelope?: Record<string, unknown> | null; done?: boolean; failureReason?: string };
   /** The decision the worker's round returns, per call. */
   rounds: Array<{ decision: string; round?: number; nextRound?: number | null }>;
   /** The fix start. */
@@ -114,7 +114,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
       const r = runs.get(runId);
       if (!r) return { status: "missing", done: true, envelope: null };
       const v = w.verdict(r.role, r.head, r.step);
-      return { status: v.status ?? "succeeded", done: v.done ?? true, envelope: v.envelope === undefined ? { verdict: "pass", findings: [], summary: "fine" } : v.envelope };
+      return { status: v.status ?? "succeeded", done: v.done ?? true, envelope: v.envelope === undefined ? { verdict: "pass", findings: [], summary: "fine" } : v.envelope, ...(v.failureReason ? { failureReason: v.failureReason } : {}) };
     }),
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
       const r = rounds.length > 1 ? rounds.shift()! : rounds[0]!;
@@ -227,6 +227,24 @@ describe("reviews on the pull request's exact head", () => {
     const first = t.started.map((s) => s.step);
     await workItemAdvanceWorkflow(ARGS);
     expect(t.started.slice(first.length).map((s) => s.step)).toEqual(first);
+  });
+
+  // D#599 PL-2 (AC4): a reviewer run queued on a side the item has left ends cancelled placement_changed; the same review step starts again and its verdict comes from the new run.
+  it("a reviewer run cancelled because its item moved to the other side is started again (same step), and the verdict is the new run's", async () => {
+    let t: ReturnType<typeof setup> | null = null;
+    const w = fresh({
+      verdict: (role) =>
+        role === "code-reviewer" && t!.started.filter((r) => r.role === "code-reviewer").length < 2
+          ? { status: "cancelled", envelope: null, failureReason: "placement_changed" }
+          : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } },
+    });
+    t = setup(w);
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    const code = t.started.filter((r) => r.role === "code-reviewer");
+    expect(code).toHaveLength(2);
+    expect(code[1]!.step).toBe(code[0]!.step);
+    expect(events()).toContain("advance.review_restarted");
+    expect(t.started.filter((r) => r.role === "acceptance-tester")).toHaveLength(1);
   });
 
   it("waits durably for a reviewer that is still going", async () => {

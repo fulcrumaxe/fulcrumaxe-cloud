@@ -867,7 +867,8 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     /** An executor run that finished through the runner's `done`, recording `prNumber` and `branch` the way the writer does. */
     async function doneRun(a: SeedRefs, workItemId: string, o: { prNumber: number | null; branch?: (id: string) => string | undefined; role?: string; status?: "succeeded" | "failed" }): Promise<string> {
       const id = randomUUID();
-      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, $4, 'production', 'running')", [id, a.accountId, workItemId, o.role ?? "executor"]);
+      // The run's own mode is the repo's at the time (D#599 PL-2: the lookup follows the side of the newest executor run).
+      await admin.query("INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode) SELECT $1, $2, $3, $4, CASE WHEN r.execution_mode = 'sandbox' THEN 'production' ELSE 'runner' END, 'running', r.execution_mode FROM repos r WHERE r.id = $5", [id, a.accountId, workItemId, o.role ?? "executor", a.repoId]);
       const branch = o.branch ? o.branch(id) : branchOf(id);
       const to = o.status ?? "succeeded";
       await writeRunStatus(writerPool, {

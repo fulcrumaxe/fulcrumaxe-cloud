@@ -149,7 +149,7 @@ export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): PanelRun
     withTenant(pool, accountId, (client) => client.query(RELEASE_SQL, [accountId, key]));
 
   const targetFor = async (input: StartAgentRunInput): Promise<ExecutionTarget> =>
-    resolveExecutionTarget(await readExecutionMode(pool, accountId, input.repoId), deps.registry);
+    resolveExecutionTarget(await readExecutionMode(pool, accountId, input.repoId, input.workItemId), deps.registry);
 
   /** Stops whatever the run holds. Safe at any point and for any status. */
   async function cancelSeat(runId: string, input: StartAgentRunInput, key: string): Promise<void> {

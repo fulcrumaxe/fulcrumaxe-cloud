@@ -70,7 +70,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr };
+  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -89,15 +89,18 @@ export type PrLookup = PrFound | { ok: false; reason: string };
  * The executor's open pull request, its head commit, and the security surfaces its diff touches. A sandbox build's is found by
  * `fx/issue-<n>`; a runner run's by the number and branch its `done` recorded, and none recorded is `no_open_pr` (D#6 C25 section 1.2).
  */
-export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<PrLookup> {
+export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
   if (!open) return { ok: false, reason: "github_unavailable" };
   try {
+    // D#599 PL-2: the pull request is looked up on the side that BUILT it (the newest executor run's), which is not the item's effective side
+    // right after a placement change. That side picks the client and the lookup; gating and auto-merge read the effective mode elsewhere.
+    const lookupMode = ctx.prExecutionMode ?? ctx.executionMode;
     // D#6 R3c: a runner_local repo is read through the local-only fence (paths only, never a patch).
-    const http = await openForRepo(open, ctx.executionMode, "read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
-    const found = await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: ctx.executionMode, recordedPr: ctx.recordedPr });
+    const http = await openForRepo(open, lookupMode, "read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
+    const found = await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: lookupMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
     const files =
-      ctx.executionMode === "runner_local"
+      lookupMode === "runner_local"
         ? isLocalGitHubHttp(http)
           ? await listChangedFilesLocal(http, { owner: ctx.owner, name: ctx.name, pr: found.pr.number })
           : ({ ok: false, reason: "github_unavailable" } as const)
@@ -238,6 +241,8 @@ export interface ReviewerOutcome {
   queuedOnRunner: boolean;
   /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
   tailRunId: string;
+  /** D#599 PL-2: `placement_changed` when the run was cancelled because its item moved to the other side; the driver then starts the step again. Absent otherwise. */
+  failureReason?: string | null;
 }
 
 /** How a reviewer run stands. The findings and the summary stay in the run: only the verdict word and the flag leave. */
@@ -245,7 +250,7 @@ export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId
   if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, queuedOnRunner: false, tailRunId: runId };
   const out = await worker.advanceRunOutcome(accountId, runId);
   const v = readVerdict(out.status, out.envelope);
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId };
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
 }
 
 export interface RoundOut {

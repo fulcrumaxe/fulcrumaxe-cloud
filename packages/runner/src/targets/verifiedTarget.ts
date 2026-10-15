@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { isRunnerMode } from "../runnerModes.js";
-import type { AdmitResult, CancelResult, DispatchResult, ExecutionRun, ExecutionTarget, LostRunOutcome, TargetRuntime, TerminalReport } from "../executionTarget.js";
+import type { AdmitResult, CancelResult, DispatchResult, ExecutionRun, ExecutionTarget, LostRunOutcome, PrecheckDenyReason, PrecheckRun, TargetRuntime, TerminalReport } from "../executionTarget.js";
 import { VERIFIED_SANDBOX_REVIEW_ROLES } from "./runnerTarget.js";
 
 /**
@@ -27,6 +27,9 @@ export class VerifiedTarget implements ExecutionTarget {
 
   admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult> {
     return this.forRole(run.role).admit(run, client);
+  }
+  async precheck(run: PrecheckRun): Promise<{ ok: true } | { ok: false; reason: PrecheckDenyReason }> {
+    return (await this.forRole(run.role).precheck?.(run)) ?? { ok: true };
   }
   dispatch(run: ExecutionRun): Promise<DispatchResult> {
     return this.forRole(run.role).dispatch(run);

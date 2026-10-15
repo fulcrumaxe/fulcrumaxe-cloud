@@ -169,6 +169,22 @@ export type AdmitDenyReason =
   | "repo_visibility_unknown"
   | "role_not_runner_eligible"
   | "verified_review_not_wired";
+
+/**
+ * D#599 PL-2: why a run was refused before its row was written. The target's own `AdmitDenyReason`s that need no money or row to decide, plus
+ * the repository's stored cloud-verified consent no longer being the current wording. A closed set: it reaches a person as a code.
+ */
+export type TargetPrecheckReason = Extract<AdmitDenyReason, "backend_not_selectable" | "public_repo" | "repo_visibility_unknown" | "role_not_runner_eligible" | "verified_review_not_wired">;
+export type PrecheckDenyReason = TargetPrecheckReason | "verified_consent_stale";
+
+/** What a target's `precheck` is given: the facts of a run that exist before its row does. */
+export interface PrecheckRun {
+  accountId: string;
+  repoId: string;
+  role: string;
+  backend?: string;
+}
+
 /** The same set at run time, for the one write site. A record, so a new reason fails tsc here until it is listed. */
 const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   unknown_model: true,
@@ -284,6 +300,12 @@ export interface ExecutionTarget {
    * targets/sandboxTarget.ts's header for the documented gap.
    */
   admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult>;
+  /**
+   * D#599 PL-2: the refusals that need no money and no row, decided BEFORE the run's row is inserted, so a refusal leaves nothing behind (no
+   * run, no event, no idempotency claim). `startAgentRun` and `resumeAgentRun` call it with the facts of the run about to be created; a target
+   * without one has nothing to check here, and its `admit` still runs after the insert. A throw is a refusal too: the caller fails closed.
+   */
+  precheck?(run: PrecheckRun): Promise<{ ok: true } | { ok: false; reason: PrecheckDenyReason }>;
   dispatch(run: ExecutionRun): Promise<DispatchResult>;
   cancel(run: ExecutionRun): Promise<CancelResult>;
   /**

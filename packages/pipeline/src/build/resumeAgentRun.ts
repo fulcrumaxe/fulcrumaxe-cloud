@@ -4,8 +4,10 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import {
   assertExpectedExecutionMode,
   buildExecutionRun,
-  readExecutionMode,
+  precheckRun,
+  readRunSide,
   resolveExecutionTarget,
+  sideOfMode,
   insertAgentRun,
   writeRunStatus,
   QUEUE_TTL_MS,
@@ -19,7 +21,7 @@ import {
   type RunStatus,
   type StartAgentRunInput,
 } from "@fx/runner";
-import { ResumeBackendError, lookupOwnedExecutorSession } from "./resumeOwnership.js";
+import { ResumeBackendError, ResumeSideError, lookupOwnedExecutorSession } from "./resumeOwnership.js";
 
 /**
  * D#2 H14a, criterion 2 (H09.9's "real caller", per the split ruling and
@@ -113,16 +115,22 @@ export async function resumeAgentRun(
   // BEFORE anything is written or any target method is called -- a
   // foreign/absent session throws ForeignSessionError here and nothing
   // downstream ever runs.
-  const { sessionId, backend: storedBackend, runId: sessionRunId } = await withTenant(pool, input.accountId, (client) =>
+  const { sessionId, backend: storedBackend, runId: sessionRunId, executionMode: sessionMode } = await withTenant(pool, input.accountId, (client) =>
     lookupOwnedExecutorSession(client, { accountId: input.accountId, workItemId }),
   );
 
   // D#221 R1b: the round continues on the backend the session was started on, or not at all. Checked before any write.
   if ((input.backend ?? DEFAULT_BACKEND) !== storedBackend) throw new ResumeBackendError("different");
 
-  const mode = await readExecutionMode(pool, input.accountId, input.repoId);
+  const side = await readRunSide(pool, input.accountId, input.repoId, workItemId);
+  const mode = side.mode;
   assertExpectedExecutionMode(input, mode);
+  // D#599 PL-2: a session belongs to the side that ran it. A round whose effective side is the other one starts a fresh session instead (the
+  // caller's job); resuming here would hand one side's session id to the other, so it is refused before anything is written.
+  if (sideOfMode(sessionMode) !== sideOfMode(mode)) throw new ResumeSideError();
   const target = resolveExecutionTarget(mode, registry);
+  // The guards of this round's own mode, before its row exists (a refusal writes nothing).
+  await precheckRun(target, side, input);
 
   const runId = randomUUID();
   const { id } = await insertAgentRun(pool, {

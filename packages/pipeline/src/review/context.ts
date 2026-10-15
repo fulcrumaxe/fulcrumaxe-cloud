@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { effectiveModeSql } from "@fx/runner";
 import type { WorkItemTier } from "../build/types.js";
 import { tierOfKind } from "./reviewPlan.js";
 
@@ -17,7 +18,7 @@ export interface ReviewContext {
   repoId: string;
   /** `repos.gh_repo_id`, the numeric GitHub repository id (D#6 M1G-a: what the operator's human-merge-only list names). Null when unreadable. */
   ghRepoId: string | null;
-  /** `repos.execution_mode`: `runner_local` when the repo's agents run on the customer's machine (D#6). */
+  /** The EFFECTIVE mode (D#599 PL-2): the item's placement, else `repos.execution_mode`. `runner_local` when the item's agents run on the customer's machine (D#6). */
   executionMode: string;
   owner: string;
   name: string;
@@ -54,7 +55,7 @@ interface Row {
 export async function loadReviewContext(pool: Pool, accountId: string, workItemId: string): Promise<LoadReviewContextResult> {
   const row = await withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<Row>(
-      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, r.execution_mode, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version,
+      `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
               r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external
          FROM work_items w

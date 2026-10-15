@@ -93,6 +93,14 @@ const QUEUED_ON_RUNNER = "queued_on_runner";
  */
 const STEP_YIELD_MS = 180_000;
 
+/**
+ * D#599 PL-2 (AC4): the failure reason of a run PL-1's item-scoped cancel ended because its item moved to the other side, and how many times one step
+ * restarts after it. Same values as `PLACEMENT_CHANGED` and `PLACEMENT_RESTARTS_MAX` in @fx/worker (a test pins them). The restart is the same keyed start step
+ * again: the worker picks the next key (`:p1`...) from the rows, so a replay of this step returns the restarted run and starts nothing.
+ */
+const PLACEMENT_CHANGED = "placement_changed";
+const PLACEMENT_RESTARTS_MAX = 3;
+
 /** How often a waiting workflow reads the classify run's status. */
 const POLL_MS = 20_000;
 /** Past this, the workflow gives up waiting (the run's own timeout is shorter). */
@@ -237,7 +245,7 @@ export async function advanceReviewLoadStep(accountId: string, userId: string, w
   return reviewLoadBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, pinned);
 }
 
-export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<PrLookup> {
+export async function advanceFindPrStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<PrLookup> {
   "use step";
   return findPrBody(openInstallationHttp, ctx);
 }
@@ -331,7 +339,7 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   const pinned = (read: number | null): number | null => (args.specVersion !== undefined ? args.specVersion : read);
   if (loaded.mode === "build") return buildPhase(args, pinned(loaded.specVersion));
   // Build again, for an item at Needs a person: a fresh build, unless a pull request is still open for the issue's branch.
-  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr });
+  if (loaded.mode === "rebuild") return rebuildPhase(args, pinned(loaded.specVersion), { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.number, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode });
   if (loaded.mode === "review") return reviewPhase(args, pinned(loaded.specVersion));
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
@@ -550,7 +558,7 @@ async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
  * but from `needs_human` (its own run key, so the failed run is never reused). A lookup that failed decides nothing: it stops
  * too, since a build must not start on a guess.
  */
-async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "recordedPr">): Promise<Result> {
+async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo: Pick<ReviewCtx, "repoId" | "owner" | "name" | "issue" | "executionMode" | "prExecutionMode" | "recordedPr">): Promise<Result> {
   const found = await advanceFindPrStep(repo);
   if (found.ok) {
     await stopped(args, "rebuild_pr", "rebuild_pr_open", { pr: found.number });
@@ -580,18 +588,31 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "build_start", status: started.status, reason: started.reason });
     return { status: "failed", detail: `build_refused:${started.reason ?? "none"}` };
   }
-  const runId = started.runId;
+  let runId = started.runId;
   await advanceLogStep("advance.build_started", { work_item_id: workItemId, run_id: runId });
 
   let waited = 0;
   let outcome = await advanceBuildOutcomeStep(accountId, runId);
   let pendingWaited = 0;
-  while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-    const queued = outcome.queuedOnRunner;
-    await sleep(BUILD_POLL_MS);
-    if (queued) pendingWaited += BUILD_POLL_MS;
-    else waited += BUILD_POLL_MS;
-    outcome = await advanceBuildOutcomeStep(accountId, runId);
+  for (let restarts = 0; ; restarts++) {
+    while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      const queued = outcome.queuedOnRunner;
+      await sleep(BUILD_POLL_MS);
+      if (queued) pendingWaited += BUILD_POLL_MS;
+      else waited += BUILD_POLL_MS;
+      outcome = await advanceBuildOutcomeStep(accountId, runId);
+    }
+    // D#599 PL-2: the run was queued on a side the item has left. The same step starts again on the new side; the wait goes on with that run.
+    if (outcome.done && outcome.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
+      const again = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+      if (again.status === "started" && again.runId !== null && again.runId !== runId) {
+        await advanceLogStep("advance.build_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
+        runId = again.runId;
+        outcome = await advanceBuildOutcomeStep(accountId, runId);
+        continue;
+      }
+    }
+    break;
   }
   if (!outcome.done) {
     // The wait ran out. The run must not keep going (and spending) behind a card that says Needs human.
@@ -652,7 +673,7 @@ async function findBuiltPr(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "build_pr_load", CHECK_UNAVAILABLE);
     return { end: { status: "failed", detail: `check_build_${loaded.reason}` } };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) return { stage: await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number) };
   if (found.reason === "no_open_pr") return { stage: "in_progress" };
@@ -675,7 +696,7 @@ async function checkBuildPhase(args: AdvanceStartArgs, pinned: number | null, ex
     await stopped(args, "check_build_load", CHECK_UNAVAILABLE);
     return { status: "failed", detail: `check_build_${loaded.reason}` };
   }
-  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+  const ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
   const found = await advanceFindPrStep(ctx);
   if (found.ok) {
     const stage = await advancePrFoundStep(accountId, userId, workItemId, args.haltEpoch, found.number);
@@ -711,16 +732,30 @@ interface Verdict {
 }
 
 /** Waits for one reviewer run. A run still going when the wait ends is cancelled and counts as a fail (a review that could not finish is not a pass). */
-async function waitForReviewer(accountId: string, userId: string, workItemId: string, role: string, runId: string): Promise<Verdict> {
+async function waitForReviewer(accountId: string, userId: string, workItemId: string, role: string, firstRunId: string, restart: () => Promise<string | null>): Promise<Verdict> {
+  let runId = firstRunId;
   let waited = 0;
   let out = await advanceReviewerOutcomeStep(accountId, runId);
   let pendingWaited = 0;
-  while (!out.done && waited < REVIEW_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-    const queued = out.queuedOnRunner;
-    await sleep(REVIEW_POLL_MS);
-    if (queued) pendingWaited += REVIEW_POLL_MS;
-    else waited += REVIEW_POLL_MS;
-    out = await advanceReviewerOutcomeStep(accountId, runId);
+  for (let restarts = 0; ; restarts++) {
+    while (!out.done && waited < REVIEW_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      const queued = out.queuedOnRunner;
+      await sleep(REVIEW_POLL_MS);
+      if (queued) pendingWaited += REVIEW_POLL_MS;
+      else waited += REVIEW_POLL_MS;
+      out = await advanceReviewerOutcomeStep(accountId, runId);
+    }
+    // D#599 PL-2: the run was queued on a side the item has left; the same review starts again on the new side (keyed by the worker) and is waited for here.
+    if (out.done && out.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
+      const again = await restart();
+      if (again !== null && again !== runId) {
+        await advanceLogStep("advance.review_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again, role, reason: PLACEMENT_CHANGED });
+        runId = again;
+        out = await advanceReviewerOutcomeStep(accountId, runId);
+        continue;
+      }
+    }
+    break;
   }
   if (!out.done) {
     await advanceCancelStep(accountId, userId, workItemId, out.tailRunId);
@@ -745,7 +780,10 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   });
   const verdicts: Verdict[] = [];
   for (const s of started) {
-    if (s.runId !== null) verdicts.push(await waitForReviewer(accountId, userId, workItemId, s.role, s.runId));
+    if (s.runId !== null) {
+      const role = s.role;
+      verdicts.push(await waitForReviewer(accountId, userId, workItemId, role, s.runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview)).runId));
+    }
   }
   return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role) };
 }
@@ -806,7 +844,7 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
         await stopped(args, "review_load", loaded.reason);
         return { end: { status: "failed", detail: `review_${loaded.reason}` } };
       }
-      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
       const again = await advanceFindPrStep(next);
       if (!again.ok) {
         await stopped(args, "review_pr", again.reason);
@@ -847,7 +885,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
-  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr };
+  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
 
   // C44-7: a fix round that proved "no change needed" asks the reviewers that wanted the fix to look again at the SAME head, once per head.
   // `again` is that pending look; `lookedAgain` holds the heads already given theirs (workflow state, rebuilt by a replay from the same step results).
@@ -940,7 +978,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
-    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
+    let fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
     if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
     if (!fix.ok || fix.runId === null) {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
@@ -949,12 +987,25 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     let waited = 0;
     let fixed = await advanceBuildOutcomeStep(accountId, fix.runId);
     let pendingWaited = 0;
-    while (!fixed.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
-      const queued = fixed.queuedOnRunner;
-      await sleep(BUILD_POLL_MS);
-      if (queued) pendingWaited += BUILD_POLL_MS;
-      else waited += BUILD_POLL_MS;
-      fixed = await advanceBuildOutcomeStep(accountId, fix.runId);
+    for (let restarts = 0; ; restarts++) {
+      while (!fixed.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+        const queued = fixed.queuedOnRunner;
+        await sleep(BUILD_POLL_MS);
+        if (queued) pendingWaited += BUILD_POLL_MS;
+        else waited += BUILD_POLL_MS;
+        fixed = await advanceBuildOutcomeStep(accountId, fix.runId as string);
+      }
+      // D#599 PL-2: the fix run was queued on a side the item has left; the same fix round starts again on the new side (keyed by the worker).
+      if (fixed.done && fixed.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
+        const again = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
+        if (again.ok && again.runId !== null && again.runId !== fix.runId) {
+          await advanceLogStep("advance.fix_restarted", { work_item_id: workItemId, from_run_id: fix.runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
+          fix = again;
+          fixed = await advanceBuildOutcomeStep(accountId, again.runId);
+          continue;
+        }
+      }
+      break;
     }
     if (!fixed.done) {
       await advanceCancelStep(accountId, userId, workItemId, fixed.tailRunId);

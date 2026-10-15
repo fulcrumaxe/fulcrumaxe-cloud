@@ -152,19 +152,32 @@ describe("runner runs through startAgentRun [pg]", () => {
     });
   });
 
+  // D#599 PL-2: what needs no money and no row (the role, the backend, the repo's visibility) is refused by the target's `precheck` BEFORE the run's
+  // row is written, as a typed error. `admit` keeps the same refusals as the backstop for a change between the two reads.
   describe("admit refusals reach the run with their own reason", () => {
     it.each([
       ["public", "public_repo"],
       ["unknown", "repo_visibility_unknown"],
       ["throw", "repo_visibility_unknown"],
-    ] as const)("a repo the port reads as %s: refused_spend with %s, no job issued", async (visibility, reason) => {
+    ] as const)("a repo the port reads as %s: refused with %s before a row exists, no job issued", async (visibility, reason) => {
       const w = await world();
       const { registry, issuer } = registryOf(visibility);
-      const result = await startAgentRun(db.runWriterPool, registry, inputOf(w));
-      expect(result).toMatchObject({ status: "refused_spend", reason });
-      const { rows } = await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed'`, [result.id]);
-      expect(rows[0].payload).toEqual({ from: "pending", to: "refused_spend", failureReason: reason });
+      await expect(startAgentRun(db.runWriterPool, registry, inputOf(w))).rejects.toMatchObject({ code: "run_precheck_refused", reason });
+      expect((await db.admin.query(`SELECT 1 FROM agent_runs WHERE account_id = $1`, [w.accountId])).rows).toHaveLength(0);
       expect(issuer.calls).toHaveLength(0);
+    });
+
+    it("a repo that turns public between the precheck and admit is still refused by admit: refused_spend with public_repo, no job issued", async () => {
+      const w = await world();
+      const answers = ["private", "public"] as const;
+      let reads = 0;
+      const registry: ExecutionTargetRegistry = {
+        runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: createFakeJobIssuer(), visibility: { visibility: async () => answers[Math.min(reads++, 1)]! } }),
+      };
+      const result = await startAgentRun(db.runWriterPool, registry, inputOf(w));
+      expect(result).toMatchObject({ status: "refused_spend", reason: "public_repo" });
+      const { rows } = await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed'`, [result.id]);
+      expect(rows[0].payload).toEqual({ from: "pending", to: "refused_spend", failureReason: "public_repo" });
     });
 
     it("the run after the plan's daily limit is refused as runner_daily_limit, and the refused run does not count against the next", async () => {
@@ -183,8 +196,8 @@ describe("runner runs through startAgentRun [pg]", () => {
     it("a role no runner may run is refused as role_not_runner_eligible", async () => {
       const w = await world();
       const { registry } = registryOf();
-      const result = await startAgentRun(db.runWriterPool, registry, inputOf(w, { role: "researcher" }));
-      expect(result).toMatchObject({ status: "refused_spend", reason: "role_not_runner_eligible" });
+      await expect(startAgentRun(db.runWriterPool, registry, inputOf(w, { role: "researcher" }))).rejects.toMatchObject({ code: "run_precheck_refused", reason: "role_not_runner_eligible" });
+      expect((await db.admin.query(`SELECT 1 FROM agent_runs WHERE account_id = $1`, [w.accountId])).rows).toHaveLength(0);
     });
 
     it("the composition root's defaults refuse: unwired visibility reads every repo as unknown", async () => {
@@ -192,7 +205,7 @@ describe("runner runs through startAgentRun [pg]", () => {
       const registry: ExecutionTargetRegistry = {
         runner_local: new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer: unwiredJobIssuer, visibility: unwiredRepoVisibility }),
       };
-      expect(await startAgentRun(db.runWriterPool, registry, inputOf(w))).toMatchObject({ status: "refused_spend", reason: "repo_visibility_unknown" });
+      await expect(startAgentRun(db.runWriterPool, registry, inputOf(w))).rejects.toMatchObject({ reason: "repo_visibility_unknown" });
     });
 
     it("the unwired issuer fails the run instead of leaving it pending with no job behind it", async () => {

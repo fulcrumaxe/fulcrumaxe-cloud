@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ExecutionModeChangedError, insertAgentRun, writeRunStatus } from "@fx/runner";
-import { ForeignSessionError, ResumeBackendError, lookupOwnedExecutorSession } from "../../src/build/resumeOwnership.js";
+import { ForeignSessionError, ResumeBackendError, ResumeSideError, lookupOwnedExecutorSession } from "../../src/build/resumeOwnership.js";
 import { resumeAgentRun } from "../../src/build/resumeAgentRun.js";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { pgHarness } from "../helpers/pgHarness.js";
@@ -56,7 +56,7 @@ describe("H14a resumeOwnership [pg]", () => {
     const owned = await withTenant(db.runWriterPool, accountId, (client) =>
       lookupOwnedExecutorSession(client, { accountId, workItemId }),
     );
-    expect(owned).toEqual({ runId, sessionId: "cc-session-owned", backend: "claude-code" });
+    expect(owned).toEqual({ runId, executionMode: "sandbox", sessionId: "cc-session-owned", backend: "claude-code" });
   });
 
   it("refuses a foreign session: a different tenant's row is invisible even when its workItemId is guessed", async () => {
@@ -179,9 +179,34 @@ describe("H14a resumeOwnership [pg]", () => {
     expect(await count()).toBe(before);
   });
 
+  // D#599 PL-2: a session belongs to the side that ran it. A round whose effective side (the item's placement, else the repo) is the other one is
+  // refused before any run row or target call; a same-side round passes this check.
+  it("refuses to resume a session on the other side, before any run row or target call, and lets a same-side round through to the mode check", async () => {
+    const accountId = randomUUID();
+    const repoId = randomUUID();
+    const workItemId = randomUUID();
+    await seedAccount(db.admin, accountId);
+    await seedRepo(db.admin, accountId, repoId); // the repo is on the cloud; the build's session ran in the sandbox
+    await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 7 });
+    await seedExecutorRunWithSession(accountId, workItemId, repoId, "cc-session-owned");
+    const count = async () => (await db.admin.query(`SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1`, [accountId])).rows[0].n as number;
+    const before = await count();
+    const registry = {} as ExecutionTargetRegistry; // reaching the target would throw something else
+    const base = { accountId, repoId, workItemId, pr: 7, role: "executor" as const, product: "team" as const, roleCard: "c", prompt: "p", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter" as const, estimateComputeUsd: 1, trigger: "foreground" as const } };
+    // The item is now sent to the runner: the sandbox session is the other side's.
+    await db.admin.query("UPDATE work_items SET placement = 'runner' WHERE id = $1", [workItemId]);
+    await expect(resumeAgentRun(db.runWriterPool, registry, { ...base, expectedExecutionMode: "runner_local" })).rejects.toBeInstanceOf(ResumeSideError);
+    await expect(resumeAgentRun(db.runWriterPool, registry, base)).rejects.toBeInstanceOf(ResumeSideError);
+    expect(await count()).toBe(before);
+    // Back on the cloud (same side as the session): the side check passes, and the next refusal is the registry's (nothing is registered).
+    await db.admin.query("UPDATE work_items SET placement = 'cloud' WHERE id = $1", [workItemId]);
+    await expect(resumeAgentRun(db.runWriterPool, registry, base)).rejects.toMatchObject({ name: "UnknownExecutionModeError" });
+    expect(await count()).toBe(before);
+  });
+
   it("fails closed when the run being continued has no backend on record", async () => {
     for (const backend of [null, ""]) {
-      const client = { query: async () => ({ rows: [{ id: "r1", cc_session_id: "s1", backend }] }) };
+      const client = { query: async () => ({ rows: [{ id: "r1", cc_session_id: "s1", backend, execution_mode: "sandbox" }] }) };
       await expect(lookupOwnedExecutorSession(client as never, { accountId: "a", workItemId: "w" })).rejects.toBeInstanceOf(ResumeBackendError);
     }
   });

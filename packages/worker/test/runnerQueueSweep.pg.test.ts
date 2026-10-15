@@ -181,54 +181,78 @@ describe("runner queue sweep [pg]", () => {
     }
   });
 
-  describe("race backstop (C24 section 2): a pending runner run whose repo left runner_local", () => {
-    async function inRepo(accountId: string, repoId: string | null, createdAt: number, mode = "runner_local"): Promise<string> {
+  describe("race backstop (C24 section 2, M1): a pending runner run whose item and repo no longer say runner", () => {
+    async function inRepo(accountId: string, repoId: string | null, createdAt: number, mode = "runner_local", workItemId: string | null = null): Promise<string> {
       const id = randomUUID();
       await admin.query(
-        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, created_at)
-         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', $5, $3, to_timestamp($4 / 1000.0))`,
-        [id, accountId, repoId, createdAt, mode],
+        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, created_at, work_item_id)
+         VALUES ($1, $2, 'code-reviewer', 'runner', 'pending', $5, $3, to_timestamp($4 / 1000.0), $6)`,
+        [id, accountId, repoId, createdAt, mode, workItemId],
       );
       return id;
     }
-    it("cancels it on the next tick whatever its age, with execution_mode_changed; runs of a repo still on a runner, and a run with no repo, are left alone", async () => {
+    async function item(accountId: string, repoId: string, placement: "cloud" | "runner" | null): Promise<string> {
+      const id = randomUUID();
+      await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number, placement) VALUES ($1, $2, $3, 'issue', 'internal', 'triaged', $4, $5)", [id, accountId, repoId, 8000 + Math.floor(Math.random() * 100000), placement]);
+      return id;
+    }
+    // D#599 PL-2 (M1): the sweep keys on where the run's item and repo now say it goes (placement, else the repo's mode), as the claim does.
+    it("cancels, whatever its age, a pending runner run whose effective mode left the runners (execution_mode_changed); an item placed on a runner on a sandbox repo, a run on a runner repo and a run with no repo wait", async () => {
       await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
       await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [B.repoId]);
       try {
         const late = await inRepo(B.accountId, B.repoId, NOW - 60_000); // inserted a minute ago, after the switch
         const old = await inRepo(B.accountId, B.repoId, NOW - 70 * HOUR);
+        const noPlacement = await inRepo(B.accountId, B.repoId, NOW - 60_000, "runner_local", await item(B.accountId, B.repoId, null));
+        const toCloud = await inRepo(A.accountId, A.repoId, NOW - 60_000, "runner_local", await item(A.accountId, A.repoId, "cloud")); // the item moved to the cloud
+        const placed = await inRepo(B.accountId, B.repoId, NOW - 60_000, "runner_local", await item(B.accountId, B.repoId, "runner")); // allowed: a runner run on a sandbox repo
         const stays = await inRepo(A.accountId, A.repoId, NOW - 60_000);
         const noRepo = await inRepo(A.accountId, null, NOW - 60_000);
         const result = await sweeper().sweepRunnerQueue();
-        expect(result).toMatchObject({ listed: 4, expired: 0, cancelled: 2, waiting: 2, failed: 0 });
-        for (const r of [late, old]) {
+        expect(result).toMatchObject({ listed: 7, expired: 0, cancelled: 4, waiting: 3, failed: 0 });
+        for (const r of [late, old, noPlacement, toCloud]) {
           expect(await status(r)).toBe("cancelled");
           expect(await events(r)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
         }
-        expect(await status(stays)).toBe("pending");
-        expect(await status(noRepo)).toBe("pending");
+        for (const r of [placed, stays, noRepo]) expect(await status(r)).toBe("pending");
         expect(await sweeper().sweepRunnerQueue()).toMatchObject({ cancelled: 0 });
       } finally {
         await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [B.repoId]);
       }
     });
 
-    // D#6 R5b-1 (C26 section 3, C38): the backstop acts only when the repo's new mode is not a runner mode.
+    // D#6 R5b-1 (C26 section 3, C38): a verified run is cancelled when its repo is on sandbox, and a move between the runner modes cancels nothing.
     it("a verified run is cancelled when its repo is on sandbox, and is NOT cancelled on a verified or a runner_local repo (a move between the runner modes cancels nothing)", async () => {
       try {
         await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
         await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [B.repoId]);
         const onVerified = await inRepo(A.accountId, A.repoId, NOW - 70 * HOUR, "runner_verified");
         const toSandbox = await inRepo(B.accountId, B.repoId, NOW - 60_000, "runner_verified");
-        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 2, cancelled: 1, waiting: 1 });
-        expect(await status(toSandbox)).toBe("cancelled");
-        expect(await events(toSandbox)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+        const placedOnSandbox = await inRepo(B.accountId, B.repoId, NOW - 60_000, "runner_verified", await item(B.accountId, B.repoId, "runner")); // consent withdrawn: placement does not revive it
+        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 3, cancelled: 2, waiting: 1 });
+        for (const r of [toSandbox, placedOnSandbox]) {
+          expect(await status(r)).toBe("cancelled");
+          expect(await events(r)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+        }
         expect(await status(onVerified)).toBe("pending");
         await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
         expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 1, cancelled: 0 });
         expect(await status(onVerified)).toBe("pending");
       } finally {
         await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id IN ($1, $2)", [A.repoId, B.repoId]);
+      }
+    });
+
+    it("race: a run inserted after its repo was switched to sandbox is cancelled by the next tick, never left pending", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [B.repoId]); // the switch commits first, with nothing pending to cancel
+      try {
+        const late = await inRepo(B.accountId, B.repoId, NOW - 1000); // then the dispatch that read the old side inserts its row
+        expect(await status(late)).toBe("pending");
+        expect(await sweeper().sweepRunnerQueue()).toMatchObject({ listed: 1, cancelled: 1 });
+        expect(await status(late)).toBe("cancelled");
+        expect(await events(late)).toEqual([{ from: "pending", to: "cancelled", failureReason: "execution_mode_changed" }]);
+      } finally {
+        await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [B.repoId]);
       }
     });
   });

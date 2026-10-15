@@ -5,7 +5,7 @@ import {
   acceptQueuedRunnerRun,
   buildExecutionRun,
   failClosedOnQueued,
-  readExecutionMode,
+  readRunExecutionMode,
   resolveExecutionTarget,
   startAgentRun,
   writeRunStatus,
@@ -96,8 +96,10 @@ export function createRunStarter(deps: RunStarterDeps): RunStarter {
         await deps.follow({ runId: started.id, accountId: input.accountId, hookToken: started.hookToken, watchdogMs: input.timeoutMs + WATCHDOG_MARGIN_MS });
       } catch (err) {
         // A running sandbox nobody follows would run, and spend, to its timeout: stop it and fail the run, then surface the error.
-        const target = resolveExecutionTarget(await readExecutionMode(deps.pool, input.accountId, input.repoId), deps.registry);
-        await target.cancel(buildExecutionRun(started.id, input)).catch(() => undefined);
+        // D#599 PL-2: the run's own recorded mode, never the repo's or the item's now: a placement change while it ran must not stop it on the wrong side.
+        const recorded = await readRunExecutionMode(deps.pool, input.accountId, started.id).catch(() => null);
+        const target = recorded === null ? undefined : resolveExecutionTarget(recorded, deps.registry);
+        await target?.cancel(buildExecutionRun(started.id, input)).catch(() => undefined);
         await writeRunStatus(deps.pool, { accountId: input.accountId, runId: started.id, from: "running", to: "failed", failureReason: "internal_error" }).catch(() => undefined);
         throw err;
       }

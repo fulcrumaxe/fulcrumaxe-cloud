@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AdvanceItem, AdvanceRunStart, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, AdvanceStepResult, Worker } from "@fx/worker";
 import type { IssueReadResult } from "@fx/github";
@@ -182,6 +185,49 @@ describe("the build for an item at Spec ready", () => {
     expect(events()).toEqual(["advance.build_started", "advance.build_ended", "advance.built", "advance.stopped"]);
     expect(logs[1]).toMatchObject({ run_id: "run-b", run_status: "succeeded", has_summary: true });
     expect(logs[2]).toMatchObject({ stage: "pr_opened" });
+  });
+
+  // D#599 PL-2 (AC4): the driver half. The worker owns the keys (its own test proves one restart and none on replay); the workflow starts the step again and follows the new run.
+  it("a build run cancelled because its item moved to the other side is started again on the new side, and the wait follows the new run", async () => {
+    const w = setup({
+      item: AT_SPEC,
+      buildOutcomes: [{ status: "cancelled", done: true, envelope: null, failureReason: "placement_changed" }],
+      buildSequence: [{ status: "started", runId: "run-b", branch: "fx/issue-7" }, { status: "started", runId: "run-c", branch: "fx/issue-7" }],
+      outcomeFor: (id) => (id === "run-c" ? { status: "succeeded", done: true, envelope: { summary: "I changed the footer." } } : undefined),
+      stages: ["pr_opened"],
+    });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(2);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(events()).toEqual(["advance.build_started", "advance.build_restarted", "advance.build_ended", "advance.built", "advance.stopped"]);
+    expect(logs[1]).toMatchObject({ from_run_id: "run-b", run_id: "run-c", reason: "placement_changed" });
+  });
+
+  it("a build whose restart gives back the same run, or a refusal, is not restarted again: it ends as the cancelled run it is", async () => {
+    const w = setup({
+      item: AT_SPEC,
+      buildOutcomes: [{ status: "cancelled", done: true, envelope: null, failureReason: "placement_changed" }],
+      buildSequence: [{ status: "started", runId: "run-b", branch: "fx/issue-7" }, { status: "refused", reason: "public_repo" }],
+    });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_cancelled" });
+    expect(w.advanceBuild).toHaveBeenCalledTimes(2);
+    expect(events()).not.toContain("advance.build_restarted");
+  });
+
+  it("a build cancelled for any other reason is never restarted", async () => {
+    const w = setup({ item: AT_SPEC, buildOutcomes: [{ status: "cancelled", done: true, envelope: null }] });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_cancelled" });
+    expect(w.advanceBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("the workflow's placement constants are the worker's", async () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "workItemAdvance.ts"), "utf8");
+    const workerSource = readFileSync(join(here, "../../../packages/worker/src/advance.ts"), "utf8");
+    expect(workerSource).toContain("export const PLACEMENT_RESTARTS_MAX = 3;");
+    expect(workerSource).toContain('const PLACEMENT_CHANGED = "placement_changed";');
+    expect(source).toContain("const PLACEMENT_RESTARTS_MAX = 3;");
+    expect(source).toContain('const PLACEMENT_CHANGED = "placement_changed";');
   });
 
   it("the log says when the executor left no summary, and never carries it when it did", async () => {

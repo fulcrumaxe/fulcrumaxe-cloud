@@ -4,7 +4,7 @@ import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
-import { isRunnerMode, runsInOurSandbox } from "@fx/runner";
+import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { sanitize } from "@fx/trust";
 import { agentOutputBlock } from "../plan/envelope.js";
@@ -153,7 +153,7 @@ interface BuildFacts {
 async function readFacts(pool: Pool, accountId: string, workItemId: string): Promise<BuildFacts | null> {
   return withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<BuildFacts>(
-      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, r.execution_mode
+      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
@@ -198,7 +198,7 @@ export async function startBuildForItem(
   if (facts.stage !== "spec_ready" && facts.stage !== "needs_human" && facts.stage !== "in_progress") return { status: "refused", reason: `stage_${facts.stage}` };
 
   const number = Number(facts.gh_number);
-  // The prompt is built for the mode read here; the start refuses `execution_mode_changed` if the repository's mode is different by then.
+  // The prompt is built for the item's EFFECTIVE mode (its placement, else the repository's; D#599 PL-2); the start refuses `execution_mode_changed` if that is different by then.
   const executionMode = facts.execution_mode ?? "sandbox";
   // D#6 R4d-5a (C34 section 2.1): a runner build is checked against the Spec's own file list at done, so a Spec with no readable list is refused HERE, before any
   // run exists: nothing is recorded, no job is issued, the item stays where it is, and the customer's machine spends nothing. It is the row `readFacts` just read

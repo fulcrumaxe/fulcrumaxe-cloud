@@ -77,10 +77,11 @@ describe("runner_verified mode [pg]", () => {
       const issuer = createFakeJobIssuer();
       const alone = new RunnerTarget({ limits: createFakeRunnerLimits(), pool: db.runWriterPool, issuer, visibility: createFakeVisibility("private") }, "runner_verified");
       const w = await verifiedRepo();
-      const result = await startAgentRun(db.runWriterPool, { runner_verified: alone }, input(w, role));
-      expect(result).toMatchObject({ status: "refused_spend", reason: "verified_review_not_wired" });
+      // D#599 PL-2: the refusal is now decided before the run's row exists, so the start throws and writes nothing; `admit` keeps the same refusal as a backstop.
+      await expect(startAgentRun(db.runWriterPool, { runner_verified: alone }, input(w, role))).rejects.toMatchObject({ code: "run_precheck_refused", reason: "verified_review_not_wired" });
+      expect((await db.admin.query("SELECT count(*)::int AS n FROM agent_runs WHERE account_id = $1", [w.accountId])).rows[0].n).toBe(0);
+      expect(await alone.admit({ id: randomUUID(), accountId: w.accountId, repoId: w.repoId, role, product: "team", roleCard: "card", prompt: "prompt", model: "haiku-4.5", capUsd: 5, spend: { plan: "starter", estimateComputeUsd: 1, trigger: "foreground" } }, undefined as never)).toEqual({ admitted: false, reason: "verified_review_not_wired" });
       expect(issuer.calls).toEqual([]);
-      expect(await runRow(result.id)).toMatchObject({ status: "refused_spend", failure_reason: "verified_review_not_wired", job_signed: null });
     },
   );
 

@@ -14,6 +14,7 @@ export * from "./hookChannel.js";
 export * from "./executionTarget.js";
 export * from "./runnerModes.js";
 export * from "./runnerOnline.js";
+export * from "./effectiveMode.js";
 export * from "./runLimitDecision.js";
 export * from "./sandboxRuntime.js";
 export { BACKENDS, CLAUDE_CODE_BACKEND } from "./backends.js";

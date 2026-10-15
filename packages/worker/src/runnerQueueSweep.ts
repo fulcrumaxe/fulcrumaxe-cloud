@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_QUEUE_TTL_MS, isRunnerMode, writeRunStatus } from "@fx/runner";
+import { RUNNER_QUEUE_TTL_MS, effectiveModeSql, isRunnerMode, writeRunStatus } from "@fx/runner";
 
 /**
  * D#6 R2b (correction C12 sections 2.9 and 5): the runner queue sweep. A run for a `runner_local` repo waits in `pending`
@@ -14,11 +14,14 @@ import { RUNNER_QUEUE_TTL_MS, isRunnerMode, writeRunStatus } from "@fx/runner";
  * A run that has no job yet falls back to `created_at` plus the queue time, so a run whose job was never written is still
  * cleaned up.
  *
- * Race backstop (correction C24 section 2): switching a repo off `runner_local` cancels its pending runner runs in the switch's own
- * transaction, but a dispatch that read the old mode can insert one just after the switch commits. So each tick also cancels,
- * whatever the run's age, a pending runner run whose repo is now in another mode (`sandbox`), with the failure reason
- * `execution_mode_changed` and through the same writer: it would otherwise wait out its 72 hours, never claimed. A run whose repo
- * row is gone is not touched here (no mode change ended it; its queue time does). Only runs the lister returns are looked at, and
+ * Race backstop (correction C24 section 2, reworked for D#599 PL-2): switching a repo off a runner cancels its pending runner runs in the
+ * switch's own transaction, but a dispatch that read the old side can insert one just after the switch commits (or an item can move to the
+ * cloud under a pending run). The claim hands a run out only while the EFFECTIVE mode of its item and repository (placement, else the repo's
+ * mode; an item placed on a runner on a sandbox repo is `runner_local`) is a runner mode, so each tick cancels, whatever the run's age, a
+ * pending runner run for which that is no longer true, or whose own recorded mode is not a runner mode, or a `runner_verified` run whose
+ * repo is no longer on a runner at all, with the failure reason `execution_mode_changed` and through the same writer. A move between the two
+ * runner modes cancels nothing. A run whose repo row is gone is not touched here (its queue time ends it). Only runs the lister returns are
+ * looked at, and
  * the lister is oldest first and limited to 50, so a run behind 50 older waiting runs is reached once those are claimed or end.
  *
  * Requeue is the existing `retry_run` (no new path). A retry of a run that ended this way keeps the same model (C12 A5; the
@@ -78,10 +81,14 @@ export function createRunnerQueueSweeper(pool: Pool, deps: RunnerQueueSweepDeps 
       for (const row of rows) {
         try {
           const state = await withTenant(pool, row.account_id, async (client) => {
-            const found = await client.query<{ status: string; expires_at: string | null; repo_mode: string | null }>(
+            const found = await client.query<{ status: string; expires_at: string | null; run_mode: string | null; repo_mode: string | null; effective_mode: string | null }>(
               `SELECT a.status, a.job_signed #>> '{job,expires_at}' AS expires_at,
-                      (SELECT g.execution_mode FROM repos g WHERE g.id = a.dispatch_repo_id AND g.account_id = a.account_id) AS repo_mode
-                 FROM agent_runs a WHERE a.id = $1 AND a.account_id = $2`,
+                      a.execution_mode AS run_mode, r.execution_mode AS repo_mode,
+                      CASE WHEN r.id IS NULL THEN NULL ELSE ${effectiveModeSql("w", "r")} END AS effective_mode
+                 FROM agent_runs a
+                 LEFT JOIN repos r ON r.account_id = a.account_id AND r.id = a.dispatch_repo_id
+                 LEFT JOIN work_items w ON w.account_id = a.account_id AND w.id = a.work_item_id AND w.repo_id = r.id
+                WHERE a.id = $1 AND a.account_id = $2`,
               [row.run_id, row.account_id],
             );
             return found.rows[0];
@@ -90,7 +97,12 @@ export function createRunnerQueueSweeper(pool: Pool, deps: RunnerQueueSweepDeps 
             result.skipped++;
             continue;
           }
-          if (state.repo_mode !== null && !isRunnerMode(state.repo_mode)) {
+          // Same test the claim applies: where the run's item and repository now say it goes. A run whose repo row is gone is not touched here.
+          const leftRunner =
+            (state.run_mode !== null && !isRunnerMode(state.run_mode)) ||
+            (state.effective_mode !== null && !isRunnerMode(state.effective_mode)) ||
+            (state.run_mode === "runner_verified" && state.repo_mode !== null && !isRunnerMode(state.repo_mode));
+          if (leftRunner) {
             const moved = await writeRunStatus(pool, { accountId: row.account_id, runId: row.run_id, from: "pending", to: "cancelled", failureReason: "execution_mode_changed" });
             if (moved.updated) result.cancelled++;
             else result.skipped++;

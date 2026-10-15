@@ -264,6 +264,30 @@ describe("execution mode and the auto-merge opt-in [pg] (criterion 4, C12 sectio
       expect([...SETTABLE_MODES]).toEqual(["sandbox", "runner_local", "runner_verified"]);
     });
 
+    // D#599 PL-2: the accepted wording is stored with the switch, and only while the repo is on runner_verified.
+    it("stores the accepted wording's hash with the switch, clears it on leaving, and stores it again on a return; a repo already there (switched before the hash was stored) keeps none", async () => {
+      const f = await fresh();
+      const id = await repo(f, "runner_local");
+      await key(f, "ok");
+      const stored = async (): Promise<string | null> => (await h.admin.query("SELECT verified_copy_sha256 AS h FROM repos WHERE id = $1", [id])).rows[0].h;
+      expect(await stored()).toBeNull();
+      expect((await call(f, f.o1, id, VERIFIED())).status).toBe(200);
+      expect(await stored()).toBe(CLOUD_VERIFIED_COPY_SHA256);
+      expect((await call(f, f.o1, id, { mode: "runner_local", confirm_repo: NAME })).status).toBe(200);
+      expect(await stored()).toBeNull();
+      expect((await call(f, f.o1, id, VERIFIED())).status).toBe(200);
+      expect(await stored()).toBe(CLOUD_VERIFIED_COPY_SHA256);
+      expect((await call(f, f.o1, id, { mode: "sandbox", confirm_repo: NAME })).status).toBe(200);
+      expect(await stored()).toBeNull();
+      // A refused opt-in (the wording changed) stores nothing.
+      expect(code(await call(f, f.o1, id, VERIFIED(NAME, "0".repeat(64))))).toBe("copy_changed");
+      expect(await stored()).toBeNull();
+      // A repo put on runner_verified before the hash existed has none, and the no-op answer does not invent one.
+      const old = await repo(f, "runner_verified");
+      expect(await call(f, f.o1, old, { mode: "runner_verified", confirm_repo: NAME })).toMatchObject({ status: 200, body: { changed: false } });
+      expect((await h.admin.query("SELECT verified_copy_sha256 AS h FROM repos WHERE id = $1", [old])).rows[0].h).toBeNull();
+    });
+
     it("with a connected key, the exact name and the shipped hash: the repo is on runner_verified, with one audit row naming the old and new mode", async () => {
       const f = await fresh();
       const id = await repo(f, "runner_local");

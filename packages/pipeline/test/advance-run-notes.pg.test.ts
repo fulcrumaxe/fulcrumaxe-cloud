@@ -186,3 +186,27 @@ describe("accepted run notes at the build boundary (D#597 CC-3)", () => {
     expect(out).toMatchObject({ status: "started" });
   });
 });
+
+// D#599 PL-2: the build's prompt and its expected mode are for the item's EFFECTIVE mode (its placement, else the repository's).
+describe("the build follows the item's placement [pg]", () => {
+  it("an item placed on the runner is built for a runner (a Spec without a file list is refused before any run), and one placed in the cloud on a runner repo is built for the sandbox", async () => {
+    const toRunner = await atSpecReady();
+    await h.admin.query("UPDATE work_items SET placement = 'runner' WHERE id = $1", [toRunner.workItemId]);
+    expect(await build(toRunner, randomUUID())).toEqual({ status: "refused", reason: "spec_has_no_file_list" });
+    expect(toRunner.world.requests).toEqual([]);
+    // With a readable list the same item starts, and the request names the mode the prompt was built for.
+    await h.admin.query("UPDATE spec_versions SET frontmatter = $2::jsonb WHERE work_item_id = $1", [toRunner.workItemId, JSON.stringify({ acceptance_files: ["src/a.ts"] })]);
+    expect(await build(toRunner, randomUUID())).toMatchObject({ status: "started" });
+    expect(toRunner.world.requests.at(-1)).toMatchObject({ expectedExecutionMode: "runner_local" });
+
+    const toCloud = await atSpecReady();
+    await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = (SELECT repo_id FROM work_items WHERE id = $1)", [toCloud.workItemId]);
+    await h.admin.query("UPDATE work_items SET placement = 'cloud' WHERE id = $1", [toCloud.workItemId]);
+    expect(await build(toCloud, randomUUID())).toMatchObject({ status: "started" });
+    expect(toCloud.world.requests.at(-1)).toMatchObject({ expectedExecutionMode: "sandbox" });
+
+    const follows = await atSpecReady();
+    expect(await build(follows, randomUUID())).toMatchObject({ status: "started" });
+    expect(follows.world.requests.at(-1)).toMatchObject({ expectedExecutionMode: "sandbox" });
+  });
+});

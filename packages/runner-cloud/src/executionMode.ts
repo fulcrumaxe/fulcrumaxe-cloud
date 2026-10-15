@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { isRunnerMode, recordRunStatusMove, type FailureReason } from "@fx/runner";
+import { CLOUD_VERIFIED_COPY_SHA256, isRunnerMode, recordRunStatusMove, type FailureReason } from "@fx/runner";
 import { setAsideSandboxAllowances } from "./sandboxAllowances.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
@@ -16,8 +16,11 @@ export const LOCAL_AUTO_MERGE_COPY_SHA256 = createHash("sha256").update(COPY.loc
 /** What a repo's visibility read can say. Anything that is not a clear "private" is not enough to put a repo on a runner. */
 export type RepoVisibilityAnswer = "private" | "public" | "unknown";
 
-/** The sha256 of the cloud-verified string the server ships; sent back by a client that showed it (D#6 R5b-2b-ii). */
-export const CLOUD_VERIFIED_COPY_SHA256 = createHash("sha256").update(COPY.cloudVerified, "utf8").digest("hex");
+/**
+ * The sha256 of the cloud-verified string the server ships; sent back by a client that showed it (D#6 R5b-2b-ii). Defined in `@fx/runner`
+ * (D#599 PL-2), where the run-creation guard compares the repo's stored copy of it with the current one; re-exported here for this package.
+ */
+export { CLOUD_VERIFIED_COPY_SHA256 };
 
 export const SETTABLE_MODES = ["sandbox", "runner_local", "runner_verified"] as const;
 type SettableMode = (typeof SETTABLE_MODES)[number];
@@ -181,12 +184,17 @@ export async function setExecutionMode(deps: RunnerCloudDeps, principal: Session
         const repo = await loadRepo(client, repoId);
         confirmed(repo, parsed.confirmRepo);
         if (repo.execution_mode === parsed.mode) return { repo, autoMerge: repo.auto_merge, changed: false };
-        if (parsed.mode === "runner_verified") await requireUsableKey(client, principal.accountId);
+        if (parsed.mode === "runner_verified") {
+          // Checked again under the lock: the repo may have changed since the first read, and the wording the person saw is what gets stored.
+          if (parsed.copySha256 !== CLOUD_VERIFIED_COPY_SHA256) throw new RunnerHttpError(409, "copy_changed", "the wording changed; reload and confirm again");
+          await requireUsableKey(client, principal.accountId);
+        }
         let autoMergeOff = false;
         if (repo.execution_mode === "runner_local") {
           autoMergeOff = (await client.query<{ changed: boolean }>("SELECT repo_local_review_optin_set($1, false) AS changed", [repoId])).rows[0]?.changed === true;
         }
-        await client.query("UPDATE repos SET execution_mode = $2, updated_at = now() WHERE id = $1", [repoId, parsed.mode]);
+        // D#599 PL-2: opting in stores the wording the person accepted (a run in this mode starts only while it is still the current one); every other mode stores none.
+        await client.query("UPDATE repos SET execution_mode = $2, verified_copy_sha256 = $3, updated_at = now() WHERE id = $1", [repoId, parsed.mode, parsed.mode === "runner_verified" ? CLOUD_VERIFIED_COPY_SHA256 : null]);
         // Leaving the runner modes (to sandbox) ends the repo's queued runner runs with it. The definer moves them (the web tier's login cannot write
         // a run's status) and answers their ids; the events are written here, by the code every status change uses, in this transaction.
         let cancelled = 0;
