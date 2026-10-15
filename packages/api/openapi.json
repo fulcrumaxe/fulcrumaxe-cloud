@@ -160,6 +160,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "requestBody": {
           "required": true,
           "content": {
@@ -283,6 +284,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "responses": {
           "200": {
             "description": "Pause the account (owner or admin, session only)",
@@ -396,6 +398,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "responses": {
           "200": {
             "description": "Resume a paused account (owner or admin, session only)",
@@ -1730,6 +1733,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -3937,6 +3941,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -4083,6 +4088,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -4229,6 +4235,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -4375,6 +4382,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -4505,6 +4513,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -10274,6 +10283,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "requestBody": {
           "required": true,
           "content": {
@@ -12376,6 +12386,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -12527,6 +12538,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -12673,6 +12685,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "required",
         "parameters": [
           {
             "name": "id",
@@ -12819,6 +12832,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -13258,6 +13272,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "required",
         "requestBody": {
           "required": true,
           "content": {
@@ -14178,6 +14193,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "requestBody": {
           "required": true,
           "content": {
@@ -14818,6 +14834,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -15192,6 +15209,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -18200,6 +18218,7 @@
             ]
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -18697,6 +18716,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",
@@ -18960,6 +18980,7 @@
             "session": []
           }
         ],
+        "x-fx-idempotency": "optional",
         "parameters": [
           {
             "name": "id",

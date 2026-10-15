@@ -201,6 +201,8 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
         [kind]: kind === "token" && route.scope && !route.tokenSelfOnly ? [route.scope] : [],
       })),
       ...(route.tokenSelfOnly ? { "x-fx-token-self-only": true } : {}),
+      // Whether the route takes an `Idempotency-Key` ("required" or "optional"); absent means it rejects the header.
+      ...(route.idempotency !== "never" ? { "x-fx-idempotency": route.idempotency } : {}),
       ...(parameters.length > 0 ? { parameters } : {}),
       ...(route.bodySchema
         ? {
