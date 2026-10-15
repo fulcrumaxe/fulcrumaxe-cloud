@@ -3,8 +3,9 @@
 // The environment is never copied, listed or passed on (test/cli/cli.test.ts checks this file). It is also where the real process
 // start, the real signal source and this program's own path are handed to `run`, `doctor` and `service`, so that nothing under
 // src/ has to name them. The two Anthropic variables reach `doctor` as names only, never as values.
-import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { userInfo } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,8 @@ import { runCli } from "../src/cli.js";
 import { RUNNER_VERSION } from "../src/version.js";
 import { API_KEY_MAX_BYTES } from "../src/credentials.js";
 import { readSecret } from "../src/secretInput.js";
+import { CODE_MAX_BYTES } from "../src/codeSource.js";
+import { CliError } from "../src/cliError.js";
 import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
@@ -51,6 +54,14 @@ const updateHost = {
 // Run from the single-executable release build (scripts/build-sea.mjs), the program is process.execPath itself and there is no script file to name:
 // the bundle is CommonJS (no top-level await, no import.meta), so this file is one promise chain and the script path is only looked up when it exists.
 const sea = isSea();
+// The account this runs as, for the lingering advice `doctor` prints; the account database, not the environment.
+const accountName = () => {
+  try {
+    return userInfo().username;
+  } catch {
+    return undefined;
+  }
+};
 const scriptPath = () => realpathSync(fileURLToPath(import.meta.url));
 
 runCli({
@@ -65,6 +76,12 @@ runCli({
   xdgCacheHome: process.env.XDG_CACHE_HOME,
   // The one place standard input is touched: the API key is read here, never taken from the command line.
   readSecret: () => readSecret(process.stdin, (text) => process.stderr.write(text), API_KEY_MAX_BYTES),
+  // Likewise the registration code or token (`register --code-stdin`): never taken from the command line.
+  readCode: () =>
+    readSecret(process.stdin, (text) => process.stderr.write(text), CODE_MAX_BYTES, {
+      prompt: "Registration code or token (what you type is not shown): ",
+      tooLong: () => new CliError("the registration code or token is too long", 2),
+    }),
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
   host: {
@@ -92,7 +109,7 @@ runCli({
       }
     },
   },
-  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
+  doctorHost: { platform: process.platform, shellVars, engine, home: process.env.HOME, shell: process.env.SHELL, xdgCacheHome: process.env.XDG_CACHE_HOME, uid: process.getuid?.(), xdgRuntimeDir: process.env.XDG_RUNTIME_DIR, xdgConfigHome: process.env.XDG_CONFIG_HOME, userName: accountName(), sandbox: createSandboxHost(engine.captureWithStderr), update: { version: RUNNER_VERSION, execPath } },
   vmHost: vmBuildHost,
   serviceHost: {
     home: process.env.HOME,
@@ -101,6 +118,31 @@ runCli({
     command: sea ? [process.execPath, "run"] : [process.execPath, scriptPath(), "run"],
     path: process.env.PATH,
     execPath,
+    // Only the account list is read, for the check that a system service's account exists and is not root (Linux).
+    passwd: () => {
+      try {
+        return readFileSync("/etc/passwd", "utf8");
+      } catch {
+        return undefined;
+      }
+    },
+    // What the check on a system service's program location reads: the mode bits and link-ness of one path, never followed.
+    lstat: (file) => {
+      try {
+        const info = lstatSync(file);
+        return { mode: info.mode, isSymbolicLink: info.isSymbolicLink() };
+      } catch {
+        return undefined;
+      }
+    },
+    // macOS only, for the same account check: the fixed argument list of the directory service tool, no shell and no inherited environment.
+    accountUid: (name) => {
+      const found = spawnSync("/usr/bin/dscl", [".", "-read", `/Users/${name}`, "UniqueID"], { encoding: "utf8", env: {}, timeout: 10000 });
+      if (found.error !== undefined || found.status === null) return undefined;
+      if (found.status !== 0) return /eDSRecordNotFound|DS Error: -14136/.test(`${found.stdout}${found.stderr}`) ? null : undefined;
+      const match = /^UniqueID:\s*(\d+)\s*$/m.exec(found.stdout);
+      return match === null ? undefined : Number(match[1]);
+    },
   },
 }).then((code) => {
   process.exitCode = code;

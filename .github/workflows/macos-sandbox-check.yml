@@ -42,6 +42,9 @@ jobs:
           FX_B10_CHECK: "1"
           FX_B10_OUT: ${{ runner.temp }}/b10-macos-15
         run: pnpm --filter "@fulcrumaxe/fx-runner" exec vitest run test/canary --no-file-parallelism
+      - name: Lint the system service files with plutil
+        if: always()
+        run: pnpm --filter "@fulcrumaxe/fx-runner" exec vitest run test/commands/serviceSystem.test.ts
       - name: Job summary
         if: always()
         env:
