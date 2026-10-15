@@ -206,6 +206,44 @@ pins sha256 hashes of already-applied migration files, so an edit to a
 migration that has already shipped is caught as a schema drift rather than
 silently changing what a fresh database ends up with.
 
+### The Neon-shape check and its per-migration entries
+
+`bash packages/db/scripts/test-neon-shape.sh` migrates a real throwaway
+cluster as a non-superuser owner and checks the result (see
+`docs/ops/hosted-postgres.md`). What it needs to know about one migration
+lives in one data file, `packages/db/neon-shape.d/<migration>.conf`, named like
+the migration (`0798_foo.sql` has `0798_foo.conf`). A migration PR that creates
+a role, a SECURITY DEFINER function owned by a role other than `platform_ops`,
+or a table that needs a shape check adds exactly one new file there. It never
+edits another migration's entry, so two migration PRs do not conflict.
+
+Entries are data only. They are never sourced or evaluated: every line is
+checked against an allowlist before anything is registered, and a refused line
+is named by file and line. The directory holds only regular files named
+`<NNNN>_<name>.conf` (no symlinks, nothing else). One directive per line, `#`
+comments allowed:
+
+- `role <role>...` for each role the migration creates. The script derives the
+  role set from the migrated cluster and fails if a role has no entry, has two,
+  or an entry names a role no migration created.
+- `exempt <label> <check_fn> [arg...]` for a definer exemption: `<check_fn>
+  fx_neon [arg...]` prints the oid(s) of the function(s) the role may own, or
+  `SHAPE_FAIL:<why>`. `exempt_single` requires exactly one oid.
+- `check <check_fn> [arg...]` for a role-grant or table-shape check
+  (`check_everywhere` also runs it on the upgrade-path and D#94 databases).
+- `late` when the migration must be held back on the upgrade path.
+- `functions <PREFIX> <name>...` and `privilege <PREFIX> <word>...` (one
+  privilege per line, e.g. `privilege MEMORY_DEFINER column memory_entries.id
+  SELECT`) for `check_sandbox_net_role_shape`; the privilege count is computed
+  from the list.
+
+The `check_*` functions live in `test-neon-shape.sh`, not in entries. A
+migration that needs a new check function adds the function to the script and
+names it in its entry. `test-neon-shape-entries.sh` is the loader's self-test
+(it runs first and proves hostile entries are refused). Nothing is counted by
+hand: the script prints the counts it loaded. The header of
+`test-neon-shape.sh` and `neon-shape-entries.sh` are the full reference.
+
 ## Known gaps
 
 None found in this package's own scope at this HEAD.

@@ -14,6 +14,49 @@
 # description's "fails on main" proof (criterion 1), which points this
 # same script at an unmodified checkout of origin/main's migrations
 # instead of ever editing main itself.
+#
+# PER-MIGRATION ENTRIES. Everything this script needs to know about one
+# migration lives in ONE data file, packages/db/neon-shape.d/<migration>.conf (same
+# base name as packages/db/migrations/<migration>.sql). A migration PR that needs
+# a shape check adds its own new file and never edits this script or another
+# migration's entry, so two migration PRs cannot conflict on a shared line.
+#
+# Entries are data, not code: they are never sourced or evaluated. Every line of
+# every entry is checked against a strict allowlist before anything is
+# registered, and a refused line is named by file and line. The directory may
+# hold nothing but regular files named <NNNN>_<name>.conf (no symlinks, no
+# other names), and an entry whose migration does not exist fails the run. The
+# grammar and the loader are in neon-shape-entries.sh; its self-test
+# (test-neon-shape-entries.sh) runs first and proves hostile entries are refused.
+#
+#   role <role>...                the roles this migration creates. Derived, not
+#                                 counted: the roles in the migrated cluster
+#                                 (apart from postgres, neon_superuser and
+#                                 fx_migrator) must equal the union of every
+#                                 entry's roles, each declared exactly once.
+#   exempt <label> <check_fn> [arg...]
+#                                 a SECURITY DEFINER exemption: runs
+#                                 `<check_fn> fx_neon [arg...]`, which prints the
+#                                 oid(s) of the function(s) the role may own (or
+#                                 SHAPE_FAIL:<why>). Those oids are what the
+#                                 "owned by platform_ops" scan lets through.
+#                                 exempt_single requires exactly one oid.
+#   check <check_fn> [arg...]     runs `<check_fn> fx_neon [arg...]` (role grants,
+#                                 table shape): it exits 1 naming what is wrong.
+#   check_everywhere <check_fn> [arg...]
+#                                 the same, and also on the upgrade-path and
+#                                 D#94 databases.
+#   late                          hold this migration back on the upgrade path
+#                                 (it lands after 0200_partners.sql on real
+#                                 databases; see the upgrade-path comment below).
+#   functions <PREFIX> <name>...  / privilege <PREFIX> <word>... : the lists
+#                                 check_sandbox_net_role_shape reads
+#                                 (<PREFIX>_FUNCTIONS, <PREFIX>_PRIVILEGES).
+#
+# The check_* functions live in THIS script; an entry only registers them. A
+# migration that needs a new check function adds the function here and names it
+# in its entry. The counts printed by the "neon-shape entries" line are computed
+# from what was loaded; none is written down anywhere.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # packages/db
@@ -25,6 +68,20 @@ MIGRATIONS_DIR="${MIGRATIONS_DIR:-$(pwd)/migrations}"
 MIGRATE_RUNNER_TS="$(pwd)/scripts/neon-shape-migrate.ts"
 CATALOG_SQL="$(pwd)/scripts/neon-shape-catalog.sql"
 
+# 0. The per-migration entries (see the header): proven hostile-input safe first, then validated and loaded
+#    before any database work. Nothing is sourced; a malformed entry fails here.
+# shellcheck source=packages/db/scripts/neon-shape-entries.sh
+source "$(pwd)/scripts/neon-shape-entries.sh"
+bash "$(pwd)/scripts/test-neon-shape-entries.sh"
+NS_ENTRY_DIR="$(pwd)/neon-shape.d"
+NS_STRICT=0
+if [ "$MIGRATIONS_DIR" = "$(pwd)/migrations" ]; then
+  # With MIGRATIONS_DIR pointed at another chain (see the header), entries for migrations that chain lacks are
+  # skipped. Against this checkout's own migrations an entry with no migration is a typo or a stale file.
+  NS_STRICT=1
+fi
+ns_load_entries "$NS_ENTRY_DIR" "$MIGRATIONS_DIR" "$NS_STRICT"
+
 PG_TMP_DIR="$(mktemp -d)"
 PGDATA_DIR="$PG_TMP_DIR/data"
 # An OS-assigned free port (bind 0, read it back, release it), not a guessed range. The window before
@@ -32,8 +89,11 @@ PGDATA_DIR="$PG_TMP_DIR/data"
 PG_PORT="$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
 
 cleanup() {
+  local rc=$?
   pg_ctl -D "$PGDATA_DIR" -m fast stop >/dev/null 2>&1 || true
   rm -rf "$PG_TMP_DIR"
+  # An `exit 0` anywhere before the final step must not pass the gate.
+  ns_exit_guard "$rc" || exit 1
 }
 trap cleanup EXIT
 
@@ -163,7 +223,7 @@ echo "==> migrating fx_super as postgres (superuser, unchanged path)"
 echo "==> diffing neon-shape-catalog.sql between fx_neon and fx_super"
 "${PSQL[@]}" -U fx_migrator -d fx_neon -A -F'|' -f "$CATALOG_SQL" > "$PG_TMP_DIR/catalog_neon.txt"
 "${PSQL[@]}" -U postgres -d fx_super -A -F'|' -f "$CATALOG_SQL" > "$PG_TMP_DIR/catalog_super.txt"
-if ! diff -u "$PG_TMP_DIR/catalog_neon.txt" "$PG_TMP_DIR/catalog_super.txt"; then
+if ! command diff -u "$PG_TMP_DIR/catalog_neon.txt" "$PG_TMP_DIR/catalog_super.txt"; then
   echo "neon-shape: schema parity check FAILED (fx_neon vs fx_super, see diff above)" >&2
   exit 1
 fi
@@ -1064,22 +1124,6 @@ check_sandbox_net_role_shape() {
     exit 1
   fi
 }
-
-# The two roles of 0760 and what each may hold and own (see the migration header).
-SANDBOX_EPHEMERAL_REAPER_FUNCTIONS="'sandbox_reap_ephemeral_state', 'sandbox_reap_candidates_ephemeral', 'sandbox_reap_claim_ephemeral'"
-SANDBOX_EPHEMERAL_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column agent_runs.compute_settle_due_at SELECT','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','column ledger.account_id SELECT','column ledger.run_id SELECT','column ledger.kind SELECT','table sandbox_reaps SELECT','table sandbox_reaps INSERT','table sandbox_reaps UPDATE','schema public USAGE'"
-SANDBOX_INVENTORY_WRITER_FUNCTIONS="'sandbox_inventory_write'"
-SANDBOX_INVENTORY_WRITER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.updated_at SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','table sandbox_inventory SELECT','table sandbox_inventory INSERT','table sandbox_inventory DELETE','schema public USAGE'"
-
-# The two roles of 0761 and what each may hold and own (see the migration header).
-SANDBOX_IDLE_REAPER_FUNCTIONS="'sandbox_reap_idle_state', 'sandbox_reap_candidates_idle', 'sandbox_reap_claim_idle'"
-SANDBOX_IDLE_REAPER_PRIVILEGES="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.status SELECT','column agent_runs.sandbox_name SELECT','column agent_runs.dispatch_repo_id SELECT','column agent_runs.dispatch_pr_number SELECT','column agent_runs.created_at SELECT','column agent_runs.updated_at SELECT','column agent_runs.ended_at SELECT','column agent_runs.compute_settle_due_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.gh_number SELECT','column work_items.stage SELECT','column work_items.updated_at SELECT','column run_action_requests.account_id SELECT','column run_action_requests.target_id SELECT','column run_action_requests.state SELECT','column spend_reservations.account_id SELECT','column spend_reservations.run_id SELECT','column spend_reservations.state SELECT','column spend_reservations.budget SELECT','table sandbox_reaps SELECT','table sandbox_reaps INSERT','table sandbox_reaps UPDATE','schema public USAGE'"
-SANDBOX_CLAIM_GUARD_FUNCTIONS="'sandbox_reap_claimed'"
-SANDBOX_CLAIM_GUARD_PRIVILEGES="'column sandbox_reaps.sandbox_name SELECT','column sandbox_reaps.state SELECT','column sandbox_reaps.claimed_at SELECT','schema public USAGE'"
-
-# The role of 0762 and what it may hold and own (see the migration header).
-SANDBOX_REAP_AUDIT_WRITER_FUNCTIONS="'sandbox_reap_settings_audit_write'"
-SANDBOX_REAP_AUDIT_WRITER_PRIVILEGES="'table sandbox_reap_settings_audit INSERT','column sandbox_reap_settings.mode SELECT','column sandbox_reap_settings.updated_by SELECT'"
 
 # D#2 SANDBOX-REAPER-2 (0761): the one SECURITY DEFINER owned by sandbox_claim_guard (sandbox_reap_claimed(text)), matched by exact
 # signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp whose ACL holds platform_ops (the owner of
@@ -2583,24 +2627,6 @@ check_runner_capacity_table_shape() {
   fi
 }
 
-# D#605 FL-1 (0783): the two roles that write runner_facts and runner_settings, what each may hold and own (see the migration header), the exact
-# signature, search_path and ACL of the one SECURITY DEFINER function each owns, and the shape of the two tables. Each check is a no-op when its role or table does not exist.
-RUNNER_FACTS_DEFINER_FUNCTIONS="'runner_facts_record'"
-RUNNER_FACTS_DEFINER_PRIVILEGES="'column runner_facts.runner_id SELECT','column runner_facts.account_id SELECT','column runner_facts.os SELECT','column runner_facts.arch SELECT','column runner_facts.mem_gb_bucket SELECT','column runner_facts.cpus SELECT','column runner_facts.sandbox_engine SELECT','column runner_facts.reported_at SELECT','column runner_facts.runner_id INSERT','column runner_facts.account_id INSERT','column runner_facts.os INSERT','column runner_facts.arch INSERT','column runner_facts.mem_gb_bucket INSERT','column runner_facts.cpus INSERT','column runner_facts.sandbox_engine INSERT','column runner_facts.reported_at INSERT','column runner_facts.os UPDATE','column runner_facts.arch UPDATE','column runner_facts.mem_gb_bucket UPDATE','column runner_facts.cpus UPDATE','column runner_facts.sandbox_engine UPDATE','column runner_facts.reported_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
-RUNNER_PROVISIONING_DEFINER_FUNCTIONS="'runner_provisioning_token_mint', 'runner_provisioning_token_list', 'runner_provisioning_token_revoke', 'runner_provisioning_token_account', 'runner_provisioning_register', 'runner_provisioning_token_revoke_for_member'"
-RUNNER_PROVISIONING_DEFINER_PRIVILEGES="'column runner_provisioning_tokens.id SELECT','column runner_provisioning_tokens.account_id SELECT','column runner_provisioning_tokens.created_by SELECT','column runner_provisioning_tokens.token_sha256 SELECT','column runner_provisioning_tokens.name SELECT','column runner_provisioning_tokens.labels SELECT','column runner_provisioning_tokens.credential_mode SELECT','column runner_provisioning_tokens.allowed_repo_ids SELECT','column runner_provisioning_tokens.created_at SELECT','column runner_provisioning_tokens.expires_at SELECT','column runner_provisioning_tokens.used_at SELECT','column runner_provisioning_tokens.runner_id SELECT','column runner_provisioning_tokens.first_ip SELECT','column runner_provisioning_tokens.revoked_at SELECT','column runner_provisioning_tokens.revoked_by SELECT','column runner_provisioning_tokens.account_id INSERT','column runner_provisioning_tokens.created_by INSERT','column runner_provisioning_tokens.token_sha256 INSERT','column runner_provisioning_tokens.name INSERT','column runner_provisioning_tokens.labels INSERT','column runner_provisioning_tokens.credential_mode INSERT','column runner_provisioning_tokens.allowed_repo_ids INSERT','column runner_provisioning_tokens.expires_at INSERT','column runner_provisioning_tokens.used_at UPDATE','column runner_provisioning_tokens.runner_id UPDATE','column runner_provisioning_tokens.first_ip UPDATE','column runner_provisioning_tokens.revoked_at UPDATE','column runner_provisioning_tokens.revoked_by UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.revoked_at SELECT','column runners.account_id INSERT','column runners.registered_by INSERT','column runners.public_key_jwk INSERT','column runners.jkt INSERT','column runners.credential_mode INSERT','column runners.isolation INSERT','column runners.allowed_repo_ids INSERT','column runner_settings.runner_id INSERT','column runner_settings.account_id INSERT','column runner_settings.name INSERT','column runner_settings.labels INSERT','column runner_settings.updated_by INSERT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column account_members.role UPDATE','column repos.id SELECT','column repos.account_id SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
-RUNNER_SETTINGS_DEFINER_FUNCTIONS="'runner_settings_apply'"
-RUNNER_SETTINGS_DEFINER_PRIVILEGES="'column runner_settings.runner_id SELECT','column runner_settings.account_id SELECT','column runner_settings.name SELECT','column runner_settings.labels SELECT','column runner_settings.rank SELECT','column runner_settings.paused_at SELECT','column runner_settings.paused_by SELECT','column runner_settings.draining SELECT','column runner_settings.drained_by SELECT','column runner_settings.updated_by SELECT','column runner_settings.updated_at SELECT','column runner_settings.runner_id INSERT','column runner_settings.account_id INSERT','column runner_settings.updated_by INSERT','column runner_settings.name UPDATE','column runner_settings.labels UPDATE','column runner_settings.rank UPDATE','column runner_settings.paused_at UPDATE','column runner_settings.paused_by UPDATE','column runner_settings.draining UPDATE','column runner_settings.drained_by UPDATE','column runner_settings.updated_by UPDATE','column runner_settings.updated_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.revoked_at SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT'"
-RUNNER_NAME_INITIAL_DEFINER_FUNCTIONS="'runner_name_initial'"
-RUNNER_NAME_INITIAL_DEFINER_PRIVILEGES="'column runner_settings.runner_id SELECT','column runner_settings.account_id SELECT','column runner_settings.name SELECT','column runner_settings.runner_id INSERT','column runner_settings.account_id INSERT','column runner_settings.updated_by INSERT','column runner_settings.name UPDATE','column runner_settings.updated_by UPDATE','column runner_settings.updated_at UPDATE','column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.revoked_at SELECT','column runners.created_at SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
-# D#605 FL-8 (0790): the role that changes which repositories a runner covers, and the audit insert 0790 gave runner_settings_definer (the 5 audit_log columns appended above).
-RUNNER_REPOS_DEFINER_FUNCTIONS="'runner_repos_set'"
-RUNNER_REPOS_DEFINER_PRIVILEGES="'column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.allowed_repo_ids SELECT','column runners.revoked_at SELECT','column runners.allowed_repo_ids UPDATE','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT'"
-
-# D#600 CX-2 (0796): the role that writes repo_context_settings (see the migration header): its exact privileges, its one function, and the table's shape.
-REPO_CONTEXT_SETTINGS_DEFINER_FUNCTIONS="'repo_context_settings_apply'"
-REPO_CONTEXT_SETTINGS_DEFINER_PRIVILEGES="'column repo_context_settings.account_id SELECT','column repo_context_settings.repo_id SELECT','column repo_context_settings.memory_slot_bytes SELECT','column repo_context_settings.account_id INSERT','column repo_context_settings.repo_id INSERT','column repo_context_settings.memory_slot_bytes INSERT','column repo_context_settings.updated_by INSERT','column repo_context_settings.memory_slot_bytes UPDATE','column repo_context_settings.updated_by UPDATE','column repo_context_settings.updated_at UPDATE','table repo_context_settings DELETE','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
-
 # Prints the oid(s) of the function(s) <role> owns when each is exactly one of the given signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp,
 # with an ACL that holds app_user and nobody else but the owner, no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
 check_runner_fleet_exception_shape() {
@@ -2946,10 +2972,6 @@ check_memory_exception_shape() {
   echo "$oids"
 }
 
-# D#601 MEM-1 (0793): what memory_definer may hold and own (see the migration header), checked by check_sandbox_net_role_shape.
-MEMORY_DEFINER_FUNCTIONS="'memory_propose', 'memory_write', 'memory_decide', 'memory_edit', 'memory_delete', 'memory_session', 'memory_validate', 'memory_assert_room'"
-MEMORY_DEFINER_PRIVILEGES="'column memory_entries.id SELECT','column memory_entries.account_id SELECT','column memory_entries.scope SELECT','column memory_entries.scope_ref SELECT','column memory_entries.kind SELECT','column memory_entries.body SELECT','column memory_entries.why SELECT','column memory_entries.author_kind SELECT','column memory_entries.provenance SELECT','column memory_entries.status SELECT','column memory_entries.prior_status SELECT','column memory_entries.created_by SELECT','column memory_entries.approved_by SELECT','column memory_entries.approved_at SELECT','column memory_entries.expires_at SELECT','column memory_entries.deleted_at SELECT','column memory_entries.version SELECT','column memory_entries.supersedes_id SELECT','column memory_entries.id INSERT','column memory_entries.account_id INSERT','column memory_entries.scope INSERT','column memory_entries.scope_ref INSERT','column memory_entries.kind INSERT','column memory_entries.body INSERT','column memory_entries.why INSERT','column memory_entries.author_kind INSERT','column memory_entries.provenance INSERT','column memory_entries.status INSERT','column memory_entries.created_by INSERT','column memory_entries.approved_by INSERT','column memory_entries.approved_at INSERT','column memory_entries.expires_at INSERT','column memory_entries.version INSERT','column memory_entries.supersedes_id INSERT','column memory_entries.content_sha256 INSERT','column memory_entries.status UPDATE','column memory_entries.prior_status UPDATE','column memory_entries.approved_by UPDATE','column memory_entries.approved_at UPDATE','column memory_entries.expires_at UPDATE','column memory_entries.deleted_at UPDATE','column memory_entries.updated_at UPDATE','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
-
 # D#601 MEM-1 (0793): the shape of memory_entries. Row security enabled and forced; platform_ops, partner_user and agent_run_writer hold nothing on it;
 # app_user reads and cannot write; the definer cannot delete a row or change what is written once (the text, the hash, the author, the scope); the
 # three SECURITY INVOKER helpers are owned by memory_definer and executable by nobody else (no PUBLIC, no app_user, no platform_ops).
@@ -2986,415 +3008,47 @@ check_memory_table_shape() {
 }
 
 # criterion 8: every SECURITY DEFINER function in public is owned by
-# platform_ops, except the named exemptions above -- the DS-0a eraser
-# (discussion_eraser) and the four D#7 receipt_writer definers
-# (decision_receipt_write, decision_receipt_write_class1, decision_ask_raise, decision_ask_answer), each admitted
-# only when its own shape check passes; fx_migrator does not INHERIT any
-# runtime role, including discussion_eraser and receipt_writer.
-EXEMPT_RESULT="$(check_eraser_exception_shape fx_neon)"
-if [[ "$EXEMPT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${EXEMPT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-EXEMPT_FILTER="${EXEMPT_RESULT:-0}"
-if ! [[ "$EXEMPT_FILTER" =~ ^[0-9]+$ ]]; then
-  echo "neon-shape: internal error -- exempt function oid was not numeric: $EXEMPT_RESULT" >&2
-  exit 1
-fi
-RECEIPT_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_receipt_write text,text,text,text,integer,jsonb,uuid,uuid,integer)"
-RECEIPT1_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_receipt_write_class1 text,text,text,integer,jsonb,uuid,uuid,integer)"
-ASK_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_ask_raise text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text)"
-ASK_ANSWER_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_ask_answer uuid,text,uuid)"
-for RESULT in "$RECEIPT_RESULT" "$RECEIPT1_RESULT" "$ASK_RESULT" "$ASK_ANSWER_RESULT"; do
-  if [[ "$RESULT" == SHAPE_FAIL:* ]]; then
-    echo "neon-shape: ${RESULT#SHAPE_FAIL:}" >&2
-    exit 1
-  fi
-  if [ -n "$RESULT" ] && ! [[ "$RESULT" =~ ^[0-9]+$ ]]; then
-    echo "neon-shape: internal error -- receipt exempt function oid was not numeric: $RESULT" >&2
-    exit 1
-  fi
-done
-METERING_RESULT="$(check_metering_reporter_exception_shape fx_neon)"
-if [[ "$METERING_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${METERING_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$METERING_RESULT" ] && ! [[ "$METERING_RESULT" =~ ^[0-9]+$ ]]; then
-  echo "neon-shape: internal error -- metering exempt function oid was not numeric: $METERING_RESULT" >&2
-  exit 1
-fi
-ERROR_EVENT_RESULT="$(check_error_event_writer_exception_shape fx_neon)"
-if [[ "$ERROR_EVENT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${ERROR_EVENT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$ERROR_EVENT_RESULT" ] && ! [[ "$ERROR_EVENT_RESULT" =~ ^[0-9]+$ ]]; then
-  echo "neon-shape: internal error -- error_event exempt function oid was not numeric: $ERROR_EVENT_RESULT" >&2
-  exit 1
-fi
-GUARD_DEFINER_RESULT="$(check_guard_definer_exception_shape fx_neon)"
-if [[ "$GUARD_DEFINER_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${GUARD_DEFINER_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$GUARD_DEFINER_RESULT" ] && ! [[ "$GUARD_DEFINER_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- guard_definer exempt function oids were not numeric: $GUARD_DEFINER_RESULT" >&2
-  exit 1
-fi
-SANDBOX_REAPER_RESULT="$(check_sandbox_reaper_exception_shape fx_neon)"
-if [[ "$SANDBOX_REAPER_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_REAPER_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_REAPER_RESULT" ] && ! [[ "$SANDBOX_REAPER_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_reaper exempt function oids were not numeric: $SANDBOX_REAPER_RESULT" >&2
-  exit 1
-fi
-SANDBOX_EPHEMERAL_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_ephemeral_reaper "$SANDBOX_EPHEMERAL_REAPER_FUNCTIONS")"
-if [[ "$SANDBOX_EPHEMERAL_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_EPHEMERAL_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_EPHEMERAL_RESULT" ] && ! [[ "$SANDBOX_EPHEMERAL_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_ephemeral_reaper exempt function oids were not numeric: $SANDBOX_EPHEMERAL_RESULT" >&2
-  exit 1
-fi
-SANDBOX_INVENTORY_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_inventory_writer "$SANDBOX_INVENTORY_WRITER_FUNCTIONS")"
-if [[ "$SANDBOX_INVENTORY_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_INVENTORY_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_INVENTORY_RESULT" ] && ! [[ "$SANDBOX_INVENTORY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_inventory_writer exempt function oids were not numeric: $SANDBOX_INVENTORY_RESULT" >&2
-  exit 1
-fi
-SANDBOX_IDLE_RESULT="$(check_sandbox_net_exception_shape fx_neon sandbox_idle_reaper "$SANDBOX_IDLE_REAPER_FUNCTIONS")"
-if [[ "$SANDBOX_IDLE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_IDLE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_IDLE_RESULT" ] && ! [[ "$SANDBOX_IDLE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_idle_reaper exempt function oids were not numeric: $SANDBOX_IDLE_RESULT" >&2
-  exit 1
-fi
-SANDBOX_CLAIM_GUARD_RESULT="$(check_sandbox_claim_guard_exception_shape fx_neon)"
-if [[ "$SANDBOX_CLAIM_GUARD_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_CLAIM_GUARD_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_CLAIM_GUARD_RESULT" ] && ! [[ "$SANDBOX_CLAIM_GUARD_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_claim_guard exempt function oid was not numeric: $SANDBOX_CLAIM_GUARD_RESULT" >&2
-  exit 1
-fi
-PLAN_KIND_AUDIT_RESULT="$(check_plan_kind_audit_exception_shape fx_neon)"
-if [[ "$PLAN_KIND_AUDIT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${PLAN_KIND_AUDIT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$PLAN_KIND_AUDIT_RESULT" ] && ! [[ "$PLAN_KIND_AUDIT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- plan_kind_audit_writer exempt function oid was not numeric: $PLAN_KIND_AUDIT_RESULT" >&2
-  exit 1
-fi
-SANDBOX_REAP_SETTINGS_RESULT="$(check_sandbox_reap_settings_exception_shape fx_neon)"
-if [[ "$SANDBOX_REAP_SETTINGS_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_REAP_SETTINGS_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_REAP_SETTINGS_RESULT" ] && ! [[ "$SANDBOX_REAP_SETTINGS_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_reap_audit_writer exempt function oid was not numeric: $SANDBOX_REAP_SETTINGS_RESULT" >&2
-  exit 1
-fi
-PROPOSAL_WI_RESULT="$(check_proposal_work_item_exception_shape fx_neon)"
-if [[ "$PROPOSAL_WI_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${PROPOSAL_WI_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$PROPOSAL_WI_RESULT" ] && ! [[ "$PROPOSAL_WI_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- proposal_work_item_reader exempt function oid was not numeric: $PROPOSAL_WI_RESULT" >&2
-  exit 1
-fi
-SANDBOX_SETTLE_RESULT="$(check_sandbox_settle_definer_exception_shape fx_neon)"
-if [[ "$SANDBOX_SETTLE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${SANDBOX_SETTLE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$SANDBOX_SETTLE_RESULT" ] && ! [[ "$SANDBOX_SETTLE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- sandbox_settle_definer exempt function oids were not numeric: $SANDBOX_SETTLE_RESULT" >&2
-  exit 1
-fi
-WORK_ITEM_HALT_RESULT="$(check_work_item_halt_definer_exception_shape fx_neon)"
-if [[ "$WORK_ITEM_HALT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${WORK_ITEM_HALT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$WORK_ITEM_HALT_RESULT" ] && ! [[ "$WORK_ITEM_HALT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- work_item_halt_definer exempt function oid was not numeric: $WORK_ITEM_HALT_RESULT" >&2
-  exit 1
-fi
-RUNNER_LEASE_RESULT="$(check_runner_lease_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_LEASE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_LEASE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_LEASE_RESULT" ] && ! [[ "$RUNNER_LEASE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_lease_definer exempt function oids were not numeric: $RUNNER_LEASE_RESULT" >&2
-  exit 1
-fi
-RUNNER_APPROVAL_RESULT="$(check_runner_approval_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_APPROVAL_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_APPROVAL_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_APPROVAL_RESULT" ] && ! [[ "$RUNNER_APPROVAL_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_approval_definer exempt function oids were not numeric: $RUNNER_APPROVAL_RESULT" >&2
-  exit 1
-fi
-RUNNER_MODE_SWITCH_RESULT="$(check_runner_mode_switch_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_MODE_SWITCH_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_MODE_SWITCH_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_MODE_SWITCH_RESULT" ] && ! [[ "$RUNNER_MODE_SWITCH_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_mode_switch_definer exempt function oids were not numeric: $RUNNER_MODE_SWITCH_RESULT" >&2
-  exit 1
-fi
-WORK_ITEM_PLACEMENT_RESULT="$(check_work_item_placement_definer_exception_shape fx_neon)"
-if [[ "$WORK_ITEM_PLACEMENT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${WORK_ITEM_PLACEMENT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$WORK_ITEM_PLACEMENT_RESULT" ] && ! [[ "$WORK_ITEM_PLACEMENT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- work_item_placement_definer exempt function oids were not numeric: $WORK_ITEM_PLACEMENT_RESULT" >&2
-  exit 1
-fi
-RUN_HANDOFF_RESULT="$(check_run_handoff_definer_exception_shape fx_neon)"
-if [[ "$RUN_HANDOFF_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUN_HANDOFF_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUN_HANDOFF_RESULT" ] && ! [[ "$RUN_HANDOFF_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- run_handoff_definer exempt function oids were not numeric: $RUN_HANDOFF_RESULT" >&2
-  exit 1
-fi
-RUN_HANDOFF_COMPLETE_RESULT="$(check_run_handoff_complete_definer_exception_shape fx_neon)"
-if [[ "$RUN_HANDOFF_COMPLETE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUN_HANDOFF_COMPLETE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUN_HANDOFF_COMPLETE_RESULT" ] && ! [[ "$RUN_HANDOFF_COMPLETE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- run_handoff_complete_definer exempt function oids were not numeric: $RUN_HANDOFF_COMPLETE_RESULT" >&2
-  exit 1
-fi
-RUNNER_NOTICE_RESULT="$(check_runner_notice_lister_exception_shape fx_neon)"
-if [[ "$RUNNER_NOTICE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_NOTICE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_NOTICE_RESULT" ] && ! [[ "$RUNNER_NOTICE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_notice_lister exempt function oid was not numeric: $RUNNER_NOTICE_RESULT" >&2
-  exit 1
-fi
-INVARIANT_SWEEP_RESULT="$(check_invariant_sweep_exception_shape fx_neon)"
-if [[ "$INVARIANT_SWEEP_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${INVARIANT_SWEEP_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$INVARIANT_SWEEP_RESULT" ] && ! [[ "$INVARIANT_SWEEP_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- invariant_sweep_definer exempt function oids were not numeric: $INVARIANT_SWEEP_RESULT" >&2
-  exit 1
-fi
-RUNNER_SANDBOX_STATUS_RESULT="$(check_runner_sandbox_status_exception_shape fx_neon)"
-if [[ "$RUNNER_SANDBOX_STATUS_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_SANDBOX_STATUS_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_SANDBOX_STATUS_RESULT" ] && ! [[ "$RUNNER_SANDBOX_STATUS_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_sandbox_status_definer exempt function oid was not numeric: $RUNNER_SANDBOX_STATUS_RESULT" >&2
-  exit 1
-fi
-RUNNER_GIT_RESULT="$(check_runner_git_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_GIT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_GIT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_GIT_RESULT" ] && ! [[ "$RUNNER_GIT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_git_definer exempt function oid was not numeric: $RUNNER_GIT_RESULT" >&2
-  exit 1
-fi
-RUNNER_GIT_BYTES_RESULT="$(check_runner_git_bytes_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_GIT_BYTES_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_GIT_BYTES_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_GIT_BYTES_RESULT" ] && ! [[ "$RUNNER_GIT_BYTES_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_git_bytes_definer exempt function oid was not numeric: $RUNNER_GIT_BYTES_RESULT" >&2
-  exit 1
-fi
-RUNNER_CONSENT_RESULT="$(check_runner_consent_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_CONSENT_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_CONSENT_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_CONSENT_RESULT" ] && ! [[ "$RUNNER_CONSENT_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_consent_definer exempt function oid was not numeric: $RUNNER_CONSENT_RESULT" >&2
-  exit 1
-fi
-RUNNER_AUTO_APPROVE_RESULT="$(check_runner_auto_approve_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_AUTO_APPROVE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_AUTO_APPROVE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_AUTO_APPROVE_RESULT" ] && ! [[ "$RUNNER_AUTO_APPROVE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_auto_approve_definer exempt function oids were not numeric: $RUNNER_AUTO_APPROVE_RESULT" >&2
-  exit 1
-fi
-RUNNER_USAGE_RESULT="$(check_runner_usage_definer_exception_shape fx_neon)"
-if [[ "$RUNNER_USAGE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_USAGE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_USAGE_RESULT" ] && ! [[ "$RUNNER_USAGE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_usage_definer exempt function oids were not numeric: $RUNNER_USAGE_RESULT" >&2
-  exit 1
-fi
-RUN_CONTEXT_LEDGER_RESULT="$(check_run_context_ledger_exception_shape fx_neon)"
-if [[ "$RUN_CONTEXT_LEDGER_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUN_CONTEXT_LEDGER_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUN_CONTEXT_LEDGER_RESULT" ] && ! [[ "$RUN_CONTEXT_LEDGER_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- run_context_ledger_definer exempt function oid was not numeric: $RUN_CONTEXT_LEDGER_RESULT" >&2
-  exit 1
-fi
-RUNNER_ALLOWANCE_RESULT="$(check_runner_allowance_exception_shape fx_neon)"
-if [[ "$RUNNER_ALLOWANCE_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_ALLOWANCE_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_ALLOWANCE_RESULT" ] && ! [[ "$RUNNER_ALLOWANCE_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_allowance_definer exempt function oid was not numeric: $RUNNER_ALLOWANCE_RESULT" >&2
-  exit 1
-fi
-RUNNER_CONCURRENCY_RESULT="$(check_runner_concurrency_exception_shape fx_neon)"
-if [[ "$RUNNER_CONCURRENCY_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_CONCURRENCY_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_CONCURRENCY_RESULT" ] && ! [[ "$RUNNER_CONCURRENCY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_concurrency_definer exempt function oid was not numeric: $RUNNER_CONCURRENCY_RESULT" >&2
-  exit 1
-fi
-RUNNER_CAPACITY_RESULT="$(check_runner_capacity_exception_shape fx_neon)"
-if [[ "$RUNNER_CAPACITY_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${RUNNER_CAPACITY_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$RUNNER_CAPACITY_RESULT" ] && ! [[ "$RUNNER_CAPACITY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- runner_capacity_definer exempt function oid was not numeric: $RUNNER_CAPACITY_RESULT" >&2
-  exit 1
-fi
-WORK_ITEM_CORRECTION_RESULT="$(check_work_item_correction_exception_shape fx_neon)"
-if [[ "$WORK_ITEM_CORRECTION_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${WORK_ITEM_CORRECTION_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$WORK_ITEM_CORRECTION_RESULT" ] && ! [[ "$WORK_ITEM_CORRECTION_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- work_item_correction_definer exempt function oids were not numeric: $WORK_ITEM_CORRECTION_RESULT" >&2
-  exit 1
-fi
-MEMORY_RESULT="$(check_memory_exception_shape fx_neon)"
-if [[ "$MEMORY_RESULT" == SHAPE_FAIL:* ]]; then
-  echo "neon-shape: ${MEMORY_RESULT#SHAPE_FAIL:}" >&2
-  exit 1
-fi
-if [ -n "$MEMORY_RESULT" ] && ! [[ "$MEMORY_RESULT" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-  echo "neon-shape: internal error -- memory_definer exempt function oids were not numeric: $MEMORY_RESULT" >&2
-  exit 1
-fi
-RUNNER_FACTS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_facts_definer 'public.runner_facts_record(text,text,integer,integer,text)')"
-RUNNER_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_settings_definer 'public.runner_settings_apply(uuid,text,text,text[],integer)')"
-RUNNER_NAME_INITIAL_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_name_initial_definer 'public.runner_name_initial(uuid,text)')"
-RUNNER_PROVISIONING_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_provisioning_definer 'public.runner_provisioning_token_mint(text,text,text,uuid[],text[],integer)' 'public.runner_provisioning_token_list()' 'public.runner_provisioning_token_revoke(uuid)' 'public.runner_provisioning_token_account(text)' 'public.runner_provisioning_register(text,jsonb,text,integer,text)' 'public.runner_provisioning_token_revoke_for_member()')"
-RUNNER_REPOS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_repos_definer 'public.runner_repos_set(uuid,uuid[])')"
-REPO_CONTEXT_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon repo_context_settings_definer 'public.repo_context_settings_apply(uuid,integer)')"
-RUNNER_ROUTING_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_routing_definer 'public.runner_routing_set(text,uuid,jsonb)')"
-for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT" "$RUNNER_PROVISIONING_RESULT" "$RUNNER_NAME_INITIAL_RESULT" "$RUNNER_REPOS_RESULT" "$REPO_CONTEXT_SETTINGS_RESULT" "$RUNNER_ROUTING_RESULT"; do
-  if [[ "$fleet_result" == SHAPE_FAIL:* ]]; then
-    echo "neon-shape: ${fleet_result#SHAPE_FAIL:}" >&2
-    exit 1
-  fi
-  if [ -n "$fleet_result" ] && ! [[ "$fleet_result" =~ ^[0-9]+(,\ [0-9]+)*$ ]]; then
-    echo "neon-shape: internal error -- runner fleet definer exempt function oid was not numeric: $fleet_result" >&2
-    exit 1
-  fi
-done
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${ASK_ANSWER_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUN_HANDOFF_RESULT:-0}, ${RUN_HANDOFF_COMPLETE_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}, ${RUNNER_PROVISIONING_RESULT:-0}, ${RUNNER_NAME_INITIAL_RESULT:-0}, ${RUNNER_REPOS_RESULT:-0}, ${RUNNER_ROUTING_RESULT:-0}, ${RUN_CONTEXT_LEDGER_RESULT:-0}, ${MEMORY_RESULT:-0}, ${REPO_CONTEXT_SETTINGS_RESULT:-0}"
+# platform_ops, except the ones a migration's entry (neon-shape.d/, loaded above)
+# names with exempt: the DS-0a eraser (discussion_eraser), the D#7 receipt
+# writers, and every later single-purpose definer role. Each is admitted only
+# when its own shape check passes (SHAPE_FAIL fails the whole script, naming
+# why); fx_migrator does not INHERIT any of those roles.
+ns_run_exempts
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE p.prosecdef AND n.nspname = 'public'
     AND pg_get_userbyid(p.proowner) <> 'platform_ops'
-    AND p.oid NOT IN ($EXEMPT_FILTER, $RECEIPT_FILTER);")"
+    AND p.oid NOT IN ($EXEMPT_FILTER);")"
 if [ -n "$BAD_DEFINERS" ]; then
   echo "neon-shape: SECURITY DEFINER function(s) in public not owned by platform_ops: $BAD_DEFINERS" >&2
   exit 1
 fi
-check_eraser_role_shape fx_neon
-check_receipt_writer_role_shape fx_neon
-check_metering_reporter_role_shape fx_neon
-check_error_event_writer_role_shape fx_neon
-check_guard_definer_role_shape fx_neon
-check_guard_definer_owner_cascade fx_neon
-check_sandbox_reaper_role_shape fx_neon
-check_sandbox_net_role_shape fx_neon sandbox_ephemeral_reaper SANDBOX_EPHEMERAL_REAPER
-check_sandbox_net_role_shape fx_neon sandbox_inventory_writer SANDBOX_INVENTORY_WRITER
-check_sandbox_net_role_shape fx_neon sandbox_idle_reaper SANDBOX_IDLE_REAPER
-check_sandbox_net_role_shape fx_neon sandbox_claim_guard SANDBOX_CLAIM_GUARD
-check_sandbox_claim_guard_platform_ops fx_neon
-check_plan_kind_audit_role_shape fx_neon
-check_sandbox_net_role_shape fx_neon sandbox_reap_audit_writer SANDBOX_REAP_AUDIT_WRITER
-check_sandbox_reap_settings_tables fx_neon
-check_sandbox_settle_definer_role_shape fx_neon
-check_work_item_halt_definer_role_shape fx_neon
-check_proposal_work_item_role_shape fx_neon
-check_runner_lease_definer_role_shape fx_neon
-check_runner_approval_definer_role_shape fx_neon
-check_runner_consent_definer_role_shape fx_neon
-check_runner_auto_approve_definer_role_shape fx_neon
-check_runner_git_definer_role_shape fx_neon
-check_runner_git_bytes_definer_role_shape fx_neon
-check_runner_usage_definer_role_shape fx_neon
-check_run_context_ledger_definer_role_shape fx_neon
-check_runner_notice_lister_role_shape fx_neon
-check_invariant_sweep_role_shape fx_neon
-check_runner_mode_switch_definer_role_shape fx_neon
-check_work_item_placement_definer_role_shape fx_neon
-check_run_handoff_definer_role_shape fx_neon
-check_run_handoff_complete_definer_role_shape fx_neon
-check_repo_verified_consent_shape fx_neon
-check_runner_sandbox_status_role_shape fx_neon
-check_runner_sandbox_status_table_shape fx_neon
-check_runner_allowance_role_shape fx_neon
-check_runner_allowance_table_shape fx_neon
-check_runner_concurrency_role_shape fx_neon
-check_runner_capacity_role_shape fx_neon
-check_runner_capacity_table_shape fx_neon
-check_work_item_correction_role_shape fx_neon
-check_work_item_correction_table_shape fx_neon
-check_sandbox_net_role_shape fx_neon runner_facts_definer RUNNER_FACTS_DEFINER
-check_sandbox_net_role_shape fx_neon runner_settings_definer RUNNER_SETTINGS_DEFINER
-check_sandbox_net_role_shape fx_neon runner_provisioning_definer RUNNER_PROVISIONING_DEFINER
-check_sandbox_net_role_shape fx_neon runner_name_initial_definer RUNNER_NAME_INITIAL_DEFINER
-check_sandbox_net_role_shape fx_neon runner_repos_definer RUNNER_REPOS_DEFINER
-check_runner_fleet_table_shape fx_neon runner_facts
-check_runner_fleet_table_shape fx_neon runner_settings
-check_runner_claim_index_shape fx_neon
-check_runner_fleet_table_shape fx_neon runner_provisioning_tokens
-check_sandbox_net_role_shape fx_neon memory_definer MEMORY_DEFINER
-check_memory_table_shape fx_neon
-check_sandbox_net_role_shape fx_neon repo_context_settings_definer REPO_CONTEXT_SETTINGS_DEFINER
-check_runner_fleet_table_shape fx_neon repo_context_settings
+# The roles are derived, not listed here: every role the migrations created
+# (apart from the harness's own postgres, neon_superuser and fx_migrator) must be
+# declared by exactly one entry with role, and every declared role must
+# exist. A migration that adds a role without its entry, or an entry naming a
+# role no migration creates, fails here -- there is no count to keep in step.
+NS_CLUSTER_ROLES="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c \
+  "SELECT rolname FROM pg_roles WHERE rolname NOT LIKE 'pg\_%' AND rolname NOT IN ('postgres', 'neon_superuser', 'fx_migrator');" | LC_ALL=C sort)"
+NS_DECLARED="$(printf '%s\n' "${NS_DECLARED_ROLES[@]}" | LC_ALL=C sort)"
+NS_DUPLICATE_ROLES="$(command uniq -d <<<"$NS_DECLARED")"
+if [ -n "$NS_DUPLICATE_ROLES" ]; then
+  echo "neon-shape: role(s) declared by more than one entry in $NS_ENTRY_DIR: $(tr '\n' ' ' <<<"$NS_DUPLICATE_ROLES")" >&2
+  exit 1
+fi
+NS_UNDECLARED="$(command comm -23 <(echo "$NS_CLUSTER_ROLES") <(echo "$NS_DECLARED"))"
+if [ -n "$NS_UNDECLARED" ]; then
+  echo "neon-shape: role(s) created by the migrations but declared by no entry (add 'role <role>' to the entry of the migration that creates it, in $NS_ENTRY_DIR): $(tr '\n' ' ' <<<"$NS_UNDECLARED")" >&2
+  exit 1
+fi
+NS_MISSING="$(command comm -13 <(echo "$NS_CLUSTER_ROLES") <(echo "$NS_DECLARED"))"
+if [ -n "$NS_MISSING" ]; then
+  echo "neon-shape: entry declares role(s) that the migrations did not create: $(tr '\n' ' ' <<<"$NS_MISSING")" >&2
+  exit 1
+fi
+echo "==> neon-shape entries: ${NS_ENTRY_COUNT} loaded, ${#NS_DECLARED_ROLES[@]} roles declared, ${#NS_EXEMPT_CMDS[@]} definer exemptions, ${#NS_CHECK_CMDS[@]} shape checks"
+ns_run_checks all fx_neon
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"
@@ -3498,7 +3152,8 @@ fi
 #
 # HISTORICAL_LATE_MIGRATIONS is held back for TIMING reasons -- when each
 # file landed relative to 0200 -- and can't be derived from the file
-# contents. 0005/0008/0010/0011/0601 stay a literal list.
+# contents. Each such migration says so itself, with `late` in its own
+# entry under packages/db/neon-shape.d/ (0005/0008/0010/0011/0601 included).
 #
 # D#97 C1: any migration that touches audit_write/audit_write_system also
 # has to be held back, for a DIFFERENT reason -- 0008 and 0011 already do
@@ -3529,16 +3184,7 @@ fi
 # whole input (up to a NUL byte, none of which appears here) as a single
 # record, so the match can span the embedded newlines exactly like the TS
 # version's does.
-# D#2 (0721): 0721 changes the owner of functions that 0001, 0005 and 0200 create or replace (current_member_*, has_open_invitation,
-# the partner helpers). It is held back so the upgrade path applies it AFTER 0005, as every real database has it: a CREATE OR
-# REPLACE of an already guard_definer-owned has_open_invitation in 0005 would otherwise fail for the migration role.
-# D#2 (0760): 0731 is held back by the audit_write rule above (it grants EXECUTE on audit_write_system to its role), and 0760 reads 0731's
-# sandbox_reaps table and its sandbox_reap_done definer. A migration cannot run before the one it extends, so it is held back with it.
-# D#2 (0761): the lock, idle rule and cap extend 0731 (sandbox_reaps, sandbox_reap_ex_state) and 0760, so it is held back with them.
-# D#6 R2b-5a (0768): the usage definer reads agent_runs.model, a column 0010 adds, so it is held back with 0010 (a migration cannot run before the one it extends).
-# D#597 CC-8 (0776): the invariant sweep reads runner_run_usage (0768) and agent_runs.envelope/role (0010 era), so it is held back with 0768.
-# D#6 C42-5 (0775): it grants a role agent_runs.model, a column 0010 adds, so it is held back with 0010 as 0768 is.
-HISTORICAL_LATE_MIGRATIONS=(0005_account_members_role_gate.sql 0008_audit_log_append_only.sql 0010_model_routing.sql 0011_audit_write_role_settings_actions.sql 0601_pin_model_connections_guard_write_search_path.sql 0721_membership_helpers_not_owned_by_platform_ops.sql 0760_sandbox_reaper_net.sql 0761_sandbox_reap_lock.sql 0768_runner_run_usage.sql 0775_runner_run_model.sql 0776_platform_invariant_sweep.sql)
+HISTORICAL_LATE_MIGRATIONS=("${NS_LATE_MIGRATIONS[@]}")
 
 AUDIT_WRITE_FUNCTION_PATTERN='FUNCTION[[:space:]]+("?public"?[[:space:]]*\.[[:space:]]*)?"?audit_write(_system)?"?([^A-Za-z0-9_]|$)'
 
@@ -3676,8 +3322,7 @@ if [ "$UPGRADE_CREATE_END" != "f" ] || [ "$UPGRADE_INHERIT_END" != "f" ]; then
 fi
 # DS-0a item 4: the same discussion_eraser INHERIT/shape check, on the
 # upgrade path. A no-op today (discussion_eraser doesn't exist on main).
-check_eraser_role_shape fx_upgrade
-check_receipt_writer_role_shape fx_upgrade
+ns_run_checks everywhere fx_upgrade
 
 # A second run over the same (now fully caught-up) dir is still a no-op,
 # same invariant as the fresh path's own re-run check.
@@ -3733,7 +3378,7 @@ fi
 
 echo "==> D94 parity: diffing neon-shape-catalog.sql between fx_d94_parity (upgrade path) and fx_neon (fresh path)"
 "${PSQL[@]}" -U fx_migrator -d fx_d94_parity -A -F'|' -f "$CATALOG_SQL" > "$PG_TMP_DIR/catalog_d94_parity.txt"
-if ! diff -u "$PG_TMP_DIR/catalog_d94_parity.txt" "$PG_TMP_DIR/catalog_neon.txt"; then
+if ! command diff -u "$PG_TMP_DIR/catalog_d94_parity.txt" "$PG_TMP_DIR/catalog_neon.txt"; then
   echo "neon-shape: D#94 parity check FAILED (base-then-added upgrade vs fresh, see diff above)" >&2
   exit 1
 fi
@@ -3748,9 +3393,9 @@ if [ "$D94_CREATE_END" != "f" ] || [ "$D94_INHERIT_END" != "f" ]; then
 fi
 # DS-0a item 4: the same discussion_eraser INHERIT/shape check, on the
 # D#94 parity path. A no-op today (discussion_eraser doesn't exist on main).
-check_eraser_role_shape fx_d94_parity
-check_receipt_writer_role_shape fx_d94_parity
+ns_run_checks everywhere fx_d94_parity
 
 ELAPSED=$((SECONDS - SCRIPT_START))
 echo "neon-shape: runtime ${ELAPSED}s"
+NS_COMPLETED=1
 echo "neon-shape: OK"
