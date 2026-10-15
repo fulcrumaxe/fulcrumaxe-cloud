@@ -86,6 +86,11 @@ export interface NormalizedEvent {
    */
   agentOutput?: Record<string, unknown>;
   /**
+   * D#600 CX-1b: the context ledger of the command, measured from its stream by `ContextLedgerCapture` and set by a runtime that
+   * measures it, on the final `result` event only. Integers and enums; never text or a path.
+   */
+  contextLedger?: import("./contextLedger.js").ContextLedgerMeasure;
+  /**
    * D#2 PREVIEW-RUNNER-EVENTS: an `assistant` event's tool-use blocks, REDUCED (see `toolActivity.ts`): an id, one of
    * five coarse kinds, and at most a repo-relative path or a short search term. Never raw tool input.
    */

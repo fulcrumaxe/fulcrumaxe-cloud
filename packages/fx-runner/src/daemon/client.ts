@@ -5,7 +5,7 @@
  */
 import {
   ClaimMessage, ClaimRateLimitedReply, HelloMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
-  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type ClaimCapacity, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
+  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type ClaimCapacity, type ContextLedgerWire, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -45,6 +45,8 @@ export interface DoneInput {
   leaseGeneration: number;
   sessionId?: string | undefined;
   agentOutput?: Record<string, unknown> | undefined;
+  /** D#600 CX-1b: the wire form of the run's context ledger. Left out when an older cloud has refused it. */
+  contextLedger?: ContextLedgerWire | undefined;
 }
 
 export interface RunnerClient {
@@ -71,6 +73,8 @@ export interface RunnerClientConfig {
 }
 
 export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
+  /** Set once a `done` carrying `context_ledger` is refused as an invalid message: that cloud predates the field. */
+  let cloudRefusesLedger = false;
   /** One signed POST; undefined when the cloud could not be reached. */
   async function send(path: string, body: unknown): Promise<CloudReply | undefined> {
     try {
@@ -154,11 +158,24 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
 
     async done(input) {
       const base = { run_id: input.runId, lease_generation: input.leaseGeneration, ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }) };
-      // The envelope is advisory: one the protocol refuses (too large or too deep) is left out rather than failing the run.
-      const withOutput = input.agentOutput === undefined ? undefined : DoneMessage.safeParse({ ...base, agentOutput: input.agentOutput });
-      const message = withOutput?.success ? withOutput : DoneMessage.safeParse(base);
+      // The ledger is advisory too: one the protocol refuses is left out, and so is it once an older cloud has refused the field.
+      const ledger = input.contextLedger !== undefined && !cloudRefusesLedger ? { context_ledger: input.contextLedger } : {};
+      const build = (extra: Record<string, unknown>) => {
+        // The envelope is advisory: one the protocol refuses (too large or too deep) is left out rather than failing the run.
+        const withOutput = input.agentOutput === undefined ? undefined : DoneMessage.safeParse({ ...base, ...extra, agentOutput: input.agentOutput });
+        return withOutput?.success ? withOutput : DoneMessage.safeParse({ ...base, ...extra });
+      };
+      let message = build(ledger);
+      if (!message.success && "context_ledger" in ledger) message = build({});
       if (!message.success) return fail(undefined, "invalid_message");
-      const reply = await send(donePath(input.runId), message.data);
+      let reply = await send(donePath(input.runId), message.data);
+      // A cloud from before CX-1b refuses the unknown key with 400 invalid_message before it looks at the run (nothing is written), so the
+      // same `done` goes again without it, and the runner stops sending it to this cloud.
+      if (reply?.status === 400 && message.data.context_ledger !== undefined && errorCodeOf(reply.body) === "invalid_message") {
+        cloudRefusesLedger = true;
+        const without = build({});
+        if (without.success) reply = await send(donePath(input.runId), without.data);
+      }
       if (reply?.status === 200) {
         const parsed = DoneReply.safeParse(reply.body);
         return parsed.success ? { kind: "done", outcome: parsed.data.outcome, failureReason: parsed.data.failure_reason, prNumber: parsed.data.pr_number } : fail(reply, "invalid_reply");

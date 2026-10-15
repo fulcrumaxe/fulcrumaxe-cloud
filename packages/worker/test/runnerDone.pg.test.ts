@@ -249,6 +249,71 @@ describe("runner done [pg]", () => {
       expect((await row(id)).envelope).toEqual(DROPPED_AGENT_OUTPUT);
     });
 
+    // D#600 CX-1b: the run's context ledger is written in the done transaction by `run_context_ledger_record` on the run-writer login.
+    describe("context ledger", () => {
+      const ledgerRows = async (id: string) => (await admin.query("SELECT * FROM run_context_ledger WHERE account_id = $1 AND run_id = $2", [A.accountId, id])).rows;
+      const body = {
+        basis: "measured" as const,
+        sections: [{ code: "spec" as const, bytes: 12, sha256: "c".repeat(64), trimmed_bytes: 0 }],
+        first_turn_input: 100,
+        peak_context: 400,
+        cache_read: 900,
+        cache_write: 50,
+        tool_output_bytes: { Read: 7 },
+        compactions: 1,
+      };
+
+      it("stores the runner's ledger with the verdict, as measured", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: body })).toEqual({ kind: "recorded", verdict: ok });
+        const rows = await ledgerRows(id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ basis: "measured", first_turn_input_tokens: "100", peak_context_tokens: "400", cache_read_tokens: "900", cache_write_tokens: "50", compactions: 1, tool_output_bytes: { Read: 7 }, sections: body.sections });
+      });
+
+      it("an older runner that sent no ledger gets a partial row with nothing measured: null figures, never zeros", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        await facade.finishRunnerDone({ ...lease(id, g), verdict: ok });
+        const rows = await ledgerRows(id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, memory_tokens: null, compactions: 0, tool_output_bytes: {}, sections: [] });
+      });
+
+      it("a taken-over run records a partial row even if a ledger was sent", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        await facade.finishRunnerDone({ ...lease(id, g), verdict: { outcome: "failed", failureReason: "taken_over", prNumber: null }, contextLedger: body });
+        expect((await ledgerRows(id))[0]).toMatchObject({ basis: "partial", peak_context_tokens: null });
+      });
+
+      it("a ledger the definer refuses (past the schema) writes no row and does not cost the verdict", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        const lines: string[] = [];
+        const warn = console.warn;
+        console.warn = (line: unknown) => void lines.push(String(line));
+        try {
+          const refused = { ...body, sections: [{ code: "not_a_section", bytes: 1, sha256: "c".repeat(64), trimmed_bytes: 0 }] } as never;
+          expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: refused })).toEqual({ kind: "recorded", verdict: ok });
+        } finally {
+          console.warn = warn;
+        }
+        expect(await ledgerRows(id)).toEqual([]);
+        expect((await row(id)).status).toBe("succeeded");
+        expect(lines.join("\n")).toContain("runner.done.context_ledger_not_recorded");
+        expect(lines.join("\n")).not.toContain("not_a_section");
+      });
+
+      it("a fenced done writes no ledger", async () => {
+        const id = await pending();
+        const g = await claimed(id);
+        expect(await facade.finishRunnerDone({ ...lease(id, g + 1), verdict: ok, contextLedger: body })).toEqual({ kind: "fenced", reason: "stale_generation" });
+        expect(await ledgerRows(id)).toEqual([]);
+      });
+    });
+
     it("is fenced inside the write transaction: a stale generation, another runner, and a lease that ended while GitHub was asked write nothing", async () => {
       const id = await pending();
       const g = await claimed(id);

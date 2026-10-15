@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { ContextLedgerCapture, SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -163,6 +163,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
       let result: Record<string, unknown> | undefined;
       let sessionId: string | undefined;
       let agentOutput: Record<string, unknown> | undefined;
+      const ledger = new ContextLedgerCapture();
       const engineVersion = binary.version;
       log.write("meta", JSON.stringify({ engine_version: engineVersion }));
       // The version goes out first, so a breaking release shows up across runs.
@@ -198,7 +199,10 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
           }
           sawInit = true;
         }
-        const event = normalizeMessage({ runId: opts.runId, role: opts.role }, message, seq++, workdir);
+        // Integers only leave the capture (no text, no path); the result line comes last, so its snapshot covers the whole command.
+        ledger.observe(message);
+        const normalized = normalizeMessage({ runId: opts.runId, role: opts.role }, message, seq++, workdir);
+        const event = message.type === "result" ? { ...normalized, contextLedger: ledger.snapshot() } : normalized;
         if (event.sessionId !== undefined && SESSION_ID_PATTERN.test(event.sessionId)) sessionId = event.sessionId;
         if (message.type === "result") {
           result = message;

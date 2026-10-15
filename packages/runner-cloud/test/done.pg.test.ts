@@ -854,6 +854,10 @@ describe("done route [pg]", () => {
       expect((await s.call({ body: { run_id: s.runId, lease_generation: 1, extra: true } })).status).toBe(400);
       expect((await s.call({ body: { run_id: s.runId, lease_generation: -1 } })).status).toBe(400);
       expect((await s.call({ body: { run_id: s.runId, lease_generation: 1, session_id: "bad session!" } })).status).toBe(400);
+      // D#600 CX-1b: a context_ledger with a free-text field or a key outside its schema is refused before the fence is touched.
+      const ledger = { basis: "partial", sections: [], tool_output_bytes: {}, compactions: 0 };
+      expect((await s.call({ body: { run_id: s.runId, lease_generation: 1, context_ledger: { ...ledger, note: "free text" } } })).status).toBe(400);
+      expect((await s.call({ body: { run_id: s.runId, lease_generation: 1, context_ledger: { ...ledger, tool_output_bytes: { "/etc/passwd": 1 } } } })).status).toBe(400);
       const huge = signed(key, donePath(s.runId), {}, { rawBody: Buffer.alloc(MAX_BODY_BYTES + 1, 0x20) });
       expect((await toResponse(() => doneRun(h.deps({ leases }), huge, s.runId))).status).toBe(413);
       expect((await toResponse(() => doneRun(h.deps({ leases }), huge, "not-a-uuid"))).status).toBe(404);

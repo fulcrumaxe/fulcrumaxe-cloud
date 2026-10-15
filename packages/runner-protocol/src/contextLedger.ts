@@ -6,7 +6,9 @@
  * It is pure and imports nothing, so the sandbox port now and the local runner's daemon (CX-1b) measure identically.
  *
  * What it measures, per assistant message id (a message's content blocks repeat its usage, so one id is one turn):
- *  - the context of a turn: input + cache read + cache write tokens;
+ *  - the context of a turn: input + cache read + cache write tokens (clamped to CONTEXT_MAX_COUNT), main thread only: a line that
+ *    carries `parent_tool_use_id` is a subagent's, whose context is its own, so it counts toward the cache sums and tool bytes but
+ *    not toward the first turn or the peak;
  *  - the first turn's context, and the largest turn's context (the peak);
  *  - cache read and cache write tokens, summed over turns;
  *  - tool output bytes by tool (the UTF-8 size of each `tool_result`'s text, keyed by the tool that was asked);
@@ -150,7 +152,10 @@ export class ContextLedgerCapture {
     this.cacheRead += read - (known?.read ?? 0);
     this.cacheWrite += write - (known?.write ?? 0);
     this.turns.set(id, { read, write });
-    const context = input + read + write;
+    // A subagent (Task) thread has a context of its own: its turns are costs (the sums above) but not the main thread's context.
+    if (typeof line.parent_tool_use_id === "string") return;
+    // Three fields each up to the cap can sum past it, and the store refuses a figure above it: clamp, so one huge turn never costs the row.
+    const context = Math.min(input + read + write, CONTEXT_MAX_COUNT);
     if (this.firstId === undefined) this.firstId = id;
     if (id === this.firstId) this.firstContext = context;
     if (context > this.peak) this.peak = context;
@@ -207,5 +212,60 @@ export function mergeContextLedgerMeasures(a: ContextLedgerMeasure | undefined, 
     cache_write_tokens: add(a.cache_write_tokens, b.cache_write_tokens),
     tool_output_bytes,
     compactions: Math.min(a.compactions + b.compactions, CONTEXT_MAX_COUNT),
+  };
+}
+
+/** The body of a runner's `done.context_ledger` (a strict schema in messages.ts) and how it maps to and from a measure. A figure not measured is absent. */
+export interface ContextLedgerWire {
+  basis: ContextLedgerBasis;
+  sections: ContextSection[];
+  first_turn_input?: number;
+  peak_context?: number;
+  cache_read?: number;
+  cache_write?: number;
+  memory?: number;
+  tool_output_bytes: Partial<Record<ContextTool, number>>;
+  compactions: number;
+}
+
+export function contextLedgerToWire(measure: ContextLedgerMeasure, sections: readonly ContextSection[] = [], memoryTokens?: number): ContextLedgerWire {
+  const keep = <K extends string>(key: K, value: number | null | undefined): { [P in K]?: number } => (value === null || value === undefined ? {} : ({ [key]: value } as { [P in K]?: number }));
+  return {
+    basis: measure.basis,
+    sections: [...sections],
+    ...keep("first_turn_input", measure.first_turn_input_tokens),
+    ...keep("peak_context", measure.peak_context_tokens),
+    ...keep("cache_read", measure.cache_read_tokens),
+    ...keep("cache_write", measure.cache_write_tokens),
+    ...keep("memory", memoryTokens),
+    tool_output_bytes: { ...measure.tool_output_bytes },
+    compactions: measure.compactions,
+  };
+}
+
+/** What the cloud stores for a runner that sent no ledger (an older runner): a `partial` row with nothing measured, never zeros. */
+export const NOT_RECORDED_MEASURE: ContextLedgerMeasure = Object.freeze({
+  basis: "partial",
+  first_turn_input_tokens: null,
+  peak_context_tokens: null,
+  cache_read_tokens: null,
+  cache_write_tokens: null,
+  tool_output_bytes: Object.freeze({}),
+  compactions: 0,
+}) as ContextLedgerMeasure;
+
+export function contextLedgerFromWire(wire: ContextLedgerWire): { measure: ContextLedgerMeasure; sections: ContextSection[]; memoryTokens?: number } {
+  return {
+    measure: {
+      basis: wire.basis,
+      first_turn_input_tokens: wire.first_turn_input ?? null,
+      peak_context_tokens: wire.peak_context ?? null,
+      cache_read_tokens: wire.cache_read ?? null,
+      cache_write_tokens: wire.cache_write ?? null,
+      tool_output_bytes: { ...wire.tool_output_bytes },
+      compactions: wire.compactions,
+    },
+    sections: wire.sections,
+    ...(wire.memory === undefined ? {} : { memoryTokens: wire.memory }),
   };
 }

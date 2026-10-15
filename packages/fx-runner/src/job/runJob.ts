@@ -2,7 +2,7 @@ import type { CleanEnvOptions, CredentialMode } from "./cleanEnv.js";
 import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
-import { cliModelNameFor, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { cliModelNameFor, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import type { SandboxPort } from "../sandbox/port.js";
 import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
@@ -68,7 +68,7 @@ export type FailureReason = "wall_clock" | "no_result" | "agent_error" | "agent_
 export type RunJobResult =
   | { status: "duplicate" }
   | { status: "refused"; reasons: HashRefusal[] }
-  | { status: "done"; workspace: string; sessionId?: string; agentOutput?: Record<string, unknown> }
+  | { status: "done"; workspace: string; sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure }
   | { status: "failed"; reason: FailureReason; workspace?: string };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -141,7 +141,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     if (ended === "wall_clock") return { status: "failed", reason: "wall_clock", workspace };
     if (ended === undefined) return { status: "failed", reason: "no_result", workspace };
     if (ended.type !== "result") return { status: "failed", reason: "agent_error", workspace };
-    return { status: "done", workspace, ...(ended.sessionId === undefined ? {} : { sessionId: ended.sessionId }), ...(ended.agentOutput === undefined ? {} : { agentOutput: ended.agentOutput }) };
+    return { status: "done", workspace, ...(ended.sessionId === undefined ? {} : { sessionId: ended.sessionId }), ...(ended.agentOutput === undefined ? {} : { agentOutput: ended.agentOutput }), ...(ended.contextLedger === undefined ? {} : { contextLedger: ended.contextLedger }) };
   } catch (error) {
     // fx-swallow-ok: the failure is returned as a closed reason code; the error text could hold job content
     return { status: "failed", reason: reasonOf(error), workspace };
