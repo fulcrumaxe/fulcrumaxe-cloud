@@ -6,6 +6,7 @@ import { UNTRUSTED_DELIMITER_END, UNTRUSTED_DELIMITER_START, storeWorkEvent, typ
 import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
 import {
+  DIAL_VERSION_CATALOGUE_DEFAULT,
   RECEIPT_FENCE_END,
   RECEIPT_FENCE_START,
   ReceiptWriteError,
@@ -83,6 +84,18 @@ describe('writeReceipt (DP3b)', () => {
       )
     ).rows[0].payload;
 
+  describe('DP-C9 2b: dialVersion 0 means "catalogue default, no decision_settings row"', () => {
+    it('exports the constant as 0', () => {
+      expect(DIAL_VERSION_CATALOGUE_DEFAULT).toBe(0);
+    });
+
+    it('accepts dialVersion 0 and stores it as 0', async () => {
+      const r = await write(valid({ dialVersion: DIAL_VERSION_CATALOGUE_DEFAULT }));
+      if (r.store !== 'decision_receipts') throw new Error('expected the durable store');
+      expect((await durableRow(r.id)).dial_version).toBe(0);
+    });
+  });
+
   describe('3b-1: actor and catalogue version are the writer\'s, not the caller\'s', () => {
     const forged = { actor: 'forged-actor', catalogueVersion: 99, account_id: randomUUID() };
 
@@ -156,7 +169,7 @@ describe('writeReceipt (DP3b)', () => {
       ['a class-1 type written as class 3', 'receipt_decision_class_mismatch', { decisionType: 'dependency_patch_bump', class: 'human_in_the_loop' }],
       ['an unknown decision type', 'receipt_unknown_decision_type', { decisionType: 'made_up_type' }],
       ['a secret-shaped decision type', 'receipt_unknown_decision_type', { decisionType: 'Bearer ghp_A1b2C3d4E5f6G7h8I9j0' }],
-      ['dialVersion 0', 'receipt_invalid_dial_version', { dialVersion: 0 }],
+      ['dialVersion -1', 'receipt_invalid_dial_version', { dialVersion: -1 }],
       ['dialVersion above int4', 'receipt_invalid_dial_version', { dialVersion: 2_147_483_648 }],
     ];
     it.each(cases)('%s is refused with zero queries and zero rows', async (_n, code, over) => {

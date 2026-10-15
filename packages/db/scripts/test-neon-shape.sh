@@ -520,7 +520,9 @@ check_receipt_writer_role_shape() {
             OR (p.proname = 'decision_receipt_write_class1'
               AND p.proargtypes = array_to_string('{text,text,text,integer,jsonb,uuid,uuid,integer}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_raise'
-              AND p.proargtypes = array_to_string('{text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text}'::regtype[]::oid[], ' ')::oidvector)))
+              AND p.proargtypes = array_to_string('{text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'decision_ask_answer'
+              AND p.proargtypes = array_to_string('{uuid,text,uuid}'::regtype[]::oid[], ' ')::oidvector)))
         UNION ALL SELECT 'relation ' || c.relname FROM pg_class c WHERE c.relowner = r.oid
         UNION ALL SELECT 'schema ' || n.nspname FROM pg_namespace n WHERE n.nspowner = r.oid
         UNION ALL SELECT 'type ' || t.typname FROM pg_type t WHERE t.typowner = r.oid) x), ''),
@@ -552,7 +554,7 @@ check_receipt_writer_role_shape() {
     exit 1
   fi
   if [ -n "$owned" ]; then
-    echo "neon-shape ($dbname): receipt_writer owns object(s) beyond the three exempted functions (item 10): $owned" >&2
+    echo "neon-shape ($dbname): receipt_writer owns object(s) beyond the four exempted functions (item 10): $owned" >&2
     exit 1
   fi
   if [ "$create_priv" != "f" ]; then
@@ -2985,8 +2987,8 @@ check_memory_table_shape() {
 
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the named exemptions above -- the DS-0a eraser
-# (discussion_eraser) and the three D#7 receipt_writer definers
-# (decision_receipt_write, decision_receipt_write_class1, decision_ask_raise), each admitted
+# (discussion_eraser) and the four D#7 receipt_writer definers
+# (decision_receipt_write, decision_receipt_write_class1, decision_ask_raise, decision_ask_answer), each admitted
 # only when its own shape check passes; fx_migrator does not INHERIT any
 # runtime role, including discussion_eraser and receipt_writer.
 EXEMPT_RESULT="$(check_eraser_exception_shape fx_neon)"
@@ -3002,7 +3004,8 @@ fi
 RECEIPT_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_receipt_write text,text,text,text,integer,jsonb,uuid,uuid,integer)"
 RECEIPT1_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_receipt_write_class1 text,text,text,integer,jsonb,uuid,uuid,integer)"
 ASK_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_ask_raise text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text)"
-for RESULT in "$RECEIPT_RESULT" "$RECEIPT1_RESULT" "$ASK_RESULT"; do
+ASK_ANSWER_RESULT="$(check_receipt_writer_exception_shape fx_neon decision_ask_answer uuid,text,uuid)"
+for RESULT in "$RECEIPT_RESULT" "$RECEIPT1_RESULT" "$ASK_RESULT" "$ASK_ANSWER_RESULT"; do
   if [[ "$RESULT" == SHAPE_FAIL:* ]]; then
     echo "neon-shape: ${RESULT#SHAPE_FAIL:}" >&2
     exit 1
@@ -3325,7 +3328,7 @@ for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT" "$RUNNER_PR
     exit 1
   fi
 done
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUN_HANDOFF_RESULT:-0}, ${RUN_HANDOFF_COMPLETE_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}, ${RUNNER_PROVISIONING_RESULT:-0}, ${RUNNER_NAME_INITIAL_RESULT:-0}, ${RUNNER_REPOS_RESULT:-0}, ${RUN_CONTEXT_LEDGER_RESULT:-0}, ${MEMORY_RESULT:-0}, ${REPO_CONTEXT_SETTINGS_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${ASK_ANSWER_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUN_HANDOFF_RESULT:-0}, ${RUN_HANDOFF_COMPLETE_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}, ${RUNNER_PROVISIONING_RESULT:-0}, ${RUNNER_NAME_INITIAL_RESULT:-0}, ${RUNNER_REPOS_RESULT:-0}, ${RUN_CONTEXT_LEDGER_RESULT:-0}, ${MEMORY_RESULT:-0}, ${REPO_CONTEXT_SETTINGS_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
