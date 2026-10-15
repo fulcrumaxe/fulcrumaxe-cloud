@@ -41,7 +41,11 @@ Exported from `packages/sitekit-claims/src/index.ts`:
   that can reach render eligibility via human attestation instead of an
   automated verifier run), `ALLOWED_UI_CHROME` (the fixed dictionary keys a
   chrome-* prop may hold), `SECTION_PROPS_SCHEMA`, `CLAIM_REF_FIELDS`,
-  `URL_FIELDS`.
+  `URL_FIELDS`, `PRODUCT_KINDS` / `ProductKind` / `DEFAULT_PRODUCT_KIND` (the
+  customer-chosen site kind, `open_source` unless a document says
+  `code_visible_paid`), `REQUIRED_SECTIONS` (the section types each kind must
+  carry; `code_visible_paid` needs a `pricing-table`, and every pricing claim in any section must be
+  attested, enforced by `gateSite`), `SectionChromeKeySchema` (`ChromeKeySchema` minus `footer.licence` and `footer.badge`; the key type of section title, subtitle and CTA fields).
 - Functions: `isSlug`, `isAssetPath`, `parseRepoUrlShape`, `isRepoUrlHostAllowed`,
   `assertRenderable`, `gateSite`.
 

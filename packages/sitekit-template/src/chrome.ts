@@ -1,4 +1,4 @@
-import { ALLOWED_UI_CHROME, type ChromeKey } from "@fx/sitekit-claims";
+import { ALLOWED_UI_CHROME, DEFAULT_PRODUCT_KIND, PRODUCT_KINDS, type ChromeKey, type ProductKindType } from "@fx/sitekit-claims";
 
 /**
  * English copy for every fixed UI-chrome key (D#2606 K03).
@@ -27,6 +27,31 @@ export const CHROME_EN: Record<ChromeKey, string> = {
   "section.legal.title": "Legal",
   "section.faq.title": "FAQ",
   "footer.credit": "Built with fulcrumaxe site kit",
+  // The open_source footer carries no licence line or badge; an empty value
+  // means "not rendered" (page.ts), which keeps that kind's output exactly as
+  // it was before productKind existed.
+  "footer.licence": "",
+  "footer.badge": "",
+};
+
+/**
+ * Chrome copy for a `code_visible_paid` site (D#3 K-KIND, OQ4 default
+ * wording). The source is public to read but not free to use, so it must never
+ * say or imply "open source"; a banned-string test renders the whole site
+ * and fails on any of the open-source phrases.
+ */
+export const CHROME_CODE_VISIBLE_PAID_EN: Record<ChromeKey, string> = {
+  ...CHROME_EN,
+  "section.pricing.title": "Plans",
+  "section.legal.title": "Licence",
+  "footer.licence": "The source code is public to read. Using it requires a paid plan.",
+  "footer.badge": "Code-visible",
+};
+
+/** One chrome dictionary per product kind. */
+export const CHROME_BY_KIND: Record<ProductKindType, Record<ChromeKey, string>> = {
+  open_source: CHROME_EN,
+  code_visible_paid: CHROME_CODE_VISIBLE_PAID_EN,
 };
 
 /** Skip-link text. Template-internal, deliberately not a ChromeKey: no section
@@ -36,12 +61,14 @@ export const SKIP_LINK_EN = "Skip to content";
 // Defensive completeness check, at module load: every key ALLOWED_UI_CHROME
 // declares must have English copy, and vice versa. Catches a future K01
 // change (a new chrome key) that this dictionary forgot to follow.
-for (const key of ALLOWED_UI_CHROME) {
-  if (!(key in CHROME_EN)) {
-    throw new Error(`sitekit-template: CHROME_EN is missing copy for chrome key "${key}"`);
+for (const kind of PRODUCT_KINDS) {
+  for (const key of ALLOWED_UI_CHROME) {
+    if (!(key in CHROME_BY_KIND[kind])) {
+      throw new Error(`sitekit-template: the ${kind} chrome dictionary is missing copy for chrome key "${key}"`);
+    }
   }
 }
 
-export function chrome(key: ChromeKey): string {
-  return CHROME_EN[key];
+export function chrome(key: ChromeKey, kind: ProductKindType = DEFAULT_PRODUCT_KIND): string {
+  return CHROME_BY_KIND[kind][key];
 }

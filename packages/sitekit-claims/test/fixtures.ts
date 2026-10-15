@@ -76,6 +76,7 @@ export function makeSiteContent(overrides: Partial<SiteContent> = {}): SiteConte
     site: "example",
     repo: "owner/example",
     repo_sha: REPO_SHA,
+    productKind: "open_source",
     domains: ["example.com"],
     pages: [],
     ...overrides,

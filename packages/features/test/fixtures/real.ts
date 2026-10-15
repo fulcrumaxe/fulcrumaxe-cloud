@@ -1,9 +1,9 @@
 import type { Blob, Fixture } from "../../src/upcast.js";
 
 /**
- * One fixture per shipped version of each real shape (D#8 C5c). Both are
- * v1: an untagged envelope is v1 by definition, and site_versions.content
- * is at content_schema_version 1. Key order matches what the real readers
+ * One fixture per shipped version of each real shape (D#8 C5c). The envelope
+ * is v1 (an untagged envelope is v1 by definition); site_versions.content has
+ * a v1 and a v2 fixture (v2 adds productKind). Key order matches what the real readers
  * emit, so a byte comparison is meaningful.
  */
 
@@ -64,6 +64,9 @@ export const SITE_CONTENT_V1: Blob = {
   ],
 };
 
+/** The same document as the v2 reader stores it: v1 plus the default productKind. */
+export const SITE_CONTENT_V2: Blob = { ...SITE_CONTENT_V1, productKind: "open_source" };
+
 /** A final agent message: prose, then the AGENT_OUTPUT block. */
 export const ENVELOPE_TRANSCRIPT_V1 = [
   "Done. PR opened.",
@@ -84,5 +87,6 @@ export const ENVELOPE_TRANSCRIPT_V1 = [
 
 export const realFixtures = (envelope: Blob): Fixture[] => [
   { shape: "site_content", version: 1, name: "site-versions-content-v1", blob: SITE_CONTENT_V1 },
+  { shape: "site_content", version: 2, name: "site-versions-content-v2", blob: SITE_CONTENT_V2 },
   { shape: "agent_output_envelope", version: 1, name: "extracted-envelope-v1", blob: envelope },
 ];

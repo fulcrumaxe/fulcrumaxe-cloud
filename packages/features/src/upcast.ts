@@ -53,9 +53,16 @@ export const SHAPES: readonly ShapeDef[] = [
     key: "site_content",
     table: "site_versions",
     evidence: true,
-    current: 1,
+    current: 2,
     fields: ["site", "siteNameClaimId", "repo", "repo_sha", "domains", "pages", "claims"],
-    steps: [],
+    steps: [
+      {
+        // v2 adds productKind (D#3 K-KIND). A v1 document is an open_source site.
+        from: 1,
+        adds: [{ name: "productKind", hasDefault: true, default: "open_source" }],
+        upcast: (blob) => ({ ...blob, productKind: "open_source" }),
+      },
+    ],
   },
   {
     // agent_runs.envelope; an untagged envelope is v1 by definition.
