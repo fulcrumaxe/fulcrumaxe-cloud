@@ -14,7 +14,7 @@
  * A take-over (D#6 R4a-7) is asked for by the machine's owner through the tmux watch: the agent gets SIGINT, nothing is pushed, one
  * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
 import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
@@ -396,9 +396,11 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     return sent;
   }
 
-  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; workspace?: string }, lease: ReturnType<typeof startLease>): Promise<JobResult> {
+  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>): Promise<JobResult> {
+    // Integers, enums and hashes only (C8 section 6); no section list yet (the cloud's assembler supplies sections in D#600 CX-2).
+    const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger);
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput });
+      const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger });
       if (reply.kind === "done") {
         if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);

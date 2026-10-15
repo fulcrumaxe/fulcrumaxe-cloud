@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, type ClaimCapacity, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, type ClaimCapacity, type ContextLedgerBody, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 
@@ -154,6 +154,8 @@ export interface RunnerLeaseOps {
     verdict: RunnerDoneStored;
     sessionId?: string;
     agentOutput?: Record<string, unknown>;
+    /** The runner's context ledger (D#600 CX-1b), already schema-checked; absent from an older runner. */
+    contextLedger?: ContextLedgerBody;
   }): Promise<{ kind: "recorded"; verdict: RunnerDoneStored } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }>;
 }
 

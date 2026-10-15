@@ -4,6 +4,7 @@
  * change may add a field but never remove or rename one.
  */
 import { z } from "zod";
+import { CONTEXT_MAX_COUNT, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { SESSION_ID_PATTERN } from "./job.js";
 
@@ -327,6 +328,31 @@ export function isBoundedJson(value: unknown, maxDepth: number, maxBytes: number
   }
 }
 
+/**
+ * D#600 CX-1b (additive under C8 section 6; the cloud deploys first): what a runner says about the context a run loaded. Section codes
+ * (a closed enum), integers, a sha256 per section and tool names (a closed enum) only: no free text, no path, no key outside this schema.
+ * Every string is an enum member or a 64-character hex digest, so none can carry content. `measured` needs the first turn and the peak.
+ */
+const ledgerCount = safeInt.min(0).max(CONTEXT_MAX_COUNT);
+export const ContextLedgerBody = z
+  .object({
+    basis: z.enum(["measured", "partial"]),
+    sections: z
+      .array(z.object({ code: z.enum(CONTEXT_SECTION_CODES), bytes: ledgerCount, sha256: z.string().regex(/^[0-9a-f]{64}$/), trimmed_bytes: ledgerCount }).strict())
+      .max(64),
+    first_turn_input: ledgerCount.optional(),
+    peak_context: ledgerCount.optional(),
+    cache_read: ledgerCount.optional(),
+    cache_write: ledgerCount.optional(),
+    memory: ledgerCount.optional(),
+    tool_output_bytes: z.object(Object.fromEntries(CONTEXT_TOOL_ENUM.map((tool) => [tool, ledgerCount.optional()])) as Record<(typeof CONTEXT_TOOL_ENUM)[number], z.ZodOptional<typeof ledgerCount>>).strict(),
+    compactions: safeInt.min(0).max(1_000_000),
+  })
+  .strict()
+  .refine((v) => v.basis !== "measured" || (v.first_turn_input !== undefined && v.peak_context !== undefined), { message: "a measured ledger names its first turn and its peak" })
+  .refine((v) => v.first_turn_input === undefined || v.peak_context === undefined || v.peak_context >= v.first_turn_input, { message: "the peak is at least the first turn" });
+export type ContextLedgerBody = z.infer<typeof ContextLedgerBody>;
+
 /** `done` is a hint. The cloud checks GitHub itself; `agentOutput` is stored as advisory only. */
 export const DoneMessage = z
   .object({
@@ -338,6 +364,7 @@ export const DoneMessage = z
       .record(z.unknown())
       .refine((value) => isBoundedJson(value, MAX_AGENT_OUTPUT_DEPTH, MAX_ENVELOPE_INPUT_BYTES), { message: "agentOutput is too large or too deeply nested" })
       .optional(),
+    context_ledger: ContextLedgerBody.optional(),
   })
   .strict();
 

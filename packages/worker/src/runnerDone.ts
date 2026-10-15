@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
-import { MAX_ENVELOPE_INPUT_BYTES, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, redactDeep, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { MAX_ENVELOPE_INPUT_BYTES, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -51,6 +51,8 @@ export interface RunnerDoneVerdict {
 
 export interface FinishRunnerDoneInput extends HeartbeatRunnerRunInput {
   verdict: RunnerDoneVerdict;
+  /** The runner's context ledger (D#600 CX-1b), already schema-checked by the route. Absent from an older runner: the run's row is then `partial`. */
+  contextLedger?: ContextLedgerBody;
   /** The Claude Code session the run ended in (already shape-checked by the protocol); stored in `cc_session_id`. */
   sessionId?: string;
   /** The runner's own output envelope: advisory, stored after redaction and capped in bytes. */
@@ -130,6 +132,29 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
   };
 }
 
+/** The log line a refused or failed ledger write leaves: a fixed word, never a value from the runner. */
+export const LEDGER_WRITE_FAILED = "runner.done.context_ledger_not_recorded";
+
+/**
+ * D#600 CX-1b: the run's context ledger, written in the `done` transaction on the run-writer login (the login `run_context_ledger_record`
+ * grants EXECUTE to; migration 0792). A runner that sent none, and a taken-over run (whose runner output counts for nothing), get a
+ * `partial` row with nothing measured. The write sits inside a savepoint: the ledger is advisory, so a refusal (the definer re-checks every
+ * value) or a database error rolls back to the savepoint, leaves the fixed log line, and the verdict still commits.
+ */
+async function recordRunnerLedger(client: PoolClient, input: FinishRunnerDoneInput): Promise<void> {
+  const sent = input.verdict.failureReason === "taken_over" ? undefined : input.contextLedger;
+  const { measure, sections, memoryTokens } = sent === undefined ? { measure: NOT_RECORDED_MEASURE, sections: [] as ContextSection[] } : contextLedgerFromWire(sent);
+  await client.query("SAVEPOINT context_ledger");
+  try {
+    await recordContextLedger(client, { accountId: input.accountId, runId: input.runId, sections, measure, ...(memoryTokens === undefined ? {} : { memoryTokens }) });
+    await client.query("RELEASE SAVEPOINT context_ledger");
+  } catch {
+    // fx-swallow-ok: the ledger is advisory; the savepoint is rolled back and a fixed line is the trace
+    await client.query("ROLLBACK TO SAVEPOINT context_ledger");
+    console.warn(JSON.stringify({ event: LEDGER_WRITE_FAILED, run_id: input.runId }));
+  }
+}
+
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = {}): RunnerDoneFacade {
   const now = deps.now ?? Date.now;
@@ -181,6 +206,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
           // Held under the row lock, so this is a defence: the run was running a statement ago.
           if (!moved.updated) return { kind: "fenced", reason: "run_terminal" };
           await noteRunnerActivityCap(client, { accountId: input.accountId, runId: input.runId });
+          await recordRunnerLedger(client, input);
           return { kind: "recorded", verdict };
         });
       }),

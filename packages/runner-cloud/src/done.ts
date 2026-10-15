@@ -79,6 +79,8 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
       verdict: decided.verdict,
       ...(message.session_id === undefined ? {} : { sessionId: message.session_id }),
       ...(message.agentOutput === undefined ? {} : { agentOutput: message.agentOutput }),
+      // D#600 CX-1b: checked by the strict schema above; absent from an older runner, which the store records as `partial`.
+      ...(message.context_ledger === undefined ? {} : { contextLedger: message.context_ledger }),
     }),
   );
   if (finished.kind === "fenced") return stopReply(finished.reason);
