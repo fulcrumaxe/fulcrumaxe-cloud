@@ -4,6 +4,8 @@ export interface AccountCreatedContext {
   accountId: string;
   ownerUserId: string;
   client: PoolClient;
+  /** The partner host the person signed up on, set by the sign-in handoff. Read by the partner signup hook; absent for a signup on our own host. */
+  signupHost?: string;
 }
 
 export type AccountCreatedHook = (ctx: AccountCreatedContext) => Promise<void> | void;

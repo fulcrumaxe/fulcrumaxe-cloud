@@ -680,7 +680,7 @@ test("vitest-projects maps directories to the project names vitest reports", () 
 test("vitest-projects agrees with vitest itself on the real workspace", (t) => {
   const probe = spawnSync("pnpm", ["exec", "vitest", "--version"], { encoding: "utf8", cwd: repoRoot });
   if (probe.error || probe.status !== 0) return t.skip("vitest is not installed");
-  const out = spawnSync(process.execPath, [path.join(here, "vitest-projects.mjs"), "packages/sitekit-claims", "apps/web", "apps/workspace", "packages/partners"], { encoding: "utf8", cwd: repoRoot });
+  const out = spawnSync(process.execPath, [path.join(here, "vitest-projects.mjs"), "packages/sitekit-claims", "apps/web", "apps/workspace", "infra"], { encoding: "utf8", cwd: repoRoot });
   assert.equal(out.status, 0, out.stderr);
   assert.deepEqual(out.stdout.trim().split("\n"), ["@fx/sitekit-claims", "web", "workspace"]);
 });

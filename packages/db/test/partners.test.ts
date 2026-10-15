@@ -80,9 +80,11 @@ describe('partners table', () => {
       `SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = 'partners'`,
     );
     // D#2607 P01 adds `partner_self` (a partner session may read its own
-    // row) alongside H02/X1's original platform_ops-only policy.
+    // row) alongside H02/X1's original platform_ops-only policy. 0803 adds
+    // `partner_host_definer_select`, the read policy of the definer role that owns
+    // resolve_host (a NOLOGIN role; see 0803's header).
     expect(policies.map((p) => p.policyname).sort()).toEqual(
-      ['partner_self', 'platform_ops_full_access'].sort(),
+      ['partner_host_definer_select', 'partner_self', 'platform_ops_full_access'].sort(),
     );
   });
 });

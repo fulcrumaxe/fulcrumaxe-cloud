@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SignInRefusedError, type AuthProvider } from "@fx/core/src/auth/provider";
 import { signUpOrSignIn } from "@fx/core/src/auth/identity";
 import { SIGNIN_REFUSED_CODE, isSigninAllowed } from "@fx/core/src/auth/signinAllowlist";
+import "../../../../../lib/partners/registerHooks";
 import { defaultAuthDeps, defaultGithubProvider } from "../../_lib/deps";
 import { withSessionCookie } from "../../_lib/sessionCookie";
 import { OAUTH_STATE_COOKIE } from "../handler";

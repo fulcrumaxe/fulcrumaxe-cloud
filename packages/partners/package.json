@@ -12,8 +12,15 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@fx/design": "workspace:*",
+    "zod": "^3.23.8"
+  },
   "devDependencies": {
+    "@fx/db": "workspace:*",
     "@types/node": "^24.19.0",
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1",
     "typescript": "^5.7.0",
     "vitest": "^2.1.8"
   }

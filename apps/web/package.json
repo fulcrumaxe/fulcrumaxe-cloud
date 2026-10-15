@@ -23,6 +23,7 @@
     "@fx/github": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/net-guard": "workspace:*",
+    "@fx/partners": "workspace:*",
     "@fx/pipeline": "workspace:*",
     "@fx/plan-data": "workspace:*",
     "@fx/reconcile": "workspace:*",

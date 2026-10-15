@@ -3,6 +3,7 @@ auth/github/route.ts
 auth/invitations/accept/route.ts
 auth/signout/route.ts
 auth/test/callback/route.ts
+branding/partner/route.ts
 branding/route.ts
 cron/api-sweep/route.ts
 cron/compute-settle-sweep/route.ts
