@@ -827,8 +827,13 @@ function parseYamlText(text) {
 }
 const triggersOf = (doc) => doc.on ?? doc.true; // YAML 1.1 reads the key `on` as the boolean true
 const WORKFLOW_DIR = path.join(repoRoot, ".github/workflows");
+// The one private overlay workflow that has its own, stricter-by-name rules (see the "live-e2e exception" section at the end of
+// this file). Keyed by the exact path. It is held out of `workflows` so the general tests below keep their assertions untouched;
+// the same checks run on it, with the exception, in that section. On the public plane the file does not exist and nothing changes.
+const LIVE_E2E_PATH = ".github/workflows/live-e2e.yml";
 const workflows = readdirSync(WORKFLOW_DIR)
   .filter((f) => /\.ya?ml$/.test(f))
+  .filter((f) => path.posix.join(".github/workflows", f) !== LIVE_E2E_PATH)
   .sort()
   .map((file) => {
     const text = readFileSync(path.join(WORKFLOW_DIR, file), "utf8");
@@ -871,6 +876,17 @@ function evalExpr(src, ctx) {
     if (!t) throw new Error(`unexpected end of expression: ${src}`);
     if (t.t === "val") return t.v;
     if (t.t === "ctx") {
+      // always() is true whenever the job's `if` is evaluated at all; it is the only function supported.
+      if (t.v === "always" && peek()?.v === "(" && toks[i + 1]?.v === ")") {
+        i += 2;
+        return true;
+      }
+      // github.event.schedule is the cron string of a scheduled run, and empty on every other event.
+      if (t.v === "github.event.schedule" && !(t.v in ctx)) return "";
+      // A repository variable that is not set reads as the empty string.
+      if (t.v.startsWith("vars.") && !(t.v in ctx)) return "";
+      // Payload fields, dispatch inputs and upstream job outputs that this run does not carry read as null.
+      if (/^(github\.event\.deployment_status\.|inputs\.|needs\.)/.test(t.v) && !(t.v in ctx)) return null;
       if (!(t.v in ctx)) throw new Error(`unsupported context "${t.v}" in: ${src}`);
       return ctx[t.v];
     }
@@ -1858,4 +1874,357 @@ test("public repository: unchanged on push and pull request (full suite, never t
     assert.equal(runs(stepNamed(checkSteps, "CI scope (push to private main)"), ctx), false, event);
   }
   assert.equal(runs(stepNamed(checkSteps, "CI scope (push to main)"), ctxFor("push", false)), true);
+});
+
+// ---- the live-e2e exception: one file, one label, named secrets -----------------------------------------------
+// .github/workflows/live-e2e.yml is a private overlay workflow (it never ships to the public code plane). It runs on the owner's
+// isolated `live-e2e` runner, reads a Vercel bypass secret and a Stripe test key, uses the `live-staging` environment and opens
+// report issues. The general tests above hold it out (see LIVE_E2E_PATH) and keep every rule for every other file. Here the same
+// rules are applied to it with exactly these allowances, keyed by the exact path: the same content under any other name fails.
+// The logic runs on inline fixture YAML, so it runs on the public plane too; tests that read the real file skip when it is absent.
+const LIVE_E2E_LABEL = "live-e2e";
+const LIVE_E2E_ENVIRONMENT = "live-staging";
+// Secrets by job: the bypass header everywhere; the Stripe restricted test key only in the two tiers that pay.
+SECRET_ALLOWLIST[LIVE_E2E_PATH] = {
+  poller: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET"] },
+  smoke: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET"] },
+  standard: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_STRIPE_RESTRICTED_KEY"] },
+  full: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_STRIPE_RESTRICTED_KEY"] },
+};
+/** Every way a workflow at this repository path breaks the rules; the exception applies only when `relPath` is exactly LIVE_E2E_PATH. */
+function liveE2eViolations(relPath, doc, text = "") {
+  const exact = relPath === LIVE_E2E_PATH;
+  const out = [];
+  const on = triggersOf(doc);
+  const keys = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on ?? {});
+  // This workflow never runs for a pull request, a push or a workflow_run (a fork must not reach the isolated runner).
+  for (const k of keys) if (["pull_request", "pull_request_target", "workflow_run", "push"].includes(k)) out.push(`${k} trigger`);
+  out.push(...secretViolations(relPath, doc));
+  if (/secrets\.GITHUB_TOKEN/.test(noComments(text))) out.push("reads the token as a secret");
+  const wantPerms = exact ? { contents: "read", issues: "write" } : { contents: "read" };
+  if (JSON.stringify(Object.entries(doc.permissions ?? {}).sort()) !== JSON.stringify(Object.entries(wantPerms).sort())) out.push("top-level permissions");
+  for (const [name, job] of jobsOf(doc)) {
+    for (const value of runsOnValues(job)) {
+      // In the exact file runs-on is exactly the live-e2e label (not ubuntu-* either); anywhere else the general rule applies.
+      const reason = exact ? (value === LIVE_E2E_LABEL ? null : `runs-on ${JSON.stringify(value)} is not exactly ${LIVE_E2E_LABEL}`) : judgeRunsOn(value);
+      if (reason !== null) out.push(`${name}: ${reason}`);
+    }
+    if (job.environment === LIVE_E2E_ENVIRONMENT && !exact) out.push(`${name}: environment ${LIVE_E2E_ENVIRONMENT} outside its file`);
+    for (const [scope, level] of Object.entries(job.permissions ?? {})) if (level !== "read") out.push(`${name}: asks for ${scope}: ${level}`);
+    if (job.secrets !== undefined) out.push(`${name}: passes secrets`);
+    if (job.uses !== undefined) out.push(`${name}: calls a reusable workflow`);
+    if (typeof job.if !== "string" || !job.if.startsWith("vars.CI_DISABLED != 'true'")) out.push(`${name}: does not start with the kill switch`);
+    for (const step of job.steps ?? []) {
+      if (String(step.uses ?? "").startsWith("actions/checkout@") && step.with?.["persist-credentials"] !== false) out.push(`${name}: checkout persists credentials`);
+    }
+    if (JSON.stringify(job.env ?? {}).includes("runner.")) out.push(`${name}: job-level env reads the runner context`);
+  }
+  out.push(...untrustedInRun(doc).map((h) => `untrusted text in run: ${h}`));
+  // macOS jobs: workflow_dispatch only and no secret, as for every workflow (this file has schedules, so any macos-* job fails).
+  out.push(...macosViolations(doc).map((n) => `${n}: macOS job outside a manual-only workflow, or reading a secret`));
+  // The tuf metadata publish happens only in the release workflows' listed jobs.
+  if (/release-metadata\.sh" publish/.test(text)) out.push("publishes the release metadata");
+  // Every job needs the main branch, and the kill switch must hold under every trigger, whatever the rest of its `if` says.
+  for (const [name, job] of jobsOf(doc)) {
+    if (typeof job.if !== "string") continue;
+    for (const c of liveTriggerContexts()) {
+      if (Boolean(evalExpr(job.if, { ...c, "github.ref": "refs/heads/other" }))) out.push(`${name}: runs off the main branch (${c["github.event_name"]})`);
+      if (Boolean(evalExpr(job.if, { ...c, "vars.CI_DISABLED": "true" }))) out.push(`${name}: runs with the kill switch on (${c["github.event_name"]})`);
+    }
+  }
+  return out;
+}
+/** Every trigger the file declares, with every variable favourable to running: used to test that a guard holds whatever else is true. */
+function liveTriggerContexts() {
+  const base = {
+    "github.ref": "refs/heads/main",
+    "github.repository": "org/repo",
+    "vars.CI_DISABLED": "false",
+    "vars.LIVE_E2E_POLLER": "true",
+    "vars.LIVE_E2E_WEEKLY": "true",
+    "vars.LIVE_E2E_STAGING_DEPLOY_ENV": "staging",
+    "needs.poller.outputs.changed": "true",
+  };
+  const out = [];
+  for (const cron of ["17 1 * * *", "47 2 * * 0", "*/30 * * * *"]) out.push({ ...base, "github.event_name": "schedule", "github.event.schedule": cron });
+  for (const tier of ["smoke", "standard", "full"]) out.push({ ...base, "github.event_name": "workflow_dispatch", "inputs.tier": tier });
+  out.push({ ...base, "github.event_name": "deployment_status", "github.event.deployment_status.state": "success", "github.event.deployment_status.environment": "staging" });
+  out.push({ ...base, "github.event_name": "pull_request" });
+  return out;
+}
+const LIVE_E2E_FIXTURE = `name: Live E2E
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        type: choice
+        options: [smoke, standard, full]
+        default: smoke
+  schedule:
+    - cron: "17 1 * * *"
+    - cron: "47 2 * * 0"
+    - cron: "*/30 * * * *"
+  deployment_status:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  poller:
+    if: vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main' && github.event_name == 'schedule' && github.event.schedule == '*/30 * * * *' && vars.LIVE_E2E_POLLER == 'true'
+    runs-on: live-e2e
+    environment: live-staging
+    outputs:
+      changed: \${{ steps.poll.outputs.changed }}
+    steps:
+      - id: poll
+        env:
+          BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: echo "changed=false" >> "$GITHUB_OUTPUT"
+  smoke:
+    needs: [poller]
+    if: >-
+      vars.CI_DISABLED != 'true' && always() && github.ref == 'refs/heads/main' && (
+        (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success'
+          && vars.LIVE_E2E_STAGING_DEPLOY_ENV != '' && github.event.deployment_status.environment == vars.LIVE_E2E_STAGING_DEPLOY_ENV)
+        || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
+        || needs.poller.outputs.changed == 'true')
+    runs-on: live-e2e
+    environment: live-staging
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - env:
+          BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: echo smoke
+  standard:
+    if: >-
+      vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main' && (
+        (github.event_name == 'schedule' && github.event.schedule == '17 1 * * *')
+        || (github.event_name == 'workflow_dispatch' && inputs.tier == 'standard'))
+    runs-on: live-e2e
+    environment: live-staging
+    steps:
+      - env:
+          BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          STRIPE: \${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}
+        run: echo standard
+  full:
+    if: >-
+      vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main' && (
+        (github.event_name == 'schedule' && github.event.schedule == '47 2 * * 0' && vars.LIVE_E2E_WEEKLY == 'true')
+        || (github.event_name == 'workflow_dispatch' && inputs.tier == 'full'))
+    runs-on: live-e2e
+    environment: live-staging
+    steps:
+      - env:
+          BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          STRIPE: \${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}
+        run: echo full
+`;
+const liveFixtureDoc = () => parseYamlText(LIVE_E2E_FIXTURE);
+const liveRealPath = path.join(repoRoot, LIVE_E2E_PATH);
+const liveRealPresent = existsSync(liveRealPath);
+const LIVE_SKIP = liveRealPresent ? false : "the private overlay file .github/workflows/live-e2e.yml is not in this tree (the public plane); the inline-fixture tests still run";
+
+/** The cron and kill-switch behaviour of the four jobs, checked on whichever document is passed. */
+function assertLiveSchedules(jobs) {
+  const base = { "github.ref": "refs/heads/main", "vars.LIVE_E2E_POLLER": "true", "vars.LIVE_E2E_WEEKLY": "true" };
+  const on = (job, cron) =>
+    Boolean(evalExpr(jobs[job].if, { ...base, "github.event_name": "schedule", "github.event.schedule": cron, "needs.poller.outputs.changed": "false", "inputs.tier": "" }));
+  assert.equal(on("standard", "17 1 * * *"), true);
+  assert.equal(on("standard", "47 2 * * 0"), false);
+  assert.equal(on("full", "47 2 * * 0"), true);
+  assert.equal(on("full", "17 1 * * *"), false);
+  assert.equal(on("poller", "*/30 * * * *"), true);
+  assert.equal(on("poller", "17 1 * * *"), false);
+  for (const job of Object.keys(jobs)) {
+    const killed = { ...base, "vars.CI_DISABLED": "true", "github.event_name": "schedule", "github.event.schedule": "17 1 * * *", "needs.poller.outputs.changed": "true", "inputs.tier": "standard" };
+    assert.equal(Boolean(evalExpr(jobs[job].if, killed)), false, `${job} ran with the kill switch on`);
+  }
+}
+/** No job of this document starts for a pull request, whatever the other variables say. */
+function assertLiveNeverOnPullRequest(jobs) {
+  for (const ci of ["", "false", "true"]) {
+    for (const priv of [true, false]) {
+      const prCtx = {
+        "github.event_name": "pull_request",
+        "github.event.repository.private": priv,
+        "github.ref": "refs/heads/main",
+        "github.repository": "org/repo",
+        "vars.CI_DISABLED": ci,
+        "vars.LIVE_E2E_POLLER": "true",
+        "vars.LIVE_E2E_WEEKLY": "true",
+        "vars.LIVE_E2E_STAGING_DEPLOY_ENV": "staging",
+        "inputs.tier": "smoke",
+        "needs.poller.outputs.changed": "false",
+      };
+      for (const [name, job] of jobsOf({ jobs })) assert.equal(Boolean(evalExpr(job.if, prCtx)), false, `${name} ran on a pull request (CI_DISABLED=${JSON.stringify(ci)}, private=${priv})`);
+    }
+  }
+}
+
+test("expression evaluator: github.event.schedule matches a cron string, fails to match another, and is empty on other events", () => {
+  const e = "github.event_name == 'schedule' && github.event.schedule == '17 1 * * *'";
+  assert.equal(evalExpr(e, { "github.event_name": "schedule", "github.event.schedule": "17 1 * * *" }), true);
+  assert.equal(Boolean(evalExpr(e, { "github.event_name": "schedule", "github.event.schedule": "47 2 * * 0" })), false);
+  assert.equal(Boolean(evalExpr(e, { "github.event_name": "workflow_dispatch" })), false);
+  assert.equal(evalExpr("github.event.schedule == ''", { "github.event_name": "push" }), true);
+});
+
+test("expression evaluator: always(), unset vars.*, needs and inputs read as GitHub reads them; everything else is still rejected", () => {
+  assert.equal(evalExpr("always()", {}), true);
+  assert.equal(evalExpr("always() && x == 'y'", { x: "y" }), true);
+  assert.equal(evalExpr("always() && x == 'y'", { x: "z" }), false);
+  assert.equal(evalExpr("vars.NOT_SET != 'true'", {}), true);
+  assert.equal(evalExpr("vars.NOT_SET == 'true'", {}), false);
+  assert.equal(evalExpr("vars.NOT_SET == 'true'", { "vars.NOT_SET": "true" }), true, "a value in the context wins");
+  assert.equal(evalExpr("needs.poller.outputs.changed == 'true'", { "needs.poller.outputs.changed": "true" }), true);
+  assert.equal(Boolean(evalExpr("needs.poller.outputs.changed == 'true'", {})), false, "a skipped upstream job has no output");
+  assert.equal(evalExpr("inputs.tier == 'smoke'", { "inputs.tier": "smoke" }), true);
+  assert.equal(Boolean(evalExpr("inputs.tier == 'smoke'", {})), false, "inputs are empty outside a dispatch");
+  assert.equal(Boolean(evalExpr("github.event.deployment_status.state == 'success'", {})), false);
+  // still rejected: other functions, other contexts, other names
+  assert.throws(() => evalExpr("success()", {}));
+  assert.throws(() => evalExpr("always", {}));
+  assert.throws(() => evalExpr("secrets.X == 'y'", {}));
+  assert.throws(() => evalExpr("github.actor == 'y'", {}));
+  assert.throws(() => evalExpr("matrix.os", {}));
+});
+
+test("live-e2e exception: the inline fixture passes under the exact path and fails under every other name", () => {
+  const doc = liveFixtureDoc();
+  assert.deepEqual(liveE2eViolations(LIVE_E2E_PATH, doc, LIVE_E2E_FIXTURE), []);
+  for (const other of ["ci.yml", "live-e2e.yml", ".github/workflows/live-e2e.yaml", ".github/workflows/live-e2e-copy.yml", ".github/workflows/evil.yml", "x/.github/workflows/live-e2e.yml", ".github/workflows/Live-E2E.yml", ""]) {
+    const got = liveE2eViolations(other, doc, LIVE_E2E_FIXTURE);
+    assert.ok(got.some((v) => /runs-on/.test(v)), `${other}: the live-e2e label must be refused`);
+    assert.ok(got.some((v) => /not an allowed secret reader/.test(v)), `${other}: the secrets must be refused`);
+    assert.ok(got.includes("top-level permissions"), `${other}: issues: write must be refused`);
+    assert.ok(got.some((v) => /environment live-staging outside its file/.test(v)), `${other}: the live-staging environment must be refused`);
+  }
+  // the exception is not an allowance for the label in the general helper
+  assert.notEqual(judgeRunsOn(LIVE_E2E_LABEL), null);
+});
+
+test("live-e2e exception: nothing beyond the named label, secrets, environment and permission is allowed in the exact file", () => {
+  const mutate = (fn) => {
+    const d = liveFixtureDoc();
+    fn(d);
+    return liveE2eViolations(LIVE_E2E_PATH, d, LIVE_E2E_FIXTURE);
+  };
+  for (const label of ["self-hosted", "live-e2e-2", "[live-e2e]", "Live-E2E", "${{ vars.CI_RUNS_ON || 'live-e2e' }}"]) {
+    assert.ok(mutate((d) => { d.jobs.smoke["runs-on"] = label; }).some((v) => /^smoke: runs-on/.test(v)), label);
+  }
+  assert.ok(mutate((d) => { d.jobs.smoke["runs-on"] = ["live-e2e"]; }).some((v) => /^smoke: runs-on/.test(v)), "a list is refused");
+  // a secret outside the named list, the Stripe key outside the tiers that pay, and the wrong environment
+  assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ secrets.OTHER_SECRET }}" })), ["smoke reads OTHER_SECRET"]);
+  assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}" })), ["smoke reads LIVE_E2E_STRIPE_RESTRICTED_KEY"]);
+  assert.deepEqual(mutate((d) => d.jobs.poller.steps.push({ run: "echo ${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}" })), ["poller reads LIVE_E2E_STRIPE_RESTRICTED_KEY"]);
+  assert.deepEqual(mutate((d) => { d.jobs.standard.environment = "release"; }), ["standard must run in environment live-staging"]);
+  assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ toJSON(secrets) }}" })), ["smoke reads secrets by a dynamic name"]);
+  assert.deepEqual(mutate((d) => { d.jobs.extra = { "runs-on": "live-e2e", if: "vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main'", steps: [{ run: "echo ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}" }] }; }), ["extra is not an allowed secret reader"]);
+  // permissions: nothing wider than contents: read and issues: write
+  assert.ok(mutate((d) => { d.permissions.issues = "read"; }).includes("top-level permissions"));
+  assert.ok(mutate((d) => { d.permissions.actions = "write"; }).includes("top-level permissions"));
+  assert.ok(mutate((d) => { d.permissions.contents = "write"; }).includes("top-level permissions"));
+  assert.ok(mutate((d) => { d.jobs.smoke.permissions = { issues: "write" }; }).includes("smoke: asks for issues: write"));
+  // the other rules of the general tests still apply
+  assert.ok(mutate((d) => { d.jobs.smoke.steps[0].with["persist-credentials"] = true; }).includes("smoke: checkout persists credentials"));
+  assert.ok(mutate((d) => { d.jobs.smoke.if = "github.ref == 'refs/heads/main'"; }).includes("smoke: does not start with the kill switch"));
+  assert.ok(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ github.head_ref }}" })).some((v) => /untrusted text in run/.test(v)));
+  for (const trigger of ["pull_request", "pull_request_target", "workflow_run", "push"]) {
+    assert.ok(mutate((d) => { triggersOf(d)[trigger] = null; }).includes(`${trigger} trigger`), trigger);
+  }
+});
+
+test("live-e2e jobs: the inline fixture's crons start only their own job, and the kill switch stops every job", () => {
+  assertLiveSchedules(liveFixtureDoc().jobs);
+});
+
+test("live-e2e jobs: none runs on a pull_request (inline fixture), and the check has teeth", () => {
+  assertLiveNeverOnPullRequest(liveFixtureDoc().jobs);
+  // a job that lost its event test would run on a pull request, and the check sees it
+  const loose = liveFixtureDoc().jobs;
+  loose.standard.if = "vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main'";
+  assert.throws(() => assertLiveNeverOnPullRequest(loose), /standard ran on a pull request/);
+});
+
+test("live-e2e exception: the real .github/workflows/live-e2e.yml follows the rules", { skip: LIVE_SKIP }, () => {
+  const text = readFileSync(liveRealPath, "utf8");
+  const doc = parseYamlText(text);
+  assert.deepEqual(liveE2eViolations(LIVE_E2E_PATH, doc, text), []);
+  assert.ok(jobsOf(doc).length >= 1);
+  // a copy of the real file under another name fails
+  assert.notEqual(liveE2eViolations(".github/workflows/live-e2e-copy.yml", doc, text).length, 0);
+  assertLiveSchedules(doc.jobs);
+  assertLiveNeverOnPullRequest(doc.jobs);
+});
+
+test("live-e2e exception: the real file stays on the overlay list", { skip: existsSync(path.join(here, "publish-denylist.local")) && liveRealPresent ? false : "scripts/ci/publish-denylist.local or the live-e2e workflow is not in this tree (the public plane)" }, () => {
+  const denylist = readFileSync(path.join(here, "publish-denylist.local"), "utf8");
+  assert.match(denylist, /^\.github\/workflows\/live-e2e\.yml\t/m, "live-e2e.yml must stay on the overlay list");
+});
+
+test("live-e2e exception: only the exact path is held out of the general tests", () => {
+  assert.equal(LIVE_E2E_PATH, ".github/workflows/live-e2e.yml");
+  for (const f of workflows.map((w) => w.file)) assert.notEqual(path.posix.join(".github/workflows", f), LIVE_E2E_PATH);
+  // a file with a similar name is not held out, so the general tests would see it
+  for (const f of ["live-e2e.yaml", "live-e2e-copy.yml", "Live-E2E.yml"]) assert.notEqual(path.posix.join(".github/workflows", f), LIVE_E2E_PATH);
+});
+
+// ---- review round: macOS, main-branch, kill switch under every trigger, exact label, metadata publish, actionlint ----
+test("live-e2e exception: a macOS job, a missing main-branch test, a leaky kill switch, a hosted label or a metadata publish each turn the exact file red", () => {
+  const mutate = (fn, text = LIVE_E2E_FIXTURE) => {
+    const d = liveFixtureDoc();
+    fn(d);
+    return liveE2eViolations(LIVE_E2E_PATH, d, text);
+  };
+  // macOS: an appended macos-14 job is refused (the label rule and the macOS rule both see it)
+  const mac = mutate((d) => { d.jobs.mac = { "runs-on": "macos-14", if: "vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main'", steps: [{ run: "echo" }] }; });
+  assert.ok(mac.includes("mac: macOS job outside a manual-only workflow, or reading a secret"), mac.join("; "));
+  // every job's `if` must require the main branch
+  for (const job of ["poller", "smoke", "standard", "full"]) {
+    const got = mutate((d) => { d.jobs[job].if = d.jobs[job].if.replace("github.ref == 'refs/heads/main' && ", ""); });
+    assert.ok(got.some((v) => v.startsWith(`${job}: runs off the main branch`)), `${job}: ${got.join("; ")}`);
+  }
+  // the kill switch holds under every trigger: an extra `|| workflow_dispatch` escape is seen, as is one for a deploy event
+  for (const event of ["workflow_dispatch", "deployment_status", "schedule"]) {
+    const got = mutate((d) => { d.jobs.poller.if += ` || github.event_name == '${event}'`; });
+    assert.ok(got.some((v) => v.startsWith("poller: runs with the kill switch on")), `${event}: ${got.join("; ")}`);
+  }
+  // runs-on in the exact file is exactly live-e2e: a hosted label is refused there too
+  for (const label of ["ubuntu-latest", "ubuntu-24.04", "macos-14", "${{ github.event.repository.private && vars.CI_RUNS_ON || 'ubuntu-latest' }}"]) {
+    assert.ok(mutate((d) => { d.jobs.full["runs-on"] = label; }).some((v) => /^full: runs-on/.test(v)), label);
+  }
+  // the release metadata is published only by the release workflows
+  const publish = mutate((d) => d.jobs.smoke.steps.push({ run: 'sh "$SCRIPTS/release-metadata.sh" publish meta' }), `${LIVE_E2E_FIXTURE}\n      - run: sh "$SCRIPTS/release-metadata.sh" publish meta\n`);
+  assert.ok(publish.includes("publishes the release metadata"));
+  assert.deepEqual(liveE2eViolations(LIVE_E2E_PATH, liveFixtureDoc(), LIVE_E2E_FIXTURE), [], "the unmutated fixture stays clean");
+});
+
+const liveActionlint = spawnSync("actionlint", ["-version"], { encoding: "utf8" });
+/** actionlint over one workflow text with a config that allows ONLY the live-e2e runner label; null when it passes, else its output. */
+function lintLive(yamlText) {
+  const dir = mkdtempSync(path.join(tmpdir(), "ciwf-lint-"));
+  try {
+    mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true });
+    const cfg = path.join(dir, "actionlint.yaml");
+    writeFileSync(cfg, "self-hosted-runner:\n  labels:\n    - live-e2e\n");
+    const file = path.join(dir, ".github", "workflows", "live-e2e.yml");
+    writeFileSync(file, yamlText);
+    const r = spawnSync("actionlint", ["-config-file", cfg, "-no-color", "-shellcheck", "", "-pyflakes", "", file], { encoding: "utf8" });
+    return r.status === 0 ? null : `${r.stdout}${r.stderr}`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const LIVE_LINT_SKIP = liveActionlint.status === 0 ? false : "actionlint is not on PATH in this shell (the ci dev shell provides it)";
+test("live-e2e exception: actionlint, told only about the live-e2e label, accepts a minimal workflow and refuses any other label", { skip: LIVE_LINT_SKIP }, () => {
+  const mini = (label) => `on: workflow_dispatch\njobs:\n  j:\n    runs-on: ${label}\n    steps:\n      - run: echo hi\n`;
+  assert.equal(lintLive(mini("live-e2e")), null);
+  assert.notEqual(lintLive(mini("some-other-runner")), null, "an unknown label must be reported");
+  assert.notEqual(lintLive(mini("live-e2e-2")), null, "only the exact label is allowed by the temporary config");
+});
+test("live-e2e exception: actionlint accepts the real .github/workflows/live-e2e.yml with only the live-e2e label allowed", { skip: LIVE_SKIP || LIVE_LINT_SKIP }, () => {
+  assert.equal(lintLive(readFileSync(liveRealPath, "utf8")), null);
 });
