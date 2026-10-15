@@ -1,7 +1,8 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { ingestMemoryProposals, type IngestMemoryProposalsResult } from "@fx/core/src/memory/intake.js";
-import type { LiveSecretsSource } from "@fx/core/src/memory/index.js";
+import { repoScopeRef, type LiveSecretsSource } from "@fx/core/src/memory/index.js";
+import type { PoolClient } from "pg";
 import { liveInstallationTokens } from "@fx/github";
 import { recordMemoryProposalsEvent } from "@fx/runner";
 
@@ -16,8 +17,8 @@ import { recordMemoryProposalsEvent } from "@fx/runner";
  *   - A run that did not end `succeeded` or `failed` (cancelled, timed out): there is no finished answer to take proposals from.
  *
  * The tenant's live token values are this process's installation tokens (the ones a run's git and API calls carried). A repo-scope proposal is
- * refused `scope_unresolved` until the repository's GitHub node id is stored: `repos` keeps only the numeric id, and the entry's scope is the
- * node id plus the installation (MEM-1), so nothing here makes up a different key.
+ * refused `scope_unresolved` unless the repository's GitHub node id is stored (the repo sync writes it, MEM-3w). The entry's scope is the node
+ * id plus the installation (MEM-1), the key MEM-3's retriever reads, so nothing here makes up a different key.
  */
 export interface RunMemoryIntakeInput {
   pool: Pool;
@@ -37,6 +38,25 @@ interface RunFacts {
 
 const defaultLiveSecrets: LiveSecretsSource = () => liveInstallationTokens();
 
+/**
+ * The run's repository key, built exactly as the retriever builds it (`repoScopeRef(gh_node_id, gh_installation_id)`), or null when the run has
+ * no repository, the repository has no stored node id, or it is not attached to an installation. Null refuses the proposal `scope_unresolved`:
+ * there is no fallback key.
+ */
+export async function resolveRunRepoScopeRef(client: PoolClient, accountId: string, runId: string): Promise<string | null> {
+  const { rows } = await client.query<{ gh_node_id: string | null; gh_installation_id: string | null }>(
+    `SELECT r.gh_node_id, i.gh_installation_id::text AS gh_installation_id
+       FROM agent_runs ar
+       LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
+       JOIN repos r ON r.account_id = ar.account_id AND r.id = COALESCE(w.repo_id, ar.dispatch_repo_id)
+       LEFT JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
+      WHERE ar.id = $1 AND ar.account_id = $2`,
+    [runId, accountId],
+  );
+  const row = rows[0];
+  return row?.gh_node_id && row.gh_installation_id ? repoScopeRef(row.gh_node_id, row.gh_installation_id) : null;
+}
+
 export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Promise<IngestRunResult> {
   if (input.envelope === null || input.envelope.memory_proposals === undefined) return { status: "none" };
   const facts = await withTenant(input.pool, input.accountId, async (client) => {
@@ -55,6 +75,7 @@ export async function ingestRunMemoryProposals(input: RunMemoryIntakeInput): Pro
     source: "agent",
     envelope: input.envelope,
     liveSecrets: input.liveSecrets ?? defaultLiveSecrets,
+    resolveRepoScopeRef: (client) => resolveRunRepoScopeRef(client, input.accountId, input.runId),
     recordEvent: (client, event) => recordMemoryProposalsEvent(client, { accountId: input.accountId, runId: input.runId, payload: { ...event } }),
   });
 }

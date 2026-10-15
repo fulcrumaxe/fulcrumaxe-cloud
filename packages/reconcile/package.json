@@ -22,6 +22,7 @@
     "@fx/billing": "workspace:*",
     "@fx/github": "workspace:*",
     "@fx/model-connection": "workspace:*",
+    "@fx/pipeline": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/telemetry": "workspace:*",
     "@fx/webhooks": "workspace:*",

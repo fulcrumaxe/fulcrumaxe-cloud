@@ -50,10 +50,15 @@ export interface FailRule {
   skip?: number;
 }
 
+/** The node id GitHub gives a repository (`R_kgDO` + the numeric id, base64url): every real listing entry carries one. */
+export const nodeIdOf = (id: number): string => `R_kgDO${Buffer.from(Uint32Array.of(id).buffer).reverse().toString('base64url')}`;
+
 export interface FakeRepo {
   id: number;
   name: string;
   owner: string;
+  /** What the listing says as `node_id`: absent means the real derived one; null leaves the field out; a string is sent as it is. */
+  nodeId?: string | null;
 }
 
 export interface AppWorld {
@@ -167,7 +172,12 @@ export async function startStrictGithubApps(): Promise<StrictGithubApps> {
       const link = (n: number, rel: string) => `<https://api.github.com/installation/repositories?per_page=${perPage}&page=${n}>; rel="${rel}"`;
       const body = JSON.stringify({
         total_count: all.length,
-        repositories: all.slice((page - 1) * perPage, page * perPage).map((r) => ({ id: r.id, name: r.name, owner: { login: r.owner } })),
+        repositories: all.slice((page - 1) * perPage, page * perPage).map((r) => ({
+          id: r.id,
+          ...(r.nodeId === null ? {} : { node_id: r.nodeId ?? nodeIdOf(r.id) }),
+          name: r.name,
+          owner: { login: r.owner },
+        })),
       });
       const etag = `W/"${createHash('sha1').update(body).digest('hex')}"`;
       if (req.headers['if-none-match']?.split(',').some((t) => t.trim() === etag)) return { status: 304, headers: { etag }, body: '' };
