@@ -1024,6 +1024,9 @@ importers:
       '@fx/model-connection':
         specifier: workspace:*
         version: link:../model-connection
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

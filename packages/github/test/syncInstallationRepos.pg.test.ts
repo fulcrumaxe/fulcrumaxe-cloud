@@ -59,10 +59,21 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
   const repoRows = async (accountId: string) =>
     (await admin.query(`SELECT gh_repo_id, gh_owner, gh_name, installation_id, product FROM repos WHERE account_id = $1 ORDER BY gh_repo_id`, [accountId])).rows;
 
-  const page = (repos: Array<{ id: number; name: string; owner?: string }>, total = repos.length) =>
-    Response.json({ total_count: total, repositories: repos.map((r) => ({ id: r.id, name: r.name, owner: { login: r.owner ?? 'acme' } })) });
+  /** A repository's node id as GitHub lists it (`R_kgDO` + the numeric id, base64url). */
+  const nodeIdOf = (id: number): string => `R_kgDO${Buffer.from(Uint32Array.of(id).buffer).reverse().toString('base64url')}`;
+  type Listed = { id: number; name: string; owner?: string; /** undefined: the real one; null: field left out; string: sent as is */ nodeId?: string | null };
+  const page = (repos: Listed[], total = repos.length) =>
+    Response.json({
+      total_count: total,
+      repositories: repos.map((r) => ({
+        id: r.id,
+        ...(r.nodeId === null ? {} : { node_id: r.nodeId ?? nodeIdOf(r.id) }),
+        name: r.name,
+        owner: { login: r.owner ?? 'acme' },
+      })),
+    });
 
-  function harness(all: Array<{ id: number; name: string; owner?: string }>) {
+  function harness(all: Array<Listed>) {
     const auths: string[] = [];
     const minted: Array<{ installationId: number; permissions: unknown; repositories: unknown }> = [];
     const warn = vi.fn();
@@ -479,6 +490,117 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       expect(await syncInstallationRepos(h.deps, inst.id)).toMatchObject({ detached: 1 });
       expect(await attachedTo(acc)).toEqual([[1, null], [2, inst.id]]);
       expect(h.warn).not.toHaveBeenCalled();
+    });
+  });
+  describe('D#601 MEM-3w: repos.gh_node_id is written by the sync, and filled for rows that predate it', () => {
+    const nodeIds = async (accountId: string) =>
+      (await admin.query<{ gh_repo_id: string; gh_node_id: string | null }>(`SELECT gh_repo_id::text, gh_node_id FROM repos WHERE account_id = $1 ORDER BY gh_repo_id`, [accountId])).rows.map(
+        (r) => [Number(r.gh_repo_id), r.gh_node_id] as const,
+      );
+    /** What a conditional (reconciler) run sees: a list that has not changed, so every page answers 304 to the ETag it was given. */
+    function conditionalHarness(all: Listed[], etag = 'W/"v1"') {
+      const h = harness(all);
+      const seen: Array<string | null> = [];
+      h.deps.fetchImpl = vi.fn(strictGithubFetch(async (_url: string | URL | Request, init?: RequestInit) => {
+        const inm = (init?.headers as Record<string, string>)['if-none-match'] ?? null;
+        seen.push(inm);
+        if (inm === etag) return new Response(null, { status: 304, headers: { etag } });
+        const res = page(all, all.length);
+        res.headers.set('etag', etag);
+        return res;
+      })) as unknown as typeof fetch;
+      return { ...h, seen };
+    }
+
+    it('writes the node id GitHub lists on insert, and fills a null one on an update', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      await syncInstallationRepos(harness([{ id: 31, name: 'a' }, { id: 32, name: 'b' }]).deps, inst.id);
+      expect(await nodeIds(acc)).toEqual([[31, nodeIdOf(31)], [32, nodeIdOf(32)]]);
+      await admin.query(`UPDATE repos SET gh_node_id = NULL WHERE account_id = $1 AND gh_repo_id = 32`, [acc]);
+      expect(await syncInstallationRepos(harness([{ id: 31, name: 'a' }, { id: 32, name: 'b' }]).deps, inst.id)).toMatchObject({ status: 'synced', inserted: 0, updated: 2 });
+      expect(await nodeIds(acc)).toEqual([[31, nodeIdOf(31)], [32, nodeIdOf(32)]]);
+    });
+
+    it('a listing entry with no node id, or one that fails the column format, still syncs the repo and never clears a stored id', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      await syncInstallationRepos(harness([{ id: 41, name: 'a' }]).deps, inst.id);
+      const out = await syncInstallationRepos(harness([{ id: 41, name: 'a', nodeId: null }, { id: 42, name: 'b', nodeId: 'bad id!' }, { id: 43, name: 'c', nodeId: null }]).deps, inst.id);
+      expect(out).toMatchObject({ status: 'synced', inserted: 2, skippedInvalid: 0 });
+      expect(await nodeIds(acc)).toEqual([[41, nodeIdOf(41)], [42, null], [43, null]]);
+    });
+
+    it('a conditional run on an installation with a null node id reads the list in full (no If-None-Match), fills the ids and uses the read-only installation token', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      const all = [{ id: 51, name: 'a' }, { id: 52, name: 'b' }];
+      await syncInstallationRepos(harness(all).deps, inst.id);
+      await admin.query(`UPDATE repos SET gh_node_id = NULL WHERE account_id = $1`, [acc]); // rows from before the column was filled
+      const h = conditionalHarness(all);
+      const out = await syncInstallationRepos({ ...h.deps, conditional: { priorEtags: ['W/"v1"'] } }, inst.id);
+      expect(out).toMatchObject({ status: 'synced', updated: 2 });
+      expect(h.seen).toEqual([null]); // the saved ETag was not sent: a 304 would have written nothing
+      expect(await nodeIds(acc)).toEqual([[51, nodeIdOf(51)], [52, nodeIdOf(52)]]);
+      expect(h.minted).toEqual([{ installationId: inst.gh, permissions: { metadata: 'read' }, repositories: null }]);
+    });
+
+    it('is safe to re-run: once every id is set the ETag shortcut is back and nothing is written', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      const all = [{ id: 61, name: 'a' }];
+      await syncInstallationRepos(harness(all).deps, inst.id);
+      await admin.query(`UPDATE repos SET gh_node_id = NULL WHERE account_id = $1`, [acc]);
+      const first = conditionalHarness(all);
+      await syncInstallationRepos({ ...first.deps, conditional: { priorEtags: ['W/"v1"'] } }, inst.id);
+      const again = conditionalHarness(all);
+      expect(await syncInstallationRepos({ ...again.deps, conditional: { priorEtags: ['W/"v1"'] } }, inst.id)).toEqual({ status: 'skipped', reason: 'unchanged' });
+      expect(again.seen).toEqual(['W/"v1"']);
+      expect(await nodeIds(acc)).toEqual([[61, nodeIdOf(61)]]);
+    });
+
+    it('only this installation and product count: another installation or a detached repo with a null id does not force a full read', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      const other = await install(acc);
+      const all = [{ id: 71, name: 'a' }];
+      await syncInstallationRepos(harness(all).deps, inst.id);
+      await admin.query(
+        `INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, 72, 'team', 'acme', 'other'), ($4, $2, NULL, 73, 'team', 'acme', 'gone')`,
+        [randomUUID(), acc, other.id, randomUUID()],
+      );
+      const h = conditionalHarness(all);
+      expect(await syncInstallationRepos({ ...h.deps, conditional: { priorEtags: ['W/"v1"'] } }, inst.id)).toEqual({ status: 'skipped', reason: 'unchanged' });
+      expect(h.seen).toEqual(['W/"v1"']);
+    });
+
+    it('a failed backfill check does not block the sync: it warns in fixed words and runs the conditional pass as before', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      const all = [{ id: 81, name: 'a' }];
+      await syncInstallationRepos(harness(all).deps, inst.id);
+      const h = conditionalHarness(all);
+      let calls = 0;
+      const flaky = new Proxy(appUserPool, {
+        get(target, prop, receiver) {
+          if (prop === 'connect' && calls++ === 0) return async () => { throw new Error('connection refused for acct-secret'); };
+          const v = Reflect.get(target, prop, target);
+          return typeof v === 'function' ? v.bind(target) : Reflect.get(target, prop, receiver);
+        },
+      });
+      const out = await syncInstallationRepos({ ...h.deps, appUserPool: flaky as Pool, conditional: { priorEtags: ['W/"v1"'] } }, inst.id);
+      expect(out).toEqual({ status: 'skipped', reason: 'unchanged' });
+      expect(h.seen).toEqual(['W/"v1"']);
+      const said = h.warn.mock.calls.flat().join(' ');
+      expect(said).toContain('node id backfill check failed');
+      expect(said).not.toContain('acct-secret');
+    });
+
+    it('the column refuses a node id of the wrong shape (the sync checks the same pattern before it writes)', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      await syncInstallationRepos(harness([{ id: 91, name: 'a' }]).deps, inst.id);
+      await expect(admin.query(`UPDATE repos SET gh_node_id = 'no good' WHERE account_id = $1`, [acc])).rejects.toMatchObject({ code: '23514' });
     });
   });
 });

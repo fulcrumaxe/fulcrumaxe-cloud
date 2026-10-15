@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
+import { createMemoryPort } from '@fx/pipeline';
 import { InstallationTokenCache, mintAppJwt, recordInstallationLifecycle, syncInstallationRepos, type AppCredentialsSource } from '@fx/github';
 import { seedAccount } from '../../billing/test/helpers/seed.js';
 import {
@@ -17,7 +18,7 @@ import {
   type ReconcileJob,
   type ReportError,
 } from '../src/index.js';
-import { APP_SLUGS, startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
+import { APP_SLUGS, nodeIdOf, startStrictGithubApps, type StrictGithubApps } from './helpers/strictGithubApps.js';
 
 /**
  * D#454 H2c against real Postgres and a strict GitHub fake reached over real TLS: the repo re-sync reconciler. It runs the
@@ -111,7 +112,7 @@ describe('github repo re-sync reconcile job', () => {
    */
   async function seed(
     kind: InstallationKind,
-    opts: { inDb?: number[]; onGithub?: number[]; github?: 'active' | 'gone'; suspendedHere?: boolean; deletedHere?: boolean } = {},
+    opts: { inDb?: number[]; onGithub?: number[]; github?: 'active' | 'gone'; suspendedHere?: boolean; deletedHere?: boolean; legacy?: boolean } = {},
   ): Promise<Seeded> {
     const ghId = nextGh++;
     const accountId = randomUUID();
@@ -124,8 +125,9 @@ describe('github repo re-sync reconcile job', () => {
     );
     const inDb = opts.inDb ?? [nextRepo++];
     for (const id of inDb) {
-      await adminClient.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $4, $5, 'octo-org', $6)`, [
-        randomUUID(), accountId, installationId, id, kind === 'sitekit' ? 'sitekit' : 'team', `repo-${id}`,
+      // A repo the sync wrote already has its node id; `legacy` is one written before the column existed (null).
+      await adminClient.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, gh_node_id) VALUES ($1, $2, $3, $4, $5, 'octo-org', $6, $7)`, [
+        randomUUID(), accountId, installationId, id, kind === 'sitekit' ? 'sitekit' : 'team', `repo-${id}`, opts.legacy ? null : nodeIdOf(id),
       ]);
     }
     if ((opts.github ?? 'active') !== 'gone') {
@@ -551,6 +553,108 @@ describe('github repo re-sync reconcile job', () => {
       expect(spans['github_installations']).toBe(CAP); // it used its whole allowance (the un-suspend re-sync included)...
       expect(spans['github_repos']).toBe(CAP); // ...and the repo job still got a full one of its own
       expect((await instRow()).last_result_code).toBe('budget');
+    });
+  });
+  describe('D#601 MEM-3w: repos.gh_node_id is backfilled for rows the ETag gate would never refill', () => {
+    const nodeIds = async (s: Seeded) =>
+      (await admin.query(`SELECT gh_repo_id::text AS id, gh_node_id FROM repos WHERE account_id = $1 ORDER BY gh_repo_id`, [s.accountId])).rows.map((r) => [Number(r.id), r.gh_node_id as string | null] as const);
+    const dueNow = () => admin.query(`UPDATE reconcile_jobs SET next_due_at = now() WHERE name = $1`, [JOB]);
+    /** The ETag state of an installation that was synced before node ids were stored: saved ETags, repo rows with a null id. */
+    async function legacyWithEtags(ids: number[]): Promise<Seeded> {
+      const s = await seed('team', { inDb: ids });
+      await tick();
+      expect((await installer(s)).repo_list_etags).not.toBeNull();
+      await admin.query(`UPDATE repos SET gh_node_id = NULL WHERE account_id = $1`, [s.accountId]);
+      gh.calls.length = 0;
+      await dueNow();
+      return s;
+    }
+
+    it('a run on an installation with null node ids ignores its saved ETags, reads the list in full and fills every id; the next run is a free 304 again', async () => {
+      const ids = Array.from({ length: 120 }, () => nextRepo++); // two pages
+      const s = await legacyWithEtags(ids);
+      await tick();
+      expect(listCalls().every((c) => c.ifNoneMatch === undefined || c.ifNoneMatch === null)).toBe(true);
+      expect(listCalls()).toHaveLength(2);
+      expect(await nodeIds(s)).toEqual(ids.map((id) => [id, nodeIdOf(id)]));
+      expect(reports).toEqual([]);
+      // Nothing left to fill: back to the conditional shape, one 304 per page and no write.
+      const saved = (await installer(s)).repo_list_etags as string[];
+      gh.calls.length = 0;
+      await dueNow();
+      await tick();
+      expect(listCalls().map((c) => c.ifNoneMatch)).toEqual(saved);
+      expect(listCalls()).toHaveLength(2);
+    });
+
+    it('asks GitHub for nothing beyond the ordinary sync: one token mint and one GET of the installation listing (the metadata:read scope is asserted in the sync test in the github package)', async () => {
+      const s = await legacyWithEtags([nextRepo++]);
+      await tick();
+      expect(gh.calls.map((c) => `${c.method ?? "GET"} ${c.path.replace(String(s.gh), ':id')}`)).toEqual(['POST /app/installations/:id/access_tokens', 'GET /installation/repositories']);
+      expect(mints()).toHaveLength(1);
+    });
+
+    it('is bounded and resumable: with two installations a run, three legacy installations are filled over two runs, and re-running changes nothing', async () => {
+      const all: Seeded[] = [];
+      for (let i = 0; i < 3; i++) all.push(await seed('team', { inDb: [nextRepo++], legacy: true }));
+      const j = job({ perRun: 2 });
+      await tick(j);
+      const filled = async () => (await Promise.all(all.map(async (s) => (await nodeIds(s))[0]![1] !== null))).filter(Boolean).length;
+      expect(await filled()).toBe(2);
+      await tick(j);
+      expect(await filled()).toBe(3);
+      const after = await Promise.all(all.map(nodeIds));
+      await dueNow();
+      await tick(j);
+      await tick(j);
+      expect(await Promise.all(all.map(nodeIds))).toEqual(after);
+    });
+
+    it('a backfill that fails is reported and does not stop the others, and the failing installation keeps its rows', async () => {
+      const bad = await seed('team', { inDb: [nextRepo++], legacy: true });
+      const good = await seed('team', { inDb: [nextRepo++], legacy: true });
+      gh.world.failNext.push({ status: 500, match: /\/installation\/repositories/ });
+      await tick();
+      expect(reports).toHaveLength(1);
+      const [b, g] = [await nodeIds(bad), await nodeIds(good)];
+      const order = (await admin.query(`SELECT id FROM installations WHERE id = ANY($1::uuid[]) ORDER BY id`, [[bad.installationId, good.installationId]])).rows.map((r) => r.id);
+      const failedFirst = order[0] === bad.installationId; // the 500 lands on whichever installation runs first
+      expect([b[0]![1], g[0]![1]].filter((v) => v !== null)).toHaveLength(1);
+      expect(failedFirst ? g[0]![1] : b[0]![1]).not.toBeNull();
+      expect((await admin.query(`SELECT count(*)::int AS n FROM repos WHERE installation_id IS NULL`)).rows[0].n).toBe(0);
+    });
+
+    it('repo-scope recall works end to end after the backfill: empty (fail-closed) while the id is missing, the approved repo entry once the run has filled it', async () => {
+      const repo = nextRepo++;
+      const s = await legacyWithEtags([repo]);
+      const repoId = (await admin.query(`SELECT id FROM repos WHERE account_id = $1`, [s.accountId])).rows[0].id as string;
+      const body = 'use pnpm, not npm';
+      const entryId = randomUUID();
+      await admin.query(
+        `INSERT INTO memory_entries (id, account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256)
+         VALUES ($1, $2, 'repo', $3, 'command', $4, 'person', 'approved', 1, $5)`,
+        [entryId, s.accountId, `${nodeIdOf(repo)}@${s.gh}`, body, createHash('sha256').update(body).digest('hex')],
+      );
+      const port = createMemoryPort(appUser);
+      const recall = () => port.recall({ accountId: s.accountId, repoId, role: 'executor', slot: 'stable' } as never);
+      expect(await recall()).toEqual([]); // no node id: no repo key, nothing recalled
+      await tick(); // the backfill
+      expect((await recall()).map((e) => e.id)).toEqual([entryId]);
+      expect(reports).toEqual([]);
+    });
+
+    it('a repo-scope entry keyed on another installation is still not recalled after the backfill (the key is node id plus installation)', async () => {
+      const repo = nextRepo++;
+      const s = await legacyWithEtags([repo]);
+      const repoId = (await admin.query(`SELECT id FROM repos WHERE account_id = $1`, [s.accountId])).rows[0].id as string;
+      const body = 'belongs to a reinstall';
+      await admin.query(
+        `INSERT INTO memory_entries (id, account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256)
+         VALUES ($1, $2, 'repo', $3, 'command', $4, 'person', 'approved', 1, $5)`,
+        [randomUUID(), s.accountId, `${nodeIdOf(repo)}@${s.gh + 1}`, body, createHash('sha256').update(body).digest('hex')],
+      );
+      await tick();
+      expect(await createMemoryPort(appUser).recall({ accountId: s.accountId, repoId, role: 'executor', slot: 'stable' } as never)).toEqual([]);
     });
   });
 });

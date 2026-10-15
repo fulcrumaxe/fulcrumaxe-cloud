@@ -107,10 +107,18 @@ const PER_PAGE = 100;
 const MAX_PAGES = 100;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The shape of `repos.gh_node_id` (migration 0806's CHECK, repeated so a value the column would refuse never reaches the write). GitHub's
+ * node ids look like `R_kgDOHbPaZA`.
+ */
+export const GH_NODE_ID_RE = /^[A-Za-z0-9_=-]{4,100}$/;
+
 interface Listed {
   ghRepoId: number;
   owner: string;
   name: string;
+  /** The listing entry's GitHub node id, or null when it is missing or fails the column's format (the repo is still synced). */
+  ghNodeId: string | null;
 }
 
 /** Paged `GET /installation/repositories`. Entries failing the id/name/owner grammar are counted, not returned. */
@@ -168,7 +176,7 @@ async function listRepositories(
     const etag = res.headers.get("etag");
     if (etag) etags.push(etag);
     else everyPageHadEtag = false;
-    const body = (await res.json()) as { total_count?: unknown; repositories?: Array<{ id?: unknown; name?: unknown; owner?: { login?: unknown } }> } | null;
+    const body = (await res.json()) as { total_count?: unknown; repositories?: Array<{ id?: unknown; node_id?: unknown; name?: unknown; owner?: { login?: unknown } }> } | null;
     if (!Array.isArray(body?.repositories)) {
       malformedPage = true;
       break;
@@ -184,7 +192,7 @@ async function listRepositories(
         typeof r.name === "string" && GH_REPO_NAME_RE.test(r.name) &&
         typeof owner === "string" && GH_OWNER_LOGIN_RE.test(owner)
       ) {
-        byId.set(r.id, { ghRepoId: r.id, owner, name: r.name });
+        byId.set(r.id, { ghRepoId: r.id, owner, name: r.name, ghNodeId: typeof r.node_id === "string" && GH_NODE_ID_RE.test(r.node_id) ? r.node_id : null });
       } else {
         skippedInvalid++;
       }
@@ -216,6 +224,32 @@ async function listRepositories(
     etags: everyPageHadEtag && etags.length > 0 ? etags : null,
     unchanged: false,
   };
+}
+
+/** The same call allowance, with no saved ETags: the listing is read in full. */
+const withoutEtags = (c: SyncDeps["conditional"]): SyncDeps["conditional"] => (c === undefined ? undefined : { ...c, priorEtags: null });
+
+/**
+ * True when this installation still has an attached repo whose node id is null. Only asked on a conditional (reconciler) run, the one path
+ * that can skip the write phase. A failure here must not stop the sync: it answers false (the conditional pass runs as before) and says so
+ * in one fixed line. Reads as the tenant (`app_user`), the role that owns these rows; no new grant.
+ */
+async function installationNeedsNodeIds(deps: SyncDeps, accountId: string, installationId: string, product: string): Promise<boolean> {
+  const prior = deps.conditional?.priorEtags;
+  if (!prior || prior.length === 0) return false;
+  try {
+    return await withTenant(deps.appUserPool, accountId, async (client) => {
+      const r = await client.query(
+        "SELECT 1 FROM repos WHERE account_id = $1 AND installation_id = $2 AND product = $3 AND gh_node_id IS NULL LIMIT 1",
+        [accountId, installationId, product],
+      );
+      return (r.rowCount ?? 0) > 0;
+    });
+  } catch {
+    // fx-swallow-ok: the node-id backfill check is best effort; the ordinary sync must still run (the next pass asks again)
+    (deps.warn ?? console.warn)("syncInstallationRepos: node id backfill check failed; syncing as usual");
+    return false;
+  }
 }
 
 export async function syncInstallationRepos(deps: SyncDeps, installationId: string): Promise<SyncResult> {
@@ -261,9 +295,12 @@ export async function syncInstallationRepos(deps: SyncDeps, installationId: stri
       : deps.requester,
     cache: deps.cache,
   }));
+  // D#601 MEM-3w backfill: rows written before the node id was stored keep a null one, and an unchanged list (304 on every page) writes
+  // nothing, so the ETag shortcut is dropped for an installation that still has such a row. The full listing that follows fills them.
+  const conditional = (await installationNeedsNodeIds(deps, accountId, installationId, product)) ? withoutEtags(deps.conditional) : deps.conditional;
   const { repos, skippedInvalid, listedIds, etags, unchanged } = await atStage(
     "list_repos",
-    listRepositories(token, deps.fetchImpl ?? fetch, deps.conditional, deps.meter),
+    listRepositories(token, deps.fetchImpl ?? fetch, conditional, deps.meter),
   );
   if (unchanged) return { status: "skipped", reason: "unchanged" };
   if (skippedInvalid > 0) (deps.warn ?? console.warn)(`syncInstallationRepos: skipped ${skippedInvalid} repositories failing the name grammar`);
@@ -289,8 +326,8 @@ export async function syncInstallationRepos(deps: SyncDeps, installationId: stri
       const cur = found.rows[0];
       if (!cur) {
         const created = await client.query<{ id: string }>(
-          `INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name) VALUES ($1, $2, $3, $6, $4, $5) RETURNING id`,
-          [accountId, installationId, r.ghRepoId, r.owner, r.name, product],
+          `INSERT INTO repos (account_id, installation_id, gh_repo_id, product, gh_owner, gh_name, gh_node_id) VALUES ($1, $2, $3, $6, $4, $5, $7) RETURNING id`,
+          [accountId, installationId, r.ghRepoId, r.owner, r.name, product, r.ghNodeId],
         );
         // A new repo gets its full role set in this same transaction: a missing role_settings row means "off".
         await materializeRoleDefaults(client, accountId, created.rows[0]!.id);
@@ -302,9 +339,9 @@ export async function syncInstallationRepos(deps: SyncDeps, installationId: stri
       const repoint = kind === "team" && cur.other_kind === "team_readonly";
       if (!ours && !free && !repoint) continue; // another installation owns it: leave it alone
       await client.query(
-        `UPDATE repos SET installation_id = $3, gh_owner = $4, gh_name = $5, updated_at = now()
+        `UPDATE repos SET installation_id = $3, gh_owner = $4, gh_name = $5, gh_node_id = COALESCE($7, gh_node_id), updated_at = now()
           WHERE id = $1 AND account_id = $2 AND installation_id IS NOT DISTINCT FROM $6`,
-        [cur.id, accountId, installationId, r.owner, r.name, cur.installation_id],
+        [cur.id, accountId, installationId, r.owner, r.name, cur.installation_id, r.ghNodeId],
       );
       if (ours || free) counts.updated++;
       else counts.repointed++;

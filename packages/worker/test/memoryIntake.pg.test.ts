@@ -5,6 +5,7 @@ import { createAdvanceModule } from "../src/advance.js";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { InstallationTokenCache, liveInstallationTokens } from "@fx/github";
+import { createMemoryPort } from "@fx/pipeline";
 import { ingestRunMemoryProposals } from "../src/memoryIntake.js";
 
 // Built from pieces so the source holds no token-shaped literal.
@@ -90,5 +91,88 @@ describe("run memory intake in the worker [pg]", { timeout: 60_000 }, () => {
     await m.advanceRunOutcome(a.accountId, runId);
     expect(await rows(runId)).toHaveLength(1);
     expect(await events(runId)).toHaveLength(1);
+  });
+  describe("repo-scope proposals (D#601 MEM-3w)", () => {
+    const repoEnvelope = (body: string) => ({ verdict: "done", memory_proposals: [{ scope: "repo", kind: "command", body }] });
+    const setNodeId = (id: string | null) => admin.query("UPDATE repos SET gh_node_id = $2 WHERE id = $1", [a.repoId, id]);
+    const ghInstallation = async () => Number((await admin.query("SELECT gh_installation_id FROM installations WHERE id = $1", [a.installationId])).rows[0].gh_installation_id);
+
+    it("is refused scope_unresolved, with nothing stored, while the repository has no node id (no fallback key)", async () => {
+      await setNodeId(null);
+      const runId = await run("production");
+      expect(await ingest(runId, repoEnvelope("use pnpm, not npm"))).toMatchObject({ stored: [], refused: [{ index: 0, reason: "scope_unresolved" }] });
+      expect(await rows(runId)).toHaveLength(0);
+    });
+
+    it("is refused scope_unresolved when the repository is detached from its installation, even with a node id", async () => {
+      await setNodeId("R_kgDOWorkerDetached");
+      await admin.query("UPDATE repos SET installation_id = NULL WHERE id = $1", [a.repoId]);
+      try {
+        const runId = await run("production");
+        expect(await ingest(runId, repoEnvelope("detached repo note"))).toMatchObject({ stored: [], refused: [{ index: 0, reason: "scope_unresolved" }] });
+      } finally {
+        await admin.query("UPDATE repos SET installation_id = $2 WHERE id = $1", [a.repoId, a.installationId]);
+      }
+    });
+
+    it("after the node id is stored, the proposal lands at the key MEM-3 recalls from, and once approved it is recalled for that repository", async () => {
+      const nodeId = "R_kgDOWorkerRecall";
+      await setNodeId(nodeId);
+      const runId = await run("production");
+      expect(await ingest(runId, repoEnvelope("run the linter before the tests"))).toMatchObject({ refused: [], stored: [{ index: 0, scope: "repo" }] });
+      const key = `${nodeId}@${await ghInstallation()}`;
+      const stored = (await admin.query("SELECT id, scope_ref FROM memory_entries WHERE account_id = $1 AND provenance->>'source_run_id' = $2", [a.accountId, runId])).rows;
+      expect(stored).toEqual([{ id: expect.any(String), scope_ref: key }]);
+      const port = createMemoryPort(writerPool);
+      const recall = () => port.recall({ accountId: a.accountId, repoId: a.repoId, role: "executor", slot: "stable" } as never);
+      expect(await recall()).toEqual([]); // proposed: never injected
+      await admin.query("UPDATE memory_entries SET status = 'approved' WHERE id = $1", [stored[0].id]);
+      expect((await recall()).map((e) => e.id)).toEqual([stored[0].id]);
+    });
+
+    it("keys the proposal to the work item's repository when the run was dispatched against a different one (work item wins)", async () => {
+      const otherRepo = randomUUID();
+      await admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, gh_node_id, product) VALUES ($1,$2,$3,2,'R_kgDOWorkerDispatchOther','team')", [otherRepo, a.accountId, a.installationId]);
+      const workNodeId = "R_kgDOWorkerWorkItemWins";
+      await setNodeId(workNodeId);
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, dispatch_repo_id) VALUES ($1,$2,$3,'executor','production','succeeded',$4)`, [runId, a.accountId, a.workItemId, otherRepo]);
+      expect(await ingest(runId, repoEnvelope("work item repo wins"))).toMatchObject({ refused: [], stored: [{ index: 0, scope: "repo" }] });
+      const scopeRefs = (await admin.query("SELECT scope_ref FROM memory_entries WHERE account_id = $1 AND provenance->>'source_run_id' = $2", [a.accountId, runId])).rows;
+      expect(scopeRefs).toEqual([{ scope_ref: `${workNodeId}@${await ghInstallation()}` }]);
+    });
+
+    it("uses the dispatch repository only when the run has no work item", async () => {
+      const dispatchRepo = randomUUID();
+      const dispatchNodeId = "R_kgDOWorkerDispatchOnly";
+      await admin.query("INSERT INTO repos (id, account_id, installation_id, gh_repo_id, gh_node_id, product) VALUES ($1,$2,$3,3,$4,'team')", [dispatchRepo, a.accountId, a.installationId, dispatchNodeId]);
+      const runId = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, dispatch_repo_id) VALUES ($1,$2,'executor','production','succeeded',$3)`, [runId, a.accountId, dispatchRepo]);
+      expect(await ingest(runId, repoEnvelope("dispatch only"))).toMatchObject({ refused: [], stored: [{ index: 0, scope: "repo" }] });
+      const scopeRefs = (await admin.query("SELECT scope_ref FROM memory_entries WHERE account_id = $1 AND provenance->>'source_run_id' = $2", [a.accountId, runId])).rows;
+      expect(scopeRefs).toEqual([{ scope_ref: `${dispatchNodeId}@${await ghInstallation()}` }]);
+    });
+
+    it("never resolves to another account's repository when both accounts' repositories carry the same node id", async () => {
+      const b = await seedAccount(admin, randomUUID());
+      const sharedNodeId = "R_kgDOWorkerSharedAcrossAccounts";
+      await setNodeId(sharedNodeId);
+      await admin.query("UPDATE repos SET gh_node_id = $2 WHERE id = $1", [b.repoId, sharedNodeId]);
+      const bInstallation = Number((await admin.query("SELECT gh_installation_id FROM installations WHERE id = $1", [b.installationId])).rows[0].gh_installation_id);
+      const aInstallation = await ghInstallation();
+      expect(bInstallation).not.toBe(aInstallation);
+      // Same node id on both sides: each account's run keys to its own installation, never the other's.
+      const runA = await run("production");
+      expect(await ingest(runA, repoEnvelope("account A note"))).toMatchObject({ refused: [], stored: [{ index: 0, scope: "repo" }] });
+      const refA = (await admin.query("SELECT scope_ref FROM memory_entries WHERE account_id = $1 AND provenance->>'source_run_id' = $2", [a.accountId, runA])).rows;
+      expect(refA).toEqual([{ scope_ref: `${sharedNodeId}@${aInstallation}` }]);
+      expect((await admin.query("SELECT 1 FROM memory_entries WHERE account_id = $1", [b.accountId])).rowCount).toBe(0); // A's run stored nothing for B
+      // The other account is symmetric. (The database itself refuses a dispatch repo id from another account, so the join guard is the second line.)
+      const runB = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1,$2,$3,'executor','production','succeeded')`, [runB, b.accountId, b.workItemId]);
+      expect(await ingestRunMemoryProposals({ pool: writerPool, accountId: b.accountId, runId: runB, envelope: repoEnvelope("account B note") })).toMatchObject({ refused: [], stored: [{ index: 0, scope: "repo" }] });
+      const refB = (await admin.query("SELECT scope_ref FROM memory_entries WHERE account_id = $1", [b.accountId])).rows;
+      expect(refB).toEqual([{ scope_ref: `${sharedNodeId}@${bInstallation}` }]);
+    });
   });
 });
