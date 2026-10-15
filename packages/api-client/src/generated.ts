@@ -650,6 +650,41 @@ export interface Operations {
       runner_checked_in_at?: string | null;
     };
   };
+  getRunContext: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      run_id: string;
+      runtime: string;
+      status: string;
+      recorded: boolean;
+      basis: ("measured" | "partial") | (null);
+      sections: Array<{
+        code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "output" | "repo_instructions";
+        bytes: number;
+        trimmed_bytes: number;
+      }>;
+      first_turn_input_tokens: (number) | (null);
+      peak_context_tokens: (number) | (null);
+      cache_read_tokens: (number) | (null);
+      cache_write_tokens: (number) | (null);
+      memory_tokens: (number) | (null);
+      tool_output: Array<{
+        tool: "Read" | "Grep" | "Glob" | "LS" | "Bash" | "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "WebFetch" | "WebSearch" | "Task" | "TodoWrite" | "other";
+        bytes: number;
+      }>;
+      compactions: (number) | (null);
+      recalled_memory: Array<{
+        id: string;
+        name: string;
+        version: number;
+      }>;
+      repo_map_version: (string) | (null);
+    };
+  };
   listWebhookEndpoints: {
     path: undefined;
     query: {
@@ -2455,6 +2490,17 @@ export const operations = {
   getRunInsight: {
     method: "GET",
     path: "/api/v1/runs/{id}/insight",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  getRunContext: {
+    method: "GET",
+    path: "/api/v1/runs/{id}/context",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
