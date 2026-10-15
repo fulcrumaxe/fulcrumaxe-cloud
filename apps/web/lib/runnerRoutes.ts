@@ -54,9 +54,15 @@ function accountRunnerCaps(): { total: number; heavy: number } {
   return { total: maxConcurrentRunnerJobs, heavy: maxConcurrentHeavyRunnerJobs ?? 1 };
 }
 
+/** The fleet page's account line: the runner plan's flat figure, or a hosted plan's default (the account's own setting replaces it). Throws while the plan data cannot say. */
+function accountJobLimit(plan: string): { jobs: number; hosted: boolean } {
+  const limits = runnerLimitsFor(plan);
+  return "hosted" in limits ? { jobs: limits.defaultAccountJobs, hosted: true } : { jobs: limits.maxConcurrentRunnerJobs, hosted: false };
+}
+
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

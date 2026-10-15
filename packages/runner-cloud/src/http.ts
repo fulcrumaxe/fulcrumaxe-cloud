@@ -108,6 +108,12 @@ export interface RunnerCloudDeps {
    */
   accountRunnerCaps?: (accountId: string) => { total: number; heavy: number };
   /**
+   * D#605 FL-9: the plan's figure for the runner jobs an account may have running at once, for the fleet page's account line: the runner plan's flat
+   * figure (`hosted: false`), or a hosted plan's default, which the account's own setting replaces (`hosted: true`). Throws while the plan data cannot
+   * say; the page then shows no limit. Absent is the same.
+   */
+  accountJobLimit?: (plan: string) => { jobs: number; hosted: boolean };
+  /**
    * Whether a repository is private, asked of GitHub (apps/web supplies it). Anything but "private" keeps a repo off a
    * runner. Absent is "unknown".
    */
