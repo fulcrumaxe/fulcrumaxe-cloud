@@ -48,6 +48,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/keys.ts": ["crypto"],
   "src/credentials.ts": ["crypto", "fs", "path"], // D#6 R5b-3: the API key file: lstat checks, a no-follow open judged by the open handle, a random temp-file name, an exclusive 0600 create and one rename
   "src/protectionBypass.ts": ["fs", "path"], // the Vercel protection bypass secret file: one no-follow open judged by the open handle, a bounded read, and a real-path check that it lies under the home directory
+  "src/codeSource.ts": ["fs"], // D#605 FL-7: the registration code file: one no-follow open judged by the open handle (regular file, mode 0600, owner), a bounded read
   "src/keyring.ts": ["crypto"], // SHA-256 of a cloud address: the pinned-key table is keyed by hash, so no private host name is committed
   "src/hostFacts.ts": ["os"], // D#605 FL-2: the facts a hello reports (platform, architecture, total memory rounded to a bucket, core count) and the host name as the default runner name; read-only calls, no file and no process
   "src/daemon/resources.ts": ["fs", "os", "path"], // D#6 C43-4: what the machine has free: os.freemem (MemAvailable), load average and core count, and statfs of the workspace and cache volumes; no process is started and no process-table file is read

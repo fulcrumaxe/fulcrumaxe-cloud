@@ -7,6 +7,8 @@ export interface CommandContext {
   err: (line: string) => void;
   now: () => Date;
   fetchFn: typeof fetch;
+  /** Reads the registration code or token from standard input (no echo on a terminal). Only `bin/fx-runner.mjs` supplies it; `register --code-stdin` needs it. */
+  readCode?: (() => Promise<string>) | undefined;
   /** What `FX_RUNNER_PROTECTION_BYPASS_FILE` came to (protectionBypass.ts). Commands that call the cloud pass its secret to the HTTP layer. */
   bypass?: Bypass | undefined;
   /** The path `FX_RUNNER_PROTECTION_BYPASS_FILE` names, as given (never the content). Only `service install` uses it, to carry the path into the unit. */

@@ -32,6 +32,8 @@ export interface FakeCloud {
   runners: Map<string, { runnerId: string; jwk: Ed25519Jwk; revoked: boolean; credentialMode: CredentialMode }>;
   /** Next replies to force, consumed in order. */
   force: Array<"rate_limit" | "runner_limit" | "leases_not_failed" | "key_too_old">;
+  /** Called once the request body has arrived and before any reply, so a test can look at the machine while the caller is waiting. */
+  beforeReply?: (() => void | Promise<void>) | undefined;
   close: () => Promise<void>;
 }
 
@@ -67,6 +69,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       if (!body) return refuse(413, "body_too_large");
       const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]));
       state.seen.push({ path, headers, body: body.toString("utf8") });
+      await state.beforeReply?.();
 
       let json: unknown;
       try {

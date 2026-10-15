@@ -15,7 +15,7 @@ describe("command line", () => {
   it("prints usage for --help (exit 0) and for no command (exit 2)", async () => {
     const help = await run(["--help"]);
     expect(help.code).toBe(0);
-    expect(help.out).toContain("register --code");
+    expect(help.out).toContain("register (--code-stdin | --code-file <path>)");
     expect((await run([])).code).toBe(2);
   });
 
@@ -63,7 +63,7 @@ describe("bin/fx-runner.mjs", () => {
 
   it("reads the environment only by name, never as a whole", () => {
     const reads = [...text.matchAll(/process\.env(\.\w+|\[[^\]]*\]|[^\w.[])/g)].map((m) => m[1]);
-    expect(reads).toEqual([".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".FX_RUNNER_SERVICE", ".PATH", ".HOME", ".FX_RUNNER_HOME", ".XDG_CACHE_HOME", ".HOME", ".FX_RUNNER_HOME", ".FX_RUNNER_PROTECTION_BYPASS_FILE", ".XDG_CACHE_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".XDG_RUNTIME_DIR", ".HOME", ".SHELL", ".XDG_CACHE_HOME", ".XDG_RUNTIME_DIR", ".HOME", ".XDG_CONFIG_HOME", ".PATH"]);
+    expect(reads).toEqual([".ANTHROPIC_API_KEY", ".ANTHROPIC_AUTH_TOKEN", ".FX_RUNNER_SERVICE", ".PATH", ".HOME", ".FX_RUNNER_HOME", ".XDG_CACHE_HOME", ".HOME", ".FX_RUNNER_HOME", ".FX_RUNNER_PROTECTION_BYPASS_FILE", ".XDG_CACHE_HOME", ".HOME", ".XDG_CACHE_HOME", ".TERM", ".XDG_RUNTIME_DIR", ".HOME", ".SHELL", ".XDG_CACHE_HOME", ".XDG_RUNTIME_DIR", ".XDG_CONFIG_HOME", ".HOME", ".XDG_CONFIG_HOME", ".PATH"]);
     expect(text).not.toMatch(/\.\.\.\s*process|Object\.\w+\(\s*process\.env|globalThis|\bglobal\b/);
   });
 });

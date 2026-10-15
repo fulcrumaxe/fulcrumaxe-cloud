@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { runCli } from "../../src/cli.js";
 import { KEY_FILE, REGISTRATION_FILE } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
 import { CODE, useRig } from "./harness.js";
@@ -115,7 +116,9 @@ describe("register (R4a.1)", () => {
   });
 
   it("a network failure and a redirect are reported without a path or a stack", async () => {
-    const down = await rig.run(["register", "--code", CODE, "--credential-mode", "api_key", "--cloud-url", "http://127.0.0.1:1"]);
+    let err = "";
+    const downCode = await runCli({ argv: ["register", "--code-stdin", "--credential-mode", "api_key", "--cloud-url", "http://127.0.0.1:1"], home: undefined, stateDirOverride: rig.dir, readCode: async () => CODE, stdout: () => undefined, stderr: (t) => (err += t) });
+    const down = { code: downCode, err };
     expect(down.code).toBe(1);
     expect(down.err).toBe("fx-runner: could not reach the cloud; check --cloud-url and your network, then try again\n");
     const fetchFn = vi.fn(async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;

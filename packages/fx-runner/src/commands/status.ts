@@ -12,7 +12,7 @@ const DAY_MS = 86_400_000;
 export async function statusCommand(ctx: CommandContext): Promise<number> {
   const registration = loadRegistration(ctx.stateDir);
   if (!registration) {
-    ctx.out("Not registered. Create a registration code in the workspace, then run: fx-runner register --code <code> --credential-mode <mode> --cloud-url <url>");
+    ctx.out("Not registered. Create a registration code in the workspace, then run: fx-runner register --code-stdin --credential-mode <mode> --cloud-url <url>");
     return 1;
   }
   const key = loadRunnerKey(ctx.stateDir);
