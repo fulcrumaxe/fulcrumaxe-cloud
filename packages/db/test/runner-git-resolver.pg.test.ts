@@ -548,7 +548,10 @@ describe('migration 0765 gives platform_ops nothing', () => {
     }
     await runMigrations(pool, beforeDir);
     before = await snapshot();
-    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0765 and every later migration (the earlier ones are already recorded; a later one may depend on 0765, so it cannot be in the before set)
+    // Apply 0765 alone on top of the before set. Later migrations are left out: each is judged by its own test, and one that gives platform_ops
+    // EXECUTE on a function of its own (0803's assign_partner_on_signup) is not a change to what 0765 left it holding.
+    copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, MIGRATION), path.join(beforeDir, MIGRATION));
+    await runMigrations(pool, beforeDir);
     after = await snapshot();
   }, 120_000);
 

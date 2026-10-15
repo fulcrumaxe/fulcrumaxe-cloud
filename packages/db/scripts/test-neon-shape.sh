@@ -3067,6 +3067,33 @@ check_memory_table_shape() {
   fi
 }
 
+# Partner layer P02a (0803): the two SECURITY DEFINER functions owned by partner_host_definer, matched by exact signature. Prints their oids, comma
+# separated, when every SECURITY DEFINER function the role owns is exactly one of the two, pinned to search_path=pg_catalog, public, pg_temp, with no
+# PUBLIC entry and no grant option, and with an ACL that holds app_user alone (besides the owner) on resolve_host(text) and platform_ops alone on
+# assign_partner_on_signup(uuid,text); SHAPE_FAIL:<count> when any is not; nothing when it owns none.
+check_partner_host_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable OR a.grantee = 0)
+        AND ((p.oid = 'public.resolve_host(text)'::regprocedure
+              AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user'])
+          OR (p.oid = 'public.assign_partner_on_signup(uuid,text)'::regprocedure
+              AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['platform_ops']))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'partner_host_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'partner-host-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by partner_host_definer fail the exception shape (not one of its two exact signatures, a loose search_path, EXECUTE for anyone but app_user (resolve_host) or platform_ops (assign_partner_on_signup) and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
 # criterion 8: every SECURITY DEFINER function in public is owned by
 # platform_ops, except the ones a migration's entry (neon-shape.d/, loaded above)
 # names with exempt: the DS-0a eraser (discussion_eraser), the D#7 receipt

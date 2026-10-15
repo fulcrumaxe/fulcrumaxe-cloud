@@ -183,6 +183,9 @@ importers:
       '@fx/net-guard':
         specifier: workspace:*
         version: link:../../packages/net-guard
+      '@fx/partners':
+        specifier: workspace:*
+        version: link:../../packages/partners
       '@fx/pipeline':
         specifier: workspace:*
         version: link:../../packages/pipeline
@@ -914,10 +917,26 @@ importers:
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
   packages/partners:
+    dependencies:
+      '@fx/design':
+        specifier: workspace:*
+        version: link:../design
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
+      '@fx/db':
+        specifier: workspace:*
+        version: link:../db
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.23.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.23.0
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

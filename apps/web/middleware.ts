@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE_NAME, verifySession } from "@fx/core/src/auth/session";
+import { hostBrandStep } from "@fx/partners/host";
 import { csrfStep } from "./lib/shell/csrf";
 import { SHELL_PATH_HEADER, shellSessionRewriteStep } from "./lib/shell/shell-paths";
 
@@ -48,12 +49,12 @@ async function sessionStep(req: NextRequest, headers: Headers): Promise<void> {
 }
 
 // D#31 API-1 (correction C1): csrfStep runs first -- CSRF classification
-// happens "before any other step". P02 (D#2607) adds `hostBrandStep,` here.
+// happens "before any other step". D#2607 X3.1: hostBrandStep sits right after it.
 // shellSessionRewriteStep (D#37 WS-C criterion 5) runs last: it only ever
 // rewrites the destination the request continues to, and both CSRF
 // classification and sessionStep's downstream headers must be decided
 // against the ORIGINAL request path first.
-const STEPS: MiddlewareStep[] = [csrfStep, sessionStep, shellSessionRewriteStep];
+const STEPS: MiddlewareStep[] = [csrfStep, hostBrandStep, sessionStep, shellSessionRewriteStep];
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const headers = new Headers(req.headers);
