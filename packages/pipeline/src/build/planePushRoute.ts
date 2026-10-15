@@ -1,17 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-/**
- * The pairing as the route needs it. Structurally the `RepoPairing` that `getRepoPairing` (packages/core/src/repos/pairing.ts) returns, so
- * `() => getRepoPairing(ctx, repoId)` is a valid `loadPairing`; restated here so this module needs nothing from that change to build.
- */
-export interface RepoPairing {
-  enabled: boolean;
-  codeRepo: string | null;
-  overlayGlobs: string[];
-  identifierRulesPath: string | null;
-  planDataRulesPath: string | null;
-}
+import type { RepoPairing } from "@fx/core/src/repos/pairing.js";
+
+/** The pairing as the route needs it: defined once, with the data that owns it, in packages/core/src/repos/pairing.ts. */
+export type { RepoPairing };
 import { compileOverlay, parseIdentifierRules, parsePlanData, scanPlanePush, scanText, type IdentifierRuleSet, type PlanData, type Refusal } from "./planePush.js";
 import { git, gitCommitSource } from "./planePushGit.js";
 import { PUBLIC_BASE_BRANCH, branchNameOk, type PublicGitTransport } from "./planePushTransport.js";

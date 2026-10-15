@@ -4,6 +4,7 @@ import { assertRepoIdShape, getRepo, listRepos, type RepoDTO } from "@fx/core/sr
 import { getRepoGuardSettings, isRepoHumanMergeOnly, setRepoGuardSettings } from "@fx/core/src/role-settings/guardSettings.js";
 import type { RepoGuardSettings } from "@fx/core/src/role-settings/types.js";
 import type { RouteEntry } from "../registry.js";
+import { repoPairingRoutes } from "./repoPairing.js";
 import { decodeCursor, encodeCursor, parseLimit } from "../pagination.js";
 
 /** D#31 API-8a: a repo as listed. `install_state` is derived from `repos.installation_id`, not stored. */
@@ -157,4 +158,5 @@ export const repoRoutes: RouteEntry[] = [
       return toSettingsItem(after, await isRepoHumanMergeOnly({ pool: ctx.pool, principal: ctx.principal }, repoId));
     },
   },
+  ...repoPairingRoutes,
 ];
