@@ -15,6 +15,18 @@ export {
   resolveDeclaredEntry,
 } from "./declared.js";
 export type { DeclaredEntry } from "./declared.js";
+export {
+  ASK_NOTIFY_DEFAULT,
+  ASK_NOTIFY_VALUES,
+  ASK_WINDOW_DEFAULT_MINUTES,
+  ASK_WINDOW_MAX_MINUTES,
+  ASK_WINDOW_MIN_MINUTES,
+  AskPolicyNotAskedError,
+  TIMEOUT_OUTCOMES,
+  presetDefaultTimeoutOutcome,
+  resolveAskPolicy,
+} from "./askPolicy.js";
+export type { AskNotify, AskPolicy, AskSettingRow } from "./askPolicy.js";
 export type {
   CatalogueEntry,
   CustomerProximity,
@@ -28,4 +40,5 @@ export type {
   PresetDispositions,
   PresetName,
   ReversalDeclaration,
+  TimeoutOutcome,
 } from "./types.js";

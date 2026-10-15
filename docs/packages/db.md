@@ -124,6 +124,11 @@ either tenant-facing role would otherwise let a caller read through the
 definer's own privileges while the table-only inventory still reported
 clean.
 
+`decisionAskSettings.ts` stores the customer's ask settings (answer window, timeout outcome, notify) in `decision_ask_settings`
+(migration 0812) as append-only versions: `writeAskSetting` appends one version and its audit row in one transaction (owner or admin only,
+the actor is `ctx.principal`), a null value means inherit, and undo is a new version. `raiseAsk` resolves its policy from these rows when
+no explicit policy is passed.
+
 `decisions.ts` reads and writes the `decision_settings`/`decision_receipts`
 tables: `getCurrentDialSetting`/`listDialHistory` are plain reads over
 `withTenant`-scoped connections; `writeDialSetting` inserts the next

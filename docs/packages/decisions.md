@@ -132,6 +132,14 @@ rejected before anything else runs (`decide.ts`'s
 decision request can never assign itself a more lenient class than the
 catalogue entry for its type actually has.
 
+## Ask policy
+
+`askPolicy.ts` holds `resolveAskPolicy(entry, preset, settings, repoId)`, which is pure and returns
+`{ answerWindowMinutes, timeoutOutcome, notify }` for one ask. The first non-null value per field wins, in the order repo + type, repo +
+`'*'`, account + type, account + `'*'`, then the preset default (24 hours; Cautious stops, Balanced goes ahead on class 2, Autonomous goes
+ahead where the entry allows it). The outcome is clamped to the entry's `timeoutOutcomes`, and the window to 15 minutes through 14 days.
+Class 1 is never asked, so it has no policy. The customer's rows are stored by `packages/db/src/decisionAskSettings.ts` (migration 0812).
+
 ## Tests
 
 `packages/decisions/test/` covers the catalogue's fixed shape and content,

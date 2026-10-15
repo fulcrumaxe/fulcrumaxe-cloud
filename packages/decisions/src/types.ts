@@ -62,6 +62,12 @@ export type CustomerProximity = "customer_facing" | "internal_only";
 export type DataSensitivity = "none" | "customer_data" | "regulated_data";
 
 /**
+ * What happens when an ask's answer window ends unanswered (D#7 DP-C5 R1). Silence is never a denial: the ask either stays open
+ * and gets flagged, or it goes ahead with the option the agent recommended.
+ */
+export type TimeoutOutcome = "stop_and_flag" | "proceed_recommended";
+
+/**
  * One entry in the decision-type catalogue, shaped like
  * `packages/roles/src/manifest.ts`'s `RoleManifestEntry`. `defaultDisposition`
  * and `allowedDispositions` let a catalogue author lock a specific decision
@@ -82,6 +88,11 @@ export interface CatalogueEntry {
   readonly customerProximity: CustomerProximity;
   /** Documentation only in v1 (DP-OD2) -- decide() never reads this field. */
   readonly dataSensitivity: DataSensitivity;
+  /**
+   * The timeout outcomes this entry permits (DP-C5 R2). A reviewed, static field, never a tenant setting: resolveAskPolicy clamps every
+   * default and every customer override to this list. Empty for class 1, which is never asked. Every other entry lists `stop_and_flag`.
+   */
+  readonly timeoutOutcomes: readonly TimeoutOutcome[];
 }
 
 /** The three preset names (DP-OD1). Renaming them is rejected as churn. */

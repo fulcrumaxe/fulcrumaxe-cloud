@@ -49,6 +49,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `partner_audit_log` | `0200_partners.sql` | partner | yes |
 | `decision_settings` | `0400_decisions.sql` | tenant | yes |
 | `decision_receipts` | `0400_decisions.sql` | tenant | yes |
+| `decision_ask_settings` | `0812_decision_ask_settings.sql` | tenant | yes |
 | `idempotency_keys` | `0600_api_core.sql` | tenant | yes |
 | `stripe_webhook_events` | `0606_derived_account_status.sql` | platform-wide (`platform_ops`-only policy; no grant to `app_user`/`partner_user`) | yes |
 | `sitekit_entitlements` | `0679_sitekit_billing.sql` | tenant (`app_user` SELECT only; the Stripe webhook writes as `platform_ops`) | yes |

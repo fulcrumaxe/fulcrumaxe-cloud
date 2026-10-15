@@ -11,6 +11,10 @@
  * so an addition or removal is a deliberate, reviewed change to this file,
  * not a silent drift.
  *
+ * `timeoutOutcomes` (D#7 DP12a-1, DP-C5 R2) lists what an unanswered ask may resolve to for the entry. Only the two internal,
+ * reversible-before-build class-2 entries allow `proceed_recommended`; every other asked entry is `stop_and_flag` only, and a class-1
+ * entry (never asked) has none. A later class-3 entry is `stop_and_flag` only unless its own reviewed PR says otherwise and names why.
+ *
  * `allowedDispositions` values use DP-C1's `ask | announce | act`
  * vocabulary. An entry that does not lock itself more conservatively than
  * its class allows lists every disposition its class's presets can ever
@@ -26,7 +30,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 3;
+export const CATALOGUE_VERSION = 4;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -38,6 +42,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: [],
   },
   {
     id: "retry_transient_step_failure",
@@ -51,6 +56,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: [],
   },
 
   // --- class 2: human_over_the_loop -- ask, announce, or act, per preset ---
@@ -62,6 +68,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
   },
   {
     id: "test_strategy_choice",
@@ -71,6 +78,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
   },
   {
     // D#6 R2b-4a (C31): a runner run uses the Claude plan of the member whose subscription runner takes it. Cautious asks for each
@@ -85,6 +93,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Stop-and-flag only: going ahead on silence would spend a member's plan without that member's consent (D#7 DP12a-1).
+    timeoutOutcomes: ["stop_and_flag"],
   },
   // D#483 S5-a: starting work. The three small kinds share one shape: the person's dial moves them (Cautious asks, Balanced
   // starts and says so, Autonomous starts). With no dial row the default is `ask`: starting work is a person's approval until they
@@ -98,6 +108,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     id: "start_work_bug",
@@ -107,6 +119,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     id: "start_work_doc",
@@ -116,6 +130,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     // Launching a sub-item of a parent a person already approved: a planned PR or task of its approved Spec, a fix round, or a
@@ -128,6 +144,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     id: "publish_deprecation_notice",
@@ -141,6 +159,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "compensating_work" },
     customerProximity: "customer_facing",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
   },
 
   // --- class 3: human_in_the_loop -- always asked ---
@@ -156,6 +175,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     },
     customerProximity: "customer_facing",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     id: "external_paid_api_call",
@@ -168,6 +188,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     // The first start of a feature, project or critical item. Always asked, at every preset.
@@ -178,6 +199,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Class 3 added after v1: stop-and-flag only (D#7 R2 v1 clamps).
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     // An item reached its spend envelope and would go past it.
@@ -191,6 +214,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Going past a spend envelope on silence is never allowed: stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
   },
   {
     // An item that started as small, doc or bug and that triage then classifies higher.
@@ -201,6 +226,8 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    // Class 3 added after v1: stop-and-flag only (D#7 R2 v1 clamps).
+    timeoutOutcomes: ["stop_and_flag"],
   },
 ] as const;
 
