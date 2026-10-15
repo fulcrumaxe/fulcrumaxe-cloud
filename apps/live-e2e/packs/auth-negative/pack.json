@@ -1,6 +1,6 @@
 {
   "id": "auth-negative",
-  "rows": ["P6", "A4"],
+  "rows": ["P6", "A4", "A7"],
   "tier": "smoke",
   "tags": ["@ui", "@api"],
   "targets": ["staging", "production"],
@@ -12,5 +12,5 @@
   "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
   "retry": 0,
   "runs_last": false,
-  "paths": ["apps/web/app/api/auth/**", "packages/core/src/auth/**"]
+  "paths": ["apps/web/app/api/auth/**", "apps/web/app/api/shell/**", "apps/web/lib/shell/session-guard.ts", "apps/web/lib/shell/session-routes.ts", "apps/web/lib/shell/shell-paths.ts", "packages/core/src/auth/**"]
 }
