@@ -1,9 +1,12 @@
 import type {
+  BranchComparison,
   CiSnapshot,
   MergeBlockReason,
   MergeCallOutcome,
   MergeGateGitHubPort,
+  PullRequestMergeability,
   PullRequestState,
+  UpdateBranchOutcome,
 } from "../../../src/build/mergeGate.js";
 import type { PullRequestRef } from "../../../src/build/types.js";
 
@@ -29,6 +32,13 @@ export interface FakeGitHubOptions {
   /** A buggy port that answers the CI query with this snapshot whatever
    * SHA was asked for. */
   ciAlwaysReturns?: CiSnapshot;
+  /** What the re-read PR says about mergeability (default: mergeable, clean). A test may change it between calls. */
+  mergeability?: Pick<PullRequestMergeability, "mergeable" | "mergeableState">;
+  /** The compare of the base against the head (default: identical). */
+  comparison?: BranchComparison;
+  /** Whether protection requires up-to-date branches (default false), or a function that throws to model an unreadable rule. */
+  requiresUpToDate?: boolean | (() => boolean);
+  updateBranchOutcome?: UpdateBranchOutcome;
 }
 
 export class FakeGitHub implements MergeGateGitHubPort {
@@ -36,11 +46,32 @@ export class FakeGitHub implements MergeGateGitHubPort {
   readonly mergeCalls: { sha: string }[] = [];
   readonly humanMarks: { headSha: string; reasons: readonly MergeBlockReason[] }[] = [];
   readonly ciQueries: string[] = [];
+  readonly updateCalls: { expectedHeadSha: string }[] = [];
+  mergeability: Pick<PullRequestMergeability, "mergeable" | "mergeableState">;
   private readonly opts: FakeGitHubOptions;
 
   constructor(opts: FakeGitHubOptions) {
     this.opts = opts;
     this.pr = opts.pr;
+    this.mergeability = opts.mergeability ?? { mergeable: true, mergeableState: "clean" };
+  }
+
+  async getMergeability(_pr: PullRequestRef): Promise<PullRequestMergeability> {
+    return { headSha: this.pr.headSha, state: this.pr.state, merged: this.pr.merged, ...this.mergeability };
+  }
+
+  async updateBranch(_pr: PullRequestRef, args: { expectedHeadSha: string }): Promise<UpdateBranchOutcome> {
+    this.updateCalls.push({ expectedHeadSha: args.expectedHeadSha });
+    return this.opts.updateBranchOutcome ?? { outcome: "accepted" };
+  }
+
+  async compareToBase(_pr: PullRequestRef, _headSha: string): Promise<BranchComparison> {
+    return this.opts.comparison ?? { status: "identical", aheadBy: 0, behindBy: 0, files: null, filesTruncated: false };
+  }
+
+  async requiresUpToDateBranch(_pr: PullRequestRef): Promise<boolean> {
+    const v = this.opts.requiresUpToDate;
+    return typeof v === "function" ? v() : v === true;
   }
 
   async getPullRequest(_pr: PullRequestRef): Promise<PullRequestState> {
