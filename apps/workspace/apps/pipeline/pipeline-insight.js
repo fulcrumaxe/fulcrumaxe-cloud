@@ -131,6 +131,7 @@ export function runView(run, maxLines = 40) {
     waitText,
     checkedIn: seen ? "Runner checked in " + seen : null,
     attachHint: runner && live,
+    id: typeof run.id === "string" ? run.id : "",
     key: "r:" + run.id,
     phase: phaseOf(run.role),
     role: roleWord(run.role),
@@ -360,6 +361,8 @@ export function createInsightPanel(deps) {
       r.checkedIn ? h("p", { class: "pl-muted", "data-testid": "pl-run-checkin" }, r.checkedIn) : null,
       r.costNote ? h("p", { class: "pl-muted", "data-testid": "pl-run-cost-note" }, r.costNote) : null,
       r.attachHint ? h("p", { class: "pl-muted", "data-testid": "pl-run-attach-hint" }, "You can also watch this run on the runner machine with ", h("code", null, "fx-runner attach"), ".") : null,
+      // D#600 CX-8: the Runs app's detail holds the context panel; this opens that run there.
+      r.id ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-run-context", "aria-label": "What this run loaded: " + r.role, onClick: () => window.FULCWM && window.FULCWM.open("runs", { runId: r.id }) }, "What this run loaded") : null,
       r.lines.length
         ? h(
             "ol",

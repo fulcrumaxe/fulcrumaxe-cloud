@@ -6,6 +6,7 @@ import { workItemPriorityRoutes } from "./work-item-priority.js";
 import { tokenRoutes } from "./tokens.js";
 import { statsRoutes } from "./stats.js";
 import { workItemActivityRoutes } from "./work-item-activity.js";
+import { runContextRoutes } from "./run-context.js";
 import { runInsightRoutes } from "./run-insight.js";
 import { webhookEndpointRoutes } from "./webhook-endpoints.js";
 import { eventRoutes } from "./events.js";
@@ -48,7 +49,7 @@ import { runHandoffRoutes } from "./run-handoff.js";
  * API-8d adds `runLimitRoutes` (run limits read and set).
  * API-7b adds `auditLogRoutes`. API-6a-2 adds `runActionRoutes`.
  * D#45 S8a adds `runEventsExportRoutes` (the per-run NDJSON download).
- * D#483 P4 adds `workItemActivityRoutes` (what the pipeline is doing for one work item); P5 adds `runInsightRoutes`.
+ * D#483 P4 adds `workItemActivityRoutes` (what the pipeline is doing for one work item); P5 adds `runInsightRoutes`. D#600 CX-8 adds `runContextRoutes` (what one run loaded into its context).
  */
 export const ROUTES: RouteEntry[] = [
   ...accountRoutes,
@@ -60,6 +61,7 @@ export const ROUTES: RouteEntry[] = [
   ...workItemActivityRoutes,
   ...workItemActionRoutes,
   ...runInsightRoutes,
+  ...runContextRoutes,
   ...webhookEndpointRoutes,
   ...eventRoutes,
   ...modelConnectionRoutes,

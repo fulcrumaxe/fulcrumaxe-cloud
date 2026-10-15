@@ -9,9 +9,9 @@ import { h, timeNode } from "../_lib/dom.js";
 import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
-import { foldBox, guardToolName, headLinks, headMeta, readInsight, renderInsight, runnerEventLine, runnerNotes, titleOf } from "./runs-detail.js";
+import { foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerNotes, titleOf } from "./runs-detail.js";
 import {
-  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, loadRun, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
+  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, loadRun, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
 
 const FULC = window.FULC;
@@ -137,7 +137,7 @@ function teardown() {
   }
 }
 
-function mountApp(contentEl) {
+function mountApp(contentEl, launchArg) {
   let rows = []; // the runs loaded so far, in the order the server gave them
   let next = ""; // next_cursor of the last list page; "" = no more
   let listState = "loading"; // loading | ready | error
@@ -255,7 +255,7 @@ function mountApp(contentEl) {
           ? h("p", { class: "runs-muted", role: "status" }, "Loading what this run did…")
           : ins === null
             ? h("p", { class: "runs-muted", role: "status", "data-testid": "runs-insight-error" }, INSIGHT_UNAVAILABLE)
-            : renderInsight(ins, { openRun: open, ui: detail.ui })
+            : renderInsight(ins, { openRun: open, ui: detail.ui, context: detail.context, retryContext: () => retryContext(detail) })
       );
       content = [
         h(
@@ -311,7 +311,12 @@ function mountApp(contentEl) {
     onStatus: (id) => loadRun(id, undefined, liveAc.signal).then((run) => {
       if (listState === "ready" && run && run.id === id) { rows = upsertRow(rows, run); paintList(); }
       // The open run changed (claimed, cancelled ...): its approval is read again from the fresh run.
-      if (run && run.id === id && id === openId && detail && detail.status === "ready") { detail.run = { ...detail.run, ...run }; loadApproval(detail); }
+      if (run && run.id === id && id === openId && detail && detail.status === "ready") {
+        const wasLive = isLiveStatus(detail.run.status);
+        detail.run = { ...detail.run, ...run };
+        loadApproval(detail);
+        if (wasLive && !isLiveStatus(detail.run.status)) loadContext(detail, id); // the ledger is written when the run ends
+      }
     }, () => {}),
     onRefresh: refresh,
   });
@@ -343,6 +348,29 @@ function mountApp(contentEl) {
         repaintKeepFocus();
       }
     );
+  }
+  // D#600 CX-8: what the run loaded into its context. Read when the run opens and again when it ends (its ledger is written then);
+  // undefined while it loads, null when it could not be read (the panel then offers Retry).
+  function loadContext(mine, id) {
+    const ac = detailAc;
+    loadRunContext(id, undefined, ac.signal).then(
+      (body) => {
+        if (ac.signal.aborted || detail !== mine) return;
+        mine.context = readContext(body);
+        repaintKeepFocus();
+      },
+      () => {
+        if (ac.signal.aborted || detail !== mine) return;
+        mine.context = null;
+        repaintKeepFocus();
+      }
+    );
+  }
+  function retryContext(mine) {
+    if (detail !== mine || !openId || mine.context === undefined) return;
+    mine.context = undefined;
+    repaintKeepFocus();
+    loadContext(mine, openId);
   }
   // D#6 R2b-4b: whether the open run waits for a person, read once it is open and again when its status changes or after a click.
   function loadApproval(mine) {
@@ -393,8 +421,10 @@ function mountApp(contentEl) {
         if (ac.signal.aborted) return;
         const mine = (detail = { status: "ready", run: d.run, events: d.events.slice(0, EVENT_CAP), capped: d.capped, insight: undefined, ui: {} });
         mine.approval = { entry: null, copy: null, phase: null };
+        mine.context = undefined;
         mine.reinsight = coalesce(() => loadInsight(mine, id), 5000);
         mine.reinsight();
+        loadContext(mine, id);
         loadApproval(mine);
         paintDetail();
         pane.querySelector(".runs-back").focus();
@@ -403,7 +433,7 @@ function mountApp(contentEl) {
           stream = openRunStream(id, {
             lastSeq,
             onEvent: (ev) => onLive(ev, mine),
-            onEnd: (st) => { stream = null; if (detail === mine && st) { mine.run = { ...mine.run, status: st }; repaintKeepFocus(); loadInsight(mine, id); } },
+            onEnd: (st) => { stream = null; if (detail === mine && st) { mine.run = { ...mine.run, status: st }; repaintKeepFocus(); loadInsight(mine, id); loadContext(mine, id); } },
           });
         }
       },
@@ -430,8 +460,12 @@ function mountApp(contentEl) {
 
   paintList();
   loadFirst();
+  // Another app (Pipeline's "What this run loaded") asks for one run by id. The argument is untrusted: only a UUID is used.
+  const show = (arg) => { if (arg && typeof arg === "object" && isUuid(arg.runId)) open(arg.runId); };
+  show(launchArg);
 
   return {
+    show,
     destroy() {
       stopStream();
       unwatch();
@@ -450,9 +484,13 @@ FULC.register({
   title: "Runs",
   icon: "▶",
   defaultSize: { w: 980, h: 600 },
-  onOpen({ contentEl }) {
+  onOpen({ contentEl, launchArg }) {
     teardown();
-    current = mountApp(contentEl);
+    current = mountApp(contentEl, launchArg);
+  },
+  // Opened again from another app while it is already open: go to that run.
+  onLaunch({ launchArg }) {
+    if (current) current.show(launchArg);
   },
   onClose() {
     teardown();

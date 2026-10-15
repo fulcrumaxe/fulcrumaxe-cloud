@@ -289,6 +289,184 @@ export const isReviewer = (role) => REVIEWERS.has(role);
 /** How many activity lines show before the rest fold away. */
 export const LINES_OPEN = 12;
 
+// ── D#600 CX-8: the context panel ─────────────────────────────────────────────
+// Input is the body of GET /api/v1/runs/{id}/context: integers and fixed names only. Every figure that was not measured is null in the body and
+// "Not recorded" here, never 0; one formatter (`figure`) turns a number into words, so no cell can show null, undefined or NaN.
+
+const SECTION_NAMES = {
+  card: "Role card",
+  boundary: "Boundary",
+  map: "Repo map",
+  memory_stable: "Memory (account, repo, role)",
+  memory_item: "Memory (this item)",
+  spec: "Spec",
+  note: "Notes",
+  corrections: "Corrections",
+  findings: "Findings",
+  output: "Output block",
+  repo_instructions: "Repo instructions",
+};
+const TOOL_NAMES = {
+  Read: "Files read",
+  Grep: "Searches (Grep)",
+  Glob: "File lookups (Glob)",
+  LS: "Folder listings",
+  Bash: "Commands run",
+  Edit: "Edits",
+  MultiEdit: "Multi-file edits",
+  Write: "Files written",
+  NotebookEdit: "Notebook edits",
+  WebFetch: "Web pages fetched",
+  WebSearch: "Web searches",
+  Task: "Sub-agents",
+  TodoWrite: "To-do updates",
+  other: "Other tools",
+};
+export const CONTEXT_WORDS = {
+  loading: "Loading what this run loaded…",
+  error: "What this run loaded isn't available right now.",
+  retry: "Retry",
+  notRecorded: "Not recorded",
+  live: "Recorded when this run ends.",
+  none: "Not recorded for this run. Runs from before this was kept, and runs on an older runner, have none.",
+  runner: "Contents stayed on your machine",
+  runnerHelp: "This run ran on your runner, so only sizes and counts reach the cloud.",
+  partial: "Estimated: this run's usage was only partly measured, so the shares below are estimates.",
+};
+
+/** A byte count in words: "912 B", "5.2 KiB", "1.4 MiB". Null for anything that is not a count. */
+export function bytesText(n) {
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n < 1024) return n + " B";
+  const unit = n < 1048576 ? [n / 1024, "KiB"] : [n / 1048576, "MiB"];
+  return String(Math.round(unit[0] * 10) / 10) + " " + unit[1];
+}
+/** A token count in words, or null. */
+const tokenText = (n) => (Number.isFinite(n) && n >= 0 ? n.toLocaleString("en-US") + (n === 1 ? " token" : " tokens") : null);
+/** The one place a figure becomes a sentence part: the words, or "Not recorded". */
+const figure = (text, estimated) => (text === null ? CONTEXT_WORDS.notRecorded : text + (estimated ? " (estimated)" : ""));
+/** A part's share of a whole as { value: 0-100, text: "40%" }; a whole of nothing has no share. */
+function share(part, whole) {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return null;
+  const p = (part / whole) * 100;
+  return { value: Math.round(p), text: p > 0 && p < 1 ? "<1%" : Math.round(p) + "%" };
+}
+const countOrNull = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+
+/** The body of the context route when it has the shape this file reads, else null (the panel then shows its error and Retry). */
+export function readContext(raw) {
+  const b = clean(raw);
+  if (!isObj(b) || typeof b.run_id !== "string" || typeof b.status !== "string" || typeof b.recorded !== "boolean") return null;
+  const sections = (Array.isArray(b.sections) ? b.sections : [])
+    .filter((x) => isObj(x) && typeof x.code === "string" && countOrNull(x.bytes) !== null)
+    .slice(0, 64)
+    .map((x) => ({ code: x.code, bytes: x.bytes, trimmed_bytes: countOrNull(x.trimmed_bytes) ?? 0 }));
+  const tools = (Array.isArray(b.tool_output) ? b.tool_output : [])
+    .filter((x) => isObj(x) && typeof x.tool === "string" && countOrNull(x.bytes) !== null)
+    .slice(0, 32)
+    .map((x) => ({ tool: x.tool, bytes: x.bytes }));
+  const memory = (Array.isArray(b.recalled_memory) ? b.recalled_memory : [])
+    .filter((x) => isObj(x) && typeof x.id === "string" && typeof x.name === "string" && x.name.trim() !== "" && Number.isInteger(x.version) && x.version >= 1)
+    .slice(0, 50);
+  return {
+    run_id: b.run_id,
+    runtime: typeof b.runtime === "string" ? b.runtime : "",
+    status: b.status,
+    recorded: b.recorded,
+    basis: b.basis === "measured" || b.basis === "partial" ? b.basis : null,
+    sections,
+    first_turn_input_tokens: countOrNull(b.first_turn_input_tokens),
+    peak_context_tokens: countOrNull(b.peak_context_tokens),
+    cache_read_tokens: countOrNull(b.cache_read_tokens),
+    cache_write_tokens: countOrNull(b.cache_write_tokens),
+    memory_tokens: countOrNull(b.memory_tokens),
+    tool_output: tools,
+    compactions: countOrNull(b.compactions),
+    recalled_memory: memory,
+    repo_map_version: typeof b.repo_map_version === "string" && b.repo_map_version !== "" ? b.repo_map_version : null,
+  };
+}
+
+/**
+ * Everything the panel draws, from a read context: its state (`none`, `live`, `partial`, `ready`) and the words. A run on the person's
+ * machine is shown as sizes and counts only: no memory names and no map version, whatever the body holds.
+ */
+export function contextModel(ctx) {
+  if (!ctx.recorded || ctx.basis === null) {
+    const live = ctx.status === "pending" || ctx.status === "running";
+    return { state: live ? "live" : "none", text: live ? CONTEXT_WORDS.live : CONTEXT_WORDS.none };
+  }
+  const runner = ctx.runtime === "runner";
+  const est = ctx.basis === "partial";
+  const secTotal = ctx.sections.reduce((n, x) => n + x.bytes, 0);
+  const toolTotal = ctx.tool_output.reduce((n, x) => n + x.bytes, 0);
+  const row = (key, label, bytes, whole, trimmed) => {
+    const s = share(bytes, whole);
+    return { key, label, size: figure(bytesText(bytes), false), pct: s ? s.value : null, pctText: s ? s.text + (est ? " (estimated)" : "") : CONTEXT_WORDS.notRecorded, trimmed: trimmed > 0 ? "Trimmed: " + bytesText(trimmed) + " cut" : null };
+  };
+  const read = ctx.cache_read_tokens;
+  const write = ctx.cache_write_tokens;
+  const comp = ctx.compactions;
+  return {
+    state: est ? "partial" : "ready",
+    estimated: est,
+    runner: runner ? { title: CONTEXT_WORDS.runner, help: CONTEXT_WORDS.runnerHelp } : null,
+    sections: ctx.sections.map((x) => row("section-" + x.code, SECTION_NAMES[x.code] || word(x.code), x.bytes, secTotal, x.trimmed_bytes)),
+    tools: ctx.tool_output.map((x) => row("tool-" + x.tool, TOOL_NAMES[x.tool] || word(x.tool), x.bytes, toolTotal, 0)),
+    // The ledger holds the cache's reads and writes and not the uncached input, so "from cache" is the reads out of all cache traffic.
+    cache: read !== null && write !== null ? figure(read.toLocaleString("en-US") + " of " + (read + write).toLocaleString("en-US") + " tokens from cache", est) : "Cache use: " + CONTEXT_WORDS.notRecorded,
+    facts: [
+      ["First turn", figure(tokenText(ctx.first_turn_input_tokens), est)],
+      ["Largest context", figure(tokenText(ctx.peak_context_tokens), est)],
+      ["Compacted", comp === null ? CONTEXT_WORDS.notRecorded : comp === 0 ? "Not compacted" : comp === 1 ? "Once" : comp + " times"],
+    ],
+    memory: runner ? null : { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })) },
+    mapVersion: runner ? null : ctx.repo_map_version,
+  };
+}
+
+function ctxRow(r) {
+  return h(
+    "li",
+    { class: "runs-ctx-row", "data-testid": "runs-ctx-row", "data-key": r.key },
+    h("span", { class: "runs-ctx-name" }, r.label),
+    h("span", { class: "runs-ctx-size" }, r.size),
+    r.pct === null ? null : h("meter", { class: "runs-ctx-bar", min: 0, max: 100, value: r.pct, "aria-label": r.label + " share" }),
+    h("span", { class: "runs-ctx-pct", "data-testid": "runs-ctx-pct" }, r.pctText),
+    r.trimmed ? h("span", { class: "runs-ctx-trim", "data-testid": "runs-ctx-trim" }, r.trimmed) : null
+  );
+}
+
+/** The panel. `context` is undefined while it loads, null when it could not be read, else the read body. */
+export function contextSection(context, retry) {
+  const sec = (state, ...kids) => h("section", { class: "runs-sec runs-ctx", "data-testid": "runs-context", "data-state": state }, h("h4", { class: "runs-sec-title" }, "Context"), ...kids);
+  if (context === undefined) return sec("loading", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-loading" }, CONTEXT_WORDS.loading));
+  if (context === null) {
+    return sec("error", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-error" }, CONTEXT_WORDS.error), h("button", { type: "button", class: "runs-more", "data-testid": "runs-ctx-retry", onClick: retry }, CONTEXT_WORDS.retry));
+  }
+  const m = contextModel(context);
+  if (m.state === "none" || m.state === "live") return sec(m.state, h("p", { class: "runs-muted", "data-testid": "runs-ctx-empty" }, m.text));
+  const group = (title, rows, testid) => (rows.length ? [h("h5", { class: "runs-sub" }, title), h("ul", { class: "runs-ctx-rows", "data-testid": testid }, rows.map(ctxRow))] : []);
+  return sec(
+    m.state,
+    m.runner ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-runner" }, h("strong", null, m.runner.title), ". " + m.runner.help) : null,
+    m.estimated ? h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-estimated" }, CONTEXT_WORDS.partial) : null,
+    ...group("What the prompt held", m.sections, "runs-ctx-sections"),
+    h("p", { "data-testid": "runs-ctx-cache" }, m.cache),
+    h("dl", { class: "runs-factlist", "data-testid": "runs-ctx-facts" }, m.facts.map(([k, v]) => h("div", { class: "runs-fact" }, h("dt", null, k), h("dd", null, v)))),
+    ...group("What tools returned", m.tools, "runs-ctx-tools"),
+    m.memory && (m.memory.items.length || m.memory.tokens)
+      ? h(
+          "div",
+          { "data-testid": "runs-ctx-memory" },
+          h("h5", { class: "runs-sub" }, "Recalled memory" + (m.memory.tokens ? " · " + m.memory.tokens : "")),
+          m.memory.items.length ? h("ul", { class: "runs-ctx-rows" }, m.memory.items.map((i) => h("li", { class: "runs-ctx-row" }, i.name, " ", h("code", { title: i.title }, i.ref)))) : null
+        )
+      : null,
+    m.mapVersion ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-map" }, "Repo map version: ", h("code", null, m.mapVersion)) : null
+  );
+}
+
 // ── view ────────────────────────────────────────────────────────────────────
 
 const STATUS_NOTE = {
@@ -473,7 +651,7 @@ function factsSection(insight, openRun, ui) {
   );
 }
 
-/** The sections under the header, in the approved order: outcome, cost, activity, run facts. */
-export function renderInsight(insight, { openRun, ui }) {
-  return [outcomeSection(insight), costSection(insight), activitySection(insight, ui), factsSection(insight, openRun, ui)];
+/** The sections under the header, in the approved order: outcome, cost, context, activity, run facts. */
+export function renderInsight(insight, { openRun, ui, context, retryContext }) {
+  return [outcomeSection(insight), costSection(insight), contextSection(context, retryContext), activitySection(insight, ui), factsSection(insight, openRun, ui)];
 }
