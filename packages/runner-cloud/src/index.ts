@@ -39,7 +39,9 @@ export {
   type LocalOnlyAllowlistEntry,
 } from "./localOnlyGithub.js";
 export { HELLO_PATH, protocolVersionSupported, runnerHello } from "./hello.js";
-export { REVOKED_REGISTRANT_LEFT_NOTE, RUNNER_STATES, RUN_WAIT_REASONS, capacityOf, classifyRunner, getRunWait, getRunWaitReason, getRunnerStates, listRunners, loadLabel, waitReasonOf, type AccountRunnerCaps, type RawRun, type RunWaitReason, type RunnerCapacity, type RunnerFacts, type RunnerRow, type RunnerRunning, type RunnerState } from "./readModel.js";
+export { ALREADY_FINISHING_REASON, ALREADY_PAUSED_REASON, NOT_HELD_REASON, NOT_YOUR_RUNNER_REASON, SET_BY_SOMEONE_ELSE_REASON, accountLineOf, fleetControlsOf, type AccountLine, type FleetControl, type FleetControls } from "./fleetView.js";
+export { REVOKED_REGISTRANT_LEFT_NOTE, RUNNER_STATES, RUN_WAIT_REASONS, capacityOf, classifyRunner, getRunWait, getRunWaitReason, getRunnerStates, loadLabel, waitReasonOf, type AccountRunnerCaps, type RawRun, type RunWaitReason, type RunnerCapacity, type RunnerFacts, type RunnerRow, type RunnerRunning, type RunnerState } from "./readModel.js";
+export { listRunners } from "./fleetList.js";
 export { approveRun } from "./approvals.js";
 export { APPROVALS_LIMIT, listApprovals, type ApprovalEntry } from "./approvalsList.js";
 export { setPlanConsent } from "./planConsent.js";

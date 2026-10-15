@@ -1,9 +1,10 @@
 import type { PoolClient } from "pg";
-import { COPY, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
+import { LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, MAX_LIGHT_CAPACITY, MAX_TOTAL_CAPACITY, type SandboxUnavailableReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
-import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { accountLineOf, fleetControlsOf, type AccountLine, type FleetControls } from "./fleetView.js";
+import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps } from "./http.js";
 
 /**
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
@@ -98,7 +99,7 @@ export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_
   return facts.busy ? "busy" : "online_idle";
 }
 
-type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps">;
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps" | "accountJobLimit" | "maxRunners">;
 
 export interface RunnerRow {
   id: string;
@@ -141,6 +142,29 @@ export interface RunnerRow {
    * owner or admin only (null for anyone else, and for a read with no user), and is null when the edge sent none. Null for a runner made from a one-time code.
    */
   provisioning: { minted_by: { id: string; name: string }; first_ip: string | null } | null;
+  /** D#605 FL-9: the name given in `runner_settings`, or "Unnamed runner (<registrant>)" when none was (never null, so no screen can show it). */
+  name: string;
+  /** False when `name` is the placeholder, so a rename starts from an empty box. */
+  has_name: boolean;
+  labels: string[];
+  /** What the runner reported on `hello` (os, arch, sandbox engine); null before it has. Display only: no decision reads it. */
+  facts: { os: string; arch: string; engine: string } | null;
+  /** The runs it holds now with a live lease, for the page to link. `label` is "<role> · owner/name", never null. */
+  current_runs: Array<{ id: string; label: string }>;
+  /** `runner_settings.paused_at` and `draining` as set, before the online test; `state` above is the one word to show. */
+  paused: boolean;
+  draining: boolean;
+  /** What this caller may do, with the reason when not. Null for a removed runner (it has no controls) and for a read with no user. */
+  controls: FleetControls | null;
+  /** C-605-1: for a runner revoked because its registrant left, and only for an owner or admin: what "Register this machine again" pre-fills. Cloud-side data, no secret. */
+  register_again: { name: string; labels: string[]; repo_ids: string[] } | null;
+}
+
+interface RawRunnerRun {
+  runner_id: string;
+  id: string;
+  role: string;
+  repo_name: string | null;
 }
 
 interface RawRunner {
@@ -169,15 +193,60 @@ interface RawRunner {
   prov_minted_by: string | null;
   prov_minted_by_name: string | null;
   prov_first_ip: string | null;
+  set_name: string | null;
+  set_labels: string[] | null;
+  paused_by: string | null;
+  drained_by: string | null;
 }
 
 /** A repo's display name, the same text the approvals list uses: "owner/name", else a fixed fallback, never null or an id. */
 const REPO_NAME_SQL = "COALESCE(NULLIF(gh_owner || '/' || gh_name, ''), 'a repository')";
 
+/** What a runner nobody named reads as (FL-2 acceptance 2, FL-9 acceptance 3). */
+const UNNAMED_RUNNER = (registrant: string): string => `Unnamed runner (${registrant})`;
+
 export async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
+  return (await readFleet(deps, accountId, userId)).runners;
+}
+
+/** D#605 FL-9: the runners, the caller's role and the account line, read in the one tenant transaction. The role and the line are null for a read with no user. */
+export interface FleetRead {
+  runners: RunnerRow[];
+  viewer: { role: "owner" | "admin" | "member" } | null;
+  account: AccountLine | null;
+}
+
+/** The plan's figures behind the account line. Plan data that cannot say reads as no figure (the page then says so), never as zero or a guess. */
+async function planFigures(deps: ReadDeps, client: PoolClient, accountId: string): Promise<{ limit: number | null; runnerLimit: number | null }> {
+  const plan = (await client.query<{ plan: string }>("SELECT plan FROM accounts WHERE id = $1", [accountId])).rows[0]?.plan;
+  if (plan === undefined) return { limit: null, runnerLimit: null };
+  let runnerLimit: number | null = null;
+  try {
+    runnerLimit = deps.maxRunners ? deps.maxRunners(plan) : null;
+  } catch {
+    // fx-swallow-ok: unavailable plan data means no figure to show; registering reports 503 plan_unavailable on its own
+    runnerLimit = null;
+  }
+  let figure: { jobs: number; hosted: boolean } | null = null;
+  try {
+    figure = deps.accountJobLimit ? deps.accountJobLimit(plan) : null;
+  } catch {
+    // fx-swallow-ok: unavailable plan data means no figure to show; the claim fails closed on its own
+    figure = null;
+  }
+  if (figure === null) return { limit: null, runnerLimit };
+  // A hosted account's setting (an accepted raise) replaces the plan's default; the runner plan's figure is flat.
+  const stored = figure.hosted ? (await client.query<{ total_jobs: number }>("SELECT total_jobs FROM account_runner_concurrency WHERE account_id = $1", [accountId])).rows[0] : undefined;
+  return { limit: stored?.total_jobs ?? figure.jobs, runnerLimit };
+}
+
+/** What a runner reported about its machine (os, arch, sandbox engine), by runner id. Read by fleetList.ts alone: this file is in the import graph of the request verifier, which must never name the facts (FL-2 acceptance 4). */
+export type ReportedFactsLoader = (client: PoolClient, accountId: string) => Promise<Map<string, { os: string; arch: string; engine: string }>>;
+
+export async function readFleet(deps: ReadDeps, accountId: string, userId: string | null, loadReported?: ReportedFactsLoader): Promise<FleetRead> {
   const now = (deps.now ?? (() => new Date()))();
   const min = deps.minSupportedProtocolVersion ?? MIN_SUPPORTED_PROTOCOL_VERSION;
-  const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string> }> => {
+  const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string>; runs: RawRunnerRun[]; plan: { limit: number | null; runnerLimit: number | null }; reported: Map<string, { os: string; arch: string; engine: string }> }> => {
     const runners = (
       await client.query<RawRunner>(
         `SELECT r.id, r.credential_mode, r.registered_by, COALESCE(NULLIF(u.name, ''), NULLIF(u.github_login, ''), $3) AS registered_by_name,
@@ -188,7 +257,8 @@ export async function readRunners(deps: ReadDeps, accountId: string, userId: str
                          WHERE a.account_id = r.account_id AND a.runner_id = r.id AND a.status = 'running' AND a.lease_expires_at > $2) AS busy,
                 live.light AS running_light, live.heavy AS running_heavy,
                 cap.declared AS cap_declared, cap.light_limit AS cap_light_limit, cap.heavy_limit AS cap_heavy_limit, cap.limited_by AS cap_limited_by,
-                pt.created_by AS prov_minted_by, COALESCE(NULLIF(pu.name, ''), NULLIF(pu.github_login, ''), $3) AS prov_minted_by_name, host(pt.first_ip) AS prov_first_ip
+                pt.created_by AS prov_minted_by, COALESCE(NULLIF(pu.name, ''), NULLIF(pu.github_login, ''), $3) AS prov_minted_by_name, host(pt.first_ip) AS prov_first_ip,
+                st.name AS set_name, st.labels AS set_labels, st.paused_by, st.drained_by
            FROM runners r LEFT JOIN users u ON u.id = r.registered_by
                 LEFT JOIN runner_provisioning_tokens pt ON pt.runner_id = r.id AND pt.account_id = r.account_id
                 LEFT JOIN users pu ON pu.id = pt.created_by
@@ -205,16 +275,37 @@ export async function readRunners(deps: ReadDeps, accountId: string, userId: str
       )
     ).rows;
     // The repo names, looked up under the caller's tenant (row security) and again by account, so a repo of another account is never named.
-    const ids = [...new Set(runners.filter((r) => r.revoked_at === null).flatMap((r) => r.allowed_repo_ids))];
+    // A runner revoked because its registrant left keeps its repo ids for "Register this machine again" (C-605-1); no other removed runner lists any.
+    const ids = [...new Set(runners.filter((r) => r.revoked_at === null || r.revoked_reason === "member_demoted").flatMap((r) => r.allowed_repo_ids))];
     const repos = new Map<string, string>();
     if (ids.length > 0) {
       const found = await client.query<{ id: string; name: string }>(`SELECT id, ${REPO_NAME_SQL} AS name FROM repos WHERE account_id = $1 AND id = ANY($2::uuid[])`, [accountId, ids]);
       for (const f of found.rows) repos.set(f.id, f.name);
     }
-    return { runners, repos };
+    // The fleet page's extras, for a session read only: the runs each runner holds (to link), and the plan's figures.
+    const runs =
+      userId === null
+        ? []
+        : (
+            await client.query<RawRunnerRun>(
+              `SELECT a.runner_id, a.id, a.role, COALESCE(NULLIF(g.gh_owner || '/' || g.gh_name, ''), 'a repository') AS repo_name
+                 FROM agent_runs a LEFT JOIN repos g ON g.id = a.dispatch_repo_id AND g.account_id = a.account_id
+                WHERE a.account_id = $1 AND a.runner_id IS NOT NULL AND a.status = 'running' AND a.lease_expires_at > $2
+                ORDER BY a.created_at, a.id`,
+              [accountId, now],
+            )
+          ).rows;
+    return {
+      runners,
+      repos,
+      runs,
+      plan: userId === null ? { limit: null, runnerLimit: null } : await planFigures(deps, client, accountId),
+      reported: userId === null || !loadReported ? new Map() : await loadReported(client, accountId),
+    };
   };
   let seesAddress = false;
-  const { runners: rows, repos } =
+  const viewerSeen: { role: "owner" | "admin" | "member" | null } = { role: null };
+  const { runners: rows, repos, runs, plan, reported } =
     userId === null
       ? await withTenant(deps.appUserPool, accountId, read)
       : await withTenant(deps.appUserPool, accountId, userId, async (client) => {
@@ -222,10 +313,14 @@ export async function readRunners(deps: ReadDeps, accountId: string, userId: str
           // closed even if a caller ever pairs a user with an account they are not in.
           const role = (await client.query<{ role: string | null }>("SELECT current_member_role() AS role")).rows[0]?.role;
           if (role === null || role === undefined) throw new RunnerHttpError(403, "forbidden", "you are not a member of this account");
+          if (role !== "owner" && role !== "admin" && role !== "member") throw new RunnerHttpError(403, "forbidden", "you are not a member of this account");
+          viewerSeen.role = role;
           seesAddress = role === "owner" || role === "admin";
           return read(client);
         });
-  return rows.map((r) => {
+  const runsOf = new Map<string, Array<{ id: string; label: string }>>();
+  for (const run of runs) runsOf.set(run.runner_id, [...(runsOf.get(run.runner_id) ?? []), { id: run.id, label: `fulcrumaxe ${run.role} · ${run.repo_name ?? "a repository"}` }]);
+  const runners = rows.map((r): RunnerRow => {
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
@@ -255,8 +350,28 @@ export async function readRunners(deps: ReadDeps, accountId: string, userId: str
             .map((id) => ({ id, name: repos.get(id)! }))
             .sort((x, y) => x.name.localeCompare(y.name) || x.id.localeCompare(y.id)),
     provisioning: r.prov_minted_by === null ? null : { minted_by: { id: r.prov_minted_by, name: r.prov_minted_by_name ?? UNNAMED_MEMBER }, first_ip: seesAddress ? r.prov_first_ip : null },
+    name: r.set_name ?? UNNAMED_RUNNER(r.registered_by_name),
+    has_name: r.set_name !== null,
+    labels: r.set_labels ?? [],
+    facts: reported.get(r.id) ?? null,
+    current_runs: r.revoked_at !== null ? [] : (runsOf.get(r.id) ?? []),
+    paused: r.paused,
+    draining: r.draining,
+    controls:
+      viewerSeen.role === null || userId === null || r.revoked_at !== null
+        ? null
+        : fleetControlsOf({ role: viewerSeen.role, userId, registeredBy: r.registered_by, paused: r.paused, pausedBy: r.paused_by, draining: r.draining, drainedBy: r.drained_by }),
+    register_again:
+      revokedReason === "registrant_left" && seesAddress
+        ? { name: r.set_name ?? "", labels: r.set_labels ?? [], repo_ids: [...new Set(r.allowed_repo_ids)].filter((id) => repos.has(id)) }
+        : null,
     };
   });
+  return {
+    runners,
+    viewer: viewerSeen.role === null ? null : { role: viewerSeen.role },
+    account: userId === null ? null : accountLineOf({ limit: plan.limit, runnerLimit: plan.runnerLimit, runners }),
+  };
 }
 
 /** Each of the account's runners (revoked ones included, so the list can say so) with its one state. */
@@ -431,37 +546,4 @@ export async function getRunWait(deps: ReadDeps, accountId: string, runId: strin
 export async function readUnapprovedRunFacts(client: PoolClient, accountId: string, now: Date, limit: number): Promise<RawRun[]> {
   const { rows } = await client.query<RawRun>(WAIT_FACTS("a.status = 'pending' AND a.runtime = 'runner' AND a.approved_by IS NULL", "ORDER BY a.created_at DESC, a.id LIMIT $4"), [accountId, now, RUNNER_ONLINE_SECONDS, limit]);
   return rows;
-}
-
-/**
- * GET /api/runners (a session route, any member of the account). The runners with their derived state and consent, and the copy
- * strings the runner screens show, so the UI never retypes them. A runner's key, thumbprint and nonces are not selected, so they
- * cannot be returned. Its repo list is returned as `{ id, name }` pairs, and only for repos the caller's tenant context can read.
- */
-export async function listRunners(deps: RunnerCloudDeps, principal: SessionPrincipal): Promise<RunnerHttpResponse> {
-  const runners = await readRunners(deps, principal.accountId, principal.userId);
-  return {
-    status: 200,
-    body: {
-      runners,
-      copy: {
-        usageLimits: COPY.usageLimits,
-        approval: COPY.approval,
-        runner: COPY.runner,
-        localOnly: COPY.localOnly,
-        sandboxUnavailable: COPY.sandboxUnavailable,
-        approvalMine: COPY.approvalMine,
-        approvalButton: COPY.approvalButton,
-        approvalDone: COPY.approvalDone,
-        approvalRefused: COPY.approvalRefused,
-        approvalAuto: COPY.approvalAuto,
-        planConsentText: COPY.planConsentText,
-        dialRunnerRuns: COPY.dialRunnerRuns,
-        dialRunnerRunsAsk: COPY.dialRunnerRunsAsk,
-        dialRunnerRunsAnnounce: COPY.dialRunnerRunsAnnounce,
-        dialRunnerRunsAct: COPY.dialRunnerRunsAct,
-      },
-    },
-    headers: { "cache-control": "no-store" },
-  };
 }
