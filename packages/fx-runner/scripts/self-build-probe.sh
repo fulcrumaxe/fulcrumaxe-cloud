@@ -74,8 +74,8 @@ plant() {
     # parts holds the missing directories innermost first; they are made outermost first.
     local i
     for ((i = ${#parts[@]} - 1; i >= 0; i--)); do
-      mkdir -m 700 "${parts[$i]}" || plant_fail "cannot create ${parts[$i]}"
       printf 'dir\t%s\n' "${parts[$i]}" >> "$state/manifest"
+      mkdir -m 700 "${parts[$i]}" || plant_fail "cannot create ${parts[$i]}"
     done
     [ ! -e "$target" ] || plant_fail "$target already exists"
     local value="FXPROBE-CANARY-$(rand_hex)"
@@ -90,15 +90,46 @@ plant() {
   echo "probe: planted ($made manifest lines)" >&2
 }
 
+# proc_is_ours DIR: true only for a process directory owned by this user (the effective uid), so a run as root never kills another user's process.
+proc_is_ours() { [ -O "$1" ]; }
+
+# kill_decoys: ends the decoy process. pkill goes first, then a scan of /proc, so cleanup never depends on pgrep or pkill seeing this user's
+# processes (a unit with ProtectProc=invisible hides them from both; our own /proc/PID/cmdline may still be readable).
+kill_decoys() {
+  pkill -u "$(id -u)" -f "$SENTINEL" 2> /dev/null || true
+  local d pid cmd
+  for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    [ "$pid" != "$$" ] || continue
+    proc_is_ours "$d" || continue
+    [ -r "$d/cmdline" ] || continue
+    cmd="$(tr '\0' ' ' < "$d/cmdline" 2> /dev/null)" || continue
+    case "$cmd" in "$SENTINEL"*) kill -KILL "$pid" 2> /dev/null || true ;; esac
+  done
+}
+
+# The tools unplant itself needs. A host whose PATH lacks one (the self-hosted CI unit has no awk, curl or shasum) gets a clear message and a
+# non-zero exit, never a silent half cleanup.
+unplant_tools_ok() {
+  local t missing=""
+  for t in rm rmdir cut sort tr; do command -v "$t" > /dev/null 2>&1 || missing="$missing $t"; done
+  if [ -n "$missing" ]; then echo "probe: unplant cannot run, missing tool(s):$missing" >&2; return 1; fi
+}
+
 unplant() {
   local state; state="$(state_dir)"
+  unplant_tools_ok || return 3
   rm -f "$HOME/fx-probe" "$SYSTEM_DIR/fx-probe" 2> /dev/null
-  pkill -u "$(id -u)" -f "$SENTINEL" 2> /dev/null || true
+  kill_decoys
   [ -d "$state" ] || return 0
   local kind path
-  # Files first, then directories from the deepest, and only if empty.
+  # Files first, then directories from the deepest (longest path first), and only if empty. No awk: bash writes the length in front of each path.
   while IFS=$'\t' read -r kind path; do [ "$kind" = file ] && rm -f -- "$path"; done < "$state/manifest"
-  grep '^dir' "$state/manifest" | cut -f2 | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2 | while IFS= read -r path; do rmdir -- "$path" 2> /dev/null || echo "probe: left $path (not empty)" >&2; done
+  local dirs=()
+  while IFS=$'\t' read -r kind path; do [ "$kind" = dir ] && dirs+=("$(printf '%06d\t%s' "${#path}" "$path")"); done < "$state/manifest"
+  if [ "${#dirs[@]}" -gt 0 ]; then
+    printf '%s\n' "${dirs[@]}" | sort -rn | cut -f2- | while IFS= read -r path; do [ -e "$path" ] || continue; rmdir -- "$path" 2> /dev/null || echo "probe: left $path (not empty)" >&2; done
+  fi
   rm -rf "$state"
 }
 
