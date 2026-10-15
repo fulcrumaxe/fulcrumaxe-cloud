@@ -76,6 +76,6 @@
     {"from":"packages/sitekit-checks","to":"packages/sitekit-template","kind":"test","reason":"relative import in packages/sitekit-checks/test/browser/motion-degrade.test.ts"},
     {"from":"packages/worker","to":"apps/web","kind":"test","reason":"relative import in packages/worker/test/compositionRoot.test.ts"},
     {"from":"packages/worker","to":"packages/api","kind":"test","reason":"relative import in packages/worker/test/runActions.test.ts"},
-    {"from":"apps/web","to":"apps/workspace","kind":"src","reason":"its prebuild copies the workspace shell (apps/web/scripts/copy-workspace.mjs)"}
+    {"from":"apps/web","to":"apps/workspace","kind":"src","reason":"its build:prepare copies the workspace shell (apps/web/scripts/copy-workspace.mjs)"}
   ]
 }
