@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), and `workflow-routes` (the Workflow SDK route list).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -11,7 +11,7 @@
  * Exit codes: 0 plan written; 1 the plan was written (or could not be) because of a refusal of a pack the
  * caller named, or EMPTY-SELECTION; 2 usage, manifest or target errors.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPacks, ManifestError, TIERS, type Pack, type Tier } from "./manifest.js";
@@ -25,7 +25,9 @@ import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.j
 import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
+import { listStagingOnlyTests } from "./staging-only.js";
 import { identityGuard, isProdSafe, loadTarget, readDeploymentIdentity, TargetError } from "./targets.js";
+import { extractWorkflowRoutes, renderRoutesFile, WorkflowRoutesError } from "./workflow-routes.js";
 
 export interface Args {
   command: "plan" | "run";
@@ -277,10 +279,63 @@ function lastTestedCommand(argv: string[], io: Io): number {
   }
 }
 
+/**
+ * `live-e2e workflow-routes --build-dir <apps/web/.next> [--out <file>] [--check]`: the Workflow SDK routes (P9) from
+ * the built output. Without `--out` the list is printed; with it the file is written; with `--check` as well nothing
+ * is written and the exit code is 1 when the file on disk differs from what the build says.
+ */
+function workflowRoutesCommand(argv: string[], io: Io): number {
+  const usage = "usage: live-e2e workflow-routes --build-dir <folder> [--out <file>] [--check]";
+  let buildDir: string | undefined;
+  let out: string | undefined;
+  let check = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const flag = argv[i];
+    if (flag === "--check") check = true;
+    else if (flag === "--build-dir" && buildDir === undefined && argv[i + 1] !== undefined) buildDir = argv[(i += 1)];
+    else if (flag === "--out" && out === undefined && argv[i + 1] !== undefined) out = argv[(i += 1)];
+    else {
+      io.stderr(usage);
+      return 2;
+    }
+  }
+  if (buildDir === undefined || (check && out === undefined)) {
+    io.stderr(usage);
+    return 2;
+  }
+  try {
+    const text = renderRoutesFile(extractWorkflowRoutes(resolve(io.cwd, buildDir)));
+    if (out === undefined) {
+      io.stdout(text.trimEnd());
+      return 0;
+    }
+    const file = resolve(io.cwd, out);
+    if (check) {
+      if (existsSync(file) && readFileSync(file, "utf8") === text) {
+        io.stdout(`${out} matches the build`);
+        return 0;
+      }
+      io.stderr(`${out} is out of date: regenerate it with \`live-e2e workflow-routes --build-dir ${buildDir} --out ${out}\``);
+      return 1;
+    }
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+    io.stdout(`wrote ${out}`);
+    return 0;
+  } catch (err) {
+    if (err instanceof WorkflowRoutesError) {
+      io.stderr(err.message);
+      return 2;
+    }
+    throw err;
+  }
+}
+
 export async function main(argv: string[], io: Io): Promise<number> {
   if (argv[0] === "scrub") return scrubCommand(argv.slice(1), io);
   if (argv[0] === "issues") return issuesCommand(argv.slice(1), io);
   if (argv[0] === "last-tested") return lastTestedCommand(argv.slice(1), io);
+  if (argv[0] === "workflow-routes") return workflowRoutesCommand(argv.slice(1), io);
   let args: Args;
   try {
     args = parseArgs(argv);
@@ -310,6 +365,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
       ...(tier !== undefined ? { tier } : {}),
       ...(args.tag !== undefined ? { tag: args.tag } : {}),
       ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
+      stagingOnly: listStagingOnlyTests(join(io.root, "packs")),
     };
     let plan = buildPlan(planInput);
     if (args.command === "run") {
@@ -326,6 +382,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
     writeFileSync(outFile, `${JSON.stringify(plan, null, 2)}\n`);
     if (plan.routing_fallback !== null) io.stdout(`routing fell back to every pack at or below standard: ${plan.routing_fallback}`);
     for (const o of plan.packs) io.stdout(describeOutcome(o));
+    for (const t of plan.tests_skipped) io.stdout(`${t.pack}: test skipped on ${plan.target} (${t.reason}): ${t.test}`);
     io.stdout(`plan written to ${outFile}`);
     const namedRefusals = plan.refused.filter((r) => r.named);
     for (const r of namedRefusals) io.stderr(`REFUSED ${r.reason} (pack ${r.id})`);
