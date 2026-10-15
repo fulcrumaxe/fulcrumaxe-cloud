@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, type ClaimCapacity, type ContextLedgerBody, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 
@@ -63,8 +63,8 @@ export const MAX_KEY_AGE_DAYS = 90;
  * refuses anything shorter than 180 (migration 0724), so lowering the bound cannot quietly shorten the memory below it.
  */
 export const NONCE_RETENTION_SECONDS = 2 * MAX_CREATED_SKEW_SECONDS + 60;
-/** The protocol version this cloud speaks (one constant in runner-protocol, which fx-runner sends on hello too, so a bump moves both). A `hello` below `current - 1` gets 426 (criterion 10). */
-export { CURRENT_PROTOCOL_VERSION };
+/** The protocol version this cloud speaks (one constant in runner-protocol, which fx-runner sends on hello too, so a bump moves both). A `hello` outside `MIN_SUPPORTED_PROTOCOL_VERSION` to current gets 426 (criterion 10). */
+export { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION };
 
 /** What the handlers need from the outside. Everything that varies in tests is here. */
 export interface RunnerCloudDeps {
@@ -94,6 +94,8 @@ export interface RunnerCloudDeps {
   now?: () => Date;
   /** The protocol version `hello` is judged against. Defaults to the constant. */
   currentProtocolVersion?: number;
+  /** The oldest protocol version `hello` accepts. Defaults to the constant. */
+  minSupportedProtocolVersion?: number;
   /**
    * The most active runners an account on this plan may hold, read from the plan data (D#6 R2b criterion 12; every plan
    * has one since D#605 FL-12a). Throws while the plan data is unavailable or has no figure for the plan: registering then

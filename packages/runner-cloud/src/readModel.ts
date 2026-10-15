@@ -3,7 +3,7 @@ import { COPY, LIGHT_JOB_ROLES, LIMITED_BY, type LimitedBy, MAX_HEAVY_CAPACITY, 
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RESUMES_WITHIN_NOTE, RUNNER_ONLINE_SECONDS } from "@fx/runner";
 import { UNNAMED_MEMBER } from "./memberRole.js";
-import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
+import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 
 /**
  * D#6 R2b criterion 13 (the read model) and criterion 16 (`GET /api/runners`, correction C6 section 2).
@@ -83,14 +83,14 @@ export function loadLabel(state: RunnerState, running: RunnerRunning, capacity: 
 
 /**
  * The one state of a runner. Precedence, highest first: `revoked` (nothing else matters once the key is dead),
- * `outdated` (below N-1: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
+ * `outdated` (below the supported floor: it is refused at `hello`, and an upgrade is the only fix, so it says so even while it is quiet),
  * `paused` and `draining` (D#605 FL-3: set by a person, answered idle by the claim, and shown BEFORE the online test, because a runner told to
  * wait 5 minutes is quiet for longer than the online window and must not read `offline`), `offline` (no request for 120 seconds), `busy`, `online_idle`. A runner that has never said `hello` has no protocol
  * version and is not outdated: it is offline until it is heard from.
  */
-export function classifyRunner(facts: RunnerFacts, now: Date, current: number = CURRENT_PROTOCOL_VERSION): RunnerState {
+export function classifyRunner(facts: RunnerFacts, now: Date, min: number = MIN_SUPPORTED_PROTOCOL_VERSION): RunnerState {
   if (facts.revokedAt !== null) return "revoked";
-  if (facts.protocolVersion !== null && facts.protocolVersion < current - 1) return "outdated";
+  if (facts.protocolVersion !== null && facts.protocolVersion < min) return "outdated";
   if (facts.paused === true) return "paused";
   // D#605 FL-8: a drain lets running work finish, and when the last run ends the runner reads as paused (it still takes nothing new until resumed).
   if (facts.draining === true) return facts.busy ? "draining" : "paused";
@@ -98,7 +98,7 @@ export function classifyRunner(facts: RunnerFacts, now: Date, current: number = 
   return facts.busy ? "busy" : "online_idle";
 }
 
-type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "currentProtocolVersion" | "accountRunnerCaps">;
+type ReadDeps = Pick<RunnerCloudDeps, "appUserPool" | "now" | "minSupportedProtocolVersion" | "accountRunnerCaps">;
 
 export interface RunnerRow {
   id: string;
@@ -176,7 +176,7 @@ const REPO_NAME_SQL = "COALESCE(NULLIF(gh_owner || '/' || gh_name, ''), 'a repos
 
 export async function readRunners(deps: ReadDeps, accountId: string, userId: string | null): Promise<RunnerRow[]> {
   const now = (deps.now ?? (() => new Date()))();
-  const current = deps.currentProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
+  const min = deps.minSupportedProtocolVersion ?? MIN_SUPPORTED_PROTOCOL_VERSION;
   const read = async (client: PoolClient): Promise<{ runners: RawRunner[]; repos: Map<string, string> }> => {
     const runners = (
       await client.query<RawRunner>(
@@ -229,7 +229,7 @@ export async function readRunners(deps: ReadDeps, accountId: string, userId: str
     // A revoked runner takes no work, so it shows neither a load nor a capacity.
     const running = r.revoked_at === null ? { light: Number(r.running_light), heavy: Number(r.running_heavy) } : { light: 0, heavy: 0 };
     const capacity = r.revoked_at === null ? capacityOf(r.cap_declared === null ? null : { declared: r.cap_declared, light_limit: r.cap_light_limit, heavy_limit: r.cap_heavy_limit, limited_by: r.cap_limited_by }, running) : null;
-    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining }, now, current);
+    const state = classifyRunner({ revokedAt: r.revoked_at, protocolVersion: r.protocol_version, lastSeenAt: r.last_seen_at, busy: r.busy, paused: r.paused, draining: r.draining }, now, min);
     const revokedReason = r.revoked_at !== null && r.revoked_reason === "member_demoted" ? ("registrant_left" as const) : null;
     return {
     id: r.id,

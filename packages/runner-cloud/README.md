@@ -102,7 +102,7 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   `accounts.plan` is `runner`), under the account's advisory lock; any other account has no limit. `RunnerTarget.admit`
   reads the day's cap through its `limits` port.
 - **The list.** `GET /api/runners` (session, any member) returns each runner's id, credential mode, who registered it,
-  binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below N-1), `paused` or `draining` (a person set it in
+  binary version, last-seen time and one derived state: `revoked`, `outdated` (protocol below the supported floor), `paused` or `draining` (a person set it in
   `runner_settings`; the claim answers it idle with `retry_after` 300, so it is shown before the online test and never reads `offline`;
   `state_note` says "Resumes within 5 min"), `offline` (no request for `RUNNER_ONLINE_SECONDS` = 120 s, the one figure the covering
   test of a waiting run and the waiting notice share), `busy` (holds a running run whose lease has not run out) or `online_idle`, in that

@@ -268,7 +268,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
       onDepsDetail: (detail: string) => ctx.out(`fx-runner: dependencies for this job (${detail})`),
       ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`), onNixDetail: (detail: string) => ctx.out(`fx-runner: Nix dev shell for this job (${detail})`) }),
-      ...(watch === undefined ? {} : { watch, interrupt: (job) => sandbox.interrupt(job) }),
+      // The interrupt serves a take-over (with a watch) and a handoff's checkpoint turn (always): both end the agent's turn with SIGINT.
+      ...(watch === undefined ? {} : { watch }),
+      interrupt: (job) => sandbox.interrupt(job),
+      ...(host.engine.sessionOfRun === undefined ? {} : { sessionOfRun: (runId: string) => host.engine.sessionOfRun!(stateDir, runId) }),
       client,
       keyring,
       clock,

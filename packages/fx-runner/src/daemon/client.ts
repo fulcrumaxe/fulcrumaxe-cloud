@@ -25,7 +25,8 @@ export interface CallError {
 
 export type Claimed = { kind: "claimed"; signedJob: SignedJob; runId: string; leaseGeneration: number };
 export type ClaimResult = Claimed | { kind: "idle"; retryAfter: number } | { kind: "rate_limited"; retryAfter: number } | CallError;
-export type HeartbeatResult = { kind: "ok"; leaseExpiresAt: string } | { kind: "stop"; reason: StopReason } | CallError;
+/** `handoff` is present only when the cloud asked for the run to move to the other side; `deadline` is the UTC instant after which it takes the last pushed commit. */
+export type HeartbeatResult = { kind: "ok"; leaseExpiresAt: string; handoff?: { deadline: string } } | { kind: "stop"; reason: StopReason } | CallError;
 export type EventsResult =
   | { kind: "ok"; accepted: number; duplicates: number; leaseExpiresAt: string }
   | { kind: "stop"; reason: StopReason }
@@ -119,7 +120,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       const reply = await send(HEARTBEAT_PATH, HeartbeatMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
       if (reply?.status === 200) {
         const parsed = HeartbeatReply.safeParse(reply.body);
-        return parsed.success ? { kind: "ok", leaseExpiresAt: parsed.data.lease_expires_at } : fail(reply, "invalid_reply");
+        return parsed.success ? { kind: "ok", leaseExpiresAt: parsed.data.lease_expires_at, ...(parsed.data.handoff === undefined ? {} : { handoff: { deadline: parsed.data.handoff.deadline } }) } : fail(reply, "invalid_reply");
       }
       if (reply?.status === 409) {
         const parsed = StopReply.safeParse(reply.body);

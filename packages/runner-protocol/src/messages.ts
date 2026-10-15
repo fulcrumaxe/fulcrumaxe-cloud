@@ -204,8 +204,21 @@ export const LocalOnlyEvent = z
   });
 export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
-/** The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one. */
-export const CURRENT_PROTOCOL_VERSION = 1;
+/**
+ * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
+ * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn); a bump never cuts an older runner off, see below.
+ */
+export const CURRENT_PROTOCOL_VERSION = 2;
+/**
+ * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
+ * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
+ */
+export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
+/**
+ * The first version whose runner can read and act on a heartbeat reply's `handoff` (replies.ts). The runner parse is strict, so the cloud sends the
+ * signal only to a run whose runner has declared at least this version (the cloud-side gate); an older runner gets a plain reply and keeps running.
+ */
+export const HANDOFF_MIN_PROTOCOL_VERSION = 2;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;

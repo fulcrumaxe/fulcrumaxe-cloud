@@ -128,11 +128,12 @@ describe("heartbeat", () => {
     expect(cloud.seen.at(-1)).toMatchObject({ path: "/api/runner/heartbeat", body: { run_id: runId, lease_generation: leaseGeneration } });
   });
 
-  it("D#599 HO-1: a reply that carries a handoff request is still ok on this runner, and is not an invalid reply", async () => {
+  it("D#599 HO-1/HO-3: a reply that carries a handoff request is ok on this runner, reports its deadline, and is not an invalid reply", async () => {
     const { runId, leaseGeneration } = await claimOne();
     const lease_expires_at = new Date(Date.now() + 90_000).toISOString();
-    cloud.force.heartbeat.push({ status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at, handoff: { requested: true, deadline: new Date(Date.now() + 300_000).toISOString() } }) });
-    expect(await client.heartbeat(runId, leaseGeneration)).toEqual({ kind: "ok", leaseExpiresAt: lease_expires_at });
+    const deadline = new Date(Date.now() + 300_000).toISOString();
+    cloud.force.heartbeat.push({ status: 200, body: HeartbeatReply.parse({ continue: true, lease_expires_at, handoff: { requested: true, deadline } }) });
+    expect(await client.heartbeat(runId, leaseGeneration)).toEqual({ kind: "ok", leaseExpiresAt: lease_expires_at, handoff: { deadline } });
     // Any other key beside handoff is still refused.
     cloud.force.heartbeat.push({ status: 200, body: { continue: true, lease_expires_at, handoff: { requested: true, deadline: lease_expires_at, note: "x" } } });
     expect(await client.heartbeat(runId, leaseGeneration)).toMatchObject({ kind: "error", code: "invalid_reply" });

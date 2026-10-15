@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CURRENT_PROTOCOL_VERSION } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { HELLO_PATH, REGISTER_PATH, mintProvisioningToken, registerRunner, runnerHello } from "../src/index.js";
@@ -48,7 +49,7 @@ describe("facts on hello and the runner name on register [pg]", () => {
       const key = newKey();
       const id = await registerKey(h.admin, f.accountId, f.a1, key);
       const res = await hello(key, LEGACY_HELLO);
-      expect(res).toMatchObject({ status: 200, body: { protocol_version: 1 } });
+      expect(res).toMatchObject({ status: 200, body: { protocol_version: CURRENT_PROTOCOL_VERSION } });
       expect(await factsRow(id)).toBeNull();
       expect((await h.admin.query("SELECT binary_version, isolation FROM runners WHERE id = $1", [id])).rows[0]).toEqual({ binary_version: "0.4.2", isolation: "host_sandbox" });
     });
