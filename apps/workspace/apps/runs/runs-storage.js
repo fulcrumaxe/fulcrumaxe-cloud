@@ -170,3 +170,9 @@ export function approvalLine(run, state) {
   const who = autoName(run);
   return who ? copy.approvalAuto.replace("{person}", () => who) : "";
 }
+
+/** D#605 FL-9: the run a launch argument ({ runId }) names, lowercased, or "" for no argument or anything that is not a UUID. The argument is untrusted. */
+export function launchRunId(arg) {
+  const id = arg && typeof arg === "object" && typeof arg.runId === "string" ? arg.runId : "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id.toLowerCase() : "";
+}

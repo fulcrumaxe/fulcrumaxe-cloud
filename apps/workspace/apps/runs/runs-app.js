@@ -11,7 +11,7 @@ import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-dis
 import { openRunStream } from "../_lib/stream.js";
 import { foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerNotes, titleOf } from "./runs-detail.js";
 import {
-  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, isUuid, loadRun, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
+  EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, launchRunId, loadRun, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
 
 const FULC = window.FULC;
@@ -461,7 +461,7 @@ function mountApp(contentEl, launchArg) {
   paintList();
   loadFirst();
   // Another app (Pipeline's "What this run loaded") asks for one run by id. The argument is untrusted: only a UUID is used.
-  const show = (arg) => { if (arg && typeof arg === "object" && isUuid(arg.runId)) open(arg.runId); };
+  const show = (arg) => { const id = launchRunId(arg); if (id) open(id); };
   show(launchArg);
 
   return {
