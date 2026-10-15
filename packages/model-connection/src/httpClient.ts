@@ -122,6 +122,16 @@ export function requestFor(provider: Provider, plaintextKey: string): Validation
       headers: { Authorization: `Bearer ${plaintextKey}` },
     };
   }
+  if (provider === 'openai') {
+    // D#221 MC1: the OpenAI API key, proved with the same read-only listing call. 401 is a rejected key; a 403 here is a
+    // region or project restriction, not proof the key is bad (outcomeFromStatus), so it stays "could not confirm".
+    return {
+      url: 'https://api.openai.com/v1/models',
+      method: 'GET',
+      redirect: 'error',
+      headers: { Authorization: `Bearer ${plaintextKey}` },
+    };
+  }
   return {
     url: 'https://api.anthropic.com/v1/models',
     method: 'GET',

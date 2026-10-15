@@ -579,8 +579,19 @@ describe('security review round 3 fixes', () => {
           platformOps.release();
         }
 
+        // A provider-only retag is refused: the kind/provider CHECK keeps a row from
+        // pairing one provider with another provider's credential kind.
+        await expect(
+          withTenant(appUserPool, accountId, (client) =>
+            client.query(`UPDATE model_connections SET provider = 'anthropic' WHERE id = $1`, [id]),
+          ),
+        ).rejects.toMatchObject({ code: '23514' });
+
         await withTenant(appUserPool, accountId, async (client) => {
-          await client.query(`UPDATE model_connections SET provider = 'anthropic' WHERE id = $1`, [id]);
+          await client.query(
+            `UPDATE model_connections SET provider = 'anthropic', credential_kind = 'anthropic' WHERE id = $1`,
+            [id],
+          );
         });
 
         const { rows } = await admin.query(

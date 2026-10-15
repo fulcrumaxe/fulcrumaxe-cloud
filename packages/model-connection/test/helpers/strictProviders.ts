@@ -3,26 +3,27 @@ import type { AddressInfo } from 'node:net';
 import { generateSelfSignedCert } from './selfSignedCert.js';
 
 /**
- * Local TLS servers that stand in for `ai-gateway.vercel.sh` and `api.anthropic.com`, and a `fetch`-shaped transport
+ * Local TLS servers that stand in for `ai-gateway.vercel.sh`, `api.anthropic.com` and `api.openai.com`, and a `fetch`-shaped transport
  * that reaches them through Node's REAL connection path: real TLS with the server certificate as the explicit `ca`
  * (never `rejectUnauthorized: false`), the real hostname as SNI, and a pinned `lookup` that is called with
- * `{ all: true }` the way Node 20+ calls it (autoSelectFamily). The lookup answers 127.0.0.1 for the two provider
+ * `{ all: true }` the way Node 20+ calls it (autoSelectFamily). The lookup answers 127.0.0.1 for the three provider
  * hostnames and refuses every other name, so nothing here can resolve, let alone reach, a real provider.
  *
  * What the fakes enforce (each has a test that a stricter fake catches what a lenient one would let through):
- *  - Only GET on the allowed paths: `/v1/credits` (gateway) and `/v1/models` (Anthropic). ANY other method or path is
+ *  - Only GET on the allowed paths: `/v1/credits` (gateway) and `/v1/models` (Anthropic, OpenAI). ANY other method or path is
  *    refused with 405 or 404 AND recorded in `refused`; a test asserts `refused` is empty, so a request that could
  *    generate (a POST, a chat-completions path) fails the test and never silently "works".
  *  - Gateway: `/v1/models` answers 200 whatever the auth, as the docs say; `/v1/credits` answers 401 unless the
  *    Authorization header is `Bearer <a known key>`.
  *  - Anthropic: `/v1/models` answers 401 unless `x-api-key` is a known key and `anthropic-version` is present.
+ *  - OpenAI: `/v1/models` answers 401 unless the Authorization header is `Bearer <a known key>`; an `x-api-key` header is not accepted.
  *  - Either answers 403, 429, 500, or never answers (a timeout) on demand, per request, through `mode`.
  *
  * Not faked faithfully (the PR says so): the response bodies (every answer is an empty body, since the client reads
  * none), the providers' real rate-limit thresholds, and the real 403 wording. Whether the real gateway answers 403 for
  * a plan restriction on /v1/credits is the live pre-merge probe's job, not a fake's.
  */
-export type ProviderName = 'ai_gateway' | 'anthropic';
+export type ProviderName = 'ai_gateway' | 'anthropic' | 'openai';
 export type ProviderMode = { status: number } | 'hang' | null;
 
 export interface SeenRequest {
@@ -47,8 +48,8 @@ export interface StrictProvider {
   close(): Promise<void>;
 }
 
-const HOSTS: Record<ProviderName, string> = { ai_gateway: 'ai-gateway.vercel.sh', anthropic: 'api.anthropic.com' };
-const ALLOWED_PATH: Record<ProviderName, string> = { ai_gateway: '/v1/credits', anthropic: '/v1/models' };
+const HOSTS: Record<ProviderName, string> = { ai_gateway: 'ai-gateway.vercel.sh', anthropic: 'api.anthropic.com', openai: 'api.openai.com' };
+const ALLOWED_PATH: Record<ProviderName, string> = { ai_gateway: '/v1/credits', anthropic: '/v1/models', openai: '/v1/models' };
 
 export async function startStrictProvider(name: ProviderName, knownKeys: string[] = []): Promise<StrictProvider> {
   const host = HOSTS[name];
@@ -94,7 +95,7 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
     if (provider.mode) return reply(provider.mode.status);
 
     if (generic) return reply(200);
-    if (name === 'ai_gateway') {
+    if (name === 'ai_gateway' || name === 'openai') {
       const auth = headers['authorization'] ?? '';
       const key = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
       return reply(key && provider.knownKeys.has(key) ? 200 : 401);
@@ -115,6 +116,7 @@ export async function startStrictProvider(name: ProviderName, knownKeys: string[
 export interface StrictProviders {
   ai_gateway: StrictProvider;
   anthropic: StrictProvider;
+  openai: StrictProvider;
   /** A `fetch`-shaped transport for `fetchValidationHttpClient(timeoutMs, transport)`. */
   transport: typeof fetch;
   /** All requests refused by either fake (wrong method or path). */
@@ -125,10 +127,11 @@ export interface StrictProviders {
   close(): Promise<void>;
 }
 
-export async function startStrictProviders(keys: { ai_gateway?: string[]; anthropic?: string[] } = {}): Promise<StrictProviders> {
+export async function startStrictProviders(keys: { ai_gateway?: string[]; anthropic?: string[]; openai?: string[] } = {}): Promise<StrictProviders> {
   const ai_gateway = await startStrictProvider('ai_gateway', keys.ai_gateway ?? []);
   const anthropic = await startStrictProvider('anthropic', keys.anthropic ?? []);
-  const byHost = new Map([ai_gateway, anthropic].map((p) => [p.host, p]));
+  const openai = await startStrictProvider('openai', keys.openai ?? []);
+  const byHost = new Map([ai_gateway, anthropic, openai].map((p) => [p.host, p]));
 
   const transport = ((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
@@ -176,11 +179,12 @@ export async function startStrictProviders(keys: { ai_gateway?: string[]; anthro
   return {
     ai_gateway,
     anthropic,
+    openai,
     transport,
-    refused: () => [...ai_gateway.refused, ...anthropic.refused],
-    seen: () => [...ai_gateway.seen, ...anthropic.seen],
+    refused: () => [...ai_gateway.refused, ...anthropic.refused, ...openai.refused],
+    seen: () => [...ai_gateway.seen, ...anthropic.seen, ...openai.seen],
     reset() {
-      for (const p of [ai_gateway, anthropic]) {
+      for (const p of [ai_gateway, anthropic, openai]) {
         p.seen.length = 0;
         p.refused.length = 0;
         p.mode = null;
@@ -189,6 +193,7 @@ export async function startStrictProviders(keys: { ai_gateway?: string[]; anthro
     close: async () => {
       await ai_gateway.close();
       await anthropic.close();
+      await openai.close();
     },
   };
 }

@@ -176,8 +176,9 @@ describe('onboarding progress marks (0692)', () => {
     }
     const conn = (c: PoolClient, id: string, status: string, validated: string | null) =>
       c.query(
-        `INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status, last_validated_at)
-         VALUES ($1, 'anthropic', 'c', 'n', 'w', 1, $2, $3, $4)`,
+        // credential_kind is named because the default-from-provider trigger does not fire under session_replication_role = replica
+        `INSERT INTO model_connections (account_id, provider, credential_kind, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status, last_validated_at)
+         VALUES ($1, 'anthropic', 'anthropic', 'c', 'n', 'w', 1, $2, $3, $4)`,
         [id, `fp-${randomUUID()}`, status, validated],
       );
     const event = (c: PoolClient, id: string, type: string, at: string) =>

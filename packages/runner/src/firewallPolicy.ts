@@ -44,6 +44,13 @@ export interface EncryptedTenantKey {
   nonce: Uint8Array;
   wrappedDek: Uint8Array;
   kekVersion: number;
+  /**
+   * D#221 MC1: what the production decryptor needs to rebuild the envelope's AAD (the credential kind the key was sealed
+   * for, and the AAD generation). Non-secret. Absent on a key sealed before the kind existed: the decryptor reads that as
+   * the original AAD (generation 1), which it accepts for the two original kinds only.
+   */
+  credentialKind?: string;
+  aadVersion?: number;
 }
 
 /**

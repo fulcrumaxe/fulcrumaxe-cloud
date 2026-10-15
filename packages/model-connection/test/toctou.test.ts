@@ -6,7 +6,7 @@ import { withTenant } from '@fx/db/src/withTenant.js';
 import { test as testConnection } from '../src/validate.js';
 import { connect } from '../src/connect.js';
 import { seal } from '../src/crypto.js';
-import { buildAad, type ModelConnectionCtx } from '../src/types.js';
+import { connectionAad, CURRENT_AAD_VERSION, type ModelConnectionCtx } from '../src/types.js';
 import { fakeHttpClient, gatedHttpClient } from './helpers/fakeHttpClient.js';
 import { fakeKekSource } from './helpers/fakeKek.js';
 import { seedAccountWithMember } from './helpers/seed.js';
@@ -14,11 +14,11 @@ import { ctxFactory } from './helpers/ctx.js';
 
 /** Rotates account `accountId`'s stored key to `plaintextKey`, as app_user, keeping the row's own id for AAD. */
 function rotateKey(appUserPool: Pool, accountId: string, connectionId: string, kek: ReturnType<typeof fakeKekSource>, plaintextKey: string): Promise<void> {
-  const sealed = seal({ kek: kek.keyFor(1), aad: buildAad(accountId, connectionId) }, plaintextKey);
+  const sealed = seal({ kek: kek.keyFor(1), aad: connectionAad({ accountId, connectionId, credentialKind: 'ai_gateway', aadVersion: CURRENT_AAD_VERSION }) }, plaintextKey);
   return withTenant(appUserPool, accountId, async (client) => {
     await client.query(
       `UPDATE model_connections
-         SET key_ciphertext = $2, key_nonce = $3, wrapped_dek = $4, kek_version = 1, key_fingerprint = $5
+         SET key_ciphertext = $2, key_nonce = $3, wrapped_dek = $4, kek_version = 1, key_fingerprint = $5, aad_version = ${CURRENT_AAD_VERSION}
        WHERE account_id = $1`,
       [accountId, sealed.ciphertext, sealed.nonce, sealed.wrappedDek, 'rotated'],
     );

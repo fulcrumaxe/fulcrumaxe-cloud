@@ -18,6 +18,7 @@ const childProcess: typeof import("node:child_process") =
 export const FORBIDDEN_MODEL_HOSTS = [
   "ai-gateway.vercel.sh",
   "api.anthropic.com",
+  "api.openai.com",
 ] as const;
 
 export class ModelCallBlockedError extends Error {}

@@ -131,13 +131,24 @@ async function outsideMeterOf(ctx: ModelConnectionCtx, provider: ConnectionDto["
   return { note: OUTSIDE_METER_NOTE, label: s.label, reason: s.label === "beta" ? s.reason : null };
 }
 
+/**
+ * D#221 MC1 added `openai` to the stored providers. This route's wire enum does not carry it yet (the route fields come
+ * with the selection change), so a connection of that provider reads as no connection here rather than as a value the
+ * published schema cannot express. The PUT body enum cannot create one, so nothing reachable through this route does.
+ */
+function wireProvider(provider: ConnectionStatusView["provider"]): ConnectionDto["provider"] {
+  if (provider === "openai") throw new NotFoundError("no model connection");
+  return provider;
+}
+
 async function present(ctx: ModelConnectionCtx, view: ConnectionStatusView): Promise<ConnectionDto> {
-  return { ...toDto(view), outside_meter: await outsideMeterOf(ctx, view.provider) };
+  const dto = toDto(view);
+  return { ...dto, outside_meter: await outsideMeterOf(ctx, dto.provider) };
 }
 
 function toDto(view: ConnectionStatusView): Omit<ConnectionDto, "outside_meter"> {
   return {
-    provider: view.provider,
+    provider: wireProvider(view.provider),
     fingerprint: view.fingerprint,
     status: view.status,
     last_validated_at: view.last_validated_at ? view.last_validated_at.toISOString() : null,

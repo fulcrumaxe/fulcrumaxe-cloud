@@ -4,6 +4,8 @@ import { Pool, type PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
 import { connect } from '../src/connect.js';
+import { seal } from '../src/crypto.js';
+import { buildAad } from '../src/types.js';
 import { test as testConnection, healthCheck, type HealthCheckCtx } from '../src/validate.js';
 import { fetchValidationHttpClient, type ValidationHttpClient, type ValidationOutcome } from '../src/httpClient.js';
 import * as pkg from '../src/index.js';
@@ -169,9 +171,16 @@ describe('healthCheck (D#454 H2e)', () => {
     });
 
     it('an Anthropic 403 is a rejection too and breaks the key on its second, with code 403', async () => {
-      // connect() does not take Anthropic yet (feature flag), so the stored provider is switched directly.
+      // connect() does not take Anthropic yet (feature flag), so the row is rewritten as a pre-kinds Anthropic row: the
+      // key re-sealed under the original AAD (version 1), which a row of the two original kinds still opens under.
       const a = await seedConnected();
-      await admin.query(`UPDATE model_connections SET provider = 'anthropic' WHERE account_id = $1`, [a.accountId]);
+      const id = (await row(a.accountId)).id as string;
+      const old = seal({ kek: kek.keyFor(1), aad: buildAad(a.accountId, id) }, a.key);
+      await admin.query(
+        `UPDATE model_connections SET provider = 'anthropic', credential_kind = 'anthropic', aad_version = 1,
+                key_ciphertext = $2, key_nonce = $3, wrapped_dek = $4 WHERE account_id = $1`,
+        [a.accountId, old.ciphertext, old.nonce, old.wrappedDek],
+      );
       await checkAll(a.accountId, { kind: 'rejected', code: '403', message: 'x' }, { kind: 'rejected', code: '403', message: 'x' });
       const r = await row(a.accountId);
       expect([r.status, r.last_error_code]).toEqual(['broken', '403']);

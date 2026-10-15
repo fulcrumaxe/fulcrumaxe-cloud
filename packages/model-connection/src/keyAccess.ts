@@ -7,7 +7,7 @@ import { getMemberRole } from '@fx/core/src/tenancy/authorize.js';
 import { NotFoundError } from './errors.js';
 import { open, type Sealed } from './crypto.js';
 import type { KekSource } from './kek.js';
-import { buildAad, type Principal, type Provider } from './types.js';
+import { connectionAad, type Principal, type Provider } from './types.js';
 
 export interface KeyAccessCtx {
   pool: Pool;
@@ -19,6 +19,8 @@ interface KeyRow extends Sealed {
   id: string;
   provider: Provider;
   kek_version: number;
+  credential_kind: string;
+  aad_version: number;
 }
 
 /**
@@ -36,13 +38,14 @@ export async function withOpenedKey<T>(
   if ((await getMemberRole(ctx.pool, accountId, userId)) === null) throw missing();
   const row = await withTenant(ctx.pool, accountId, async (client) => {
     const { rows } = await client.query<KeyRow>(
-      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce AS nonce, wrapped_dek AS "wrappedDek", kek_version
+      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce AS nonce, wrapped_dek AS "wrappedDek", kek_version,
+              credential_kind, aad_version
          FROM model_connections WHERE account_id = $1`,
       [accountId],
     );
     return rows[0] ?? null;
   });
   if (!row) throw missing();
-  const key = open({ kek: ctx.kek.keyFor(row.kek_version), aad: buildAad(accountId, row.id) }, row);
+  const key = open({ kek: ctx.kek.keyFor(row.kek_version), aad: connectionAad({ accountId, connectionId: row.id, credentialKind: row.credential_kind, aadVersion: row.aad_version }) }, row);
   return use({ provider: row.provider, key });
 }

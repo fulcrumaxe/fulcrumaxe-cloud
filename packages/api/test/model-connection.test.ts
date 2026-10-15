@@ -210,6 +210,23 @@ describe('D#31 API-2: model-connection routes', () => {
     expect(((await goneRes.json()) as ErrorBody).error.code).toBe('not_found');
   });
 
+  it('D#221 MC1: the wire enum does not carry openai yet: a PUT for it is 422 with nothing stored, and a stored openai row reads as no connection', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const res = await put(owner, freshKey(), 'openai');
+    expect(res.status).toBe(422);
+    expect(provider.calls).toHaveLength(0);
+    expect((await admin.query('SELECT 1 FROM model_connections WHERE account_id = $1', [owner.accountId])).rowCount).toBe(0);
+
+    await admin.query(
+      `INSERT INTO model_connections (account_id, provider, credential_kind, aad_version, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint)
+       VALUES ($1, 'openai', 'openai_api_key', 2, 'c', 'n', 'w', 1, 'abcd')`,
+      [owner.accountId],
+    );
+    const get = await call(owner, 'GET');
+    expect(get.status).toBe(404);
+    expect(((await get.json()) as ErrorBody).error.code).toBe('not_found');
+  });
+
   it('a replaced key changes the fingerprint and keeps a single connection row', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const first = (await (await put(owner, freshKey())).json()) as Dto;

@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool } from "@fx/db/src/pool.js";
-import { buildAad, seal, type KekSource } from "@fx/model-connection";
+import { buildAad, connectionAad, seal, type KekSource } from "@fx/model-connection";
 import { createConnectionStatusPort, createDecryptTenantKey, createModelConnectionPort } from "../src/ports.js";
 
 /**
@@ -60,6 +60,31 @@ describe("[pg] modelConnection + decryptTenantKey", () => {
     await expect(decrypt(got.encryptedKey, { accountId: b.accountId, connectionId: got.connectionId })).rejects.toThrow();
     await expect(decrypt(got.encryptedKey, { accountId: a.accountId, connectionId: b.connectionId })).rejects.toThrow();
     expect((await port.get(b.accountId)).connectionId).toBe(b.connectionId);
+  });
+
+  it("D#221 MC1: a row sealed under AAD version 2 comes through the port with its sealing context and opens only under its kind", async () => {
+    const t = await seedTenant();
+    const sealed = seal({ kek: KEK, aad: connectionAad({ accountId: t.accountId, connectionId: t.connectionId, credentialKind: "ai_gateway", aadVersion: 2 }) }, PLAINTEXT);
+    await admin.query(
+      `UPDATE model_connections SET key_ciphertext = $2, key_nonce = $3, wrapped_dek = $4, aad_version = 2 WHERE id = $1`,
+      [t.connectionId, sealed.ciphertext, sealed.nonce, sealed.wrappedDek],
+    );
+    const got = await createModelConnectionPort(runnerPool).get(t.accountId);
+    expect([got.encryptedKey.credentialKind, got.encryptedKey.aadVersion]).toEqual(["ai_gateway", 2]);
+    const decrypt = createDecryptTenantKey(kek);
+    await expect(decrypt(got.encryptedKey, { accountId: t.accountId, connectionId: got.connectionId })).resolves.toBe(PLAINTEXT);
+    // The same ciphertext presented as another kind, or as a version-1 row, does not open.
+    await expect(decrypt({ ...got.encryptedKey, credentialKind: "anthropic" }, { accountId: t.accountId, connectionId: got.connectionId })).rejects.toThrow();
+    await expect(decrypt({ ...got.encryptedKey, aadVersion: 1 }, { accountId: t.accountId, connectionId: got.connectionId })).rejects.toThrow();
+  });
+
+  it("D#221 MC1: an OpenAI connection is refused by the port until a backend can use it, and never reaches a run", async () => {
+    const t = await seedTenant();
+    await admin.query(
+      `UPDATE model_connections SET provider = 'openai', credential_kind = 'openai_api_key', aad_version = 2, backend = 'codex' WHERE id = $1`,
+      [t.connectionId],
+    );
+    await expect(createModelConnectionPort(runnerPool).get(t.accountId)).rejects.toThrow();
   });
 
   it("refuses an account with no connection and an account whose connection is broken", async () => {
