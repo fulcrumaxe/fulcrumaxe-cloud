@@ -1,0 +1,160 @@
+{
+  "site": "ledger-lens",
+  "siteNameClaimId": "c-name",
+  "repo": "acme/ledger-lens",
+  "repo_sha": "a1b2c3d4e5f6",
+  "productKind": "code_visible_paid",
+  "domains": [],
+  "pages": [
+    {
+      "slug": "home",
+      "sections": [
+        {
+          "type": "hero",
+          "props": {
+            "titleChrome": "section.hero.title",
+            "subtitleChrome": "section.hero.subtitle",
+            "ctaChrome": "section.hero.cta",
+            "ctaHref": "/pricing",
+            "headlineClaimId": "c-hero-headline"
+          }
+        },
+        {
+          "type": "feature-grid",
+          "props": {
+            "titleChrome": "section.features.title",
+            "featureClaimIds": ["c-feat-1", "c-feat-2"]
+          }
+        }
+      ]
+    },
+    {
+      "slug": "pricing",
+      "sections": [
+        {
+          "type": "pricing-table",
+          "props": {
+            "titleChrome": "section.pricing.title",
+            "leadClaimId": "c-pricing-lead",
+            "planClaimIds": ["c-plan-1", "c-plan-2"]
+          }
+        }
+      ]
+    },
+    {
+      "slug": "legal",
+      "sections": [
+        {
+          "type": "legal-page",
+          "props": {
+            "titleChrome": "section.legal.title",
+            "bodyClaimIds": ["c-legal-1"],
+            "anchor": "licence"
+          }
+        }
+      ]
+    }
+  ],
+  "claims": [
+    {
+      "id": "c-name",
+      "section": "site/name",
+      "locale": "en",
+      "text": "Ledger Lens",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "package.json", "lines": { "start": 2, "end": 2 }, "excerpt": "\"name\": \"ledger-lens\"" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01"
+    },
+    {
+      "id": "c-hero-headline",
+      "section": "home/hero",
+      "locale": "en",
+      "text": "Reconcile your books against the bank feed in one pass.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "README.md", "lines": { "start": 1, "end": 3 }, "excerpt": "# Ledger Lens" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01"
+    },
+    {
+      "id": "c-feat-1",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Imports bank statements in CSV and OFX formats.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/import.ts", "lines": { "start": 10, "end": 22 }, "excerpt": "export function importStatement(file: File) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01"
+    },
+    {
+      "id": "c-feat-2",
+      "section": "home/feature-grid",
+      "locale": "en",
+      "text": "Flags transactions that appear twice within the same week.",
+      "kind": "feature",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "src/dedupe.ts", "lines": { "start": 4, "end": 15 }, "excerpt": "export function findDuplicates(rows: Row[]) { ... }" }],
+      "verdict": "VERIFIED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01"
+    },
+    {
+      "id": "c-pricing-lead",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Two plans are on offer. Both are billed monthly, and you can cancel at any time from the account page without contacting anyone.",
+      "kind": "pricing",
+      "evidence": [],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-10-15T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-plan-1",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Solo: one workspace for a single person, with email support during working hours, for $12 a month.",
+      "kind": "pricing",
+      "evidence": [],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-10-15T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-plan-2",
+      "section": "pricing/pricing-table",
+      "locale": "en",
+      "text": "Team: ten workspaces shared across a small company, with priority email support, for $49 a month.",
+      "kind": "pricing",
+      "evidence": [],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-10-15T12:30:00Z", "version_id": "fixture-v1" }
+    },
+    {
+      "id": "c-legal-1",
+      "section": "legal/legal-page",
+      "locale": "en",
+      "text": "The licence in the repository lets you read the source code and learn from it. Running the software for your own business needs a paid plan, as described on the pricing page, where each plan lists what it includes and what it costs each month.",
+      "kind": "legal",
+      "evidence": [{ "repo_sha": "a1b2c3d4e5f6", "path": "LICENSE", "lines": { "start": 1, "end": 3 }, "excerpt": "Source-available, paid use." }],
+      "verdict": "ATTESTED",
+      "checked_sha": "a1b2c3d4e5f6",
+      "checked_at": "2026-10-15T12:00:00Z",
+      "verifier_run_id": "run-2026-10-15-01",
+      "attestation": { "user_id": "u-owner", "at": "2026-10-15T12:30:00Z", "version_id": "fixture-v1" }
+    }
+  ]
+}

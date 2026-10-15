@@ -29,14 +29,14 @@ function pageHref(page: Page): string {
 /** A page's own nav/tab label. Every section type's `titleChrome` is
  * boilerplate chrome text (never product-specific prose), so it is safe to
  * reuse as this page's label without inventing a separate free-text field. */
-function pageLabel(page: Page): string {
+function pageLabel(content: SiteContent, page: Page): string {
   const first = page.sections[0];
-  return first ? chrome(first.props.titleChrome) : page.slug;
+  return first ? chrome(first.props.titleChrome, content.productKind) : page.slug;
 }
 
 function renderNav(content: SiteContent): string {
   const links = content.pages
-    .map((p) => `<a href="${escapeHtml(pageHref(p))}">${escapeHtml(pageLabel(p))}</a>`)
+    .map((p) => `<a href="${escapeHtml(pageHref(p))}">${escapeHtml(pageLabel(content, p))}</a>`)
     .join("\n");
   return `<header class="site-header">
 <a class="site-name" href="/">${siteDisplayNameHtml(content)}</a>
@@ -44,8 +44,16 @@ function renderNav(content: SiteContent): string {
 </header>`;
 }
 
-function renderFooter(): string {
-  return `<footer class="site-footer"><p>${escapeHtml(chrome("footer.credit"))}</p></footer>`;
+function renderFooter(content: SiteContent): string {
+  const kind = content.productKind;
+  const licence = chrome("footer.licence", kind);
+  const badge = chrome("footer.badge", kind);
+  // Empty chrome means the kind has no such line (open_source): emit nothing, so
+  // that kind's footer stays byte-identical to what it was before productKind.
+  const licenceHtml = licence
+    ? `<p class="site-licence">${badge ? `<span class="kind-badge">${escapeHtml(badge)}</span> ` : ""}${escapeHtml(licence)}</p>`
+    : "";
+  return `<footer class="site-footer"><p>${escapeHtml(chrome("footer.credit", kind))}</p>${licenceHtml}</footer>`;
 }
 
 /** Every claim id referenced anywhere on a page, via K01's own field map —
@@ -78,7 +86,7 @@ function pageDescription(content: SiteContent, page: Page): string {
   if (desc.length >= 40) {
     return desc.slice(0, 200);
   }
-  return `${siteDisplayName(content)} — ${pageLabel(page)}. ${desc}`.trim();
+  return `${siteDisplayName(content)} — ${pageLabel(content, page)}. ${desc}`.trim();
 }
 
 export interface RenderedPageHtml {
@@ -94,9 +102,9 @@ export function renderPage(content: SiteContent, page: Page, env: RenderEnv): Re
   // A page with no sections still needs its one <h1>: fall back to the label.
   const sectionsHtml = page.sections.length
     ? page.sections.map((section, i) => renderSection(content, section, env, i === 0)).join("\n")
-    : `<h1 class="section-heading">${escapeHtml(pageLabel(page))}</h1>`;
-  const bodyHtml = `${renderNav(content)}\n<main id="main">\n${sectionsHtml}\n</main>\n${renderFooter()}`;
-  const title = `${siteDisplayName(content)} — ${pageLabel(page)}`;
+    : `<h1 class="section-heading">${escapeHtml(pageLabel(content, page))}</h1>`;
+  const bodyHtml = `${renderNav(content)}\n<main id="main">\n${sectionsHtml}\n</main>\n${renderFooter(content)}`;
+  const title = `${siteDisplayName(content)} — ${pageLabel(content, page)}`;
   const description = pageDescription(content, page);
   return { html: htmlDocument({ title, description, bodyHtml }) };
 }

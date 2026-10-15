@@ -5,6 +5,10 @@ import {
   isSlug,
   PAGE_SLUG_MAX_LEN,
   parseRepoUrlShape,
+  DEFAULT_PRODUCT_KIND,
+  PRODUCT_KINDS,
+  ProductKind,
+  REQUIRED_SECTIONS,
   SECTION_PROPS_SCHEMA,
   SectionType,
   SITE_SLUG_MAX_LEN,
@@ -65,7 +69,10 @@ export type BlockReason =
   | "invalid-prop-value"
   | "free-text-prop"
   | "invalid-site-slug"
-  | "invalid-page-slug";
+  | "invalid-page-slug"
+  | "invalid-product-kind"
+  | "required-section-missing"
+  | "pricing-not-attested";
 
 export interface Blocker {
   reason: BlockReason;
@@ -82,6 +89,7 @@ const DOCUMENT_OBJECT_KEYS = new Set([
   "siteNameClaimId",
   "repo",
   "repo_sha",
+  "productKind",
   "domains",
   "pages",
   "claims",
@@ -218,6 +226,24 @@ export function gateSite(content: SiteContent, context: RenderContext): Blocker[
       });
     }
   }
+
+  // K-KIND: the kind is the customer's choice; an absent value is open_source,
+  // anything else outside the two kinds is a blocker (and no kind-specific
+  // rule is applied, since there is no kind to apply).
+  let productKind: ProductKind | undefined = DEFAULT_PRODUCT_KIND;
+  if (rawContent.productKind !== undefined) {
+    const kindCheck = ProductKind.safeParse(rawContent.productKind);
+    if (kindCheck.success) {
+      productKind = kindCheck.data;
+    } else {
+      productKind = undefined;
+      blockers.push({
+        reason: "invalid-product-kind",
+        detail: `SiteContent.productKind "${String(rawContent.productKind)}" must be one of: ${PRODUCT_KINDS.join(", ")}`,
+      });
+    }
+  }
+  const sectionTypesPresent = new Set<SectionType>();
 
   const claimsValue = rawContent.claims;
   if (!Array.isArray(claimsValue)) {
@@ -412,6 +438,8 @@ export function gateSite(content: SiteContent, context: RenderContext): Blocker[
         }
       }
 
+      sectionTypesPresent.add(type);
+
       const claimIds = extractClaimRefs(type, props);
       for (const claimId of claimIds) {
         const claim = claimsById.get(claimId);
@@ -434,6 +462,30 @@ export function gateSite(content: SiteContent, context: RenderContext): Blocker[
             detail: `claim "${claimId}" (kind=${claim.kind}, verdict=${claim.verdict}) is not renderable`,
           });
         }
+        // K-KIND: a code-visible paid site states its prices on the customer's
+        // word only, so every pricing claim is attested wherever a section
+        // references it (a faq answer or hero line too), not only in a table.
+        if (productKind === "code_visible_paid" && claim.kind === "pricing" && claim.verdict !== "ATTESTED") {
+          blockers.push({
+            reason: "pricing-not-attested",
+            claimId,
+            page: pageSlug,
+            section: type,
+            detail: `pricing claim "${claimId}" (verdict=${claim.verdict}) must be attested by the customer on a code_visible_paid site`,
+          });
+        }
+      }
+    }
+  }
+
+  if (productKind !== undefined) {
+    for (const required of REQUIRED_SECTIONS[productKind]) {
+      if (!sectionTypesPresent.has(required)) {
+        blockers.push({
+          reason: "required-section-missing",
+          section: required,
+          detail: `a ${productKind} site needs at least one "${required}" section`,
+        });
       }
     }
   }

@@ -21,7 +21,7 @@ import {
   NO_DEFAULT_STEP,
   demoShape,
 } from "./fixtures/demo.js";
-import { ENVELOPE_TRANSCRIPT_V1, SITE_CONTENT_V1, realFixtures } from "./fixtures/real.js";
+import { ENVELOPE_TRANSCRIPT_V1, SITE_CONTENT_V1, SITE_CONTENT_V2, realFixtures } from "./fixtures/real.js";
 
 // Imported by a non-literal specifier on purpose: this package compiles with
 // noUncheckedIndexedAccess and sitekit-claims' source does not, so a static
@@ -63,9 +63,15 @@ describe("criterion 2: round trip over the real shapes", () => {
     }
   });
 
-  it("site_content v1: the real reader reads the stored document and writes it back byte-identical", () => {
+  it("site_content v2: the real reader reads the stored document and writes it back byte-identical", () => {
+    const read = SiteContent.parse(SITE_CONTENT_V2);
+    expect(JSON.stringify(read)).toBe(JSON.stringify(SITE_CONTENT_V2));
+  });
+
+  it("site_content v1: the real reader reads a stored v1 document as exactly its v2 upcast", () => {
     const read = SiteContent.parse(SITE_CONTENT_V1);
-    expect(JSON.stringify(read)).toBe(JSON.stringify(SITE_CONTENT_V1));
+    expect(JSON.stringify(read)).toBe(JSON.stringify(upcast(shapeOf("site_content"), SITE_CONTENT_V1, 1, 2)));
+    expect(JSON.stringify(read)).toBe(JSON.stringify(SITE_CONTENT_V2));
   });
 
   it("agent_output_envelope v1: the envelope extractAgentOutputEnvelope produced survives a store round trip byte-identical", () => {
@@ -84,11 +90,11 @@ describe("criterion 2a: the tripwire", () => {
     expect(findRegistryViolations(SHAPES, REAL_FIXTURES, EVIDENCE_TABLES)).toEqual([]);
   });
 
-  it("is not vacuous: bumping site_content to 2 in a copy of the registry fails", () => {
-    const bumped = SHAPES.map((s) => (s.key === "site_content" ? { ...s, current: 2 } : s));
+  it("is not vacuous: bumping site_content past its current version in a copy of the registry fails", () => {
+    const bumped = SHAPES.map((s) => (s.key === "site_content" ? { ...s, current: s.current + 1 } : s));
     const v = findRegistryViolations(bumped, REAL_FIXTURES, EVIDENCE_TABLES);
-    expect(v).toContain("site_content: no upcaster for v1 -> v2");
-    expect(v).toContain("site_content: no fixture for v2");
+    expect(v).toContain("site_content: no upcaster for v2 -> v3");
+    expect(v).toContain("site_content: no fixture for v3");
   });
 
   it("the demo chain, complete, passes the tripwire; missing its last step does not", () => {
@@ -123,9 +129,11 @@ describe("criterion 4: every added field declares a default", () => {
     expect(fieldsAt(demoShape(), 4)).toEqual(["id", "name", "tier", "tags", "region"]);
   });
 
-  it("site_content's registered v1 fields are exactly the zod schema's keys", () => {
+  it("site_content's registered fields at the current version are exactly the zod schema's keys", () => {
     const zodKeys = Object.keys(SiteContent._def.schema.shape);
-    expect(fieldsAt(shapeOf("site_content"), 1)).toEqual(zodKeys);
+    const shape = shapeOf("site_content");
+    expect(fieldsAt(shape, shape.current)).toEqual(zodKeys);
+    expect(fieldsAt(shape, 1)).not.toContain("productKind");
   });
 
   it("the untyped envelope is refused at v2 until it ships a field list", () => {

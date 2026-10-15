@@ -47,7 +47,10 @@ Exported from `packages/sitekit-template/src/index.ts`:
 - `renderSite`, `writeRenderedSite`, `RenderBlockedError`, `SITE_CSS`
   (`render.ts`).
 - `renderPage`, `pageOutputPath` (`page.ts`); `renderSection` (`sections.ts`).
-- `CHROME_EN`, `chrome` (`chrome.ts`) — the fixed English copy dictionary.
+- `CHROME_EN`, `CHROME_CODE_VISIBLE_PAID_EN`, `CHROME_BY_KIND`, `chrome`
+  (`chrome.ts`) — the fixed English copy, one dictionary per product kind.
+  `open_source` renders exactly as before; `code_visible_paid` adds a footer
+  licence line and a "Code-visible" badge and never says "open source".
 - `resolveClaim`, `claimText`, `evidenceUrl`, `renderClaimText`,
   `siteDisplayName`, `siteDisplayNameHtml`, `MissingClaimError` (`claims.ts`).
 - `resolveAssetPath`, `referenceAsset`, `AssetResolutionError` (`assets.ts`).

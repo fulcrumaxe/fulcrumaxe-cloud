@@ -109,9 +109,29 @@ export const ALLOWED_UI_CHROME = [
   "section.legal.title",
   "section.faq.title",
   "footer.credit",
+  "footer.licence",
+  "footer.badge",
 ] as const;
 export type ChromeKey = (typeof ALLOWED_UI_CHROME)[number];
 export const ChromeKeySchema = z.enum(ALLOWED_UI_CHROME);
+
+/** Keys a section heading, subtitle or call-to-action label may use. The
+ * footer licence line and badge are left empty by the open-source kind, so a
+ * section pointing at one would render an empty heading or nav label; the
+ * footer renders them itself. */
+export const SectionChromeKeySchema = ChromeKeySchema.exclude(["footer.licence", "footer.badge"]);
+
+/**
+ * Which kind of product a site is for (D#3 K-KIND). The customer chooses it;
+ * nothing infers it (the extract prompt takes it as input and never writes
+ * it). It selects exactly two things and nothing else: the chrome dictionary
+ * (template) and the required-section set (below, enforced by gateSite).
+ * Claims, claim kinds and section types are the same for both kinds.
+ */
+export const PRODUCT_KINDS = ["open_source", "code_visible_paid"] as const;
+export const ProductKind = z.enum(PRODUCT_KINDS);
+export type ProductKind = z.infer<typeof ProductKind>;
+export const DEFAULT_PRODUCT_KIND: ProductKind = "open_source";
 
 /** A claim reference: validated here for shape only (a non-empty id).
  * Whether it resolves to a real, renderable claim is gateSite's job. */
@@ -359,9 +379,9 @@ export type SectionType = z.infer<typeof SectionType>;
 
 const HeroProps = z
   .object({
-    titleChrome: ChromeKeySchema,
-    subtitleChrome: ChromeKeySchema.optional(),
-    ctaChrome: ChromeKeySchema.optional(),
+    titleChrome: SectionChromeKeySchema,
+    subtitleChrome: SectionChromeKeySchema.optional(),
+    ctaChrome: SectionChromeKeySchema.optional(),
     ctaHref: RepoUrl.optional(),
     backgroundImage: AssetPath.optional(),
     layout: z.enum(["centered", "split"]).optional(),
@@ -375,28 +395,28 @@ const HeroProps = z
 
 const FeatureGridProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     featureClaimIds: z.array(ClaimIdField).min(1),
   })
   .strict();
 
 const RoadmapListProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     itemClaimIds: z.array(ClaimIdField).min(1),
   })
   .strict();
 
 const ChangelogProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     entryClaimIds: z.array(ClaimIdField).min(1),
   })
   .strict();
 
 const DocsIndexProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     docClaimIds: z.array(ClaimIdField).min(1),
     anchor: AnchorSlug.optional(),
   })
@@ -404,7 +424,7 @@ const DocsIndexProps = z
 
 const PricingTableProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     /** Round 4, item 4: a pricing section commonly carries a short,
      * product-specific lead line (e.g. "free for open source, $9/mo for
      * teams") above the plan list. That's exactly the kind of statement the
@@ -426,7 +446,7 @@ const PricingTableProps = z
  */
 const LegalPageProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     bodyClaimIds: z.array(ClaimIdField).min(1),
     anchor: AnchorSlug.optional(),
   })
@@ -434,7 +454,7 @@ const LegalPageProps = z
 
 const FaqProps = z
   .object({
-    titleChrome: ChromeKeySchema,
+    titleChrome: SectionChromeKeySchema,
     qnaClaimIds: z.array(ClaimIdField).min(1),
   })
   .strict();
@@ -490,6 +510,17 @@ export const URL_FIELDS: Record<SectionType, readonly string[]> = {
   "pricing-table": [],
   "legal-page": [],
   faq: [],
+};
+
+/**
+ * Section types a site of each kind must carry on at least one page. A kind
+ * with nothing here requires nothing. `code_visible_paid` sells a plan, so it
+ * must publish a pricing table, and every claim the table references must be
+ * attested by the customer (gateSite enforces both).
+ */
+export const REQUIRED_SECTIONS: Record<ProductKind, readonly SectionType[]> = {
+  open_source: [],
+  code_visible_paid: ["pricing-table"],
 };
 
 function sectionVariant<T extends SectionType>(type: T, props: (typeof SECTION_PROPS_SCHEMA)[T]) {
@@ -577,6 +608,10 @@ export const SiteContent = z
     domains: z.array(z.string().min(1)).default([]),
     pages: z.array(Page),
     claims: z.array(Claim),
+    /** Chosen by the customer, never inferred. Absent means open_source.
+     * Last on purpose: it is the one field added after content v1, and the
+     * v1 -> v2 upcaster (packages/features) appends it in this same position. */
+    productKind: ProductKind.default(DEFAULT_PRODUCT_KIND),
   })
   // Item 1 (round 4): strict for the same reason Section/Page are — see
   // gate.ts's DOCUMENT_OBJECT_KEYS check for the defensive-path mirror.

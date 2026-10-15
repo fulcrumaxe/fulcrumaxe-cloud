@@ -6,8 +6,8 @@ import { referenceAsset, type RenderEnv } from "./assets.js";
 
 export type HeadingTag = "h1" | "h2";
 
-function heading(titleChrome: Parameters<typeof chrome>[0], tag: HeadingTag): string {
-  return `<${tag} class="section-heading">${escapeHtml(chrome(titleChrome))}</${tag}>`;
+function heading(content: SiteContent, titleChrome: Parameters<typeof chrome>[0], tag: HeadingTag): string {
+  return `<${tag} class="section-heading">${escapeHtml(chrome(titleChrome, content.productKind))}</${tag}>`;
 }
 
 function claimList(content: SiteContent, ids: readonly string[], listTag: "ul" | "ol" = "ul"): string {
@@ -21,7 +21,7 @@ function renderHero(
   env: RenderEnv,
   tag: HeadingTag,
 ): string {
-  const parts: string[] = [`<section class="hero">`, heading(props.titleChrome, tag)];
+  const parts: string[] = [`<section class="hero">`, heading(content, props.titleChrome, tag)];
 
   if (props.headlineClaimId) {
     parts.push(`<p class="hero-headline">${renderClaimText(content, props.headlineClaimId)}</p>`);
@@ -29,7 +29,7 @@ function renderHero(
   if (props.subheadlineClaimId) {
     parts.push(`<p class="hero-sub">${renderClaimText(content, props.subheadlineClaimId)}</p>`);
   } else if (props.subtitleChrome) {
-    parts.push(`<p class="hero-sub">${escapeHtml(chrome(props.subtitleChrome))}</p>`);
+    parts.push(`<p class="hero-sub">${escapeHtml(chrome(props.subtitleChrome, content.productKind))}</p>`);
   }
   if (props.statusClaimId) {
     parts.push(`<p class="hero-status">${renderClaimText(content, props.statusClaimId)}</p>`);
@@ -43,7 +43,7 @@ function renderHero(
   if (props.ctaHref && props.ctaChrome) {
     // ctaHref renders ONLY as a link target — the visible label always
     // comes from chrome copy, never from the URL string itself.
-    parts.push(`<a class="cta" href="${escapeHtml(props.ctaHref)}">${escapeHtml(chrome(props.ctaChrome))}</a>`);
+    parts.push(`<a class="cta" href="${escapeHtml(props.ctaHref)}">${escapeHtml(chrome(props.ctaChrome, content.productKind))}</a>`);
   }
 
   parts.push(`</section>`);
@@ -52,21 +52,21 @@ function renderHero(
 
 function renderFeatureGrid(content: SiteContent, props: Extract<Section, { type: "feature-grid" }>["props"], tag: HeadingTag): string {
   return `<section class="feature-grid">
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${claimList(content, props.featureClaimIds)}
 </section>`;
 }
 
 function renderRoadmapList(content: SiteContent, props: Extract<Section, { type: "roadmap-list" }>["props"], tag: HeadingTag): string {
   return `<section class="roadmap-list">
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${claimList(content, props.itemClaimIds, "ol")}
 </section>`;
 }
 
 function renderChangelog(content: SiteContent, props: Extract<Section, { type: "changelog" }>["props"], tag: HeadingTag): string {
   return `<section class="changelog">
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${claimList(content, props.entryClaimIds, "ol")}
 </section>`;
 }
@@ -74,7 +74,7 @@ ${claimList(content, props.entryClaimIds, "ol")}
 function renderDocsIndex(content: SiteContent, props: Extract<Section, { type: "docs-index" }>["props"], tag: HeadingTag): string {
   const id = props.anchor ? ` id="${escapeHtml(props.anchor)}"` : "";
   return `<section class="docs-index"${id}>
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${claimList(content, props.docClaimIds)}
 </section>`;
 }
@@ -82,7 +82,7 @@ ${claimList(content, props.docClaimIds)}
 function renderPricingTable(content: SiteContent, props: Extract<Section, { type: "pricing-table" }>["props"], tag: HeadingTag): string {
   const lead = props.leadClaimId ? `<p class="pricing-lead">${renderClaimText(content, props.leadClaimId)}</p>` : "";
   return `<section class="pricing-table">
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${lead}
 ${claimList(content, props.planClaimIds, "ul").replace("<ul>", '<ul class="pricing-plans">')}
 </section>`;
@@ -92,7 +92,7 @@ function renderLegalPage(content: SiteContent, props: Extract<Section, { type: "
   const id = props.anchor ? ` id="${escapeHtml(props.anchor)}"` : "";
   const paragraphs = props.bodyClaimIds.map((id_) => `<p>${renderClaimText(content, id_)}</p>`).join("\n");
   return `<section class="legal-page"${id}>
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${paragraphs}
 </section>`;
 }
@@ -100,7 +100,7 @@ ${paragraphs}
 function renderFaq(content: SiteContent, props: Extract<Section, { type: "faq" }>["props"], tag: HeadingTag): string {
   const items = props.qnaClaimIds.map((id) => `<div class="faq-item">${renderClaimText(content, id)}</div>`).join("\n");
   return `<section class="faq">
-${heading(props.titleChrome, tag)}
+${heading(content, props.titleChrome, tag)}
 ${items}
 </section>`;
 }
