@@ -2101,6 +2101,38 @@ check_work_item_placement_definer_role_shape() {
   fi
 }
 
+# D#599 PL-2 (0795): repos.verified_copy_sha256, the stored cloud-verified consent. Every problem is named: the column is a text column, its CHECK
+# holds it to a SHA-256 that exists only in runner_verified, app_user reads and writes it through its table-wide grants (no column grant is added and none
+# is needed), and no other role can touch it: platform_ops, partner_user and the public hold nothing on the column, and no row policy names platform_ops on repos.
+check_repo_verified_consent_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN NOT EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = 'public.repos'::regclass AND t.attname = 'verified_copy_sha256' AND NOT t.attisdropped AND t.atttypid = 'text'::regtype)
+           THEN 'repos.verified_copy_sha256 is not a text column' END,
+      CASE WHEN (SELECT count(*) FROM pg_constraint WHERE conrelid = 'public.repos'::regclass AND conname = 'repos_verified_copy_sha256_check' AND contype = 'c'
+                   AND pg_get_constraintdef(oid) LIKE '%runner_verified%' AND pg_get_constraintdef(oid) LIKE '%[0-9a-f]{64}%') <> 1
+           THEN 'the consent hash is not held to a SHA-256 that exists only in runner_verified' END,
+      CASE WHEN NOT has_column_privilege('app_user', 'public.repos', 'verified_copy_sha256', 'SELECT')
+                OR NOT has_column_privilege('app_user', 'public.repos', 'verified_copy_sha256', 'UPDATE') THEN 'app_user cannot read and write the consent hash' END,
+      CASE WHEN has_column_privilege('platform_ops', 'public.repos', 'verified_copy_sha256', 'SELECT')
+                OR has_column_privilege('platform_ops', 'public.repos', 'verified_copy_sha256', 'UPDATE')
+                OR has_column_privilege('platform_ops', 'public.repos', 'verified_copy_sha256', 'INSERT') THEN 'platform_ops holds a privilege on the consent hash' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = 'partner_user'
+                          AND (has_column_privilege('partner_user', 'public.repos', 'verified_copy_sha256', 'SELECT') OR has_column_privilege('partner_user', 'public.repos', 'verified_copy_sha256', 'UPDATE')))
+           THEN 'partner_user holds a privilege on the consent hash' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_attribute t, aclexplode(t.attacl) a WHERE t.attrelid = 'public.repos'::regclass AND t.attname = 'verified_copy_sha256' AND a.grantee = 0)
+           THEN 'the public holds a column grant on the consent hash' END);" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'repo-verified-consent-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): repos.verified_copy_sha256 shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#599 HO-2a (0787): the SECURITY DEFINER functions owned by run_handoff_definer. Prints their oids, comma
 # separated, when each is one of the three exact signatures (matched by regprocedure, not by name), pinned to search_path=pg_catalog,
 # public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant option;
@@ -3331,6 +3363,7 @@ check_runner_mode_switch_definer_role_shape fx_neon
 check_work_item_placement_definer_role_shape fx_neon
 check_run_handoff_definer_role_shape fx_neon
 check_run_handoff_complete_definer_role_shape fx_neon
+check_repo_verified_consent_shape fx_neon
 check_runner_sandbox_status_role_shape fx_neon
 check_runner_sandbox_status_table_shape fx_neon
 check_runner_allowance_role_shape fx_neon

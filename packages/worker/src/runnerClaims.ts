@@ -19,7 +19,7 @@ import {
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { RUNNER_RUN_CATALOGUE_VERSION } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { MAX_RAW_TOOL_EVENTS_PER_RUN, RAW_CAPPED_TYPES, RUNNER_MODES_SQL, insertRunnerEvent, eventForStorage, noteRunnerActivityCap, projectRunnerProgress, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
+import { MAX_RAW_TOOL_EVENTS_PER_RUN, RAW_CAPPED_TYPES, RUNNER_MODES_SQL, effectiveModeSql, insertRunnerEvent, eventForStorage, noteRunnerActivityCap, projectRunnerProgress, writeRunStatusOn, type FailureReason, type RepoVisibilityPort } from "@fx/runner";
 import { guarded, requireUuid, RunActionInputError, RunActionRefusedError } from "./runActions.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
 import { accountCeiling, hostedLimitsFromPlanData, type HostedLimitsSource } from "./runnerAccountCeiling.js";
@@ -428,9 +428,14 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
               `SELECT a.id, a.role, a.dispatch_repo_id, a.job_signed
                  FROM agent_runs a
                  JOIN repos r ON r.account_id = a.account_id AND r.id = a.dispatch_repo_id
+                 -- The run's item, aliased w: the one work_items join this query carries (a later change that needs the item shares it, no second alias).
+                 -- Placement lives on the item, so the claim keys on the effective mode now, not on the mode recorded at creation. Same repo only, as readRunSide does.
+                 LEFT JOIN work_items w ON w.account_id = a.account_id AND w.id = a.work_item_id AND w.repo_id = r.id
                  LEFT JOIN agent_runs p ON p.account_id = a.account_id AND p.id = a.parent_run_id
                 WHERE a.account_id = $1 AND a.status = 'pending' AND a.runtime = 'runner' AND a.execution_mode IN (${RUNNER_MODES_SQL})
-                  AND a.runner_id IS NULL AND a.job_signed IS NOT NULL AND r.execution_mode IN (${RUNNER_MODES_SQL})
+                  AND a.runner_id IS NULL AND a.job_signed IS NOT NULL
+                  AND ${effectiveModeSql("w", "r")} IN (${RUNNER_MODES_SQL})
+                  AND (a.execution_mode <> 'runner_verified' OR r.execution_mode IN (${RUNNER_MODES_SQL}))
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
                   AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])

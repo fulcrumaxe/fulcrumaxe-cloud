@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { CLOUD_VERIFIED_COPY_SHA256 } from "../../src/effectiveMode.js";
 
 /**
  * Minimal fixture builders for packages/runner's own [pg] tests --
@@ -72,6 +73,8 @@ export async function seedMember(
 export interface SeedRepoOptions {
   product?: "team" | "sitekit";
   executionMode?: string;
+  /** D#599 PL-2: the cloud-verified wording's hash the repo stored when it opted in. A `runner_verified` repo defaults to the CURRENT wording's; pass `null` for a repo switched before the hash was stored. */
+  verifiedCopySha256?: string | null;
 }
 
 /** C10's routing input: `repos.execution_mode`, defaulting to `'sandbox'`
@@ -83,10 +86,12 @@ export async function seedRepo(
   repoId: string,
   opts: SeedRepoOptions = {},
 ): Promise<void> {
+  const mode = opts.executionMode ?? "sandbox";
+  const consent = mode === "runner_verified" ? (opts.verifiedCopySha256 === undefined ? CLOUD_VERIFIED_COPY_SHA256 : opts.verifiedCopySha256) : null;
   await admin.query(
-    `INSERT INTO repos (id, account_id, gh_repo_id, product, execution_mode)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [repoId, accountId, Math.floor(Math.random() * 1_000_000_000), opts.product ?? "team", opts.executionMode ?? "sandbox"],
+    `INSERT INTO repos (id, account_id, gh_repo_id, product, execution_mode, verified_copy_sha256)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [repoId, accountId, Math.floor(Math.random() * 1_000_000_000), opts.product ?? "team", mode, consent],
   );
 }
 

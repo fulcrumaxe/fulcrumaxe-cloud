@@ -60,7 +60,7 @@ describe("runner claim, heartbeat and events [pg]", () => {
     return id;
   }
   /** A pending runner run with a real signed job. */
-  async function pending(o: { role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number } = {}): Promise<string> {
+  async function pending(o: { role?: string; columnRole?: string; repoId?: string; initiatedBy?: string | null; approvedBy?: string | null; parent?: string | null; expiresAt?: number; mode?: string; createdAt?: number; workItemId?: string | null } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -81,10 +81,16 @@ describe("runner claim, heartbeat and events [pg]", () => {
       key_id: "k1",
     };
     await admin.query(
-      `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, approved_by, parent_run_id, created_at)
-       VALUES ($1, $2, $3, 'runner', 'pending', $4, $5, $6::jsonb, $7, $8, $9, to_timestamp($10 / 1000.0))`,
-      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(signJob(job, key)), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000],
+      `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, approved_by, parent_run_id, created_at, work_item_id)
+       VALUES ($1, $2, $3, 'runner', 'pending', $4, $5, $6::jsonb, $7, $8, $9, to_timestamp($10 / 1000.0), $11)`,
+      [id, A.accountId, o.columnRole ?? job.role, o.mode ?? "runner_local", o.repoId ?? A.repoId, JSON.stringify(signJob(job, key)), o.initiatedBy === undefined ? A.userId : o.initiatedBy, o.approvedBy ?? null, o.parent ?? null, o.createdAt ?? T0 - 5000, o.workItemId ?? null],
     );
+    return id;
+  }
+  /** An item of the account's repo with the given placement (null follows the repo). */
+  async function item(placement: "cloud" | "runner" | null): Promise<string> {
+    const id = randomUUID();
+    await admin.query("INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number, placement) VALUES ($1, $2, $3, 'issue', 'internal', 'triaged', $4, $5)", [id, A.accountId, A.repoId, 8000 + Math.floor(Math.random() * 100000), placement]);
     return id;
   }
   const row = async (id: string) => (await admin.query("SELECT status, runner_id, lease_generation, lease_expires_at, started_at FROM agent_runs WHERE id = $1", [id])).rows[0];
@@ -115,11 +121,85 @@ describe("runner claim, heartbeat and events [pg]", () => {
       expect(second.kind === "claimed" && second.signedJob.job.mode).toBe("verified");
     });
 
+    // D#599 PL-2 (R-599-PL2c, M1): the claim keys on the effective mode of the run item and repo. An item placed on a runner makes a
+    // runner_local run on a repo still in sandbox, which stays claimable; the account fence, repo coverage and the other guards stay.
+    it("hands a runner_local run for an item placed on a runner, on a sandbox repo, to a covering runner of the same account, and to no other", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      const id = await pending({ mode: "runner_local", workItemId: await item("runner") });
+      const other = await seedAccount(admin, randomUUID());
+      const stranger = await insertRunner(admin, other.accountId, other.userId, { credentialMode: "api_key" });
+      await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = $3::text[] WHERE id = $1", [stranger, [other.repoId, A.repoId], ["executor", "code-reviewer"]]);
+      expect((await facade.claimRunnerRun({ accountId: other.accountId, runnerId: stranger })).kind).toBe("idle"); // another account's runner
+      const elsewhere = await newRunner({ repos: [randomUUID()] });
+      expect((await claim(elsewhere)).kind).toBe("idle"); // a runner that does not cover the repo
+      expect((await row(id)).status).toBe("pending");
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+      expect(await row(id)).toMatchObject({ status: "running", runner_id: runner });
+    });
+
+    it("never hands a runner a run whose recorded mode is sandbox, whatever its repo's mode", async () => {
+      const id = await pending({ mode: "sandbox" });
+      expect((await claim()).kind).toBe("idle");
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).toBe("pending");
+    });
+
+    it("still refuses a placed runner_local run on a sandbox repo when the repository is not private", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      const id = await pending({ mode: "runner_local", workItemId: await item("runner") });
+      visibility = "public";
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).not.toBe("running"); // never handed out; the claim's visibility guard ends it
+    });
+
+    // M1 (CWE-362): the backstop for a repo switched off a runner while a run was being created, and for an item moved to the cloud.
     it("hands out nothing for a verified run whose repo is on sandbox", async () => {
       const id = await pending({ mode: "runner_verified" });
       await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
       expect((await claim()).kind).toBe("idle");
       expect((await row(id)).status).toBe("pending");
+    });
+
+    it("hands out nothing for a runner_local run with no placement once its repo is on sandbox, but a move between the runner modes still hands it out", async () => {
+      const id = await pending({ mode: "runner_local", workItemId: await item(null) });
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      expect((await claim()).kind).toBe("idle");
+      await admin.query("UPDATE repos SET execution_mode = 'runner_verified' WHERE id = $1", [A.repoId]);
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+    });
+
+    it("hands out a run for an item placed on a runner on a sandbox repo, and nothing once the item is placed in the cloud", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      const wi = await item("runner");
+      const id = await pending({ mode: "runner_local", workItemId: wi });
+      await admin.query("UPDATE work_items SET placement = 'cloud' WHERE id = $1", [wi]);
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).toBe("pending");
+      await admin.query("UPDATE work_items SET placement = 'runner' WHERE id = $1", [wi]);
+      expect(await claim()).toMatchObject({ kind: "claimed", runId: id });
+    });
+
+    it("hands out nothing for a pending runner run whose item moved to the cloud on a repo that is on a runner", async () => {
+      const id = await pending({ mode: "runner_local", workItemId: await item("cloud") });
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).toBe("pending");
+    });
+
+    it("a verified run for an item placed on a runner is not handed out while its repo is on sandbox (consent was withdrawn)", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
+      const id = await pending({ mode: "runner_verified", workItemId: await item("runner") });
+      expect((await claim()).kind).toBe("idle");
+      expect((await row(id)).status).toBe("pending");
+    });
+
+    it("race: a run inserted AFTER the switch to sandbox (from a read made before it) is never claimed", async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]); // the switch commits first, with nothing pending to cancel
+      const late = await pending({ mode: "runner_local" }); // then the dispatch that read the old side inserts its row
+      const lateVerified = await pending({ mode: "runner_verified" });
+      expect((await claim()).kind).toBe("idle");
+      expect((await claim(await newRunner())).kind).toBe("idle");
+      for (const id of [late, lateVerified]) expect((await row(id)).status).toBe("pending"); // the sweep cancels them (runnerQueueSweep.pg.test.ts)
     });
 
     it("hands out a pending run: running, this runner, generation 1, lease 90 s, one status event", async () => {
@@ -165,13 +245,11 @@ describe("runner claim, heartbeat and events [pg]", () => {
       }
     });
 
-    it("respects the runner's repos and roles, the repo's mode and the runner-eligible set", async () => {
+    it("respects the runner's repos and roles and the runner-eligible set (the repo's mode no longer matters, R-599-PL2c)", async () => {
       const other = await newRunner({ repos: [randomUUID()] });
       const outsider = await newRunner({ roles: ["not-a-role"] });
       const id = await pending();
       for (const r of [other, outsider]) expect((await claim(r)).kind, r).toBe("idle");
-      await admin.query("UPDATE repos SET execution_mode = 'sandbox' WHERE id = $1", [A.repoId]);
-      expect((await claim()).kind).toBe("idle");
       await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [A.repoId]);
       expect(RUNNER_ELIGIBLE_ROLES).toContain("code-reviewer");
       expect((await claim()).kind).toBe("claimed");

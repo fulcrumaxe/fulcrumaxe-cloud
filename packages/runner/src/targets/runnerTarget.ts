@@ -10,6 +10,9 @@ import type {
   DispatchResult,
   ExecutionRun,
   ExecutionTarget,
+  PrecheckDenyReason,
+  PrecheckRun,
+  TargetPrecheckReason,
   TerminalReport,
 } from "../executionTarget.js";
 
@@ -154,14 +157,40 @@ export class RunnerTarget implements ExecutionTarget {
     return this.mode === "runner_verified" ? { jobMode: "verified" } : {};
   }
 
+  /**
+   * The refusals that read nothing of ours: the backend and the role. Shared by `precheck` (before the run's row exists) and `admit`
+   * (after it), so the two cannot disagree.
+   */
+  private refusal(run: { role: string; backend?: string }): TargetPrecheckReason | null {
+    if (!isRunnerBackend(run.backend)) return "backend_not_selectable";
+    if (!RUNNER_TARGET_ROLES.has(run.role)) return "role_not_runner_eligible";
+    // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. `VerifiedTarget` (R5b-2a) routes them there, so none
+    // reaches this target through the registry; a caller that built this target alone still gets the closed refusal, before anything is counted or written.
+    if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return "verified_review_not_wired";
+    return null;
+  }
+
+  private async visibilityRefusal(run: { accountId: string; repoId?: string | null }): Promise<TargetPrecheckReason | null> {
+    // A repo the port could not read is refused, whatever the cause: a throw is the same as "unknown".
+    const seen: RepoVisibility = run.repoId
+      ? await this.deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch((): RepoVisibility => "unknown")
+      : "unknown";
+    if (seen === "public") return "public_repo";
+    if (seen !== "private") return "repo_visibility_unknown";
+    return null;
+  }
+
+  /** D#599 PL-2: every refusal of `admit` except the day's run count, which needs the row. Writes nothing. */
+  async precheck(run: PrecheckRun): Promise<{ ok: true } | { ok: false; reason: PrecheckDenyReason }> {
+    const reason = this.refusal(run) ?? (await this.visibilityRefusal(run));
+    return reason === null ? { ok: true } : { ok: false, reason };
+  }
+
   /** `client` is accepted for the interface; `startAgentRun` has already released it, so nothing here uses it. */
   async admit(run: ExecutionRun, client: PoolClient): Promise<AdmitResult> {
     void client;
-    if (!isRunnerBackend(run.backend)) return { admitted: false, reason: "backend_not_selectable" };
-    if (!RUNNER_TARGET_ROLES.has(run.role)) return { admitted: false, reason: "role_not_runner_eligible" };
-    // D#6 R5b-1 (C38): in a cloud-verified repo the four reviewers run in our sandbox. `VerifiedTarget` (R5b-2a) routes them there, so none
-    // reaches this target through the registry; a caller that built this target alone still gets the closed refusal, before anything is counted or written.
-    if (this.mode === "runner_verified" && VERIFIED_SANDBOX_REVIEW_ROLES.has(run.role)) return { admitted: false, reason: "verified_review_not_wired" };
+    const early = this.refusal(run);
+    if (early !== null) return { admitted: false, reason: early };
 
     // The limit is read first: when the plan data is unavailable the door stays shut and nothing is counted.
     let perDay: number;
@@ -173,12 +202,8 @@ export class RunnerTarget implements ExecutionTarget {
     }
     if ((await this.runsToday(run.accountId)) > perDay) return { admitted: false, reason: "runner_daily_limit" };
 
-    // A repo the port could not read is refused, whatever the cause: a throw is the same as "unknown".
-    const seen: RepoVisibility = run.repoId
-      ? await this.deps.visibility.visibility({ accountId: run.accountId, repoId: run.repoId }).catch((): RepoVisibility => "unknown")
-      : "unknown";
-    if (seen === "public") return { admitted: false, reason: "public_repo" };
-    if (seen !== "private") return { admitted: false, reason: "repo_visibility_unknown" };
+    const late = await this.visibilityRefusal(run);
+    if (late !== null) return { admitted: false, reason: late };
     return { admitted: true };
   }
 

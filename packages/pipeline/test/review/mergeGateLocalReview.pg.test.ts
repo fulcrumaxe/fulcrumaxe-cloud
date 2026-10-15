@@ -626,3 +626,50 @@ describe("D#6 R3c: the review and merge path of a runner_local repo stays inside
     });
   });
 });
+
+// D#599 PL-2: the gate reads the item's EFFECTIVE mode (its placement, else the repository's). Auto-merge on local review applies only when that
+// is runner_local, and the local-only GitHub fence goes with it.
+describe("an item's placement decides the gate's side (D#599 PL-2)", () => {
+  const place = (w: World, placement: string | null) => h.admin.query("UPDATE work_items SET placement = $2 WHERE id = $1", [w.workItemId, placement]);
+
+  it("a runner_local repo whose item is placed in the cloud is judged by the cloud rule: the local opt-in is never asked, and only production reviews clear it", async () => {
+    const asked: unknown[] = [];
+    const port: LocalReviewOptInPort = { enabled: async (a) => (asked.push(a), true) };
+    const w = await world();
+    await place(w, "cloud");
+    await passBoth({ ...w, local: false }, { runtime: "production" });
+    const out = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: port }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber });
+    expect(asked).toEqual([]);
+    expect(out.outcome).toBe("merged");
+    // Runner reviews, which only the local rule counts, do not clear this item.
+    const runner = await world();
+    await place(runner, "cloud");
+    await passBoth(runner);
+    const blocked = await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(runner.gh), localReviewOptIn: port }, { accountId: runner.accountId, workItemId: runner.workItemId, prNumber: runner.gh.prNumber });
+    expect(blocked.outcome).not.toBe("merged");
+    expect(runner.gh.merges).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  it("a cloud repo whose item is placed on the runner needs the local-only GitHub client: the REST client is refused before any call, and nothing merges", async () => {
+    const w = await world({ executionMode: "sandbox" });
+    await place(w, "runner");
+    await passBoth({ ...w, local: true });
+    await expect(runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubRest(w.gh), localReviewOptIn: on }, { accountId: w.accountId, workItemId: w.workItemId, prNumber: w.gh.prNumber })).rejects.toThrow(/local-only GitHub client/);
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("the opt-in is asked for a runner_local repo with no placement, and for a cloud repo whose item is placed on the runner (the effective mode is runner_local)", async () => {
+    const asked: unknown[] = [];
+    const port: LocalReviewOptInPort = { enabled: async (a) => (asked.push(a), false) };
+    const plain = await world();
+    await passBoth(plain);
+    await gate(plain, port);
+    expect(asked).toHaveLength(1);
+    const placed = await world({ executionMode: "sandbox" });
+    await place(placed, "runner");
+    await passBoth({ ...placed, local: true });
+    await runMergeGateForItem({ pool: h.runWriterPool, http: fakeGitHubLocal(placed.gh).http, localReviewOptIn: port }, { accountId: placed.accountId, workItemId: placed.workItemId, prNumber: placed.gh.prNumber }).catch(() => undefined);
+    expect(asked).toHaveLength(2);
+  });
+});

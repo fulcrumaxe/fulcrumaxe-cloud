@@ -116,11 +116,11 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
       await admin.query("INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, execution_mode) VALUES ($1, $2, $3, 'team', 'Acme', 'widgets', $4)", [id, accountId, Math.floor(Math.random() * 1e12), mode]);
       return id;
     }
-    async function run(accountId: string, repoId: string, status = 'pending', runtime = 'runner', mode = 'runner_local'): Promise<string> {
+    async function run(accountId: string, repoId: string, status = 'pending', runtime = 'runner', mode = 'runner_local', workItemId: string | null = null): Promise<string> {
       const id = randomUUID();
       await admin.query(
-        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id) VALUES ($1, $2, 'code-reviewer', $3, $4, $5, $6)`,
-        [id, accountId, runtime, status, runtime === 'runner' ? mode : 'sandbox', repoId],
+        `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, work_item_id) VALUES ($1, $2, 'code-reviewer', $3, $4, $5, $6, $7)`,
+        [id, accountId, runtime, status, runtime === 'runner' ? mode : 'sandbox', repoId, workItemId],
       );
       return id;
     }
@@ -161,6 +161,23 @@ describe(`migration 0759: ${ROLE} and its two definers (D#6 R2b, C24 section 2)`
         for (const r of queued) expect(await statusOf(r)).toBe('cancelled');
         for (const [r, want] of [[running, 'running'], [finished, 'succeeded'], [sandboxRun, 'pending'], [elsewhere, 'pending']] as const) expect(await statusOf(r), r).toBe(want);
         expect(await cancel(id)).toEqual([]);
+      });
+    });
+
+    // D#599 PL-2, ruling R-207-1: a pending runner_local run that an item's placement put on a repo still in sandbox is a pending runner run
+    // of that repo like any other. A run bound to the old repo cannot run correctly after a switch, so the switch cancels it too.
+    it('cancels a pending runner_local run that an item was placed on (a sandbox repo, item placement runner) along with the other pending runner runs; its running sibling stays', async () => {
+      const id = await repo(f.accountId, 'sandbox');
+      const item = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, placement) VALUES ($1, $2, $3, 'feature', 'internal', 'runner')`, [item, f.accountId, id]);
+      const placed = await run(f.accountId, id, 'pending', 'runner', 'runner_local', item);
+      const placedRunning = await run(f.accountId, id, 'running', 'runner', 'runner_local', item);
+      const plain = await run(f.accountId, id);
+      await asApp(f.a1, f.accountId, async () => {
+        expect((await cancel(id)).sort()).toEqual([placed, plain].sort());
+        expect(await statusOf(placed)).toBe('cancelled');
+        expect(await statusOf(plain)).toBe('cancelled');
+        expect(await statusOf(placedRunning)).toBe('running');
       });
     });
 

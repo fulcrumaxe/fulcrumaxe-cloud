@@ -156,11 +156,12 @@ describe("createRunStarter [pg]", { timeout: 60_000 }, () => {
   it.each([
     ["public", "public_repo"],
     ["unknown", "repo_visibility_unknown"],
-  ] as const)("D#6 C12 A4: a runner run refused because the repo reads %s comes back refused with %s, with no follower", async (visibility, reason) => {
+  ] as const)("D#6 C12 A4 / D#599 PL-2: a runner run refused because the repo reads %s is refused with %s before a row exists (a typed error), with no follower", async (visibility, reason) => {
     const w = await runnerWorld(visibility);
-    expect(await w.starter.start(w.input)).toMatchObject({ refused: reason });
+    await expect(w.starter.start(w.input)).rejects.toMatchObject({ code: "run_precheck_refused", reason });
     expect(w.follow).not.toHaveBeenCalled();
     expect(w.issuer.calls).toHaveLength(0);
+    expect((await admin.query("SELECT 1 FROM agent_runs WHERE account_id = $1 AND dispatch_repo_id IS NOT NULL", [w.input.accountId])).rows).toHaveLength(0);
   });
 
   it("D#6 C12 section 2.1: a run queued for a runner is cancelled and the start fails: no follower waits on a hook that will never fire", async () => {
@@ -179,6 +180,22 @@ describe("createRunStarter [pg]", { timeout: 60_000 }, () => {
     const input = await newInput(`run-action:${randomUUID()}`);
     await expect(w.starter.start(input)).rejects.toBe(boom);
     expect((await admin.query("SELECT status FROM agent_runs WHERE account_id = $1 AND dispatch_repo_id IS NOT NULL", [input.accountId])).rows).toEqual([{ status: "failed" }]);
+    expect(w.harness.fakeSandbox.state.stopped.length).toBeGreaterThan(0);
+  });
+
+  // D#599 PL-2: the cancel after a follower failure reads the STARTED run's own recorded mode. The registry here has only the sandbox: if the
+  // starter read the repo's mode (now runner_local) it would fail to resolve a target and the follower's error would be lost.
+  it("a follower that cannot be started stops the run on the side it was started on, even though the repo's mode changed while it started", async () => {
+    const boom = new Error("could not start the follower");
+    let repoId = "";
+    const w = world(async () => {
+      await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [repoId]);
+      throw boom;
+    });
+    const input = await newInput(`run-action:${randomUUID()}`);
+    repoId = input.repoId;
+    await expect(w.starter.start(input)).rejects.toBe(boom);
+    expect((await admin.query("SELECT status, execution_mode FROM agent_runs WHERE account_id = $1 AND dispatch_repo_id IS NOT NULL", [input.accountId])).rows).toEqual([{ status: "failed", execution_mode: "sandbox" }]);
     expect(w.harness.fakeSandbox.state.stopped.length).toBeGreaterThan(0);
   });
 

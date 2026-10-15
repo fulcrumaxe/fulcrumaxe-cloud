@@ -105,6 +105,26 @@ describe("seat resolver [pg]", () => {
     }
   });
 
+  // D#599 PL-2: with no mode named, the card follows where the item's run goes: its placement, else the repository's mode.
+  it("D#599 PL-2: the executor's card follows the item's placement when no mode is named, and the preview keeps the repository's", async () => {
+    const { loadProductCard } = await import("@fx/roles/cards");
+    const a = await team();
+    const seatCard = async (role: string) => (await okSeat(request(a, role))).roleCard;
+    const place = (placement: string | null) => admin.query("UPDATE work_items SET placement = $2 WHERE id = $1", [a.workItemId, placement]);
+    // A cloud repo whose item is sent to the runner gets the runner card; back to NULL, the sandbox card.
+    await place("runner");
+    expect(await seatCard("executor")).toBe(loadProductCard("executor", { runtime: "runner" }));
+    await place(null);
+    expect(await seatCard("executor")).toBe(loadProductCard("executor"));
+    // A runner repo whose item is sent to the cloud gets the sandbox card; the reviewers' cards do not change either way.
+    await admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [a.repoId]);
+    await place("cloud");
+    expect(await seatCard("executor")).toBe(loadProductCard("executor"));
+    expect(await seatCard("code-reviewer")).toBe(loadProductCard("code-reviewer"));
+    await place(null);
+    expect(await seatCard("executor")).toBe(loadProductCard("executor", { runtime: "runner" }));
+  });
+
   it("P6: every manifest role WITH a product card gets an ok seat (one without is refused no_card, below) whose model is priced and which SandboxTarget.admit does not refuse as unknown_model", async () => {
     const { loadProductCard } = await import("@fx/roles/cards");
     for (const { name } of ROLE_MANIFEST.filter((r) => loadProductCard(r.name) !== undefined)) {

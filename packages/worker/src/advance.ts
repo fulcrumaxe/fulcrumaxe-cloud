@@ -8,7 +8,7 @@ import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } 
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -50,6 +50,10 @@ export const FOLLOW_UP_CHAIN_MAX_RUNS = 16;
 
 /** The two reasons that make a failed runner run get a follow-up (a "follow-up hop", C22 section 5). */
 const FOLLOW_UP_REASONS: ReadonlySet<string> = new Set(["runner_lost", "usage_limit"]);
+/** D#599 PL-2: the reason PL-1's item-scoped cancel gives a pending run it moves to `cancelled`. */
+const PLACEMENT_CHANGED = "placement_changed";
+/** D#599 PL-2: how many times one step restarts on the other side after its run was cancelled for a placement change. The key of restart n is `<step key>:p<n>`. */
+export const PLACEMENT_RESTARTS_MAX = 3;
 /**
  * The first role each action starts: the seat the pre-flight in `performAdvanceWorkItem` resolves. `check_build` starts none
  * (a pull request is looked for first; with none open the item goes to Needs human and no model runs), so it has no seat to
@@ -303,7 +307,14 @@ export interface AdvanceRunOutcome {
  * the pull request number and run branch its newest executor run recorded at `done` (null when none did). A sandbox repository has no record.
  */
 export interface AdvancePrSource {
+  /** D#599 PL-2: the item's EFFECTIVE mode (its placement, else the repository's). Prompts, the run seat's card, gating and auto-merge follow it. */
   executionMode: string;
+  /**
+   * D#599 PL-2: the mode of the item's newest executor run, which is the side the pull request was built on, or the effective mode when the item has
+   * no executor run yet. The pull request lookup (and the client it is read through) follows THIS, so a placement change does not hide the open PR.
+   * Optional: absent, the lookup follows `executionMode`.
+   */
+  prExecutionMode?: string | undefined;
   recordedPr: { number: number; branch: string } | null;
 }
 
@@ -564,12 +575,21 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { result: "done", outcome: amended === 0 ? { work_item_id: workItemId, amended: 0 } : { work_item_id: workItemId, amended, version: lastVersion } };
   }
 
-  /** The item's repository mode and, for a runner repository, the pull request its run recorded. Read in the item's tenant. */
+  /**
+   * The item's effective mode (D#599 PL-2: its placement, else the repository's), the side its newest executor run was on, and, when that side is a
+   * runner, the pull request that run recorded. Read in the item's tenant.
+   */
   async function pullRequestSource(accountId: string, workItemId: string): Promise<AdvancePrSource> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ execution_mode: string | null }>("SELECT r.execution_mode FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2", [workItemId, accountId]);
+      const r = await client.query<{ execution_mode: string | null; newest_mode: string | null }>(
+        `SELECT ${effectiveModeSql("w", "r")} AS execution_mode,
+                (SELECT ar.execution_mode FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS newest_mode
+           FROM work_items w JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2`,
+        [workItemId, accountId],
+      );
       const executionMode = r.rows[0]?.execution_mode ?? "sandbox";
-      return { executionMode, recordedPr: isRunnerMode(executionMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
+      const prExecutionMode = r.rows[0]?.newest_mode ?? executionMode;
+      return { executionMode, prExecutionMode, recordedPr: isRunnerMode(prExecutionMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
     });
   }
 
@@ -617,8 +637,22 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
     if (req.expectedExecutionMode !== undefined && !MODE_RE.test(req.expectedExecutionMode)) return { ok: false, reason: "invalid_input" };
     if (req.specVersionId !== undefined && !UUID_RE.test(req.specVersionId)) return { ok: false, reason: "invalid_input" };
-    const key = `advance:${req.workItemId}:${req.step}`;
+    const baseKey = `advance:${req.workItemId}:${req.step}`;
+    let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
+      // D#599 PL-2 (AC4): a step whose run was cancelled `placement_changed` starts again on the new side, once, under the next key (`:p1`, `:p2`...). The key
+      // is chosen from the rows alone, so a replay of the step finds the restart's key and returns that run: it starts nothing more.
+      for (let generation = 0; generation <= PLACEMENT_RESTARTS_MAX; generation++) {
+        key = generation === 0 ? baseKey : `${baseKey}:p${generation}`;
+        const held = await client.query<{ status: string; reason: string | null }>(
+          `SELECT a.status, (SELECT e.payload->>'failureReason' FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'cancelled' ORDER BY e.seq DESC LIMIT 1) AS reason
+             FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+            WHERE k.account_id = $1 AND k.idempotency_key = $2`,
+          [req.accountId, key],
+        );
+        const run = held.rows[0];
+        if (!run || run.status !== "cancelled" || run.reason !== PLACEMENT_CHANGED) break;
+      }
       const r = await client.query<{ repo_id: string | null; gh_owner: string | null; gh_name: string | null; halted: boolean; halt_epoch: number }>(
         "SELECT w.repo_id, w.halted_at IS NOT NULL AS halted, w.halt_epoch, r.gh_owner, r.gh_name FROM work_items w LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id WHERE w.id = $1 AND w.account_id = $2",
         [req.workItemId, req.accountId],
@@ -676,6 +710,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof WorkItemHaltedError) return { ok: false, reason: "item_halted" };
       // The repository changed mode after the prompt was built (R4d-1): nothing was written, and no job was issued.
       if (err instanceof ExecutionModeChangedError) return { ok: false, reason: "execution_mode_changed" };
+      // D#599 PL-2: the guards of the run's own side refused it (a public or unreadable repo, a stale cloud-verified consent...) before a row was written.
+      if (err instanceof RunPrecheckRefusedError) return { ok: false, reason: err.reason };
       // The executor's sandbox is inside a reaper claim (0761): nothing was written, and the step retries after a wait.
       if (err instanceof SandboxReapingError) return { ok: false, reason: "sandbox_reaping" };
       throw err;
@@ -717,6 +753,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
               continue;
             }
           }
+        }
+        if (row.status === "cancelled") {
+          // D#599 PL-2: the one cancellation the driver acts on. The step that waited starts the same step again on the new side (see advanceStartRun).
+          const e = await client.query<{ reason: string | null }>(
+            "SELECT payload->>'failureReason' AS reason FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.status_changed' AND payload->>'to' = 'cancelled' ORDER BY seq DESC LIMIT 1",
+            [accountId, currentId],
+          );
+          if (e.rows[0]?.reason === PLACEMENT_CHANGED) reason = PLACEMENT_CHANGED;
         }
         if (row.status === "failed" && row.runtime === "runner") {
           const e = await client.query<{ reason: string | null }>(
@@ -835,6 +879,18 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       return { recorded: false };
     }
     return withTenant(runnerPool, who.accountId, (client) => recordDriverEvent(client, who.accountId, full));
+  }
+
+  /** D#599 PL-2: whether a run ended `cancelled` with the reason PL-1's item-scoped cancel gives (`placement_changed`). */
+  async function endedForPlacement(accountId: string, runId: string): Promise<boolean> {
+    return withTenant(runnerPool, accountId, async (client) => {
+      const r = await client.query(
+        `SELECT 1 FROM agent_runs a JOIN run_events e ON e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'cancelled'
+          WHERE a.account_id = $1 AND a.id = $2 AND a.status = 'cancelled' AND e.payload->>'failureReason' = $3 LIMIT 1`,
+        [accountId, runId, PLACEMENT_CHANGED],
+      );
+      return r.rowCount === 1;
+    });
   }
 
   /** D#597 CC-3: the run a step of this item started, found by its key: the exact prefix, or the prefix plus a note pin (`:n<hash>`), and nothing longer. */
@@ -994,7 +1050,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
     // A replay of the same approval on the same head finds the run it started; it never starts a second one. D#597 CC-3: the key also carries a pin of the
     // accepted run notes the run was started with, so the replay finds its run through the prefix (the notes accepted since would give another pin).
-    const keyBase = `fix:${attemptKey}`;
+    // D#599 PL-2 (AC4): a fix run cancelled `placement_changed` is restarted once on the new side under the next generation (`fix:<attempt>:p1`...).
+    let keyBase = `fix:${attemptKey}`;
+    for (let generation = 1; generation <= PLACEMENT_RESTARTS_MAX; generation++) {
+      const ended = await findStepRun(who, keyBase);
+      if (!ended || !(await endedForPlacement(who.accountId, ended.runId))) break;
+      keyBase = `fix:${attemptKey}:p${generation}`;
+    }
     const claimed = () => findStepRun(who, keyBase);
     const claimedRun = async (): Promise<string | null> => (await claimed())?.runId ?? null;
     // The fact is written on every path that returns a started run (it is deduped): a step that died between the resume
@@ -1047,16 +1109,26 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const noteText = renderRunNotes(notes);
     const prompt = noteText ? `${req.prompt}\n\n${noteText}` : req.prompt;
 
+    // D#599 PL-2: a round whose effective side is not the side the build's session ran on cannot continue that session: a session belongs to the
+    // side that made it. It starts a fresh executor session instead, carrying the fix prompt, the pinned Spec version and the fenced notes above.
+    // Same-side rounds are unchanged (R1b). Continuing the PR's branch from the other side is PL-2b (the push-branch rules are not touched here).
+    const effective = await readExecutionMode(runnerPool, who.accountId, state.repoId, who.workItemId);
+    const parentRun = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
+      return r.rows[0];
+    });
+    const crossSide = parentRun !== undefined && sideOfMode(parentRun.execution_mode) !== sideOfMode(effective);
+
     let out: { id: string; status: string };
     try {
-      // The build ran in the sandbox this PR owns, in the checkout it made; a resume continues both: same sandbox, same
-      // session, same working directory, no clone. `pr` is the ISSUE's number, as the build used it (it names the sandbox).
-      // A fix round the target queued for a runner has no hook and may sit pending for days. That is accepted: the fix wait is
-      // a status poll that credits queued time, and the runner's `done` judges the continuation on the same PR branch.
-      out = await acceptQueuedRunnerRun(
-        runnerPool,
-        who.accountId,
-        await review.resume(runnerPool, deps.registry, {
+      if (crossSide) {
+        if (!deps.starter) return refuse("starter_unavailable");
+        const coords = await withTenant(runnerPool, who.accountId, async (client) => {
+          const r = await client.query<{ gh_owner: string | null; gh_name: string | null }>("SELECT gh_owner, gh_name FROM repos WHERE id = $1 AND account_id = $2", [state.repoId, who.accountId]);
+          return r.rows[0];
+        });
+        if (!coords?.gh_owner || !coords.gh_name) return refuse("no_repo");
+        const fresh = await deps.starter.start({
           ...seat.seat,
           accountId: who.accountId,
           repoId: state.repoId,
@@ -1064,13 +1136,41 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           role: "executor",
           product: "team",
           pr: req.issue,
-          parentRunId: parent,
           prompt,
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
+          ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
+          // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
+          cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },
           idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
-        }),
-      );
+        });
+        console.info(JSON.stringify({ event: "advance.fix_fresh_session", work_item_id: who.workItemId, run_id: fresh.runId, refused: fresh.refused ?? null }));
+        if (fresh.refused) return refuse(fresh.refused);
+        out = { id: fresh.runId, status: "started" };
+      } else {
+        // The build ran in the sandbox this PR owns, in the checkout it made; a resume continues both: same sandbox, same
+        // session, same working directory, no clone. `pr` is the ISSUE's number, as the build used it (it names the sandbox).
+        // A fix round the target queued for a runner has no hook and may sit pending for days. That is accepted: the fix wait is
+        // a status poll that credits queued time, and the runner's `done` judges the continuation on the same PR branch.
+        out = await acceptQueuedRunnerRun(
+          runnerPool,
+          who.accountId,
+          await review.resume(runnerPool, deps.registry, {
+            ...seat.seat,
+            accountId: who.accountId,
+            repoId: state.repoId,
+            workItemId: who.workItemId,
+            role: "executor",
+            product: "team",
+            pr: req.issue,
+            parentRunId: parent,
+            prompt,
+            ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
+            workdir: PREVIEW_WORKDIR,
+            idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
+          }),
+        );
+      }
     } catch (err) {
       // fx-swallow-ok: the error's NAME is logged below and the refusal is recorded as a fact; its message can carry text from the sandbox or the platform
       const e = err as { name?: string };
@@ -1084,6 +1184,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");
       if (err instanceof WorkItemHaltedError) return refuse("item_halted");
       if (err instanceof ExecutionModeChangedError) return refuse("execution_mode_changed");
+      // D#599 PL-2: the guards of the round's own side refused it before a row was written.
+      if (err instanceof RunPrecheckRefusedError) return refuse(err.reason);
       // D#6 R4d-5c (C36): the build this fix round continues has no Spec version to inherit (built before the pin): nothing was written, no job issued.
       if (err instanceof NoSpecVersionError) return refuse("no_spec_version");
       return refuse("resume_failed");

@@ -4,6 +4,7 @@ import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
+import { CLOUD_VERIFIED_COPY_SHA256, effectiveModeSql } from "./effectiveMode.js";
 import {
   resolveExecutionTarget,
   runtimeFor,
@@ -17,6 +18,7 @@ import {
   type FailureReason,
   type ExecutionTarget,
   type ExecutionTargetRegistry,
+  type PrecheckDenyReason,
 } from "./executionTarget.js";
 import { defaultResolvePayer, type RunFunding } from "./funding.js";
 import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./runStatusWriter.js";
@@ -197,20 +199,69 @@ export function assertExpectedExecutionMode(input: { expectedExecutionMode?: str
   if (input.expectedExecutionMode !== undefined && input.expectedExecutionMode !== mode) throw new ExecutionModeChangedError();
 }
 
-/** Exported for `workflows/agentRun.ts`: the post-dispatch watchdog (H09.7)
- * needs to resolve the SAME `ExecutionTarget` again, once `startAgentRun`
- * has already returned, to call `cancel`/`finalize` on it. */
-export async function readExecutionMode(pool: Pool, accountId: string, repoId: string): Promise<string> {
+/** D#599 PL-2: a run was refused before its row was written (the target's `precheck`, or the repository's stored cloud-verified consent no longer being the current wording). Nothing was written. */
+export class RunPrecheckRefusedError extends Error {
+  /** The closed code a caller reports for the whole class; `reason` says which refusal. */
+  readonly code = "run_precheck_refused";
+  constructor(readonly reason: PrecheckDenyReason) {
+    super(`the run was refused before it was created: ${reason}`);
+    this.name = "RunPrecheckRefusedError";
+  }
+}
+
+/** Where a run goes, as read at its creation: the effective mode (the item's placement, else the repo's mode) and the repo's stored cloud-verified consent. */
+export interface RunSide {
+  mode: string;
+  verifiedCopySha256: string | null;
+}
+
+/**
+ * D#599 PL-2: the one read of where a run goes. The mode is `effectiveExecutionMode` in SQL: the item's `placement`, else `repos.execution_mode`.
+ * An item that is not in this repo is ignored (the repo's mode applies), so a caller cannot route a repo's run by naming another repo's item.
+ * Exported for `workflows/agentRun.ts`: the post-dispatch watchdog (H09.7) needs to resolve the SAME `ExecutionTarget` again, once
+ * `startAgentRun` has already returned, to call `cancel`/`finalize` on it.
+ */
+export async function readRunSide(pool: Pool, accountId: string, repoId: string, workItemId?: string | null): Promise<RunSide> {
   return withTenant(pool, accountId, async (client) => {
-    const { rows } = await client.query<{ execution_mode: string }>(
-      `SELECT execution_mode FROM repos WHERE account_id = $1 AND id = $2`,
-      [accountId, repoId],
+    const { rows } = await client.query<{ mode: string; verified_copy_sha256: string | null }>(
+      `SELECT ${effectiveModeSql("w", "r")} AS mode, r.verified_copy_sha256
+         FROM repos r LEFT JOIN work_items w ON w.account_id = r.account_id AND w.id = $3::uuid AND w.repo_id = r.id
+        WHERE r.account_id = $1 AND r.id = $2`,
+      [accountId, repoId, workItemId ?? null],
     );
     if (!rows[0]) {
       throw new NotFoundError(`repos ${repoId} not found`);
     }
-    return rows[0].execution_mode;
+    return { mode: rows[0].mode, verifiedCopySha256: rows[0].verified_copy_sha256 };
   });
+}
+
+export async function readExecutionMode(pool: Pool, accountId: string, repoId: string, workItemId?: string | null): Promise<string> {
+  return (await readRunSide(pool, accountId, repoId, workItemId)).mode;
+}
+
+/** The mode a run was STARTED in (`agent_runs.execution_mode`, fixed at insert). A caller that stops a run it started reads this, never the repo's mode now. Null when the run is not visible. */
+export async function readRunExecutionMode(pool: Pool, accountId: string, runId: string): Promise<string | null> {
+  return withTenant(pool, accountId, async (client) => {
+    const { rows } = await client.query<{ execution_mode: string | null }>("SELECT execution_mode FROM agent_runs WHERE account_id = $1 AND id = $2", [accountId, runId]);
+    return rows[0]?.execution_mode ?? null;
+  });
+}
+
+/**
+ * D#599 PL-2: every refusal that can be decided before the run's row exists, re-checked at EACH run creation for the run's own mode. Placement
+ * is a routing input and never a permission, so a run on the other side meets the other side's guards here, now, whatever was true when the
+ * placement was set:
+ *  - a `runner_verified` run needs the cloud-verified wording the repo's owner accepted to be the wording this server ships now (a repo
+ *    switched before the hash was stored has none, and needs the same re-consent);
+ *  - the target's own `precheck` (the runner's backend, role and a live visibility read, where anything but `private` refuses).
+ * A refusal throws `RunPrecheckRefusedError` and writes nothing.
+ */
+export async function precheckRun(target: ExecutionTarget, side: RunSide, input: Pick<StartAgentRunInput, "accountId" | "repoId" | "role" | "backend">): Promise<void> {
+  if (side.mode === "runner_verified" && side.verifiedCopySha256 !== CLOUD_VERIFIED_COPY_SHA256) throw new RunPrecheckRefusedError("verified_consent_stale");
+  if (!target.precheck) return;
+  const result = await target.precheck({ accountId: input.accountId, repoId: input.repoId, role: input.role, ...(input.backend === undefined ? {} : { backend: input.backend }) });
+  if (!result.ok) throw new RunPrecheckRefusedError(result.reason);
 }
 
 type DispatchRace = { timedOut: true } | { timedOut: false; dispatched: DispatchResult };
@@ -320,9 +371,12 @@ export async function startAgentRun(
   // UnknownExecutionModeError. The run leaves no reservation, no
   // createSandbox call and no status write." Resolved BEFORE the INSERT
   // below, so an unknown mode never creates a row at all.
-  const mode = await readExecutionMode(pool, input.accountId, input.repoId);
+  const side = await readRunSide(pool, input.accountId, input.repoId, input.workItemId);
+  const mode = side.mode;
   assertExpectedExecutionMode(input, mode);
   const target = resolveExecutionTarget(mode, registry);
+  // D#599 PL-2: the guards of this run's own mode, before a row exists.
+  await precheckRun(target, side, input);
 
   // C16.3: fails closed for unsupported funding BEFORE anything is
   // written -- same position as the mode check above, and for the same

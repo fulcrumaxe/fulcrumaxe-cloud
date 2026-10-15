@@ -147,6 +147,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invariant_usage_not_recorded",
   // Runner prompt variant (D#6 R4d-1): a run was started for a repository whose execution mode changed since the prompt was built.
   "execution_mode_changed",
+  // Per-item placement (D#599 PL-2): a run was refused before its row was written (the target's precheck, or the repo's stored cloud-verified consent being stale).
+  "run_precheck_refused",
+  "verified_consent_stale",
   // Runner review workspace (D#6 R4d-4a): the job issuer refused a review job with no valid stored head, or whose prompt names another commit.
   "review_without_head",
   "review_sha_prompt_mismatch",

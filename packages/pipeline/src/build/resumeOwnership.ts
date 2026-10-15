@@ -41,7 +41,20 @@ export class ResumeBackendError extends Error {
   }
 }
 
+/**
+ * D#599 PL-2: a fix round's effective side (where its item's placement sends it) is not the side the session was run on. Thrown before anything
+ * is written. A session id is only ever handed to the side that made it; a round on the other side starts a fresh executor session.
+ */
+export class ResumeSideError extends Error {
+  constructor() {
+    super("refusing to resume: the session was run on the other side");
+    this.name = "ResumeSideError";
+  }
+}
+
 export interface OwnedExecutorSession {
+  /** `agent_runs.execution_mode` of that run: the mode it ran in, whatever the repo or the item says now. */
+  executionMode: string | null;
   /** `agent_runs.backend` of that run (0735): what the session was started on. */
   backend: string;
   /** The `agent_runs.id` the session id was read from -- for
@@ -79,8 +92,8 @@ export async function lookupOwnedExecutorSession(
   client: PoolClient,
   params: { accountId: string; workItemId: string },
 ): Promise<OwnedExecutorSession> {
-  const { rows } = await client.query<{ id: string; cc_session_id: string | null; backend: string | null }>(
-    `SELECT id, cc_session_id, backend FROM agent_runs
+  const { rows } = await client.query<{ id: string; cc_session_id: string | null; backend: string | null; execution_mode: string | null }>(
+    `SELECT id, cc_session_id, backend, execution_mode FROM agent_runs
        WHERE account_id = $1 AND work_item_id = $2 AND role = $3 AND cc_session_id IS NOT NULL
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -92,5 +105,5 @@ export async function lookupOwnedExecutorSession(
   }
   // A run with no backend on record cannot be shown to match: fail closed (the column is NOT NULL, so this is a stub or a drift).
   if (typeof row.backend !== "string" || row.backend === "") throw new ResumeBackendError("missing");
-  return { runId: row.id, sessionId: row.cc_session_id, backend: row.backend };
+  return { runId: row.id, sessionId: row.cc_session_id, backend: row.backend, executionMode: row.execution_mode };
 }
