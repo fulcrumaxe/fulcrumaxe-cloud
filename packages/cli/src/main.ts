@@ -1,6 +1,7 @@
 import { parseCommandLine, type Parsed } from "./args.js";
 import { logout, profiles, whoami } from "./commands/account.js";
 import { login } from "./commands/login.js";
+import { readCommand } from "./commands/read.js";
 import type { Io } from "./context.js";
 import { CliExit, EXIT, EXIT_TABLE, usage } from "./errors.js";
 import { Output } from "./output.js";
@@ -11,6 +12,17 @@ const HELP = `fx (fulcrumaxe): your account from a terminal
   fx logout [--profile p] [--all]           forget the saved token on this machine (it does not revoke it)
   fx whoami [--profile p]                   show the account the token belongs to
   fx profiles                               list profiles
+
+  fx runs list | show <id>                  runs, with their work item's title
+  fx work-items list | show <id> | timeline <id>
+  fx discussions list | show <id> | comments <id>
+  fx repos list | show <id>
+  fx webhooks list | show <id> | deliveries <id>
+  fx usage                                  spend this month against the limits
+  fx budgets                                the monthly limits for your plan
+  Lists show one page: --limit n sets its size, --all follows every page.
+  Changing things (webhooks add, sites, runs retry, work-items approve|close|reopen|respec, budgets set, tokens) is not available to a token: those
+  commands print a workspace link and exit 6 without sending anything.
 
 Options: --json (one {"v":1,...} envelope on stdout), --debug (method, path, status and timing on stderr; the token is redacted), --help
 Environment: FX_TOKEN (CI), FX_BASE_URL, FX_PROFILE, XDG_CONFIG_HOME
@@ -30,6 +42,7 @@ async function run(io: Io, out: Output, args: Parsed): Promise<void> {
     case "profiles":
       return profiles(io, out);
     default:
+      if (await readCommand(io, out, args)) return;
       throw usage(args.command === undefined ? "no command given: see `fx --help`" : "unknown command: see `fx --help`");
   }
 }
