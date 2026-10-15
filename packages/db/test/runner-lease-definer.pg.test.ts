@@ -119,7 +119,8 @@ describe(`migration 0754: ${ROLE}, the lease guard and the row policies (D#6 R2b
       const { rows } = await admin.query(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'runner_claim_stamps'::regclass`);
       expect(rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
       for (const who of ['app_user', 'platform_ops', 'partner_user', 'agent_run_writer']) {
-        const { rows: priv } = await admin.query(`SELECT has_any_column_privilege($1, 'runner_claim_stamps', 'SELECT, INSERT, UPDATE, REFERENCES') AS ok`, [who]);
+        // 0798 (D#605 FL-4) lets app_user READ the stamps of its own account (the claim's prefer hold); nobody gets to write them.
+        const { rows: priv } = await admin.query(`SELECT has_any_column_privilege($1, 'runner_claim_stamps', $2) AS ok`, [who, who === 'app_user' ? 'INSERT, UPDATE, REFERENCES' : 'SELECT, INSERT, UPDATE, REFERENCES']);
         expect(priv[0].ok, who).toBe(false);
       }
     });
@@ -323,7 +324,8 @@ describe('migration 0754 gives platform_ops nothing', () => {
     // 0762 re-creates runner_follow_up_run (it adds one clause), so it cannot be applied before the 0754 that creates the function; it joins the second run.
     // 0767 grants a role SELECT on agent_runs.claimable_after, a column 0754 adds, so it joins the second run too (it gives platform_ops nothing).
     // 0775 replaces agent_run_runner_claim and grants runner_lease_definer a column, so it needs 0754's role and function first.
-    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql', '0775_runner_run_model.sql'];
+    // 0798 grants app_user a read of 0754's runner_claim_stamps (the routing hold reads the preferred runners' last poll), so it needs the table first.
+    const NEEDS_0754 = ['0762_sandbox_reap_settings.sql', '0767_runner_plan_consent.sql', '0771_runner_verified_repo_mode.sql', '0774_runner_verified_approvals.sql', '0775_runner_run_model.sql', '0798_runner_routing.sql'];
     for (const f of readdirSync(DEFAULT_MIGRATIONS_DIR).filter((name) => name.endsWith('.sql') && name !== MIGRATION && !NEEDS_0754.includes(name))) {
       copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, f), path.join(beforeDir, f));
     }

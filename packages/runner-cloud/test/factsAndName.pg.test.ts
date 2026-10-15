@@ -237,8 +237,9 @@ describe("facts on hello and the runner name on register [pg]", () => {
   });
 
   describe("facts do not reach authorization (criterion 4)", () => {
-    // The import graph of the request verifier, the ticket route and the job signer, followed through relative imports, never reaches the hello route
-    // (the only reader of the facts definer) and never names the facts table or its definer.
+    // The import graph of the request verifier, the ticket route, the claim route and the job signer, followed through relative imports, never reaches the hello route
+    // (the only reader of the facts definer) and never names the facts table or its definer. D#605 FL-4 adds the claim route: the claim itself reads the facts
+    // (to route, in the worker, which this package does not import), but the route that authorizes the request must not.
     const importsOf = (file: string): string[] => [...readFileSync(file, "utf8").matchAll(/from\s+"(\.{1,2}\/[^"]+)\.js"/g)].map((m) => path.resolve(path.dirname(file), `${m[1]}.ts`));
     const closure = (entry: string): string[] => {
       const seen = new Set<string>();
@@ -253,13 +254,14 @@ describe("facts on hello and the runner name on register [pg]", () => {
     it.each([
       [path.join(srcDir, "verifyRunnerRequest.ts")],
       [path.join(srcDir, "gitTicket.ts")],
+      [path.join(srcDir, "claim.ts")],
       [path.join(protocolDir, "src", "jobSignature.ts")],
     ])("%s", (entry) => {
       const files = closure(entry);
       expect(files.length).toBeGreaterThan(0);
       for (const file of files) {
         expect(path.basename(file), `${entry} reaches ${file}`).not.toBe("hello.ts");
-        expect(readFileSync(file, "utf8"), file).not.toMatch(/runner_facts|runner_name_initial|\.facts\b/);
+        expect(readFileSync(file, "utf8"), file).not.toMatch(/runner_facts|runner_name_initial|runner_routing|\.facts\b/);
       }
     });
   });

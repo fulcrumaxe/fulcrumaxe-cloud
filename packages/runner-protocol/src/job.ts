@@ -120,6 +120,10 @@ export const JobSchema = z
     // D#6 R7a (C35): the repo's admin-approved sandbox allowances, present only when the approved set has entries and omitted (never null or empty)
     // on every other job, so their canonical JSON and signature are unchanged. The signature covers it. The runner floor-checks it (R7b).
     sandbox_allowances: JobAllowancesSchema.optional(),
+    // D#605 FL-4: the sandbox engine this job cannot run without, present only on a job that needs a microVM and omitted (never null) on every
+    // other job, so their canonical JSON and signature are unchanged. The cloud's claim hands such a job only to a runner whose reported engine
+    // is `microvm`, whatever the person's routing says. Set by the cloud when it signs the job; no person-set rule can write or clear it.
+    requires_engine: z.literal("microvm").optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

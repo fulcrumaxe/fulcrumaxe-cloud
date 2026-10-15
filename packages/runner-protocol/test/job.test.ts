@@ -8,7 +8,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -203,5 +203,20 @@ describe("job.sandbox_allowances (D#6 R7a, C35)", () => {
   it("refuses a reason with a control character or a line break, and an empty or over-long value", () => {
     for (const reason of ["two\nlines", "bell\u0007", ""]) expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, reason }] })).success, JSON.stringify(reason)).toBe(false);
     for (const value of ["", "has space.example.com", "x".repeat(513)]) expect(JobSchema.safeParse(withAllowances({ entries: [{ ...entry, value }] })).success, value.slice(0, 20)).toBe(false);
+  });
+});
+
+describe("job.requires_engine (D#605 FL-4)", () => {
+  it("accepts microvm, and the parsed job carries it", () => {
+    expect(JobSchema.parse(sampleJob({ requires_engine: "microvm" })).requires_engine).toBe("microvm");
+  });
+
+  it("is omitted, never null, on a job that needs no VM, so every other job's canonical JSON is unchanged", () => {
+    expect("requires_engine" in JobSchema.parse(sampleJob())).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ requires_engine: null })).success).toBe(false);
+  });
+
+  it("refuses any other value, including os_sandbox: a job can require a VM, never forbid one", () => {
+    for (const bad of ["os_sandbox", "docker", "", 1, true]) expect(JobSchema.safeParse(sampleJob({ requires_engine: bad })).success, String(bad)).toBe(false);
   });
 });
