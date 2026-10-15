@@ -8,6 +8,13 @@ export const EVENTS = [
   "telemetry.invalid_event",
   // reportError (reportError.ts): a caught server error, as a coded class.
   "error.reported",
+  // apps/ops (D#68 OPS-C2): staff sign-in, sign-out, passkey enrollment and the health check. The reason is the `stage` field.
+  "ops.auth.login_ok",
+  "ops.auth.login_refused",
+  "ops.auth.logout",
+  "ops.auth.enroll_ok",
+  "ops.auth.enroll_refused",
+  "ops.health.degraded",
   // Used by this package's own tests.
   "telemetry.selftest",
 ] as const;

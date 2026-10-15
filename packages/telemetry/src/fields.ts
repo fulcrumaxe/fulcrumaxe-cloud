@@ -12,6 +12,8 @@ export const ROUTE_LITERALS: ReadonlySet<string> = new Set([
   "github", "stripe", "webhook", "install", "callback", "create-repo", "cron", "api-sweep",
   // H1c: the sign-in, sign-out, gh-proxy, csp-report and rum routes.
   "auth", "signout", "gh-proxy", "csp-report", "rum",
+  // apps/ops (OPS-C2): the staff sign-in, enrollment and health routes.
+  "login", "enroll", "options", "verify", "logout", "health",
 ]);
 
 const MAX_ROUTE_SEGMENTS = 16;

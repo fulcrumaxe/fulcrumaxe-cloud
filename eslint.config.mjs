@@ -72,7 +72,7 @@ export default tseslint.config(
   // (`// fx-swallow-ok: <reason>`). It is an error; the baseline file is empty. See lint/no-silent-catch.mjs.
   // Client code in apps/workspace is out of scope.
   {
-    files: ["packages/*/src/**/*.{ts,tsx,js,mjs}", "apps/web/app/**/*.{ts,tsx}", "apps/web/lib/**/*.{ts,tsx}"],
+    files: ["packages/*/src/**/*.{ts,tsx,js,mjs}", "apps/web/app/**/*.{ts,tsx}", "apps/web/lib/**/*.{ts,tsx}", "apps/ops/app/**/*.{ts,tsx}", "apps/ops/lib/**/*.{ts,tsx}"],
     ignores: ["**/*.test.{ts,tsx,js,mjs}", "**/test/**", "**/fixtures/**"],
     plugins: { "fx-catch": fxCatch },
     rules: {
