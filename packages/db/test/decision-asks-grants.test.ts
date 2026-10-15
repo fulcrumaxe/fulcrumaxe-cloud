@@ -83,6 +83,37 @@ describe('decision_asks grants (0666)', () => {
     for (const r of rows) expect(r.name).not.toMatch(/actor|user|account/i);
   });
 
+  /** Who holds a column-level UPDATE on decision_asks (0797), minus superusers. */
+  async function columnUpdaters(): Promise<{ role: string; columns: string[] }[]> {
+    const { rows } = await admin.query<{ role: string; columns: string[] }>(
+      `SELECT r.rolname AS role, array_agg(att.attname::text ORDER BY att.attnum) AS columns
+         FROM pg_attribute att, aclexplode(att.attacl) a JOIN pg_roles r ON r.oid = a.grantee
+        WHERE att.attrelid = 'public.decision_asks'::regclass AND a.privilege_type = 'UPDATE' AND NOT r.rolsuper
+        GROUP BY r.rolname ORDER BY 1`,
+    );
+    return rows;
+  }
+
+  it('the only column-level UPDATE on decision_asks is receipt_writer\'s five answer columns', async () => {
+    expect(await columnUpdaters()).toEqual([
+      { role: 'receipt_writer', columns: ['state', 'answered_option', 'answered_by', 'answered_at', 'receipt_id'] },
+    ]);
+  });
+
+  /** Direct grantees of EXECUTE on decision_ask_answer, PUBLIC included. */
+  async function answerExecutors(): Promise<string[]> {
+    const { rows } = await admin.query<{ grantee: string }>(
+      `SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END AS grantee
+         FROM pg_proc p, aclexplode(p.proacl) a
+        WHERE p.proname = 'decision_ask_answer' AND a.grantee <> p.proowner ORDER BY 1`,
+    );
+    return rows.map((r) => r.grantee);
+  }
+
+  it('EXECUTE on decision_ask_answer is receipt_writer_invoker only', async () => {
+    expect(await answerExecutors()).toEqual(['receipt_writer_invoker']);
+  });
+
   it('findRlsViolations returns []', async () => {
     expect(await findRlsViolations(admin)).toEqual([]);
   });

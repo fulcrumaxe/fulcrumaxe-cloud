@@ -250,3 +250,40 @@ export async function listOpenAsks(
     nextCursor: last ? { answerDueAt: last.due_text, id: last.id } : null,
   };
 }
+
+/** The CATALOGUE class of a decision id, or null when the id is not in the catalogue. */
+export function catalogueClassOf(decisionType: string): DecisionClass | null {
+  return CATALOGUE.find((e) => e.id === decisionType)?.class ?? null;
+}
+
+/** The named exceptions decision_ask_answer() raises (migration 0797). */
+export const ASK_ANSWER_EXCEPTIONS = [
+  'ask_no_tenant', 'ask_session_required', 'ask_forbidden', 'ask_not_found',
+  'ask_bad_choice', 'ask_no_run', 'ask_receipt_mismatch', 'ask_already_answered',
+] as const;
+
+/** Thrown by `answerAskIn`. `code` is the exception name; branch on it, not on the message. */
+export class AskAnswerDefinerError extends Error {
+  constructor(readonly code: (typeof ASK_ANSWER_EXCEPTIONS)[number]) {
+    super(code);
+    this.name = 'AskAnswerDefinerError';
+  }
+}
+
+/**
+ * Answers an ask through decision_ask_answer() on a receipt-pool `withTenant` client with the person's user
+ * id set; the receipt was written earlier on the same client. The exception name is the text before the first
+ * colon of the message, and only a listed name counts. A unique violation on the receipt link (a second ask
+ * claiming the same receipt) is a receipt mismatch. Any other error passes through as it is.
+ */
+export async function answerAskIn(client: PoolClient, input: { askId: string; choice: string; receiptId: string }): Promise<void> {
+  try {
+    await client.query('SELECT decision_ask_answer($1::uuid, $2::text, $3::uuid)', [input.askId, input.choice, input.receiptId]);
+  } catch (err) {
+    const e = err as { code?: string; message?: string } | null;
+    const name = e?.code === '23505' ? 'ask_receipt_mismatch' : /^([a-z_]+)(?::|$)/.exec(e?.message ?? '')?.[1];
+    const known = ASK_ANSWER_EXCEPTIONS.find((n) => n === name);
+    if (known !== undefined) throw new AskAnswerDefinerError(known);
+    throw err;
+  }
+}

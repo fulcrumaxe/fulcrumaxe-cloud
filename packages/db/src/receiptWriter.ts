@@ -82,6 +82,8 @@ const CLASSES: readonly string[] = ['automated_with_monitoring', 'human_over_the
  */
 const OPTION_ID = /^[a-z0-9_.:-]{1,128}$/;
 const INT4_MAX = 2_147_483_647;
+/** A receipt's dial version when the account has no `decision_settings` row: the catalogue default. Real versions start at 1. */
+export const DIAL_VERSION_CATALOGUE_DEFAULT = 0;
 
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
@@ -100,7 +102,7 @@ function validate(input: WriteReceiptInput): ReceiptTrustClass[] {
   if (!isText(input.chosen)) throw new ReceiptWriteError('receipt_missing_chosen');
   if (!isText(input.rejectedAlternative)) throw new ReceiptWriteError('receipt_missing_rejected_alternative');
   if (!Number.isInteger(input.dialVersion)) throw new ReceiptWriteError('receipt_missing_dial_version');
-  if (input.dialVersion < 1 || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
+  if (input.dialVersion < DIAL_VERSION_CATALOGUE_DEFAULT || input.dialVersion > INT4_MAX) throw new ReceiptWriteError('receipt_invalid_dial_version');
   const entry = CATALOGUE.find((e) => e.id === input.decisionType);
   if (!entry) throw new ReceiptWriteError('receipt_unknown_decision_type');
   if (entry.class !== input.class) throw new ReceiptWriteError('receipt_decision_class_mismatch');
