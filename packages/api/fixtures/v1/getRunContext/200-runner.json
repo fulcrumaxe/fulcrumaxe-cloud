@@ -1,0 +1,26 @@
+{
+  "run_id": "8b2c5e74-5b2c-4c5a-9f74-4f7c9e3d1a03",
+  "runtime": "runner",
+  "status": "succeeded",
+  "recorded": true,
+  "basis": "measured",
+  "sections": [
+    { "code": "boundary", "bytes": 912, "trimmed_bytes": 0 },
+    { "code": "card", "bytes": 5320, "trimmed_bytes": 0 },
+    { "code": "map", "bytes": 6144, "trimmed_bytes": 0 },
+    { "code": "spec", "bytes": 11264, "trimmed_bytes": 0 },
+    { "code": "findings", "bytes": 2048, "trimmed_bytes": 0 }
+  ],
+  "first_turn_input_tokens": 8400,
+  "peak_context_tokens": 96000,
+  "cache_read_tokens": 1900000,
+  "cache_write_tokens": 150000,
+  "memory_tokens": null,
+  "tool_output": [
+    { "tool": "Read", "bytes": 210000 },
+    { "tool": "Glob", "bytes": 4000 }
+  ],
+  "compactions": 0,
+  "recalled_memory": [],
+  "repo_map_version": null
+}

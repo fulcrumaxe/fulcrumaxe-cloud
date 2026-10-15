@@ -1,0 +1,20 @@
+{
+  "run_id": "7a1b4d63-4a1b-4b4f-8e63-3e6b8d2c0f02",
+  "runtime": "production",
+  "status": "succeeded",
+  "recorded": true,
+  "basis": "partial",
+  "sections": [
+    { "code": "card", "bytes": 5320, "trimmed_bytes": 0 },
+    { "code": "spec", "bytes": 12480, "trimmed_bytes": 0 }
+  ],
+  "first_turn_input_tokens": null,
+  "peak_context_tokens": null,
+  "cache_read_tokens": null,
+  "cache_write_tokens": null,
+  "memory_tokens": null,
+  "tool_output": [],
+  "compactions": 0,
+  "recalled_memory": [],
+  "repo_map_version": null
+}

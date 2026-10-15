@@ -1,0 +1,17 @@
+{
+  "run_id": "ad4e7096-7d4e-4e7c-9196-619eb0f53c05",
+  "runtime": "production",
+  "status": "running",
+  "recorded": false,
+  "basis": null,
+  "sections": [],
+  "first_turn_input_tokens": null,
+  "peak_context_tokens": null,
+  "cache_read_tokens": null,
+  "cache_write_tokens": null,
+  "memory_tokens": null,
+  "tool_output": [],
+  "compactions": null,
+  "recalled_memory": [],
+  "repo_map_version": null
+}

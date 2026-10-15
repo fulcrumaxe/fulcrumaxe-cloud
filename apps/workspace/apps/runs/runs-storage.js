@@ -96,6 +96,9 @@ export async function loadRunEvent(id, seq, get = api, signal) {
 /** What one run did, cost and shows (D#483 P5), raw: the detail validates it. Rejects on any failure. */
 export const loadRunInsight = (id, get = api, signal) => get("GET", "/api/v1/runs/" + encodeURIComponent(id) + "/insight", undefined, signal);
 
+/** What one run loaded into its context (D#600 CX-8), raw: the panel validates it. Rejects on any failure. */
+export const loadRunContext = (id, get = api, signal) => get("GET", "/api/v1/runs/" + encodeURIComponent(id) + "/context", undefined, signal);
+
 /** One run for a list row. */
 export const loadRun = (id, get = api, signal) => get("GET", "/api/v1/runs/" + encodeURIComponent(id), undefined, signal);
 
