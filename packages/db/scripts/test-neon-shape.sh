@@ -2945,6 +2945,66 @@ check_work_item_correction_table_shape() {
   fi
 }
 
+# D#68 OPS-C1 (0801): the four SECURITY DEFINER functions owned by ops_owner (ops_current_staff, audit_write_staff, ops_login_credential,
+# ops_login_bump_sign_count). Prints their oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of those four
+# signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds ops_console and nobody else but the
+# owner (no PUBLIC, no app_user, no platform_ops), with no grant option; SHAPE_FAIL:<count> when any is not; nothing when it owns none.
+check_ops_owner_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = ANY(ARRAY['public.ops_current_staff()'::regprocedure, 'public.audit_write_staff(uuid,uuid,text,jsonb)'::regprocedure, 'public.ops_login_credential(bytea)'::regprocedure, 'public.ops_login_bump_sign_count(bytea,bigint)'::regprocedure]::oid[])
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND coalesce((SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0), '{}') <@ ARRAY['ops_console']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)
+        AND (p.proname <> 'audit_write_staff' OR NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'ops_owner') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'ops-owner-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by ops_owner fail the exception shape (not one of its four exact signatures, a loose search_path, EXECUTE for anyone but ops_console and the owner (none at all for audit_write_staff), or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#68 OPS-C1 (0801): role shape of ops_console, the one login apps/ops uses. LOGIN but otherwise unprivileged, no member but the migration role
+# (and no live membership for it), a member of no role, holding no table or column privilege anywhere (so only schema USAGE), owning nothing, with no
+# CREATE on public. Every problem is named.
+check_ops_console_role_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'ops_console'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public')
+    SELECT concat_ws('; ',
+      CASE WHEN NOT r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'wrong attributes' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'ops_console', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) OR pg_has_role('ops_console', 'platform_ops', 'MEMBER') OR pg_has_role('ops_console', 'app_user', 'MEMBER') THEN 'is a member of another role' END,
+      CASE WHEN EXISTS (SELECT 1 FROM held WHERE x <> 'schema public USAGE') OR (SELECT count(*) FROM held) <> 1 THEN 'holds a privilege beyond USAGE on public' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_proc p WHERE p.proowner = r.oid) OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid) OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'owns an object' END,
+      CASE WHEN has_schema_privilege('ops_console', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'ops_console-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): ops_console role shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
 # D#601 MEM-1 (0793): the five SECURITY DEFINER entry points owned by memory_definer (propose, write, decide, edit, delete a memory entry). Prints their
 # oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of the five signatures (matched by regprocedure), pinned to
 # search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant
