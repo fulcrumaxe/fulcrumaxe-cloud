@@ -8,7 +8,7 @@ import { startAgentRun, writeRunStatus, type StartAgentRunInput } from "@fx/runn
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { MAX_CONTINUATIONS_PER_WORK_ITEM } from "@fx/core/src/run-limits/limits.js";
-import { AUTO_CONTINUE_HASH, continueLockPoolMax, continuationKey, continueAfterLimit, continueLockPoolCount, continueWorkItem, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
+import { AUTO_CONTINUE_HASH, HANDOFF_CONTINUE_HASH, readEnded, continueLockPoolMax, continuationKey, continueAfterLimit, continueLockPoolCount, continueWorkItem, decideContinuation, inspectContinueLock, seatPrompt, setContinueLockPoolMax, type ContinuationFacts } from "../../src/build/continuation.js";
 import { continueAfterLimitLocked, continueWorkItemLocked } from "../../src/build/continuationTesting.js";
 import { createFakeExecutionTarget } from "./helpers/fakeExecutionTarget.js";
 import { seedAccount, seedRepo, seedWorkItem } from "./helpers/seed.js";
@@ -177,6 +177,22 @@ describe("H14c-5d-1 continuation [pg]", () => {
     expect(await go(f, tenth)).toMatchObject({ outcome: "parked", refusedBy: "work_item_ceiling" });
     expect(await runCount(f)).toBe(MAX_CONTINUATIONS_PER_WORK_ITEM + 1);
     expect(await stage(f)).toBe("needs_human");
+  });
+
+  it("D#599 HO-2b: a handoff is a continuation: it counts toward the ceiling of ten, and not toward max_resumes", async () => {
+    expect(HANDOFF_CONTINUE_HASH).toBe(createHash("sha256").update("continue:handoff").digest("hex"));
+    expect(HANDOFF_CONTINUE_HASH).not.toBe(MANUAL_HASH);
+    const f = await seed();
+    let tip = await ended(f);
+    for (let i = 0; i < MAX_CONTINUATIONS_PER_WORK_ITEM - 1; i++) tip = await ended(f, { parent: tip, hash: HANDOFF_CONTINUE_HASH });
+    const read = await withTenant(db.runWriterPool, f.accountId, (client) => readEnded(client, f.accountId, tip));
+    // Nine handoffs so far: one more is allowed, and none of them is automatic.
+    expect(read?.facts).toMatchObject({ totalContinuations: MAX_CONTINUATIONS_PER_WORK_ITEM - 1, autoContinuations: 0 });
+    expect(decideContinuation({ ...read!.facts, limitKind: "run_time", manual: true })).toEqual({ continue: true });
+    tip = await ended(f, { parent: tip, hash: HANDOFF_CONTINUE_HASH });
+    const full = await withTenant(db.runWriterPool, f.accountId, (client) => readEnded(client, f.accountId, tip));
+    expect(full?.facts).toMatchObject({ totalContinuations: MAX_CONTINUATIONS_PER_WORK_ITEM, autoContinuations: 0 });
+    expect(decideContinuation({ ...full!.facts, limitKind: "run_time", manual: true })).toEqual({ continue: false, refusedBy: "work_item_ceiling" });
   });
 
   it("C7: parking is idempotent: a work item already in needs_human or closed is left alone, without throwing", async () => {

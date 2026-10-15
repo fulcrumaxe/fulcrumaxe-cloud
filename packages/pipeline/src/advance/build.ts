@@ -250,9 +250,11 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
 /**
  * Fixed codes for why a build ended without a pull request. Never error text. `runner_lost` and `runner_usage_limit` (D#6 R2b-3,
  * C22 section 8) are the two ways a runner's chain of follow-up runs can run out; they are different actions for the customer than
- * `run_failed` (a runner that stopped answering twice, and a plan limit that held for a week).
+ * `run_failed` (a runner that stopped answering twice, and a plan limit that held for a week). `work_item_ceiling` and `handoff_failed` (D#599
+ * HO-2b) are the two ways a move of a running run to the other side can end with nothing to continue: the item already had ten continuations,
+ * or the new run could not start. In both the work is saved on the run's branch.
  */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit"] as const;
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };

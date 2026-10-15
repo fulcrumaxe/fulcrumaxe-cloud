@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
-import { PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYPES, RUNNER_WAITING_KIND, buildFeed } from '../onboarding/previewProgress.js';
+import { HANDOFF_KIND, PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYPES, RUNNER_WAITING_KIND, buildFeed } from '../onboarding/previewProgress.js';
 import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from '../runs/runnerUsage.js';
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
 import { redactText } from '@fx/runtime/src/redact.js';
@@ -263,10 +263,12 @@ export async function readRunLines(
     detail: string | null;
     size_mb: string | null;
     reset_at: string | null;
+    handoff_state: string | null;
+    handoff_branch: string | null;
   }>(
     // D#6 C42-3: besides the progress kinds, a runner run's own states: the `runner.waiting` notice and the three `runner.event` types that say
     // where the run stands. A `runner.event` of any other type (a tool use can be 2,000 per run) is not selected, so it cannot crowd the newest rows out.
-    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command, e.type, e.reason, e.detail, e.size_mb, e.reset_at
+    `SELECT e.run_id, e.seq, e.kind, e.created_at, e.tool, e.path, e.pattern, e.stage, e."to", e.command, e.type, e.reason, e.detail, e.size_mb, e.reset_at, e.handoff_state, e.handoff_branch
        FROM unnest($1::uuid[]) AS r(id)
       CROSS JOIN LATERAL (
         SELECT run_id, seq, kind, created_at,
@@ -274,17 +276,18 @@ export async function readRunLines(
                left(payload->>'stage', 32) AS stage, left(payload->>'to', 32) AS "to", left(payload->>'command', 201) AS command,
                CASE WHEN kind = $5::text THEN left(payload->>'type', 32) END AS type, CASE WHEN kind = $5::text THEN left(payload->>'reason', 64) END AS reason,
                CASE WHEN kind = $5::text THEN left(payload->>'detail', 64) END AS detail, CASE WHEN kind = $5::text THEN left(payload->>'size_mb', 6) END AS size_mb,
-               CASE WHEN kind = $5::text THEN left(payload->>'reset_at', 40) END AS reset_at
+               CASE WHEN kind = $5::text THEN left(payload->>'reset_at', 40) END AS reset_at,
+               CASE WHEN kind = $7::text THEN left(payload->>'state', 32) END AS handoff_state, CASE WHEN kind = $7::text THEN left(payload->>'branch', 80) END AS handoff_branch
           FROM run_events
          WHERE run_id = r.id
-           AND (kind = ANY($2::text[]) OR kind = $4::text OR (kind = $5::text AND payload->>'type' = ANY($6::text[])))
+           AND (kind = ANY($2::text[]) OR kind = $4::text OR kind = $7::text OR (kind = $5::text AND payload->>'type' = ANY($6::text[])))
          ORDER BY seq DESC LIMIT $3::int
       ) e`,
-    [runIds, [...PROGRESS_EVENT_KINDS], ACTIVITY_LIMITS.maxEventsPerRun, RUNNER_WAITING_KIND, RUNNER_EVENT_KIND, [...RUNNER_STATE_TYPES]],
+    [runIds, [...PROGRESS_EVENT_KINDS], ACTIVITY_LIMITS.maxEventsPerRun, RUNNER_WAITING_KIND, RUNNER_EVENT_KIND, [...RUNNER_STATE_TYPES], HANDOFF_KIND],
   );
   for (const e of ev.rows) {
     const list = eventsByRun.get(e.run_id) ?? [];
-    list.push({ seq: Number(e.seq), kind: e.kind, at: e.created_at, fields: { tool: e.tool, path: e.path, pattern: e.pattern, stage: e.stage, to: e.to, type: e.type, reason: e.reason, detail: e.detail, size_mb: e.size_mb, reset_at: e.reset_at } });
+    list.push({ seq: Number(e.seq), kind: e.kind, at: e.created_at, fields: { tool: e.tool, path: e.path, pattern: e.pattern, stage: e.stage, to: e.to, type: e.type, reason: e.reason, detail: e.detail, size_mb: e.size_mb, reset_at: e.reset_at, handoff_state: e.handoff_state, handoff_branch: e.handoff_branch } });
     if (e.kind === RUNNER_EVENT_KIND && e.type === 'run_ended' && e.reason !== null && CODE_RE.test(e.reason)) {
       const size = e.size_mb !== null && /^[0-9]{1,6}$/.test(e.size_mb) ? Number(e.size_mb) : null;
       endedBySeq.set(`${e.run_id}:${Number(e.seq)}`, { reason: e.reason, detail: e.detail !== null && CODE_RE.test(e.detail) ? e.detail : null, size_mb: size });

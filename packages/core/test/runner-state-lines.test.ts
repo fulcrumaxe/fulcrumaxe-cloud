@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RUNNER_EVENT_KIND, RUNNER_WAITING_KIND, lineFor } from '../src/onboarding/previewProgress.js';
+import { HANDOFF_KIND, RUNNER_EVENT_KIND, RUNNER_WAITING_KIND, lineFor } from '../src/onboarding/previewProgress.js';
 import { RUNNER_USAGE_NOTE, runnerUsageStateOf, type RunnerUsage } from '../src/runs/runnerUsage.js';
 import { runnerCheckedInAt, RUNNER_LEASE_SECONDS_READ } from '../src/work-items/activity.js';
 
@@ -26,6 +26,26 @@ describe('runner state lines', () => {
     expect(runnerEvent({ type: 'run_ended' })).toBe('The run ended');
     expect(runnerEvent({ type: 'run_ended', reason: 'Bearer abc.def' })).toBe('The run ended');
     expect(runnerEvent({ type: 'run_ended', reason: 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' })).toBe('The run ended');
+  });
+
+  it('words a handed-off run_ended as a move in progress, with or without a detail, and never as an ended run (R-599-HO1)', () => {
+    for (const detail of [null, 'pushed', 'push_failed', 'deadline', 'whatever']) {
+      expect(runnerEvent({ type: 'run_ended', reason: 'handed_off', detail }), String(detail)).toBe('Handing the work over to the other side');
+    }
+    expect(runnerEvent({ type: 'run_ended', reason: 'handed_off' })).not.toMatch(/ended/);
+  });
+
+  it('words how a handoff ended: handed over, forced from the last saved version, or failed with the work named on its run branch only (D#599 HO-2b)', () => {
+    const run = '11111111-1111-4111-8111-111111111111';
+    expect(lineFor(HANDOFF_KIND, { handoff_state: 'handed_off' })).toBe('The work was handed over to the other side');
+    expect(lineFor(HANDOFF_KIND, { handoff_state: 'forced' })).toBe('The deadline passed; continuing from the last saved version');
+    expect(lineFor(HANDOFF_KIND, { handoff_state: 'failed', handoff_branch: `fx/${run}-g2` })).toBe(`Your work is saved on fx/${run}-g2`);
+    // A branch that is not a run branch is never printed, and the line stays whole.
+    for (const branch of [null, undefined, '', 'main', `fx/${run}-g0`, `fx/${run}-g2\nBearer abc`, 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123', '../../escape']) {
+      expect(lineFor(HANDOFF_KIND, { handoff_state: 'failed', handoff_branch: branch }), String(branch)).toBe('Your work is saved on its branch');
+    }
+    expect(lineFor(HANDOFF_KIND, { handoff_state: 'nonsense' })).toBeNull();
+    expect(lineFor(HANDOFF_KIND, {})).toBeNull();
   });
 
   it('gives no line to a runner event of any other type, or to an unknown one', () => {

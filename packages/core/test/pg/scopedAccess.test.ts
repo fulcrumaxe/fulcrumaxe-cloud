@@ -77,7 +77,7 @@ describe('CWE-639: cross-account row access returns NotFoundError, never a permi
     ).rejects.toThrow(NotFoundError);
   });
 
-  it('the agent_runs row never carries the outside meter tag or key reference, and the column list is the table less those two', async () => {
+  it('the agent_runs row never carries the outside meter tag or key reference, and the column list is the table less those two and the claim column excluded_runner_id', async () => {
     await admin.query(`UPDATE agent_runs SET gateway_report_tag = $2, om_key_ref = $3 WHERE id = $1`, [refsA.runId, 'fxr_' + 'a'.repeat(26), 'b'.repeat(64)]);
     const row = await getTenantRowOrNotFound<Record<string, unknown>>(appUserPool, refsA.accountId, refsA.userId, 'agent_runs', refsA.runId);
     expect(row.id).toBe(refsA.runId);
@@ -86,7 +86,8 @@ describe('CWE-639: cross-account row access returns NotFoundError, never a permi
     expect(JSON.stringify(row)).not.toMatch(/fxr_a{26}|b{64}/);
     const cols = (await admin.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'agent_runs'`)).rows.map((r) => r.column_name);
     const listed = AGENT_RUN_COLUMNS.split(',').map((c) => c.trim());
-    expect([...listed].sort()).toEqual(cols.filter((c) => c !== 'gateway_report_tag' && c !== 'om_key_ref').sort());
+    // `excluded_runner_id` (0794) is the claim's own column: app_user holds no privilege on it, so it is not listed either.
+    expect([...listed].sort()).toEqual(cols.filter((c) => c !== 'gateway_report_tag' && c !== 'om_key_ref' && c !== 'excluded_runner_id').sort());
   });
 
   it('a genuinely nonexistent id also gets NotFoundError (same error as the cross-account case)', async () => {

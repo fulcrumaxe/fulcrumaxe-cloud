@@ -704,6 +704,20 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         const row = r.rows[0];
         if (!row) return { status: "missing", done: true, envelope: null };
         let reason: string | null = null;
+        // D#599 HO-2b: a run that was handed off ended `cancelled` with its work on a branch, and the run that continues it is the outcome.
+        if (row.status === "cancelled" && seen < FOLLOW_UP_CHAIN_MAX_RUNS) {
+          const e = await client.query<{ reason: string | null }>(
+            "SELECT payload->>'failureReason' AS reason FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.status_changed' AND payload->>'to' = 'cancelled' ORDER BY seq DESC LIMIT 1",
+            [accountId, currentId],
+          );
+          if (e.rows[0]?.reason === "handed_off") {
+            const next = await client.query<{ id: string }>("SELECT id FROM agent_runs WHERE account_id = $1 AND parent_run_id = $2 ORDER BY created_at DESC LIMIT 1", [accountId, currentId]);
+            if (next.rows[0]) {
+              currentId = next.rows[0].id;
+              continue;
+            }
+          }
+        }
         if (row.status === "failed" && row.runtime === "runner") {
           const e = await client.query<{ reason: string | null }>(
             "SELECT payload->>'failureReason' AS reason FROM run_events WHERE account_id = $1 AND run_id = $2 AND kind = 'run.status_changed' AND payload->>'to' = 'failed' ORDER BY seq DESC LIMIT 1",

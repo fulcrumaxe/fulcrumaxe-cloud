@@ -128,6 +128,21 @@ export const GIT_PATH_LINES = {
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
 } as const;
 
+/**
+ * D#599 HO-2b: what the dashboard shows for a `run_ended` `handed_off` event. The runner's closed `detail` (HO-1) says how the stop went; an event with no
+ * detail, or one this build does not know, still gets a line of its own, never the plain "The run ended" of a run that is not ending.
+ */
+export const HANDED_OFF_LINES = {
+  pushed: "Your work was saved and is being handed over to the other side",
+  push_failed: "Saving your work failed; the other side continues from the last version that reached the branch",
+  deadline: "The runner did not finish in time; the other side continues from the last version that reached the branch",
+} as const;
+export const HANDED_OFF_FALLBACK_LINE = "Your work is being handed over to the other side";
+export function handedOffText(detail: string | null | undefined): string {
+  // Own-property lookup: a detail such as "constructor" is not a key of the table.
+  return detail && Object.hasOwn(HANDED_OFF_LINES, detail) ? (HANDED_OFF_LINES as Readonly<Record<string, string>>)[detail]! : HANDED_OFF_FALLBACK_LINE;
+}
+
 /** D#6 R4d-4 (C33 section 3): the line for a review job the runner refused before starting it (`job_refused`). */
 export const REVIEW_REFUSED_LINE = "The runner refused a review job it could not check. Update fx-runner, then review again.";
 export const JOB_REFUSED_LINES = { review_sha_missing: REVIEW_REFUSED_LINE, review_wrong_role: REVIEW_REFUSED_LINE } as const;

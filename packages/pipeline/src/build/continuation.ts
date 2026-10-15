@@ -72,6 +72,8 @@ export function decideContinuation(f: ContinuationFacts): { continue: true } | {
 export const continuationKey = (previousRunId: string): string => `${previousRunId}:continue`;
 export const AUTO_CONTINUE_HASH = createHash("sha256").update("continue:auto").digest("hex");
 export const MANUAL_CONTINUE_HASH = createHash("sha256").update("continue:manual").digest("hex");
+/** D#599 HO-2b: a move of a running run to the other side is a continuation too. It counts toward the item's ceiling (`totalContinuations`) and not toward `max_resumes` (it is not automatic). The database definer holds the same literal. */
+export const HANDOFF_CONTINUE_HASH = createHash("sha256").update("continue:handoff").digest("hex");
 /**
  * C8 (TL ruling): the customer's continue never shares the automatic key. A refused_spend automatic attempt
  * keeps `continuationKey` taken for good, and the customer's first reason to click is a budget they just raised.
@@ -141,8 +143,8 @@ export async function readEnded(client: PoolClient, accountId: string, runId: st
     `SELECT count(*) FILTER (WHERE r.role = $3 AND k.request_hash = $4)::int AS auto, count(*)::int AS total
        FROM agent_runs r JOIN agent_run_idempotency_keys k ON k.account_id = r.account_id AND k.run_id = r.id
       WHERE r.account_id = $1 AND r.work_item_id = $2 AND r.parent_run_id IS NOT NULL AND r.status <> 'refused_spend'
-        AND r.parent_run_id <> $5 AND k.request_hash IN ($4, $6)`,
-    [accountId, r.work_item_id, r.role, AUTO_CONTINUE_HASH, runId, MANUAL_CONTINUE_HASH],
+        AND r.parent_run_id <> $5 AND k.request_hash IN ($4, $6, $7)`,
+    [accountId, r.work_item_id, r.role, AUTO_CONTINUE_HASH, runId, MANUAL_CONTINUE_HASH, HANDOFF_CONTINUE_HASH],
   );
   const silence = await client.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id

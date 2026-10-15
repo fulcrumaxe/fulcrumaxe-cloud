@@ -1,4 +1,4 @@
-import { COPY, jobRefusedText, runnerSetupText } from "@fulcrumaxe/runner-protocol";
+import { COPY, handedOffText, jobRefusedText, runnerSetupText } from "@fulcrumaxe/runner-protocol";
 import type { ActivityLine } from "@fx/core/src/work-items/activity.js";
 
 /**
@@ -15,6 +15,8 @@ export function runEndedSentence(why: { reason: string; detail: string | null; s
       return COPY.agentFailed;
     case "push_rejected":
       return COPY.pushRejected;
+    case "handed_off":
+      return handedOffText(why.detail);
     case "runner_setup":
       return runnerSetupText(why.detail ?? "other", why.size_mb ?? undefined);
     default:

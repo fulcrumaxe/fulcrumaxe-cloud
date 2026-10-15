@@ -10,6 +10,7 @@ export * from "./githubMergePort.js";
 // The two `...Locked` entry points are test-only and live behind `@fx/pipeline/testing/continuation`.
 export {
   AUTO_CONTINUE_HASH,
+  HANDOFF_CONTINUE_HASH,
   MANUAL_CONTINUE_HASH,
   continuationKey,
   manualContinuationKey,

@@ -24,6 +24,10 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/runner-sweeper")).toEqual([{ path: "/api/cron/runner-sweeper", schedule: "*/5 * * * *" }]);
   });
 
+  it("the run handoff sweep (D#599 HO-2b) fires every minute and makes two passes 30 s apart, behind its own pending-work marker, so its deadline is kept to the Spec's 30 s while an idle platform opens no connection", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/handoff-sweep")).toEqual([{ path: "/api/cron/handoff-sweep", schedule: "* * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);

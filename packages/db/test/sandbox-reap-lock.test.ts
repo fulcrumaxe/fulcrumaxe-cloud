@@ -174,7 +174,7 @@ describe('sandbox reaper lock, idle rule and cap (0761)', () => {
       await expect(opsPool.query('SELECT * FROM sandbox_reaps')).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
     });
 
-    it('agent_run_create keeps its owner and its ACL (platform_ops; EXECUTE for agent_run_writer and runner_lease_definer only), and there is one of it', async () => {
+    it('agent_run_create keeps its owner and its ACL (platform_ops; EXECUTE for agent_run_writer, run_handoff_complete_definer and runner_lease_definer only), and there is one of it', async () => {
       const { rows } = await admin.query(
         `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef, p.proconfig,
                 (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text ORDER BY pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner) AS grantees,
@@ -182,7 +182,7 @@ describe('sandbox reaper lock, idle rule and cap (0761)', () => {
            FROM pg_proc p WHERE p.proname = 'agent_run_create'`,
       );
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ owner: 'platform_ops', prosecdef: true, grantees: ['agent_run_writer', 'runner_lease_definer'], loose: false });
+      expect(rows[0]).toMatchObject({ owner: 'platform_ops', prosecdef: true, grantees: ['agent_run_writer', 'run_handoff_complete_definer', 'runner_lease_definer'], loose: false });
       expect(rows[0].proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
     });
 

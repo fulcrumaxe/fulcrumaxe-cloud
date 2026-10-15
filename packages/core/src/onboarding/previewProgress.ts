@@ -53,7 +53,11 @@ export const PROGRESS_EVENT_FIELDS = ['tool', 'path', 'pattern', 'stage', 'to', 
 export const RUNNER_WAITING_KIND = 'runner.waiting';
 export const RUNNER_EVENT_KIND = 'runner.event';
 export const RUNNER_STATE_TYPES = ['run_ended', 'taken_over', 'usage_limit_reached'] as const;
-export const RUNNER_STATE_FIELDS = ['type', 'reason', 'detail', 'size_mb', 'reset_at'] as const;
+export const RUNNER_STATE_FIELDS = ['type', 'reason', 'detail', 'size_mb', 'reset_at', 'handoff_state', 'handoff_branch'] as const;
+/** D#599 HO-2b: how a move of a running run to the other side ended (packages/runner `RUN_HANDOFF_KIND`; a test pins that the two match). Its payload is a fixed word and a run branch. */
+export const HANDOFF_KIND = 'run.handoff';
+/** The branch a handoff line may name: a run branch, `fx/<run id>-g<generation>`, and nothing else. */
+const HANDOFF_BRANCH_RE = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
 
 export type EventFields = Partial<Record<(typeof PROGRESS_EVENT_FIELDS)[number] | (typeof RUNNER_STATE_FIELDS)[number], string | null>>;
 export interface ProgressEvent {
@@ -137,6 +141,12 @@ export function lineFor(kind: string, f: EventFields): string | null {
   }
   if (kind === STATUS_KIND) return f.to === 'running' ? 'The run started' : null;
   if (kind === RUNNER_WAITING_KIND) return 'Waiting for your runner to come online';
+  if (kind === HANDOFF_KIND) {
+    if (f.handoff_state === 'handed_off') return 'The work was handed over to the other side';
+    if (f.handoff_state === 'forced') return 'The deadline passed; continuing from the last saved version';
+    if (f.handoff_state === 'failed') return typeof f.handoff_branch === 'string' && HANDOFF_BRANCH_RE.test(f.handoff_branch) ? `Your work is saved on ${f.handoff_branch}` : 'Your work is saved on its branch';
+    return null;
+  }
   if (kind === RUNNER_EVENT_KIND) {
     if (f.type === 'taken_over') return 'Taken over on the runner machine';
     if (f.type === 'usage_limit_reached') {
@@ -144,6 +154,8 @@ export function lineFor(kind: string, f: EventFields): string | null {
       return at ? `Plan usage limit reached; resumes at ${at} UTC` : 'Plan usage limit reached';
     }
     // The words of a run's end come from the runner protocol's COPY (the API route puts them in); this is the plain form for a reason that has none.
+    // A handed-off run is not ending: its work moves on. The words by detail come from the runner protocol's COPY, as for the other reasons.
+    if (f.type === 'run_ended' && f.reason === 'handed_off') return 'Handing the work over to the other side';
     if (f.type === 'run_ended') return f.reason && REASON_RE.test(f.reason) ? `The run ended (${f.reason.replace(/_/g, ' ')})` : 'The run ended';
   }
   return null;
