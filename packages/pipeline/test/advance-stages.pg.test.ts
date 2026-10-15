@@ -374,6 +374,43 @@ describe("the build", () => {
     expect(row.rows.at(-1)).toMatchObject({ to_stage: "in_progress", source_ref: `build:${(out as { runId: string }).runId}`, run_id: (out as { runId: string }).runId });
   });
 
+  it("D#600 CX-2: the start request carries the assembler's section list, which matches the prompt it was built with", async () => {
+    const t = await atSpecReady();
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+    const req = t.world.requests[0]!;
+    expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
+    const spec = req.contextSections!.find((s) => s.code === "spec")!;
+    expect(spec.bytes).toBeGreaterThan(0);
+    expect(spec.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(req.contextSections!.reduce((n, s) => n + s.bytes, 0)).toBeLessThanOrEqual(Buffer.byteLength(req.prompt, "utf8"));
+  });
+
+  it("D#600 CX-2: recalled memory is cut to the repository's slot (4096 by default, its own setting when set) and the cut is recorded", async () => {
+    const big = { recall: async () => [{ id: "mem-1", version: 2, name: "House style", origin: "person" as const, text: "word ".repeat(2400) }] };
+    const slotBytes = (r: AdvanceRunRequest): number => r.contextSections!.find((s) => s.code === "memory_stable")!.bytes;
+    const t = await atSpecReady();
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { memory: big });
+    const first = t.world.requests[0]!;
+    expect(slotBytes(first)).toBeLessThanOrEqual(4096);
+    expect(first.contextSections!.find((s) => s.code === "memory_stable")!.trimmed_bytes).toBeGreaterThan(0);
+    expect(first.contextSections!.map((s) => s.code)).toEqual(["boundary", "memory_stable", "spec", "output"]);
+
+    const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
+    const owner = (await h.admin.query<{ user_id: string }>("SELECT user_id FROM account_members WHERE account_id = $1 LIMIT 1", [t.accountId])).rows[0]?.user_id ?? randomUUID();
+    await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING", [owner, `${owner}@example.test`]);
+    await h.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, updated_by) VALUES ($1, $2, 8192, $3)", [t.accountId, repo, owner]);
+    t.world.requests.length = 0;
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { memory: big });
+    const second = t.world.requests[0]!;
+    expect(slotBytes(second)).toBeGreaterThan(4096);
+    expect(slotBytes(second)).toBeLessThanOrEqual(8192);
+    // Removing the setting returns the default (derived, nothing stamped).
+    await h.admin.query("DELETE FROM repo_context_settings WHERE repo_id = $1", [repo]);
+    t.world.requests.length = 0;
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { memory: big });
+    expect(slotBytes(t.world.requests[0]!)).toBeLessThanOrEqual(4096);
+  });
+
   it("the build is pinned to the Spec version the person approved: the same version builds, a newer one refuses spec_changed and starts nothing", async () => {
     const t = await atSpecReady();
     expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { expectedVersion: 2 })).toEqual({ status: "refused", reason: "spec_changed" });

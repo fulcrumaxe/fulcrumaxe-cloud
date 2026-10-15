@@ -21,3 +21,5 @@ export * from "./review/roundDecision.js";
 export * from "./advance/lightSpec.js";
 export * from "./advance/respec.js";
 export * from "./advance/amend.js";
+export * from "./prompt/assemblePrompt.js";
+export * from "./prompt/memorySlotSetting.js";

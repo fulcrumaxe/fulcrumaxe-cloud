@@ -40,3 +40,4 @@ export * from "./lostRunSweep.js";
 export * from "@fx/runtime/src/operatorSubscription.js";
 export * from "./repoClone.js";
 export * from "./sandboxReap.js";
+export type { ContextSection, ContextSectionCode } from "@fulcrumaxe/runner-protocol";

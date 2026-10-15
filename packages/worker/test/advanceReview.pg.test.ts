@@ -398,6 +398,17 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(t.inputs[0]).toMatchObject({ headSha: HEAD, role: "code-reviewer", cloneRepo: { owner: "acme", name: "widgets" }, idempotency: { key: `advance:${w}:review:${HEAD}:code-reviewer` } });
     });
 
+    it("D#600 CX-2: the assembler's section list reaches the run's input; a list too long to store is dropped, not truncated", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const t = build();
+      const section = { code: "spec" as const, bytes: 10, sha256: "a".repeat(64), trimmed_bytes: 0 };
+      await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, haltEpoch: 0, step: `review:${HEAD}:code-reviewer`, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD, contextSections: [section] });
+      expect(t.inputs[0]).toMatchObject({ contextSections: [section] });
+      await t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, haltEpoch: 0, step: `review:${HEAD}:acceptance-tester`, role: "acceptance-tester", prompt: "p", clone: true, headSha: HEAD, contextSections: Array.from({ length: 65 }, () => section) });
+      expect(t.inputs[1]).not.toHaveProperty("contextSections");
+    });
+
     it("two starts racing for one executor lose to the database's one-live-executor index: the loser is told already_running, nothing is left behind", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "spec_ready" });
@@ -497,6 +508,48 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const tr = await admin.query("SELECT to_stage, reviewer, source_ref FROM work_item_transitions WHERE work_item_id = $1 AND to_stage = 'changes_requested'", [w]);
       expect(tr.rows).toEqual([{ to_stage: "changes_requested", reviewer: "acceptance", source_ref: `fix-round:${failing}` }]);
       expect(await events(w)).toEqual([expect.objectContaining({ kind: "fix_round_started", round: 1, head_sha: HEAD, run_id: (out as { runId: string }).runId })]);
+    });
+
+    describe("D#600 CX-2: the unchanged-Spec line is checked against the Spec the continued run is pinned to", () => {
+      const sha = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
+      const addV2 = (a: SeedRefs, w: string) => admin.query("INSERT INTO spec_versions (account_id, work_item_id, version, body, body_sha256, created_by_kind) VALUES ($1, $2, 2, 'v2', encode(sha256(convert_to('v2', 'UTF8')), 'hex'), 'system')", [a.accountId, w]);
+
+      it("the held version is the parent run's pinned one: the short prompt goes, and the body prompt rides along for a lost snapshot", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a);
+        await buildRun(a, w);
+        const resume = realResume();
+        const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
+        expect(out.ok).toBe(true);
+        expect(resume.inputs[0]).toMatchObject({ prompt: "Spec v1 unchanged", fallbackPrompt: "SPEC v1: spec" });
+        expect(resume.inputs[0]!.fallbackContextSections).toHaveLength(1);
+      });
+
+      it("a newer Spec than the one the parent run is pinned to: the caller's held line (the latest version) is not sent, the body is", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a);
+        await buildRun(a, w);
+        await addV2(a, w);
+        const resume = realResume();
+        const out = await build({}, review({ resume: resume.fn })).module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v2 unchanged", held: { version: 2, sha256: sha("v2") }, fallbackPrompt: "SPEC v2: v2", fallbackContextSections: [{ code: "spec", bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }] }));
+        expect(out.ok).toBe(true);
+        expect(resume.inputs[0]!.prompt).toBe("SPEC v2: v2");
+        expect(resume.inputs[0]!.prompt).not.toContain("unchanged");
+        expect(resume.inputs[0]!.fallbackPrompt).toBeUndefined();
+        expect(resume.inputs[0]!.contextSections).toHaveLength(1);
+      });
+
+      it("a held line whose hash is not the pinned Spec's, or a held line with no body prompt, is refused or answered with the body", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a);
+        await buildRun(a, w);
+        const resume = realResume();
+        const t = build({}, review({ resume: resume.fn }));
+        expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("spec") } }))).toEqual({ ok: false, reason: "invalid_input" });
+        const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "unchanged", held: { version: 1, sha256: sha("other") }, fallbackPrompt: "SPEC v1: spec" }));
+        expect(out.ok).toBe(true);
+        expect(resume.inputs[0]!.prompt).toBe("SPEC v1: spec");
+      });
     });
 
     it("an item already at changes_requested is not moved again", async () => {
@@ -853,7 +906,7 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const t = build();
-      expect(await t.module.advanceLoadSpecText(who(a, w), 1)).toEqual({ version: 1, body: "spec" });
+      expect(await t.module.advanceLoadSpecText(who(a, w), 1)).toEqual({ version: 1, body: "spec", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
       expect(await t.module.advanceLoadSpecText(who(a, w), 2)).toBeNull();
       expect(await t.module.advanceLoadSpecText(who(a, w), 0)).toBeNull();
       expect(await t.module.advanceLoadSpecText({ ...who(a, w), workItemId: "nope" }, 1)).toBeNull();

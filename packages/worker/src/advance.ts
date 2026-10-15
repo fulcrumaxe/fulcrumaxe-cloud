@@ -9,6 +9,7 @@ import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import type { ContextSection } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -256,6 +257,17 @@ export interface AdvanceFixRequest {
   failingRunId: string;
   /** D#6 R4d-1 (C32): the repository's execution mode the fix prompt was built for. Another mode at start refuses `execution_mode_changed`. */
   expectedExecutionMode?: string;
+  /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
+  contextSections?: readonly ContextSection[];
+  /**
+   * D#600 CX-2: set when `prompt` says the Spec is unchanged instead of carrying it. It names the Spec version and hash the caller believes the executor's session holds.
+   * The worker checks that against the Spec version pinned on the run whose session this round continues (never against the latest Spec) and sends `fallbackPrompt`
+   * when it does not match. `fallbackPrompt` (with `fallbackContextSections`) is the same round with the Spec body: it is also what a fresh session gets when the
+   * session's snapshot has expired. Required when `held` is set.
+   */
+  held?: { version: number; sha256: string };
+  fallbackPrompt?: string;
+  fallbackContextSections?: readonly ContextSection[];
 }
 
 export interface AdvanceRunRequest {
@@ -279,6 +291,13 @@ export interface AdvanceRunRequest {
   expectedExecutionMode?: string;
   /** D#6 R4d-5a (C34): the `spec_versions.id` the run is built from, pinned on the run at insert (the database's foreign key refuses another account's). */
   specVersionId?: string;
+  /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
+  contextSections?: readonly ContextSection[];
+}
+
+/** The assembler's section list when it is an array the ledger can hold (at most 64 entries); anything else is dropped, and the run is simply not given sections. The definer checks every entry. */
+function sectionsOf(value: unknown): readonly ContextSection[] | undefined {
+  return Array.isArray(value) && value.length <= 64 ? (value as readonly ContextSection[]) : undefined;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };
@@ -411,7 +430,7 @@ export interface AdvanceFacade {
   /** D#483 P3: the item's review context, or a fixed refusal. Plain data; the Spec text is not in it. */
   advanceLoadReview(who: AdvanceStepWho): Promise<AdvanceReviewLoad>;
   /** D#483 P3: the Spec's text for the version the person approved, or null (erased, or a newer version exists). Read inside the step that builds a prompt, never kept in the workflow. */
-  advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string } | null>;
+  advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string; sha256?: string } | null>;
   /** D#483 P3: every verdict of one head recorded (passes first, non-passes last) and the decision that follows. */
   advanceRecordRound(who: AdvanceStepWho, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">): Promise<AdvanceRoundResult | { decision: "refused"; reason: string }>;
   /**
@@ -694,6 +713,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       prompt: req.prompt,
       ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
       ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
+      ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.
@@ -980,16 +1000,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return { ok: true, ctx: { ...loaded.ctx, ...(await pullRequestSource(who.accountId, who.workItemId)) } };
   }
 
-  async function advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string } | null> {
+  async function advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string; sha256?: string } | null> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) return null;
     return withTenant(runnerPool, who.accountId, async (client) => {
-      const r = await client.query<{ version: number; body: string }>(
-        "SELECT version, body FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND erased_at IS NULL ORDER BY version DESC LIMIT 1",
+      const r = await client.query<{ version: number; body: string; body_sha256: string }>(
+        "SELECT version, body, body_sha256 FROM spec_versions WHERE account_id = $1 AND work_item_id = $2 AND erased_at IS NULL ORDER BY version DESC LIMIT 1",
         [who.accountId, who.workItemId],
       );
       const row = r.rows[0];
       // The Spec the person approved is the one used: a newer version appearing in between stops the driver.
-      return row && Number(row.version) === expectedVersion ? { version: Number(row.version), body: row.body } : null;
+      return row && Number(row.version) === expectedVersion ? { version: Number(row.version), body: row.body, sha256: row.body_sha256 } : null;
     });
   }
 
@@ -1035,6 +1055,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       SHA_RE.test(req.headSha) &&
       typeof req.prompt === "string" && req.prompt !== "" && req.prompt.length <= MAX_FIX_PROMPT_CHARS &&
       Number.isInteger(req.round) && req.round >= 1 && req.round <= 20 &&
+      (req.held === undefined || (typeof req.held.sha256 === "string" && /^[0-9a-f]{64}$/.test(req.held.sha256) && Number.isInteger(req.held.version) && req.held.version > 0 &&
+        typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
+      (req.fallbackPrompt === undefined || (typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
       (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
       (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
       (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode));
@@ -1107,7 +1130,25 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const notes = await withTenant(runnerPool, who.accountId, (client) => readPendingRunNotes(client, who.workItemId));
     const key = `advance:${who.workItemId}:${keyBase}${runNotesStepSuffix(notes.map((n) => n.id))}`;
     const noteText = renderRunNotes(notes);
-    const prompt = noteText ? `${req.prompt}\n\n${noteText}` : req.prompt;
+    const withNotes = (text: string): string => (noteText ? `${text}\n\n${noteText}` : text);
+    // A prompt that says "Spec unchanged" is sent only when the run this round continues is pinned to exactly that version and hash. The pin is the one the
+    // session was built from, not the latest Spec: a mismatch (or no pin) sends the body.
+    let useFallback = false;
+    if (req.held !== undefined) {
+      const pinned = await withTenant(runnerPool, who.accountId, async (client) => {
+        const r = await client.query<{ version: number; body_sha256: string }>(
+          "SELECT sv.version, sv.body_sha256 FROM agent_runs r JOIN spec_versions sv ON sv.id = r.spec_version_id AND sv.account_id = r.account_id WHERE r.id = $1 AND r.account_id = $2 AND sv.erased_at IS NULL",
+          [parent, who.accountId],
+        );
+        return r.rows[0] ?? null;
+      });
+      useFallback = !(pinned !== null && Number(pinned.version) === req.held.version && pinned.body_sha256 === req.held.sha256);
+    }
+    const prompt = withNotes(useFallback ? req.fallbackPrompt! : req.prompt);
+    const sections = sectionsOf(useFallback ? req.fallbackContextSections : req.contextSections);
+    // The fresh session a lost snapshot falls back to has no Spec: it gets the body-carrying prompt whatever the check said.
+    const fallbackPrompt = req.fallbackPrompt === undefined || useFallback ? undefined : withNotes(req.fallbackPrompt);
+    const fallbackSections = fallbackPrompt === undefined ? undefined : sectionsOf(req.fallbackContextSections);
 
     // D#599 PL-2: a round whose effective side is not the side the build's session ran on cannot continue that session: a session belongs to the
     // side that made it. It starts a fresh executor session instead, carrying the fix prompt, the pinned Spec version and the fenced notes above.
@@ -1117,6 +1158,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       const r = await client.query<{ execution_mode: string | null; spec_version_id: string | null }>("SELECT execution_mode, spec_version_id FROM agent_runs WHERE id = $1 AND account_id = $2 AND work_item_id = $3", [parent, who.accountId, who.workItemId]);
       return r.rows[0];
     });
+    const freshPrompt = req.fallbackPrompt === undefined ? prompt : withNotes(req.fallbackPrompt);
+    const freshSections = req.fallbackPrompt === undefined ? sections : sectionsOf(req.fallbackContextSections);
     const crossSide = parentRun !== undefined && sideOfMode(parentRun.execution_mode) !== sideOfMode(effective);
 
     let out: { id: string; status: string };
@@ -1136,9 +1179,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           role: "executor",
           product: "team",
           pr: req.issue,
-          prompt,
+          // A fresh session holds nothing a continued one did: it gets the prompt that carries the Spec body when the caller sent one.
+          prompt: freshPrompt,
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
+          ...(freshSections ? { contextSections: freshSections } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
           cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },
@@ -1166,6 +1211,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             parentRunId: parent,
             prompt,
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
+            ...(sections ? { contextSections: sections } : {}),
+            ...(fallbackPrompt !== undefined ? { fallbackPrompt, ...(fallbackSections ? { fallbackContextSections: fallbackSections } : {}) } : {}),
             workdir: PREVIEW_WORKDIR,
             idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
           }),
