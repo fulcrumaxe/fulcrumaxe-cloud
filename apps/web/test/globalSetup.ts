@@ -3,7 +3,7 @@
 // D#37 WS-C2 criterion 1: apps/web/app/route.ts imports a generated
 // module (app/_generated/workspace-index.ts) built by
 // apps/web/scripts/copy-workspace.mjs from apps/workspace's own build.
-// `pnpm --filter web build`'s "prebuild" script regenerates it before
+// `pnpm --filter web build`'s "build:prepare" script regenerates it before
 // `next build`, but the root `pnpm test` (`vitest run`) step runs
 // BEFORE that build step in scripts/check.sh — without this,
 // apps/web/test/route.test.ts (and anything else importing that

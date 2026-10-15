@@ -104,7 +104,7 @@ export default defineWorkspace([
       // D#37 WS-C2 criterion 1: regenerates apps/web/app/_generated/
       // workspace-index.ts from the current apps/workspace tree before
       // any "web" project test runs -- see that file's own header for
-      // why this can't just be the "prebuild" package.json script.
+      // why this can't just be the "build:prepare" package.json script.
       globalSetup: ["./test/globalSetup.ts"],
     },
   },

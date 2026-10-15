@@ -16,7 +16,7 @@
 // - Nothing printed here ever contains the URL or any part of its password:
 //   messages are fixed text, and a caught error's text is scrubbed first.
 //
-// Run by apps/web's "prebuild" script with `node --experimental-strip-types`
+// Run by apps/web's "build:prepare" script with `node --experimental-strip-types`
 // (the migration code is TypeScript); this file itself is plain JS.
 
 import { pathToFileURL } from "node:url";
