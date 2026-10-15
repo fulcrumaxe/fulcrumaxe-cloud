@@ -417,7 +417,7 @@ test("e2e job: the skip is not a job-level if", () => {
 });
 
 test("e2e job: the first step after checkout (and the hosted-only Nix install) runs the classifier and prints the skip line", () => {
-  assert.match(e2eSteps[0].text, /actions\/checkout@v4/);
+  assert.match(e2eSteps[0].text, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/);
   assert.match(e2eSteps[0].text, /fetch-depth: 2/);
   const rest = e2eSteps.slice(1);
   const first = rest.find((s) => !/\(hosted\)$/.test(s.name));
@@ -465,7 +465,7 @@ test("e2e-runner job: runs on every pull request and push (only CI_DISABLED stan
 test("e2e-runner job: no model call and no secret: the workflow forbids model calls, and the one run step is the package script under the ci shell", () => {
   assert.equal(ciDoc.env.FX_FORBID_MODEL_CALLS, "1");
   const steps = runnerE2eSteps;
-  assert.equal(steps[0].text.includes("actions/checkout@v4"), true);
+  assert.equal(steps[0].text.includes("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"), true);
   assert.match(steps[0].text, /persist-credentials: false/);
   const run = stepNamed(steps, "Run the end-to-end runner test");
   assert.equal(ifOf(run), OVERLAY_OFF, "the test step runs unless the classifier answered overlay");
