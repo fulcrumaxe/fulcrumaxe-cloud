@@ -48,6 +48,7 @@ and `packages/runner/src/runStatusWriter.ts` both do.
 - `pool.ts`: `createPool(connectionString, overrides?)`
 - `rlsInventory.ts`: `findRlsViolations(client, exemptions?)`
 - `platformWideTables.ts`: `PLATFORM_WIDE_TABLES`
+- `opsInventory.ts`: `OPS_VIEW_ALLOWLIST`, `findOpsInventoryViolations(client, allowlist?)` (the operator console's views and functions, owned by `ops_owner`)
 - `decisions.ts`: `DecisionSetting`, `DecisionClass`, `DecisionReceipt`, `getCurrentDialSetting(client, repoId, decisionType)`, `listDialHistory(client, repoId, decisionType)`, `WriteDialSettingContext`, `WriteDialSettingInput`, `writeDialSetting(ctx, input)`, `listReceiptsForWorkItem(client, workItemId)`, `RECEIPT_RETENTION_MONTHS`, `PruneResult`, `pruneDecisionReceipts(client, retentionMonths?)`
 - `dialInventory.ts`: `FixedInvariant`, `FIXED_INVARIANTS`, `FIXED_INVARIANT_KEYS`, `findDialInvariantCollisions(catalogueIds?, invariantKeys?)`
 
@@ -165,6 +166,14 @@ table for a public API's idempotency protocol; `packages/api/src/idempotency.ts`
 (`#130`) implements that protocol.
 
 ## Security notes
+
+**Operator console roles (migration 0801).** `ops_console` is the only login `apps/ops` will use
+(`DATABASE_URL_OPS_CONSOLE`, wired in a later change; an owner sets its password at deploy time). It is not a member of
+`platform_ops` or `app_user` and holds no table, column or sequence privilege. `ops_owner` (NOLOGIN) owns the ops views and
+functions. Staff identity lives in `platform_staff`, `staff_webauthn_credentials`, `staff_enrollment_tokens` and the append-only
+`staff_audit_log`, all with row security forced. `findOpsInventoryViolations` fails on an unlisted ops view, an ops view readable by
+anyone but `ops_console`, and an ops function that is not SECURITY DEFINER with a pinned `search_path` or is executable by `PUBLIC` or
+`app_user`.
 
 See [`../security.md`](../security.md) for the tenant-isolation model this
 package implements. `withTenant`'s own comment flags one specific
