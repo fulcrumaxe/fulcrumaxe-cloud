@@ -56,6 +56,7 @@ export default defineWorkspace([
   // the Playwright *.spec.ts files under packs/ are never collected.
   "apps/live-e2e",
   "packages/api",
+  "packages/api-client",
   "packages/billing",
   "packages/core",
   "packages/db",
