@@ -7,6 +7,7 @@ import {
   MINT_PURPOSES,
   type MintPurpose,
   InstallationTokenCache,
+  liveInstallationTokens,
   InstallationTokenError,
   MintTimeoutError,
   getInstallationToken,
@@ -448,5 +449,37 @@ describe("merge_gate purpose (D#483 P3)", () => {
     await getInstallationToken({ ...base, purpose: "merge_gate" });
     await getInstallationToken({ ...base, scope: { repositories: ["r"], permissions: { metadata: "read" } }, purpose: "run" });
     expect(requester).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("liveInstallationTokens (the memory intake's scan list)", () => {
+  const mint = (token: string, expiresInMs: number, cache = new InstallationTokenCache()) =>
+    getInstallationToken({
+      installationId: 42, appKind: "team", purpose: "run" as const, role: `live-${token}`, scope: scope(), appCredentials: creds(privateKeyPem),
+      requester: vi.fn(async () => ({ token, expiresAt: new Date(Date.now() + expiresInMs).toISOString() })), cache,
+    });
+
+  it("keeps a token for its real life: still listed 2 minutes before GitHub expires it, though the cache stopped serving it 3 minutes earlier", async () => {
+    await mint("live-token-two-minutes-left", 2 * 60_000);
+    expect(liveInstallationTokens()).toContain("live-token-two-minutes-left");
+    expect(liveInstallationTokens(Date.now() + 119_000)).toContain("live-token-two-minutes-left");
+    expect(liveInstallationTokens(Date.now() + 121_000)).not.toContain("live-token-two-minutes-left");
+  });
+
+  it("drops expired values when another token is cached, without anyone reading the list", () => {
+    vi.useFakeTimers();
+    try {
+      const cache = new InstallationTokenCache();
+      const sc = scope() as never;
+      cache.set(1, "team", "r1", sc, "stale-live-token-aaaa", Date.now() + 1000 - 5 * 60_000);
+      vi.advanceTimersByTime(10 * 60_000);
+      cache.set(1, "team", "r2", sc, "fresh-live-token-bbbb", Date.now() + 3600_000);
+      vi.useRealTimers();
+      const listed = liveInstallationTokens(0); // 0: purge nothing on read, so only set() can have removed it
+      expect(listed).toContain("fresh-live-token-bbbb");
+      expect(listed).not.toContain("stale-live-token-aaaa");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

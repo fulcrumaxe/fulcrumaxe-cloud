@@ -264,6 +264,14 @@ export async function recordLimitExtended(
   );
 }
 
+/**
+ * D#601 MEM-2: the one `memory.proposals` row a run's memory intake leaves, on the caller's client so it commits with the entries it lists.
+ * The payload is indexes, ids and fixed reason words (the intake builds it from nothing else), and goes through the same redaction chokepoint.
+ */
+export async function recordMemoryProposalsEvent(client: PoolClient, p: { accountId: string; runId: string; payload: Record<string, unknown> }): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, "memory.proposals", p.payload);
+}
+
 /** D#2 H14c-3-2c: one `agent.output` row. The payload is already bounded by `boundAgentOutput`. */
 export async function recordAgentOutput(pool: Pool, p: { accountId: string; runId: string; payload: Record<string, unknown> }): Promise<void> {
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "agent.output", p.payload));
