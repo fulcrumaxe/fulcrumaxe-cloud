@@ -27,11 +27,18 @@ const VALID_CLASSES: readonly DecisionClass[] = [
 const EXPECTED_V1_IDS = [
   "dependency_patch_bump",
   "external_paid_api_call",
+  "launch_sub_item",
   "nonbreaking_refactor_approach",
   "publish_deprecation_notice",
   "publish_release_artifact",
   "retry_transient_step_failure",
   "runner_run_on_member_plan",
+  "spend_past_envelope",
+  "start_after_reclassify",
+  "start_parent_item",
+  "start_work_bug",
+  "start_work_doc",
+  "start_work_small",
   "test_strategy_choice",
 ].sort();
 

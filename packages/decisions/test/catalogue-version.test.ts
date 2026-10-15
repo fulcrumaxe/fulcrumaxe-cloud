@@ -27,8 +27,8 @@ function fingerprint(catalogue: readonly CatalogueEntry[], presets: readonly Pre
  * "we shipped a new dial" is never indistinguishable from "nothing happened".
  */
 const PINNED = {
-  version: 2,
-  sha256: "35d35d3ffa7a3bd9ee6b441cf3d56596497221013ce6c9d725c08a6452f2c0d1",
+  version: 3,
+  sha256: "c62827daad8a47ec2984dbfd547454a2ab9a5899263f3082c66efc17735fe9c4",
 };
 
 describe("DP3b-7: CATALOGUE_VERSION is pinned to the catalogue and presets", () => {
@@ -46,6 +46,15 @@ describe("DP3b-7: CATALOGUE_VERSION is pinned to the catalogue and presets", () 
       i === 0 ? { ...e, allowedDispositions: [...e.allowedDispositions, "ask" as const] } : e,
     );
     expect(fingerprint(changed, PRESETS)).not.toBe(fingerprint(CATALOGUE, PRESETS));
+  });
+
+  it("non-vacuity: changing or dropping a starting-work entry changes the hash (S5a-5)", () => {
+    const base = fingerprint(CATALOGUE, PRESETS);
+    for (const id of ["start_work_small", "start_parent_item", "launch_sub_item", "spend_past_envelope", "start_after_reclassify"]) {
+      expect(CATALOGUE.some((e) => e.id === id), id).toBe(true);
+      expect(fingerprint(CATALOGUE.filter((e) => e.id !== id), PRESETS), id).not.toBe(base);
+      expect(fingerprint(CATALOGUE.map((e) => (e.id === id ? { ...e, defaultDisposition: "act" as const } : e)), PRESETS), id).not.toBe(base);
+    }
   });
 
   it("non-vacuity: a one-field preset change changes the hash", () => {
