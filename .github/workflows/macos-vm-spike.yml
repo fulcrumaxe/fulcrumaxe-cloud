@@ -20,10 +20,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.11.0
       - name: Enable pnpm (version from package.json)
@@ -35,7 +35,7 @@ jobs:
         run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-arm64" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw results and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-vm-spike-arm64
           path: ${{ runner.temp }}/macos-vm-spike-arm64
@@ -51,10 +51,10 @@ jobs:
     timeout-minutes: 45
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.11.0
       - name: Enable pnpm (version from package.json)
@@ -66,7 +66,7 @@ jobs:
         run: python3 scripts/spike/macos-spike-report.py "$RUNNER_TEMP/macos-vm-spike-intel" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload raw results and logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-vm-spike-intel
           path: ${{ runner.temp }}/macos-vm-spike-intel
