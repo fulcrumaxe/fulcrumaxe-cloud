@@ -260,6 +260,8 @@ export interface ExecutionRun {
   workdir?: string;
   /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#601 MEM-3: the token estimate of the memory the prompt carries, recorded on the run's context ledger. Absent: not recorded (a run that did not recall, such as a fix round). */
+  memoryTokens?: number;
   /**
    * D#600 CX-2: a fix round's resume may send a short prompt (the Spec "unchanged") because the session it continues holds the Spec. When that session's
    * snapshot has expired, `SandboxTarget.resume` starts a fresh session instead, which holds nothing: it is given this prompt (the same round with the

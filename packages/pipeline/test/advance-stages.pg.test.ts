@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { sanitize } from "@fx/trust";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -409,6 +409,44 @@ describe("the build", () => {
     t.world.requests.length = 0;
     await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { memory: big });
     expect(slotBytes(t.world.requests[0]!)).toBeLessThanOrEqual(4096);
+  });
+
+  it("D#601 MEM-3: with no port given, a build recalls the repository's approved entries and the item's, never a proposal, and records both parts in the section list", async () => {
+    const t = await atSpecReady();
+    const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
+    const install = randomUUID();
+    await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, 8800123, 'team')", [install, t.accountId]);
+    await h.admin.query("UPDATE repos SET installation_id = $2, gh_node_id = 'R_kgDOBuildMem' WHERE id = $1", [repo, install]);
+    const put = (scope: string, ref: string, body: string, status: string) =>
+      h.admin.query(
+        `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256) VALUES ($1, $2, $3, 'command', $4, 'person', $5, 1, $6)`,
+        [t.accountId, scope, ref, body, status, createHash("sha256").update(body).digest("hex")],
+      );
+    await put("repo", "R_kgDOBuildMem@8800123", "run pnpm test before you push", "approved");
+    await put("repo", "R_kgDOBuildMem@8800123", "a proposal nobody approved", "proposed");
+    await put("item", t.workItemId, "keep the public name of the loader", "approved");
+    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+    expect(out).toMatchObject({ status: "started" });
+    const req = t.world.requests[0]!;
+    expect(req.prompt).toContain("run pnpm test before you push");
+    expect(req.prompt).toContain("keep the public name of the loader");
+    expect(req.prompt).not.toContain("a proposal nobody approved");
+    expect(req.contextSections!.map((s) => s.code)).toEqual(["boundary", "memory_stable", "spec", "memory_item", "output"]);
+    // The stable part sits before the Spec and the item's part after it.
+    expect(req.prompt.indexOf("run pnpm test")).toBeLessThan(req.prompt.indexOf("SPEC (version"));
+    expect(req.prompt.indexOf("keep the public name")).toBeGreaterThan(req.prompt.indexOf("SPEC (version"));
+    // The start carries the token estimate of exactly the memory sections the prompt holds.
+    const memoryBytes = req.contextSections!.filter((s) => s.code === "memory_stable" || s.code === "memory_item").reduce((n, s) => n + s.bytes, 0);
+    expect(memoryBytes).toBeGreaterThan(0);
+    expect(req.memoryTokens).toBe(Math.ceil(memoryBytes / 4));
+    const stamped = await h.admin.query("SELECT body FROM memory_entries WHERE account_id = $1 AND last_recalled_at IS NOT NULL ORDER BY body", [t.accountId]);
+    expect(stamped.rows.map((r: { body: string }) => r.body)).toEqual(["keep the public name of the loader", "run pnpm test before you push"]);
+  });
+
+  it("D#601 MEM-3: a build that recalled nothing starts with a memory figure of 0, not an absent one", async () => {
+    const t = await atSpecReady();
+    expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
+    expect(t.world.requests[0]!.memoryTokens).toBe(0);
   });
 
   it("the build is pinned to the Spec version the person approved: the same version builds, a newer one refuses spec_changed and starts nothing", async () => {

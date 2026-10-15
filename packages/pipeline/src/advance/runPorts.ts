@@ -33,6 +33,8 @@ export interface AdvanceRunRequest {
   specVersionId?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#601 MEM-3: the token estimate of the memory in the prompt (0 when none was recalled), stored on the run's context ledger. Absent: not recorded. */
+  memoryTokens?: number;
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };

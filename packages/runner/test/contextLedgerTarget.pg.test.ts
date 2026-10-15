@@ -64,6 +64,20 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
     expect(rows[0]).toMatchObject({ basis: "measured", first_turn_input_tokens: "100", peak_context_tokens: "151", cache_read_tokens: "240", cache_write_tokens: "6", sections: [section("card"), section("spec")] });
   });
 
+  it("D#601 MEM-3: the memory token figure of the run lands on the ledger row: N when memory was recalled, 0 when none was, and null only when the run never recalled (not recorded)", async () => {
+    const recorded = async (memoryTokens: number | undefined) => {
+      const s = await started(measureOf());
+      await s.target.finalize({ ...s.run, contextSections: [section("card")], ...(memoryTokens === undefined ? {} : { memoryTokens }) }, { status: "succeeded", usd: 0.1 });
+      const { rows } = await rowsOf(s.accountId, s.id);
+      expect(rows).toHaveLength(1);
+      return rows[0].memory_tokens;
+    };
+    expect(await recorded(1234)).toBe("1234");
+    expect(await recorded(0)).toBe("0");
+    // The column is nullable by design: a fix round or a runner run never asked the store, so its figure is "not recorded", not a zero.
+    expect(await recorded(undefined)).toBeNull();
+  });
+
   it("a run whose stream gave no measure has no row (the screen says Not recorded), and the run still finalizes", async () => {
     const s = await started(undefined);
     await s.target.finalize(s.run, { status: "succeeded", usd: 0.1 });

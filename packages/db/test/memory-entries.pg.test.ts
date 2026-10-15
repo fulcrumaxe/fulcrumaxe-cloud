@@ -379,7 +379,7 @@ describe('memory_entries (D#601 MEM-1)', () => {
                 has_function_privilege('platform_ops', p.oid, 'EXECUTE') AS ops,
                 COALESCE((SELECT bool_or(x.grantee = 0) FROM aclexplode(p.proacl) x), false) AS pub,
                 COALESCE((SELECT bool_or(x.is_grantable) FROM aclexplode(p.proacl) x), false) AS grantable
-           FROM pg_proc p WHERE p.proname LIKE 'memory\\_%' ORDER BY 1`,
+           FROM pg_proc p WHERE p.proname LIKE 'memory\\_%' AND pg_get_userbyid(p.proowner) = 'memory_definer' ORDER BY 1`,
       );
       expect(rows.map((r) => r.proname)).toEqual([...ENTRY_POINTS, ...HELPERS].sort());
       for (const r of rows) {
@@ -394,7 +394,7 @@ describe('memory_entries (D#601 MEM-1)', () => {
     it('the table is row-secured and forced, with a tenant read for app_user and one policy per command for the definer', async () => {
       expect((await admin.query(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'public.memory_entries'::regclass`)).rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
       const { rows } = await admin.query<{ roles: string[]; cmd: string }>(`SELECT roles::text[] AS roles, cmd FROM pg_policies WHERE schemaname = 'public' AND tablename = 'memory_entries'`);
-      expect(rows.map((r) => `${r.cmd} ${r.roles.join(',')}`).sort()).toEqual([`INSERT ${ROLE}`, `SELECT ${ROLE}`, 'SELECT app_user', `UPDATE ${ROLE}`].sort());
+      expect(rows.map((r) => `${r.cmd} ${r.roles.join(',')}`).sort()).toEqual([`INSERT ${ROLE}`, `SELECT ${ROLE}`, 'SELECT app_user', `UPDATE ${ROLE}`, 'SELECT memory_recall_definer', 'UPDATE memory_recall_definer'].sort());
     });
     it('the role may write audit_log only for the nine memory actions', async () => {
       const { rows } = await admin.query<{ with_check: string }>(`SELECT with_check FROM pg_policies WHERE tablename = 'audit_log' AND roles = ARRAY[$1]::name[]`, [ROLE]);

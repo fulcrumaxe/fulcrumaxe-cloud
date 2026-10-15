@@ -41,11 +41,13 @@ export interface MemoryEntry {
   name: string;
   origin: "person" | "agent" | "import";
   text: string;
+  /** The bracketed head of the line (D#601 MEM-3: `[scope/kind id@vN]`). When present the line is `head text`; otherwise `name (id@vN): text`. It is sanitised with the rest of the line. */
+  head?: string;
 }
 
 /** What the assembler asks of the memory store. Until D#601 implements it, `emptyMemoryPort` answers. Returns best first. */
 export interface MemoryPort {
-  recall(request: { accountId: string; repoId: string; workItemId?: string; slot: "stable" | "item" }): Promise<readonly MemoryEntry[]>;
+  recall(request: { accountId: string; repoId: string; workItemId?: string; /** The run's role, for role-scope entries. Absent: none. */ role?: string; slot: "stable" | "item" }): Promise<readonly MemoryEntry[]>;
 }
 export const emptyMemoryPort: MemoryPort = { recall: async () => [] };
 
@@ -87,7 +89,7 @@ export function renderMemorySlot(entries: readonly MemoryEntry[], budgetBytes: n
   // The slot is at most the largest size a repository may choose; a remainder of zero or less holds nothing.
   const budget = Math.min(Math.max(0, Math.floor(budgetBytes)), MEMORY_SLOT_MAX_BYTES);
   type Kept = { e: MemoryEntry; text: string };
-  const line = (k: Kept): string => `${cleanName(k.e.name)} (${k.e.id}@v${k.e.version}): ${k.text}`;
+  const line = (k: Kept): string => (k.e.head === undefined ? `${cleanName(k.e.name)} (${k.e.id}@v${k.e.version}): ${k.text}` : `${k.e.head} ${k.text}`);
   const render = (kept: readonly Kept[]): string => {
     // One author per sanitize call: each entry is fenced on its own, so text that opens a comment and never closes it
     // removes that entry only and cannot reach the entries after it.
@@ -98,7 +100,7 @@ export function renderMemorySlot(entries: readonly MemoryEntry[], budgetBytes: n
     if (other.length > 0) parts.push(`${OTHER_LABEL}\n${other.join("\n")}`);
     return parts.join("\n");
   };
-  const valid = entries.filter((e) => ID_RE.test(e.id) && Number.isSafeInteger(e.version) && e.version > 0 && typeof e.name === "string" && typeof e.text === "string");
+  const valid = entries.filter((e) => ID_RE.test(e.id) && Number.isSafeInteger(e.version) && e.version > 0 && typeof e.name === "string" && typeof e.text === "string" && (e.head === undefined || typeof e.head === "string"));
   const full = render(valid.map((e) => ({ e, text: e.text })));
   const kept: Kept[] = [];
   for (const e of valid) {
