@@ -92,6 +92,8 @@
         uvicorn       # live ASGI server used by backend/tests/* (SSE/perf tests)
         pytest
         pytest-timeout
+        pytest-asyncio # runs the @pytest.mark.asyncio tests in backend/tests;
+                       # strict mode, no re-marking
       ]);
 
       # Everything the merge-gating CI path needs, shared by BOTH shells so
