@@ -19,6 +19,9 @@ import { captureReports } from './helpers/captureReports.js';
  * D#2 H17b-2 against real Postgres: the installation_repositories case, the
  * post-commit failure-tolerant sync wiring, and the suspended/deleted stop.
  */
+const MAP_SQL = `INSERT INTO repo_context_maps (account_id, repo_id, commit_sha, map_version, body, body_sha256)
+  SELECT account_id, id, repeat('a', 40), '1', 'commit: aaaaaaaaaaaa', repeat('b', 64) FROM repos WHERE account_id = $1 AND gh_repo_id = $2`;
+
 describe('repo sync wiring (D#2 H17b-2)', () => {
   let adminPool: Pool;
   let appUserPool: Pool;
@@ -71,6 +74,16 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
   }) as GithubWebhookPayload;
   const deliver = (d: GithubWebhookDbDeps, payload: GithubWebhookPayload, kind: 'team' | 'team_readonly' = 'team') =>
     handleGithubWebhookEventForApp(d, 'installation_repositories', payload, randomUUID(), kind);
+
+  it('D#600 CX-3a: a removed repository loses its cached map in the same step; an unrelated repository keeps its own', async () => {
+    const a = await account();
+    const one = await install(a);
+    await repo(a, one.id, 1);
+    await repo(a, one.id, 2);
+    for (const id of [1, 2]) await admin.query(MAP_SQL, [a, id]);
+    await deliver(deps(), event(one.gh, 'removed', [1]));
+    expect((await admin.query('SELECT gh_repo_id::int AS id FROM repo_context_maps m JOIN repos r ON r.id = m.repo_id WHERE m.account_id = $1', [a])).rows).toEqual([{ id: 2 }]);
+  });
 
   it('removed detaches only that installation\'s rows for the listed repos; never deletes, never touches another installation or account', async () => {
     const a = await account();
@@ -345,6 +358,17 @@ describe('repo sync wiring (D#2 H17b-2)', () => {
       (await admin.query(`SELECT type, subject_id, payload FROM domain_events WHERE account_id = $1 AND type IN ('installation.changed', 'repos.changed') ORDER BY seq`, [accountId])).rows;
     const rows = async (accountId: string) =>
       (await admin.query(`SELECT gh_repo_id::int AS id, installation_id, gh_owner, gh_name FROM repos WHERE account_id = $1 ORDER BY gh_repo_id`, [accountId])).rows;
+
+    it.each(['deleted', 'suspend'])('D#600 CX-3a: %s deletes the cached maps of the detached repositories and no other', async (action) => {
+      const a = await account();
+      const gone = await install(a, 'team_readonly');
+      const stays = await install(a, 'team');
+      await repo(a, gone.id, 1);
+      await repo(a, stays.id, 3);
+      for (const id of [1, 3]) await admin.query(MAP_SQL, [a, id]);
+      await life(gone.gh, 'team_readonly', action);
+      expect((await admin.query('SELECT gh_repo_id::int AS id FROM repo_context_maps m JOIN repos r ON r.id = m.repo_id WHERE m.account_id = $1', [a])).rows).toEqual([{ id: 3 }]);
+    });
 
     it.each([
       ['deleted', 'deleted'],

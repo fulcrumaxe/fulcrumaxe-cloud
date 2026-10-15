@@ -18,6 +18,10 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *                  method and path is `path_refused`. Which GraphQL documents and bodies are sent is `localOnlyGithub`'s job
  *                  (runner-cloud's `createRunPullRequestPort` applies it itself), since this package cannot see them.
  *
+ *   - `repo_map`   D#600 CX-3a: the repository's file tree at one commit, for the prompt's repository map. Token: metadata:read and
+ *                  contents:read, one repository. Because contents:read could otherwise reach file contents, this kind has its own
+ *                  exact list, GET only: the repository, one branch ref, one tree and one blob by id. Not commits, not `contents`.
+ *
  * What it keeps, so a bug in a caller cannot widen it:
  *   - the host is api.github.com and the path must start with `/repos/<owner>/<name>/` for the repository the client was
  *     opened for: any other path throws before a token is used;
@@ -27,7 +31,7 @@ import { getInstallationToken, type AccessTokenRequester, type InstallationToken
  *     GitHub's own `message` cut short. It never hears a token, a header or a request body.
  */
 
-export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr";
+export type InstallationHttpKind = "read" | "merge_gate" | "runner_pr" | "repo_map";
 
 export interface InstallationHttpRequest {
   method: "GET" | "POST" | "PUT" | "PATCH";
@@ -75,6 +79,7 @@ export interface InstallationHttpTarget {
 
 const CALL_TIMEOUT_MS = 15_000;
 const RUNNER_PR_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read", pull_requests: "write" } as const);
+const REPO_MAP_PERMISSIONS = Object.freeze({ metadata: "read", contents: "read" } as const);
 const GRAPHQL_PATH = "/graphql";
 const PATH_RE = /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.~%:/@+=-]*$/;
 const MESSAGE_RE = /[^\x20-\x7e]/g;
@@ -97,6 +102,14 @@ function runnerPrAllowed(method: string, path: string, prefix: string): boolean 
   return false;
 }
 
+/** The only REST calls a `repo_map` client may make: the repository, one branch ref, one tree and one blob (by 40-hex id). */
+function repoMapAllowed(method: string, path: string, prefix: string): boolean {
+  if (method !== "GET") return false;
+  if (path === prefix.slice(0, -1)) return true;
+  const rest = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+  return /^git\/(trees|blobs)\/[0-9a-f]{40}$/.test(rest) || /^git\/ref\/heads\/[A-Za-z0-9._/-]{1,200}$/.test(rest);
+}
+
 export function createInstallationHttp(deps: InstallationHttpDeps): (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp> {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
@@ -108,8 +121,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
       installationId: installation.installationId,
       appKind: installation.appKind,
       purpose: kind === "merge_gate" ? "merge_gate" : "run",
-      role: kind === "merge_gate" ? "merge_gate" : kind === "runner_pr" ? "runner_pr" : "pr_read",
-      scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
+      role: kind === "merge_gate" ? "merge_gate" : kind === "runner_pr" ? "runner_pr" : kind === "repo_map" ? "repo_map" : "pr_read",
+      scope: { repositories: [target.name], permissions: kind === "merge_gate" ? {} : kind === "runner_pr" ? RUNNER_PR_PERMISSIONS : kind === "repo_map" ? REPO_MAP_PERMISSIONS : { metadata: "read", pull_requests: "read" } },
       appCredentials: deps.appCredentials,
       requester: deps.requester,
       cache: deps.cache,
@@ -126,6 +139,8 @@ export function createInstallationHttp(deps: InstallationHttpDeps): (kind: Insta
         // `runner_pr` holds contents:read, so it gets its own EXACT list rather than the prefix rule above (CWE-284): a caller that
         // names this kind must not be able to read file contents, patches or commits. Everything else is refused here, PUT included.
         if (kind === "runner_pr" && !(graphql || runnerPrAllowed(req.method, req.path, prefix))) throw new InstallationHttpError("path_refused");
+        // `repo_map` holds contents:read, so it too gets an exact list (no `contents`, commits, archives or `..`).
+        if (kind === "repo_map" && !repoMapAllowed(req.method, req.path, prefix)) throw new InstallationHttpError("path_refused");
         if (kind === "read" && req.method !== "GET" && !graphql) throw new InstallationHttpError("method_refused");
         // PATCH is for `runner_pr` alone (closing a pull request); the other kinds never needed it and never get it.
         if (req.method === "PATCH" && kind !== "runner_pr") throw new InstallationHttpError("method_refused");

@@ -349,6 +349,19 @@ describe('syncInstallationRepos (D#2 H17b-1)', () => {
       expect(await attachedTo(acc)).toEqual([[1, inst.id], [2, inst.id], [3, null]]);
     });
 
+    it('D#600 CX-3a: a repository the listing drops loses its cached map; one still listed keeps its own', async () => {
+      const acc = await account();
+      const inst = await install(acc);
+      await syncInstallationRepos(harness([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]).deps, inst.id);
+      for (const id of [1, 2]) {
+        await admin.query(`INSERT INTO repo_context_maps (account_id, repo_id, commit_sha, map_version, body, body_sha256)
+          SELECT account_id, id, repeat('a', 40), '1', 'commit: aaaaaaaaaaaa', repeat('b', 64) FROM repos WHERE account_id = $1 AND gh_repo_id = $2`, [acc, id]);
+      }
+      await syncInstallationRepos(harness([{ id: 2, name: 'b' }]).deps, inst.id);
+      const left = await admin.query('SELECT r.gh_repo_id::int AS id FROM repo_context_maps m JOIN repos r ON r.id = m.repo_id WHERE m.account_id = $1', [acc]);
+      expect(left.rows).toEqual([{ id: 2 }]);
+    });
+
     it('an empty listing detaches every repo of the installation', async () => {
       const acc = await account();
       const inst = await install(acc);
