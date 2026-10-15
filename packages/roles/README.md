@@ -40,7 +40,7 @@ named the same way H09 names a denied spend reservation's status
 (`refused_spend`, not a bare boolean or free-text reason):
 
 ```ts
-export type ResumeCause = "child_result" | "timeout" | "request_refused";
+export type ResumeCause = "child_result" | "timeout" | "request_refused" | "decision_resolved" | "decision_denied";
 
 export interface ResumeContext {
   cause: ResumeCause;
@@ -53,6 +53,26 @@ export interface ResumeContext {
 - `cause: "request_refused"` — the orchestrator declined to start a requested
   role (the challenge-round cap above is the first case of this); `reason`
   says why.
+- `cause: "decision_resolved"` — a `decision_request` the role made was answered
+  (by a person, or by policy letting the work go ahead).
+- `cause: "decision_denied"` — a `decision_request` the role made was refused;
+  the role does not take the action.
+
+### `decision_request` (D#7)
+
+`src/decision-request.ts` types the envelope field a role writes beside
+`next_role_request`: `{ type, options, proposed, rationale } | null`, with
+`parseDecisionRequestField()` and the structural check `isDecisionRequestField()`.
+A role supplies the facts of a decision and never its class: a `class` key (or any
+key outside those four) is refused with a named code. The orchestrator, not the
+role, resolves the request; this package holds no policy and must not import
+`@fx/decisions`.
+
+A role card names the decision types it may raise with a single-line
+`decision_types: [id, id]` key in its frontmatter. That line is read by the
+static guard in `test/declared-classes.test.ts` and never reaches the role: the
+text a role is given is its product card (`cards-product/`), and the guard checks
+that no catalogue id appears in it.
 
 The cap itself is 2 challenge rounds total (the initial Round-1 synthesis
 plus one challenge round, per the original Spec's "max 1 extra round" — now

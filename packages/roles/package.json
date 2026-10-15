@@ -10,7 +10,9 @@
   "exports": {
     ".": "./src/manifest.ts",
     "./toolsets": "./src/toolsets.ts",
-    "./cards": "./src/cards.ts"
+    "./cards": "./src/cards.ts",
+    "./decision-request": "./src/decision-request.ts",
+    "./next-role-request": "./src/next-role-request.ts"
   },
   "scripts": {
     "test": "vitest run",

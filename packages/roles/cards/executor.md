@@ -3,6 +3,7 @@ name: executor
 description: Executor — Implement code per Spec in a fresh sandbox, open a PR (spawn on demand)
 model: sonnet
 tier: mid
+decision_types: [nonbreaking_refactor_approach, test_strategy_choice]
 ---
 
 ## Repo Scope

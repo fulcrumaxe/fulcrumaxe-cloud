@@ -6,8 +6,8 @@
  * `packages/roles/src/tools.ts` (the tool registry) and
  * `packages/roles/cards/*.md` (the role cards).
  *
- * Declaration convention (DP5; no tool or card currently uses it -- DP4,
- * which would give a card a reason to, has not landed):
+ * Declaration convention (DP5, ratified by DP-C2a; DP4a added the first real
+ * declarations, on the executor card):
  *   - A tool declares a decision type by carrying an own `decisionType`
  *     property on its `ToolRegistryEntry` object, naming a catalogue id.
  *   - A card declares one or more decision types via a `decision_types:
@@ -26,8 +26,10 @@ import {
   assertDeclarationsResolve,
   CATALOGUE_IDS,
   findUnresolvedDeclarations,
+  getCatalogueEntry,
   type DeclaredEntry,
 } from "@fx/decisions";
+import { loadProductCard } from "../src/cards.js";
 import { TOOL_REGISTRY } from "../src/tools.js";
 
 const CARDS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "cards");
@@ -66,10 +68,23 @@ function parseCardDeclarations(text: string, source: string): DeclaredEntry[] {
     .map((decisionType) => ({ source, decisionType }));
 }
 
+function realCardDeclarations(): DeclaredEntry[] {
+  return cardFiles().flatMap((file) => parseCardDeclarations(readFileSync(path.join(CARDS_DIR, file), "utf8"), file));
+}
+
+/**
+ * D#7 DP-C2c: the exact real declaration set. Not `[]` and not "non-empty": a card that gains or loses a
+ * declaration changes this list on purpose, in a reviewed diff.
+ */
+const EXPECTED_CARD_DECLARATIONS: DeclaredEntry[] = [
+  { source: "executor.md", decisionType: "nonbreaking_refactor_approach" },
+  { source: "executor.md", decisionType: "test_strategy_choice" },
+];
+
 describe("D#7 DP5 criterion 1: every declaration in tools.ts resolves to exactly one catalogue entry", () => {
-  it("real tree: tools.ts carries zero decisionType declarations today, so the scan is vacuously []", () => {
-    // Explicit today-state assertion, not just an empty findUnresolvedDeclarations() check --
-    // this is what makes the next test's [] meaningful rather than an accident.
+  it("real tree: the exact tool declarations are [] -- DP4a declares through a card, not a tool (DP-C2c allows either)", () => {
+    // Explicit today-state assertion, not just an empty findUnresolvedDeclarations() check.
+    // A tool that gains a declaration must change this list in the same reviewed diff.
     expect(extractToolDeclarations()).toEqual([]);
   });
 
@@ -95,18 +110,15 @@ describe("D#7 DP5 criterion 1: every declaration in tools.ts resolves to exactly
 });
 
 describe("D#7 DP5 criterion 1: every declaration in packages/roles/cards/*.md resolves to exactly one catalogue entry", () => {
-  it("real tree: no card carries a decision_types frontmatter key today, so the scan is vacuously []", () => {
-    const declarations = cardFiles().flatMap((file) =>
-      parseCardDeclarations(readFileSync(path.join(CARDS_DIR, file), "utf8"), file),
-    );
-    expect(declarations).toEqual([]);
+  it("real tree: the exact list of card declarations (DP-C2c criterion 9) -- not [] and not merely non-empty", () => {
+    expect(realCardDeclarations()).toEqual(EXPECTED_CARD_DECLARATIONS);
   });
 
-  it("real tree: whatever the cards declare resolves cleanly", () => {
-    const declarations = cardFiles().flatMap((file) =>
-      parseCardDeclarations(readFileSync(path.join(CARDS_DIR, file), "utf8"), file),
-    );
-    expect(findUnresolvedDeclarations(declarations)).toEqual([]);
+  it("real tree: the real declarations resolve cleanly, and none is a class-1 entry (class 1 is never raised)", () => {
+    const all = [...extractToolDeclarations(), ...realCardDeclarations()];
+    expect(findUnresolvedDeclarations(all)).toEqual([]);
+    expect(() => assertDeclarationsResolve(all)).not.toThrow();
+    for (const d of all) expect(getCatalogueEntry(d.decisionType)?.class, d.decisionType).not.toBe("automated_with_monitoring");
   });
 
   it("sanity: the parser is not vacuous -- it finds and correctly resolves a real declaration when present", () => {
@@ -127,18 +139,73 @@ describe("D#7 DP5 criterion 1: every declaration in packages/roles/cards/*.md re
   });
 });
 
-describe("D#7 DP5 criterion 5: no dial name appears in any role card", () => {
-  it("no CATALOGUE_IDS entry appears as text in any packages/roles/cards/*.md file", () => {
+/**
+ * D#7 DP-C2b: criterion 5 scans a card for catalogue ids EXCEPT the one machine-read `decision_types:` line in
+ * the frontmatter. The exemption is exactly that line: an id in the body, in another frontmatter key, or on a
+ * `decision_types:` line that sits in the body, still counts.
+ */
+function withoutDeclarationLine(text: string): string {
+  const fm = text.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
+  if (!fm) return text;
+  const kept = (fm[2] ?? "").split(/\r?\n/).filter((line) => !/^decision_types:\s*\[[^\]]*\]\s*$/.test(line));
+  return `${fm[1]}${kept.join("\n")}${fm[3]}${text.slice(fm[0].length)}`;
+}
+
+const idsIn = (text: string): string[] => CATALOGUE_IDS.filter((id) => text.includes(id));
+
+describe("D#7 DP5 criterion 5 (as carved out by DP-C2b): no dial name appears in any role card outside its decision_types line", () => {
+  it("no CATALOGUE_IDS entry appears as text in any packages/roles/cards/*.md file, once the declaration line is set aside", () => {
     for (const file of cardFiles()) {
       const text = readFileSync(path.join(CARDS_DIR, file), "utf8");
-      for (const id of CATALOGUE_IDS) {
-        expect({ file, id, found: text.includes(id) }).toEqual({ file, id, found: false });
+      expect({ file, found: idsIn(withoutDeclarationLine(text)) }).toEqual({ file, found: [] });
+    }
+  });
+
+  it("the carve-out is exactly the declaration line: the executor card's own ids are found before it is set aside, and none after", () => {
+    const text = readFileSync(path.join(CARDS_DIR, "executor.md"), "utf8");
+    expect(idsIn(text).sort()).toEqual(["nonbreaking_refactor_approach", "test_strategy_choice"]);
+    expect(idsIn(withoutDeclarationLine(text))).toEqual([]);
+  });
+
+  it("deliberate-failure fixture: a dial name in card BODY prose is still caught", () => {
+    const hostile = `---\nname: fixture-role\ndecision_types: [${FIRST_CATALOGUE_ID}]\n---\n\nThis role can directly request ${FIRST_CATALOGUE_ID}.`;
+    expect(idsIn(withoutDeclarationLine(hostile))).toEqual([FIRST_CATALOGUE_ID]);
+  });
+
+  it("deliberate-failure fixture: a dial name in a frontmatter key OTHER than decision_types is still caught", () => {
+    const hostile = `---\nname: fixture-role\ndescription: asks for ${FIRST_CATALOGUE_ID}\ndecision_types: [${FIRST_CATALOGUE_ID}]\n---\n\nbody`;
+    expect(idsIn(withoutDeclarationLine(hostile))).toEqual([FIRST_CATALOGUE_ID]);
+    const sneaky = `---\nname: fixture-role\ndecision_types_note: [${FIRST_CATALOGUE_ID}]\n---\n\nbody`;
+    expect(idsIn(withoutDeclarationLine(sneaky))).toEqual([FIRST_CATALOGUE_ID]);
+  });
+
+  it("deliberate-failure fixture: a decision_types line in the BODY is not exempt", () => {
+    const hostile = `---\nname: fixture-role\n---\n\ndecision_types: [${FIRST_CATALOGUE_ID}]`;
+    expect(idsIn(withoutDeclarationLine(hostile))).toEqual([FIRST_CATALOGUE_ID]);
+  });
+});
+
+describe("D#7 DP-C2b: a declaration never reaches the agent -- the text a role is actually given has no catalogue id", () => {
+  // The prompt a role runs under is its product card: the seat loads loadProductCard, never a dev card
+  // (packages/worker/test/seat.pg.test.ts pins "a dev-team card exists, and must not be used"). So the
+  // rendered text of a declaring role is its product card, for each runtime it can run under.
+  const declaringRoles = [...new Set(EXPECTED_CARD_DECLARATIONS.map((d) => d.source.replace(/\.md$/, "")))];
+
+  it("every role that declares a type has a rendered card, and it names no catalogue id and no declaration key", () => {
+    expect(declaringRoles).toEqual(["executor"]);
+    for (const role of declaringRoles) {
+      for (const runtime of ["sandbox", "runner"] as const) {
+        const rendered = loadProductCard(role, { runtime });
+        expect(rendered, `${role}/${runtime}`).toBeDefined();
+        expect({ role, runtime, found: idsIn(rendered ?? "") }).toEqual({ role, runtime, found: [] });
+        expect(rendered ?? "", `${role}/${runtime}`).not.toContain("decision_types");
       }
     }
   });
 
-  it("deliberate-failure fixture: the same check does catch a dial name embedded in card-shaped prose (not vacuous)", () => {
-    const hostileText = `---\nname: fixture-role\n---\n\nThis role can directly request ${FIRST_CATALOGUE_ID}.`;
-    expect(hostileText.includes(FIRST_CATALOGUE_ID)).toBe(true);
+  it("the check is not vacuous: the same scan flags a rendered text that does carry a declaration", () => {
+    const leaked = `# Executor\n\ndecision_types: [${FIRST_CATALOGUE_ID}]`;
+    expect(idsIn(leaked)).toEqual([FIRST_CATALOGUE_ID]);
+    expect(leaked).toContain("decision_types");
   });
 });

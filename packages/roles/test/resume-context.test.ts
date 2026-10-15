@@ -20,21 +20,28 @@ function causeNamesUsed(text: string): string[] {
 }
 
 describe("ResumeContext cause names (project-manager Phase 2 fix round)", () => {
-  it("the exported enum has exactly the three named causes", () => {
-    expect([...RESUME_CAUSES].sort()).toEqual(["child_result", "request_refused", "timeout"].sort());
+  const ORIGINAL_CAUSES = ["child_result", "request_refused", "timeout"];
+
+  it("the exported enum has exactly the five named causes, and the original three still parse (D#7 DP4a: additive)", () => {
+    expect([...RESUME_CAUSES].sort()).toEqual([...ORIGINAL_CAUSES, "decision_denied", "decision_resolved"].sort());
+    for (const cause of RESUME_CAUSES) expect(isResumeCause(cause), cause).toBe(true);
+    for (const cause of ORIGINAL_CAUSES) expect(isResumeCause(cause), cause).toBe(true);
+    for (const bad of ["decision", "decision_resolve", "Decision_Resolved", "", null, undefined, 3]) {
+      expect(isResumeCause(bad), String(bad)).toBe(false);
+    }
   });
 
-  it("project-manager.md's Phase 2 uses only exported cause names, and uses all three", () => {
+  it("project-manager.md's Phase 2 uses only exported cause names, and uses the three it branches on", () => {
     const text = readFileSync(path.join(CARDS_DIR, "project-manager.md"), "utf8");
     const used = causeNamesUsed(text);
     expect(used.length).toBeGreaterThan(0);
     for (const name of used) {
       expect(isResumeCause(name), `"${name}" is not in RESUME_CAUSES`).toBe(true);
     }
-    expect(new Set(used)).toEqual(new Set(RESUME_CAUSES));
+    expect(new Set(used)).toEqual(new Set(ORIGINAL_CAUSES));
   });
 
-  it("README.md's orchestrator requirement uses only exported cause names, and uses all three", () => {
+  it("README.md's orchestrator requirement uses only exported cause names, and uses all five", () => {
     const text = readFileSync(README, "utf8");
     const used = causeNamesUsed(text);
     expect(used.length).toBeGreaterThan(0);
