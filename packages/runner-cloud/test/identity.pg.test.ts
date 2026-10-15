@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { RegisterResponse } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, RegisterResponse } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { seedAccount } from "@fx/db/test/helpers/seed.js";
 import { CODE_TTL_MINUTES, HELLO_PATH, MAX_BODY_BYTES, REGISTER_PATH, REVOKE_PATH, ROTATE_PATH, mintRegistrationCode, registerRunner, revokeAllRunners, revokeRunner } from "../src/index.js";
@@ -324,7 +324,8 @@ describe("runner identity routes [pg]", () => {
         expect((await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { ...hello, protocol_version: version })))).status, String(version)).toBe(400);
       }
       expect((await runnerRow(id)).protocol_version).toBeNull();
-      expect((await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { ...hello, protocol_version: 2 ** 31 - 1 })))).status).toBe(200);
+      // The largest integer is stored when the cloud's own current version allows it (injected here: the real one is far below).
+      expect((await respond(() => runnerHello(h.deps({ currentProtocolVersion: 2 ** 31 - 1 }), signed(key, HELLO_PATH, { ...hello, protocol_version: 2 ** 31 - 1 })))).status).toBe(200);
     });
 
     it("records the versions and the isolation tier, and refuses unknown fields", async () => {
@@ -337,20 +338,30 @@ describe("runner identity routes [pg]", () => {
       expect((await respond(() => runnerHello(h.deps(), signed(key, HELLO_PATH, { ...hello, email: "a@b.c" })))).status).toBe(400);
     });
 
-    it("refuses a protocol version below current - 1 with 426 and no download URL, using an injected current", async () => {
+    it("accepts every version from the floor to the current one and refuses the rest with 426 and no download URL, using an injected current and floor", async () => {
       const f = await fresh();
       const key = newKey();
       const id = await registerKey(h.admin, f.accountId, f.a1, key);
-      const send = (version: number, current?: number) => respond(() => runnerHello(h.deps(current === undefined ? {} : { currentProtocolVersion: current }), signed(key, HELLO_PATH, { ...hello, protocol_version: version })));
-      expect((await send(2, 3)).status).toBe(200);
-      expect((await send(3, 3)).status).toBe(200);
-      expect((await send(9, 3)).status).toBe(200);
-      const refused = await send(1, 3);
-      expect(refused.status).toBe(426);
-      expect(JSON.stringify(refused.body)).not.toMatch(/https?:|download|url/i);
-      expect(await runnerRow(id)).toMatchObject({ protocol_version: 9 }); // the last accepted hello; the refused one wrote nothing
-      // With the real constant (1) nothing a runner can send is below the floor.
+      const send = (version: number, over: { currentProtocolVersion?: number; minSupportedProtocolVersion?: number } = {}) => respond(() => runnerHello(h.deps(over), signed(key, HELLO_PATH, { ...hello, protocol_version: version })));
+      // A bump of the current version does not cut an older runner off: floor 2, current 4.
+      const range = { currentProtocolVersion: 4, minSupportedProtocolVersion: 2 };
+      expect((await send(2, range)).status).toBe(200);
+      expect((await send(3, range)).status).toBe(200);
+      expect((await send(4, range)).status).toBe(200);
+      const tooOld = await send(1, range);
+      expect(tooOld.status).toBe(426);
+      expect(tooOld.body).toMatchObject({ error: { code: "upgrade_required" } });
+      expect(JSON.stringify(tooOld.body)).not.toMatch(/https?:|download|url/i);
+      const tooNew = await send(5, range);
+      expect(tooNew.status).toBe(426);
+      expect(tooNew.body).toMatchObject({ error: { code: "protocol_too_new" } });
+      expect(JSON.stringify(tooNew.body)).not.toMatch(/https?:|download|url/i);
+      expect(await runnerRow(id)).toMatchObject({ protocol_version: 4 }); // the last accepted hello; the refused ones wrote nothing
+      // With the real constants: a version-1 runner (before the checkpoint turn) and a version-2 runner both say hello; a version-3 runner is not deployed yet.
       expect((await send(1)).status).toBe(200);
+      expect(await runnerRow(id)).toMatchObject({ protocol_version: 1 });
+      expect((await send(CURRENT_PROTOCOL_VERSION)).status).toBe(200);
+      expect((await send(CURRENT_PROTOCOL_VERSION + 1)).status).toBe(426);
     });
   });
 });

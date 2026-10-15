@@ -1,27 +1,30 @@
 import { HelloMessage } from "@fulcrumaxe/runner-protocol";
-import { CURRENT_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
+import { CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, parseJsonBody, parseMessage, pgCode, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
 import { verifyRunnerRequest, withRunnerSession } from "./verifyRunnerRequest.js";
 
 export const HELLO_PATH = "/api/runner/hello";
 
 /**
- * True when a runner speaking `version` may talk to a cloud at `current`: the current version and the one before it.
- * `current` is a parameter (default: the constant) so the boundary can be tested; with the real value 1 nothing in
- * range could be refused.
+ * True when a runner speaking `version` may talk to a cloud at `current`: any version from `min` (the fixed floor) up to `current`. A bump of
+ * `current` therefore never cuts an older runner off; it only switches a capability on for the runners that declare the new version. A version
+ * above `current` is refused too: this cloud has not been deployed with what that runner speaks. Both bounds are parameters (default: the
+ * constants) so the edges can be tested.
  */
-export const protocolVersionSupported = (version: number, current: number = CURRENT_PROTOCOL_VERSION): boolean => version >= current - 1;
+export const protocolVersionSupported = (version: number, current: number = CURRENT_PROTOCOL_VERSION, min: number = MIN_SUPPORTED_PROTOCOL_VERSION): boolean => version >= min && version <= current;
 
 /**
  * POST /api/runner/hello. Records the protocol and binary versions (and the display-only isolation tier) for
- * compatibility and the runner list; none of it is a security fact. A version below `current - 1` is 426
- * `upgrade_required`, and the response names no download location.
+ * compatibility and the runner list; none of it is a security fact. A version below the floor is 426 `upgrade_required`, one above the
+ * current version is 426 `protocol_too_new`; neither response names a download location.
  */
 export async function runnerHello(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
   const runner = await verifyRunnerRequest(deps, HELLO_PATH, req, { replay: "none" });
   const message = parseMessage(HelloMessage, parseJsonBody(req));
   const current = deps.currentProtocolVersion ?? CURRENT_PROTOCOL_VERSION;
-  if (!protocolVersionSupported(message.protocol_version, current)) {
-    throw new RunnerHttpError(426, "upgrade_required", "this runner is too old to talk to the cloud", { current_protocol_version: current, minimum_protocol_version: current - 1 });
+  const min = deps.minSupportedProtocolVersion ?? MIN_SUPPORTED_PROTOCOL_VERSION;
+  if (!protocolVersionSupported(message.protocol_version, current, min)) {
+    const tooNew = message.protocol_version > current;
+    throw new RunnerHttpError(426, tooNew ? "protocol_too_new" : "upgrade_required", tooNew ? "this runner speaks a newer protocol than this cloud" : "this runner is too old to talk to the cloud", { current_protocol_version: current, minimum_protocol_version: min });
   }
   let recorded: boolean;
   try {

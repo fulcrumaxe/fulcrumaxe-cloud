@@ -13,48 +13,49 @@ const facts = (over: Partial<RunnerFacts> = {}): RunnerFacts => ({ revokedAt: nu
 
 describe("classifyRunner (criterion 13, one state each)", () => {
   it("is online_idle for a runner heard from recently with nothing running", () => {
-    expect(classifyRunner(facts(), NOW, 3)).toBe("online_idle");
+    expect(classifyRunner(facts(), NOW, 2)).toBe("online_idle");
   });
   it("is busy while it holds a running run", () => {
-    expect(classifyRunner(facts({ busy: true }), NOW, 3)).toBe("busy");
+    expect(classifyRunner(facts({ busy: true }), NOW, 2)).toBe("busy");
   });
   it("is offline after 120 seconds without a request, and not at exactly 120", () => {
     expect(RUNNER_ONLINE_SECONDS).toBe(120);
-    expect(classifyRunner(facts({ lastSeenAt: ago(120) }), NOW, 3)).toBe("online_idle");
-    expect(classifyRunner(facts({ lastSeenAt: ago(121) }), NOW, 3)).toBe("offline");
-    expect(classifyRunner(facts({ lastSeenAt: null }), NOW, 3)).toBe("offline");
-    expect(classifyRunner(facts({ lastSeenAt: ago(500), busy: true }), NOW, 3)).toBe("offline");
+    expect(classifyRunner(facts({ lastSeenAt: ago(120) }), NOW, 2)).toBe("online_idle");
+    expect(classifyRunner(facts({ lastSeenAt: ago(121) }), NOW, 2)).toBe("offline");
+    expect(classifyRunner(facts({ lastSeenAt: null }), NOW, 2)).toBe("offline");
+    expect(classifyRunner(facts({ lastSeenAt: ago(500), busy: true }), NOW, 2)).toBe("offline");
   });
-  it("is outdated below N-1 and not at N-1, with the cloud's own constant when none is injected", () => {
-    expect(classifyRunner(facts({ protocolVersion: 1 }), NOW, 3)).toBe("outdated");
-    expect(classifyRunner(facts({ protocolVersion: 2 }), NOW, 3)).toBe("online_idle");
-    expect(classifyRunner(facts({ protocolVersion: 0 }), NOW)).toBe("online_idle");
-    expect(classifyRunner(facts({ protocolVersion: null }), NOW, 3)).toBe("online_idle");
+  it("is outdated below the supported floor and not at it, with the cloud's own constant when none is injected", () => {
+    expect(classifyRunner(facts({ protocolVersion: 1 }), NOW, 2)).toBe("outdated");
+    expect(classifyRunner(facts({ protocolVersion: 2 }), NOW, 2)).toBe("online_idle");
+    expect(classifyRunner(facts({ protocolVersion: 0 }), NOW)).toBe("outdated");
+    expect(classifyRunner(facts({ protocolVersion: 1 }), NOW)).toBe("online_idle"); // the real floor is 1: a version-1 runner is not outdated after the handoff bump
+    expect(classifyRunner(facts({ protocolVersion: null }), NOW, 2)).toBe("online_idle");
   });
   it("shows paused, then draining, before the online test: a paused runner last seen 250 s ago is paused, never offline (D#605 FL-3)", () => {
-    expect(classifyRunner(facts({ paused: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
-    expect(classifyRunner(facts({ draining: true, busy: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("draining");
+    expect(classifyRunner(facts({ paused: true, lastSeenAt: ago(250) }), NOW, 2)).toBe("paused");
+    expect(classifyRunner(facts({ draining: true, busy: true, lastSeenAt: ago(250) }), NOW, 2)).toBe("draining");
     // D#605 FL-8: when the last run ends, a drain reads as paused.
-    expect(classifyRunner(facts({ draining: true, busy: false, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
-    expect(classifyRunner(facts({ draining: true, lastSeenAt: ago(250) }), NOW, 3)).toBe("paused");
-    expect(classifyRunner(facts({ paused: true, draining: true, lastSeenAt: null }), NOW, 3)).toBe("paused");
+    expect(classifyRunner(facts({ draining: true, busy: false, lastSeenAt: ago(250) }), NOW, 2)).toBe("paused");
+    expect(classifyRunner(facts({ draining: true, lastSeenAt: ago(250) }), NOW, 2)).toBe("paused");
+    expect(classifyRunner(facts({ paused: true, draining: true, lastSeenAt: null }), NOW, 2)).toBe("paused");
     // Busy does not outrank them: a paused runner with a job running still reads paused.
-    expect(classifyRunner(facts({ paused: true, busy: true }), NOW, 3)).toBe("paused");
-    expect(classifyRunner(facts({ paused: false, draining: false, lastSeenAt: ago(250) }), NOW, 3)).toBe("offline");
+    expect(classifyRunner(facts({ paused: true, busy: true }), NOW, 2)).toBe("paused");
+    expect(classifyRunner(facts({ paused: false, draining: false, lastSeenAt: ago(250) }), NOW, 2)).toBe("offline");
   });
   it("keeps the order revoked, outdated, paused, draining, offline, busy, online_idle (D#605 FL-3)", () => {
-    expect(classifyRunner(facts({ revokedAt: ago(1), paused: true, draining: true, protocolVersion: 1 }), NOW, 3)).toBe("revoked");
-    expect(classifyRunner(facts({ protocolVersion: 1, paused: true, draining: true }), NOW, 3)).toBe("outdated");
+    expect(classifyRunner(facts({ revokedAt: ago(1), paused: true, draining: true, protocolVersion: 1 }), NOW, 2)).toBe("revoked");
+    expect(classifyRunner(facts({ protocolVersion: 1, paused: true, draining: true }), NOW, 2)).toBe("outdated");
   });
   it("has one online window for every test: 100 s ago is online, 130 s ago is offline (D#605 FL-3)", () => {
-    expect(classifyRunner(facts({ lastSeenAt: ago(100) }), NOW, 3)).toBe("online_idle");
-    expect(classifyRunner(facts({ lastSeenAt: ago(130) }), NOW, 3)).toBe("offline");
+    expect(classifyRunner(facts({ lastSeenAt: ago(100) }), NOW, 2)).toBe("online_idle");
+    expect(classifyRunner(facts({ lastSeenAt: ago(130) }), NOW, 2)).toBe("offline");
   });
   it("is revoked whatever else is true", () => {
-    expect(classifyRunner(facts({ revokedAt: ago(1), protocolVersion: 0, lastSeenAt: null, busy: true }), NOW, 3)).toBe("revoked");
+    expect(classifyRunner(facts({ revokedAt: ago(1), protocolVersion: 0, lastSeenAt: null, busy: true }), NOW, 2)).toBe("revoked");
   });
   it("puts outdated above offline, so a stale old runner says to upgrade", () => {
-    expect(classifyRunner(facts({ protocolVersion: 1, lastSeenAt: ago(900) }), NOW, 3)).toBe("outdated");
+    expect(classifyRunner(facts({ protocolVersion: 1, lastSeenAt: ago(900) }), NOW, 2)).toBe("outdated");
   });
 });
 
@@ -66,7 +67,7 @@ describe("the read model [pg]", () => {
   afterAll(() => h.close());
 
   const fresh = (): Promise<F2Fixture> => seedF2(h.admin);
-  const deps = (current = 3) => h.deps({ now: () => NOW, currentProtocolVersion: current });
+  const deps = (min = 2) => h.deps({ now: () => NOW, minSupportedProtocolVersion: min });
 
   // The repo every run below is dispatched to, and the one every runner below may take unless a test says otherwise: a runner
   // counts as online for a run only for the run's own repo (the claim never hands a runner a run of another repo). A run's
@@ -114,7 +115,7 @@ describe("the read model [pg]", () => {
     );
     return id;
   }
-  const reason = (f: F2Fixture, id: string, current = 3) => getRunWaitReason(deps(current), f.accountId, id);
+  const reason = (f: F2Fixture, id: string, min = 2) => getRunWaitReason(deps(min), f.accountId, id);
   async function ended(f: F2Fixture, id: string, status: string, failureReason: string): Promise<void> {
     await h.admin.query("UPDATE agent_runs SET status = $2 WHERE id = $1", [id, status]);
     await h.admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`, [f.accountId, id, JSON.stringify({ from: "running", to: status, failureReason })]);

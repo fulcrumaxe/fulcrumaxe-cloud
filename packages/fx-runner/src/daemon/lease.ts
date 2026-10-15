@@ -74,6 +74,8 @@ export interface LeaseConfig {
   heartbeatMs?: number;
   flushMs?: number;
   activityFlushMs?: number;
+  /** Called once, with the deadline, the first time a heartbeat reply carries a handoff request (the cloud asks the run to move to the other side). */
+  onHandoff?: (deadline: Date) => void;
 }
 
 export function startLease(config: LeaseConfig): Lease {
@@ -91,6 +93,7 @@ export function startLease(config: LeaseConfig): Lease {
   let activityKept = 0;
   let burst: { anchor: number; event: LocalOnlyEvent } | undefined;
   let soonArmed = false;
+  let handoffSeen = false;
 
   const end = (how: LeaseEnd): void => {
     if (endedWith !== undefined) return;
@@ -137,8 +140,13 @@ export function startLease(config: LeaseConfig): Lease {
       await clock.sleep(config.heartbeatMs ?? HEARTBEAT_INTERVAL_MS, loopSignal);
       if (loopSignal.aborted) return;
       const reply = await client.heartbeat(runId, leaseGeneration);
-      if (reply.kind === "ok") ok();
-      else if (reply.kind === "stop") end({ kind: "stopped", reason: reply.reason });
+      if (reply.kind === "ok") {
+        ok();
+        if (reply.handoff !== undefined && !handoffSeen) {
+          handoffSeen = true;
+          config.onHandoff?.(new Date(reply.handoff.deadline));
+        }
+      } else if (reply.kind === "stop") end({ kind: "stopped", reason: reply.reason });
       else failed(reply.status);
     }
   }

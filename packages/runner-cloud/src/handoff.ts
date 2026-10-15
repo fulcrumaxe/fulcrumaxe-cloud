@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { HANDOFF_MIN_PROTOCOL_VERSION as HANDOFF_PROTOCOL_VERSION } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { QUEUE_TTL_MS } from "@fx/runner";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -19,10 +20,9 @@ import { withRunnerSession, type VerifiedRunner } from "./verifyRunnerRequest.js
 export const HANDOFF_DEADLINE_MS = 300_000;
 /**
  * The first runner protocol version that can read `handoff` on a heartbeat reply (R-599-HO1). A runner parses replies strictly, so one
- * below this would fail its heartbeat; the cloud never sends it. HO-3 raises `CURRENT_PROTOCOL_VERSION` to this value in the same change
- * that ships a runner able to act on the field; raising it earlier would make every handoff run out its deadline.
+ * below this would fail its heartbeat; the cloud never sends it. The value is defined once, in the protocol package, and only re-named here.
  */
-export const HANDOFF_PROTOCOL_VERSION = 2;
+export { HANDOFF_PROTOCOL_VERSION };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RUNNER_MODES = new Set(["runner_local", "runner_verified"]);

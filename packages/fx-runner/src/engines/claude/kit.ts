@@ -6,7 +6,7 @@ import { authState } from "./authStatus.js";
 import { createClaudeEngine } from "./engine.js";
 import { MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
 import { planSession, readSessionIndex, recordSession } from "./session.js";
-import { takeoverCommand } from "./takeover.js";
+import { sessionOfRun, takeoverCommand } from "./takeover.js";
 
 /** The kit for the user's installed Claude Code CLI. `spawnFn` is the real process start, handed in by the program's entry point. */
 export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
@@ -44,6 +44,7 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
       }),
     planSession: (stateDir, continues) => planSession(continues, readSessionIndex(sessionsFile(stateDir))),
     recordSession: (stateDir, sessionId, workspace) => recordSession(sessionsFile(stateDir), sessionId, workspace),
+    sessionOfRun: (stateDir, runId) => sessionOfRun(path.join(stateDir, "logs", `${runId}.jsonl`)),
     // The first 2 K of error output is kept too: path A reads the proxy's HTTP status from it (never logged or sent).
     capture: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, undefined, 2048),
     captureLarge: (command, args, env, timeoutMs) => runCapture(starter.spawn, command, args, env, timeoutMs, 8 * 1024 * 1024, 2048),

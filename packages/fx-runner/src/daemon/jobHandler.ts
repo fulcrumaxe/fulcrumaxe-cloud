@@ -13,8 +13,13 @@
  * run like any setup failure: a closed code, `run_ended` `runner_setup`.
  * A take-over (D#6 R4a-7) is asked for by the machine's owner through the tmux watch: the agent gets SIGINT, nothing is pushed, one
  * `taken_over` event goes out, and `done` carries no result, so the cloud ends the run `failed` `taken_over`; then the pane is handed over.
+ * A handoff (D#599 HO-3) is asked for by the cloud on a heartbeat reply: the agent is stopped the same way, its session is resumed once with the constant
+ * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
+ * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
+import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
 import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
@@ -38,6 +43,8 @@ export const MAX_DONE_ATTEMPTS = 5;
 const MAX_DONE_WAIT_SECONDS = 60;
 /** After SIGINT, the agent gets this long to end its turn before its sandbox is stopped. */
 export const TAKEOVER_STOP_GRACE_MS = 10_000;
+/** The part of a handoff's time kept for the push: the checkpoint turn is cut off this long before the deadline. */
+export const HANDOFF_PUSH_MARGIN_MS = 30_000;
 
 export type JobResult =
   | { status: "refused"; reason: JobRefusal }
@@ -48,7 +55,9 @@ export type JobResult =
   | { status: "aborted" }
   | { status: "failed"; reason: string }
   | { status: "completed"; outcome: "succeeded" | "failed"; failureReason: string | null; prNumber: number | null }
-  | { status: "unconfirmed" };
+  | { status: "unconfirmed" }
+  /** The run was moved to the other side: `detail` is what `run_ended` said. `note` is the agent's handoff note, kept on this machine (never sent from here). */
+  | { status: "handed_off"; detail: (typeof HANDED_OFF_DETAILS)[number]; note?: CheckpointNote };
 
 export interface JobHandlerDeps {
   client: RunnerClient;
@@ -93,6 +102,8 @@ export interface JobHandlerDeps {
   watch?: JobWatch;
   /** Sends the agent in a sandbox SIGINT, which ends its turn cleanly. Required for a take-over to stop the agent. */
   interrupt?: (handle: SandboxHandle) => void | Promise<void>;
+  /** The session a run was in, from its local transcript. A handoff resumes it; without this (and without a session in the run's result) no checkpoint turn runs. */
+  sessionOfRun?: (runId: string) => string | undefined;
 }
 
 /** What the handler knows of the sandbox it made for the run. */
@@ -121,6 +132,7 @@ export function withAllowances(port: SandboxPort, grant: JobAllowanceGrant): San
 
 /** A port whose sandbox is stopped as soon as `signal` aborts, which ends the agent and so the run. */
 function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox): SandboxPort {
+  const gone = new Map<string, () => void>();
   return {
     ...port,
     async createSandbox(opts) {
@@ -130,8 +142,18 @@ function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox):
         void port.stop(handle).catch(() => undefined);
       };
       if (signal.aborted) stop();
-      else signal.addEventListener("abort", stop, { once: true });
+      else {
+        signal.addEventListener("abort", stop, { once: true });
+        gone.set(handle.sandboxName, () => signal.removeEventListener("abort", stop));
+      }
       return handle;
+    },
+    // Once the run has deleted its sandbox there is nothing left to stop: a stop reply that arrives later (while a handoff's checkpoint turn
+    // or the final report is in flight) must not reach it again.
+    async deleteSandbox(handle, opts) {
+      gone.get(handle.sandboxName)?.();
+      gone.delete(handle.sandboxName);
+      return port.deleteSandbox(handle, opts);
     },
   };
 }
@@ -251,8 +273,18 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     // The reply's own run id must be the signed job's. The reply schema checks it as well; this is the second check.
     if (job.run_id !== claimed.runId) return refuse(claimed, "run_id_mismatch");
 
+    const held: HeldSandbox = {};
+    const ran = new AbortController();
+    let takeoverOpen = true;
+    let tookOver = false;
+    /** Set when the cloud asks for the run to move (a heartbeat reply's `handoff`); ignored once the agent's run has ended. */
+    let handoff: { deadline: Date } | undefined;
     // The first heartbeat and the first events batch are an interval away, so a run that is refused or repeated at once sends neither.
-    const lease = startLease({ client: deps.client, clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }), ...(deps.activityFlushMs === undefined ? {} : { activityFlushMs: deps.activityFlushMs }) });
+    const lease = startLease({ onHandoff: (deadline) => {
+      if (!takeoverOpen || tookOver || handoff !== undefined) return;
+      handoff = { deadline };
+      void interruptAgent();
+    }, client: deps.client, clock: deps.clock, runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, ...(deps.heartbeatMs === undefined ? {} : { heartbeatMs: deps.heartbeatMs }), ...(deps.flushMs === undefined ? {} : { flushMs: deps.flushMs }), ...(deps.activityFlushMs === undefined ? {} : { activityFlushMs: deps.activityFlushMs }) });
     const stopRun = deps.shutdown === undefined ? lease.signal : AbortSignal.any([lease.signal, deps.shutdown]);
     // One run, one `seq` line: the engine numbers its events from 0 on each start and the stage marks below are made here, so every event is
     // renumbered as it is queued (a stage mark sent before the engine starts would otherwise share its numbers).
@@ -260,19 +292,20 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     const detach = deps.events.attach(claimed.runId, (event) => lease.push({ ...event, seq: next() }));
     const mark = (stage: "workspace_ready" | "cloned" | "deps_installed" | "deps_install_failed"): void => lease.push({ seq: next(), ts: deps.clock.now().toISOString(), type: "stage", stage });
     let abandonSend = false;
-    const held: HeldSandbox = {};
-    const ran = new AbortController();
-    let takeoverOpen = true;
-    let tookOver = false;
+    let usedPort: SandboxPort = deps.sandbox;
     const watched = await deps.watch?.begin({ runId: claimed.runId, role: job.role, repo: `${job.repo.owner}/${job.repo.name}`, started: deps.clock.now() });
     watched?.onTakeOver(() => {
       if (!takeoverOpen) return;
       tookOver = true;
       void interruptAgent();
     });
-    /** SIGINT now (after the sandbox exists, if the request came first); if the agent has not ended its turn within the grace, its sandbox is stopped. */
+    /**
+     * SIGINT now (after the sandbox exists, if the request came first); if the agent has not ended its turn within the grace, its sandbox is stopped.
+     * A take-over waits a bounded time for the sandbox; a handoff waits until the sandbox exists or the run ends, because its request arrives once
+     * and setup (clone, deps, Nix shell) can take longer than any fixed wait.
+     */
     async function interruptAgent(): Promise<void> {
-      for (let waited = 0; held.handle === undefined && waited < 40 && !ran.signal.aborted; waited++) await deps.clock.sleep(250, ran.signal);
+      for (let waited = 0; held.handle === undefined && (handoff !== undefined || waited < 40) && !ran.signal.aborted; waited++) await deps.clock.sleep(250, ran.signal);
       const handle = held.handle;
       if (handle === undefined) return;
       await Promise.resolve(deps.interrupt?.(handle)).catch(() => undefined);
@@ -320,6 +353,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const allowed = grant === undefined ? granted : withAllowances(granted, grant);
+          usedPort = allowed;
           result = await run(job, { ...deps.run, promptNotes: () => promptNotes, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
@@ -347,6 +381,13 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       if (stopRun.aborted) {
         abandonSend = !(await reportShutdown(lease));
         return { status: "aborted" };
+      }
+      // The cloud asked for the run to move and the agent has been stopped: checkpoint, push, and say `handed_off`. A run that never got a workspace
+      // and a base (a setup failure) has nothing to hand off and is reported as the failure it is.
+      if (handoff !== undefined && result.workspace !== undefined && started.base !== undefined) {
+        const handed = await handOff({ claimed, job, lease, git, sandbox: usedPort, stopRun, workspace: result.workspace, base: started.base, sessionId: result.status === "done" ? result.sessionId : undefined, deadline: handoff.deadline });
+        if (handed.status === "aborted") abandonSend = !(await reportShutdown(lease));
+        return handed;
       }
       if (result.status === "failed") {
         // The events the run queued go first, so `run_ended` is the last thing the cloud hears. A stop on that flush ends the report.
@@ -385,6 +426,50 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       await watched?.finish();
     }
   };
+
+  /**
+   * The handoff (D#599 HO-3). The agent is already stopped. One resume with the constant checkpoint prompt, cut off `HANDOFF_PUSH_MARGIN_MS` before the
+   * deadline; then the push; then one `run_ended` `handed_off`: `pushed`, `push_failed` (the push was refused or failed) or `deadline` (no time was left
+   * to push). Past the deadline the cloud has fenced this side, so nothing is pushed then. Nothing from the note is sent.
+   */
+  async function handOff(input: { claimed: Claimed; job: Job; lease: Lease; git: GitPath; sandbox: SandboxPort; stopRun: AbortSignal; workspace: string; base: string; sessionId: string | undefined; deadline: Date }): Promise<JobResult> {
+    const { claimed, job, lease, deadline } = input;
+    const sessionId = input.sessionId ?? deps.sessionOfRun?.(claimed.runId);
+    const turnMs = Math.min(deadline.getTime() - deps.clock.now().getTime() - HANDOFF_PUSH_MARGIN_MS, CHECKPOINT_MAX_TURN_MS);
+    let note: CheckpointNote | undefined;
+    if (sessionId !== undefined && turnMs > 0) {
+      const limit = new AbortController();
+      void deps.clock.sleep(turnMs, limit.signal).then(() => limit.abort());
+      try {
+        note = (await runCheckpointTurn({ job, sandbox: input.sandbox, credentials: deps.run.credentials, envOptions: deps.run.envOptions, defaultModel: deps.run.defaultModel, workspace: input.workspace, sessionId, signal: AbortSignal.any([input.stopRun, limit.signal]), limitMs: turnMs })).note;
+      } finally {
+        limit.abort();
+      }
+    }
+    const stoppedAfterTurn = lease.ended();
+    if (stoppedAfterTurn !== undefined) return stoppedBy(stoppedAfterTurn);
+    if (input.stopRun.aborted) return { status: "aborted" };
+    let detail: (typeof HANDED_OFF_DETAILS)[number] = "deadline";
+    if (deps.clock.now().getTime() < deadline.getTime()) {
+      try {
+        // Pushed or nothing new to push: either way the branch holds everything the run committed.
+        await input.git.publish(job, claimed, input.workspace, input.base, () => lease.ended() !== undefined);
+        detail = "pushed";
+      } catch (error) {
+        if (!(error instanceof GitPathError)) throw error;
+        await lease.flush();
+        const stopped = lease.ended();
+        if (stopped !== undefined) return stoppedBy(stopped);
+        if (isGitStop(error.code)) return { status: "stopped", reason: "lease_lost" };
+        detail = "push_failed";
+      }
+    }
+    await lease.flush();
+    const stoppedAfterPush = lease.ended();
+    if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
+    await reportEnd(lease, { reason: "handed_off", detail });
+    return { status: "handed_off", detail, ...(note === undefined ? {} : { note }) };
+  }
 
   /** The take-over, as the cloud is told: one `taken_over` event (a timestamp, nothing else), then `done` with no envelope. Then the pane is handed over. */
   async function recordTakeover(claimed: Claimed, lease: Lease, watched: WatchedJob, sessionId: string | undefined): Promise<JobResult> {

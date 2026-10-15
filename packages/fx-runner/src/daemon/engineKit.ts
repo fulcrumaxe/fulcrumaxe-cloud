@@ -51,6 +51,8 @@ export interface EngineKit {
   /** Resume or fresh, from the local session index in the state directory. */
   planSession(stateDir: string, continues: { session_id: string; branch: string } | null): SessionPlan;
   recordSession(stateDir: string, sessionId: string, workspace: string): Promise<void>;
+  /** The session a run was in, read from the run's own local transcript; undefined when it has none. The checkpoint turn of a handed-off run resumes it. Absent: no such lookup is wired. */
+  sessionOfRun?(stateDir: string, runId: string): string | undefined;
   /** The bounded, shell-less capture the daemon runs git through. */
   capture: GitCapture;
   /** Like `capture`, with a large output limit (8 MB), for `nix print-dev-env`. Absent: no dev shell step is wired (D#6 R7c). */
