@@ -12,6 +12,7 @@ import { eventRoutes } from "./events.js";
 import { modelConnectionRoutes } from "./model-connection.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
+import { decisionSettingRoutes } from "./decision-settings.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
@@ -63,6 +64,7 @@ export const ROUTES: RouteEntry[] = [
   ...modelConnectionRoutes,
   ...repoRoutes,
   ...roleRoutes,
+  ...decisionSettingRoutes,
   ...githubRoutes,
   ...billingRoutes,
   ...runLimitRoutes,

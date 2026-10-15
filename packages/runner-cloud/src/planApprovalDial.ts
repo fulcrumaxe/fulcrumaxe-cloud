@@ -73,6 +73,7 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
       case "42501":
         throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");
       case "23505":
+      case "23514":
         throw new RunnerHttpError(409, "dial_changed", "the setting changed while you saved; reload and try again");
       default:
         throw error;

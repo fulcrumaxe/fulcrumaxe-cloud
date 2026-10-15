@@ -8708,6 +8708,1002 @@
         }
       }
     },
+    "/api/v1/repos/{id}/decision-settings": {
+      "get": {
+        "operationId": "getDecisionSettings",
+        "summary": "The Autonomy settings of a repo: each decision type's dial, the active preset and the fixed invariant list",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Autonomy settings of a repo: each decision type's dial, the active preset and the fixed invariant list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "catalogue_version": {
+                      "type": "number"
+                    },
+                    "active_preset": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "presets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "customer_role": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "label",
+                          "customer_role"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "dials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "adjustable": {
+                            "type": "boolean"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "allowed_dispositions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ask",
+                                "announce",
+                                "act"
+                              ]
+                            }
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "preset",
+                              "override",
+                              "default"
+                            ]
+                          },
+                          "preset": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "version": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "class",
+                          "adjustable",
+                          "disposition",
+                          "allowed_dispositions",
+                          "source",
+                          "preset",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "invariants": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "layer": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "layer"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "catalogue_version",
+                    "active_preset",
+                    "presets",
+                    "dials",
+                    "invariants"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/decision-settings/preset/preview": {
+      "post": {
+        "operationId": "previewDecisionPreset",
+        "summary": "Which class 2 dials a preset would change on this repo, without changing any",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "preset": {
+                    "type": "string",
+                    "enum": [
+                      "cautious",
+                      "balanced",
+                      "autonomous"
+                    ]
+                  }
+                },
+                "required": [
+                  "preset"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Which class 2 dials a preset would change on this repo, without changing any",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "preset": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "customer_role": {
+                      "type": "string"
+                    },
+                    "active_preset": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "moves": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "from": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "to": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "from",
+                          "to"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "preset",
+                    "label",
+                    "customer_role",
+                    "active_preset",
+                    "moves"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/decision-settings/preset": {
+      "post": {
+        "operationId": "applyDecisionPreset",
+        "summary": "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
+        "description": "Appends a `decision_settings` version for each class 2 dial the preset changes, and an audit row naming the previous and new value for each. A repo that already matches writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "preset": {
+                    "type": "string",
+                    "enum": [
+                      "cautious",
+                      "balanced",
+                      "autonomous"
+                    ]
+                  }
+                },
+                "required": [
+                  "preset"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Adopt a preset: one new dial version per class 2 dial it changes, in one transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "catalogue_version": {
+                      "type": "number"
+                    },
+                    "active_preset": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "presets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "customer_role": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "label",
+                          "customer_role"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "dials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "adjustable": {
+                            "type": "boolean"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "allowed_dispositions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ask",
+                                "announce",
+                                "act"
+                              ]
+                            }
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "preset",
+                              "override",
+                              "default"
+                            ]
+                          },
+                          "preset": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "version": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "class",
+                          "adjustable",
+                          "disposition",
+                          "allowed_dispositions",
+                          "source",
+                          "preset",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "invariants": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "layer": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "layer"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "moved": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "from": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "to": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "from",
+                          "to"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "catalogue_version",
+                    "active_preset",
+                    "presets",
+                    "dials",
+                    "invariants",
+                    "moved"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A dial changed while the request was running (`dial_changed`), or the account is not active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/decision-settings/dial": {
+      "post": {
+        "operationId": "setDecisionDial",
+        "summary": "Set one class 2 dial to ask, announce or act",
+        "description": "Appends one `decision_settings` version and one audit row. The decision type must be a class 2 entry in the catalogue and the disposition one that entry allows; anything else, including a fixed invariant, is a 422 and writes nothing. Setting the value already in force is a no-op. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "decision_type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "disposition": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "announce",
+                      "act"
+                    ]
+                  }
+                },
+                "required": [
+                  "decision_type",
+                  "disposition"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set one class 2 dial to ask, announce or act",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "catalogue_version": {
+                      "type": "number"
+                    },
+                    "active_preset": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "presets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "customer_role": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "label",
+                          "customer_role"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "dials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "adjustable": {
+                            "type": "boolean"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "allowed_dispositions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ask",
+                                "announce",
+                                "act"
+                              ]
+                            }
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "preset",
+                              "override",
+                              "default"
+                            ]
+                          },
+                          "preset": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "version": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "class",
+                          "adjustable",
+                          "disposition",
+                          "allowed_dispositions",
+                          "source",
+                          "preset",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "invariants": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "layer": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "layer"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "catalogue_version",
+                    "active_preset",
+                    "presets",
+                    "dials",
+                    "invariants"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A dial changed while the request was running (`dial_changed`), or the account is not active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/github/install-url": {
       "get": {
         "operationId": "getInstallUrl",

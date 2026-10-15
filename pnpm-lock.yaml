@@ -231,6 +231,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/decisions':
+        specifier: workspace:*
+        version: link:../decisions
       '@fx/discussions':
         specifier: workspace:*
         version: link:../discussions
