@@ -306,7 +306,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -316,16 +316,20 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
     for (const scope of scopes) {
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
-      if ((purpose === "merge_gate" || purpose === "plan_read") && "installationWide" in scope) continue; // refused outright: see the merge_gate and plan_read tests
+      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read and plane_push tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
-      const requester = vi.fn(async () => ({ token: "ghs_x", expiresAt: new Date(Date.now() + 3600_000).toISOString(), permissions: { metadata: "read" } }));
+      const answer: { permissions: Record<string, string>; repositories?: string[] } = purpose === "plane_push" ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] } : { permissions: { metadata: "read" } };
+      const requester = vi.fn(async () => ({ token: "ghs_x", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
       await getInstallationToken({
         installationId: 1, appKind: KIND[purpose], purpose, role: "any", scope, appCredentials: creds(privateKeyPem), requester, cache: new InstallationTokenCache(),
       });
       const granted = (requester.mock.calls[0] as unknown as [{ permissions: Record<string, string> }])[0].permissions;
       const keys = Object.keys(granted);
       expect(keys.length).toBeGreaterThan(0);
-      if (purpose === "merge_gate") {
+      if (purpose === "plane_push") {
+        // D#598 P1c: whatever the caller asked for, exactly contents and pull_requests, both write.
+        expect(granted).toEqual({ contents: "write", pull_requests: "write" });
+      } else if (purpose === "merge_gate") {
         // D#483 P3: the one purpose that reads branch protection; read-only, and nothing else outside its own list.
         for (const k of keys) expect(Object.keys(MERGE_GATE_PERMISSIONS)).toContain(k);
         expect(granted.administration).toBe("read");
@@ -481,5 +485,66 @@ describe("liveInstallationTokens (the memory intake's scan list)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("plane_push (D#598 P1c): one paired public repo, contents and pull_requests write, checked against GitHub's answer", () => {
+  const good = { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["widgets"] };
+  const mint = (answer: Record<string, unknown>, over: Partial<Parameters<typeof getInstallationToken>[0]> = {}) => {
+    const requester = vi.fn(async () => ({ token: "ghs_planepush", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
+    const cache = new InstallationTokenCache();
+    const run = () =>
+      getInstallationToken({
+        installationId: 7, appKind: "team", purpose: "plane_push", role: "plane_push",
+        scope: { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } },
+        appCredentials: creds(privateKeyPem), requester, cache, ...over,
+      });
+    return { run, requester, cache };
+  };
+
+  it("requests exactly the fixed permissions for exactly the one repository", async () => {
+    const m = mint(good);
+    await expect(m.run()).resolves.toBe("ghs_planepush");
+    expect(m.requester).toHaveBeenCalledWith(expect.objectContaining({ repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } }));
+  });
+
+  it("overrides a wider scope from the caller rather than trusting it", async () => {
+    const m = mint(good, { scope: { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write", issues: "write" } } });
+    await m.run();
+    expect(m.requester).toHaveBeenCalledWith(expect.objectContaining({ permissions: { contents: "write", pull_requests: "write" } }));
+  });
+
+  it.each([
+    ["no permissions reported", { repositories: ["widgets"] }],
+    ["no repository list reported", { permissions: good.permissions }],
+    ["an extra write permission", { ...good, permissions: { ...good.permissions, issues: "write" } }],
+    ["workflows", { ...good, permissions: { ...good.permissions, workflows: "write" } }],
+    ["a missing pull_requests", { ...good, permissions: { metadata: "read", contents: "write" } }],
+    ["contents only read", { ...good, permissions: { metadata: "read", contents: "read", pull_requests: "write" } }],
+    ["metadata above read", { ...good, permissions: { ...good.permissions, metadata: "write" } }],
+    ["a second repository", { ...good, repositories: ["widgets", "other"] }],
+    ["another repository", { ...good, repositories: ["other"] }],
+    ["an empty repository list", { ...good, repositories: [] }],
+  ])("refuses the token when GitHub's answer shows %s, and does not cache it", async (_label, answer) => {
+    const m = mint(answer as Record<string, unknown>);
+    await expect(m.run()).rejects.toMatchObject({ reason: "token_scope_mismatch" });
+    expect(m.cache.get(7, "team", "plane_push", { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } }, Date.now(), "plane_push:")).toBeUndefined();
+  });
+
+  it("refuses an installation-wide scope and a read-only App before any credential is read", async () => {
+    const appCredentials = vi.fn(creds(privateKeyPem));
+    const wide = { installationWide: true, permissions: { metadata: "read" } } as unknown as Parameters<typeof getInstallationToken>[0]["scope"];
+    await expect(mint(good, { scope: wide, appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
+    await expect(mint(good, { appKind: "team_readonly", appCredentials }).run()).rejects.toThrow("installation_not_writable");
+    expect(appCredentials).not.toHaveBeenCalled();
+  });
+
+  it("caches apart from the other purposes: a run token is never handed out as a plane_push token", async () => {
+    const cache = new InstallationTokenCache();
+    const requester = vi.fn(async () => ({ token: "ghs_run", expiresAt: new Date(Date.now() + 3600_000).toISOString() }));
+    await getInstallationToken({ installationId: 7, appKind: "team", purpose: "run", role: "plane_push", scope: { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } }, appCredentials: creds(privateKeyPem), requester, cache });
+    const pp = mint(good, { cache });
+    await expect(pp.run()).resolves.toBe("ghs_planepush");
+    expect(pp.requester).toHaveBeenCalledTimes(1);
   });
 });
