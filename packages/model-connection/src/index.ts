@@ -5,8 +5,19 @@
 // createConnectionStatusPort (a different calling convention -- see
 // markBroken.ts) and the generic seal/open envelope primitives.
 
-export type { Provider, ConnectionStatus, ConnectionStatusView, ModelConnectionCtx, Principal } from './types.js';
-export { isAnthropicProviderEnabled, buildAad } from './types.js';
+export type { Provider, ConnectionStatus, ConnectionStatusView, ModelConnectionCtx, Principal, CredentialKind, AadVersion } from './types.js';
+export {
+  isAnthropicProviderEnabled,
+  buildAad,
+  connectionAad,
+  CREDENTIAL_KINDS,
+  CURRENT_AAD_VERSION,
+  PROVIDER_OF_KIND,
+  isCredentialKind,
+} from './types.js';
+
+export type { CredentialBackend, Placement, PolicyDecision, AdmitDecision, PolicyRefusal, AdmitRefusal, AdmitCredentialInput } from './credentialPolicy.js';
+export { CREDENTIAL_BACKENDS, isCredentialBackend, checkCredentialPolicy, admitCredential, defaultBackendFor } from './credentialPolicy.js';
 
 export { NotFoundError, ForbiddenError, InvalidModelKeyError, DecryptionFailedError } from './errors.js';
 

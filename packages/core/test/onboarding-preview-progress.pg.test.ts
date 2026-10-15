@@ -134,9 +134,9 @@ describe('getPreviewProgress (pg)', () => {
 
   it('model usage is labelled by whose it is: the key provider before any usage, the operator subscription for our own accounts', async () => {
     const { previewId } = await running();
-    await admin.query(`UPDATE model_connections SET provider = 'anthropic' WHERE account_id = $1`, [a.accountId]);
+    await admin.query(`UPDATE model_connections SET provider = 'anthropic', credential_kind = 'anthropic' WHERE account_id = $1`, [a.accountId]);
     expect((await getPreviewProgress(ctx(), previewId, deps())).numbers.model).toEqual({ whose: 'anthropic', usd: 0 });
-    await admin.query(`UPDATE model_connections SET provider = 'ai_gateway' WHERE account_id = $1`, [a.accountId]);
+    await admin.query(`UPDATE model_connections SET provider = 'ai_gateway', credential_kind = 'ai_gateway' WHERE account_id = $1`, [a.accountId]);
     expect((await getPreviewProgress(ctx(), previewId, deps())).numbers.model).toEqual({ whose: 'ai_gateway', usd: 0 });
     expect((await getPreviewProgress(ctx(), previewId, deps({ isOperatorAccount: () => true }))).numbers.model).toEqual({ whose: 'operator', usd: null });
   });

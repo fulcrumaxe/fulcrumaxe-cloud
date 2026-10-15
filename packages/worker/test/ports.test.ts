@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildAad, seal, type KekSource } from "@fx/model-connection";
+import { buildAad, connectionAad, seal, type KekSource } from "@fx/model-connection";
 import { buildFirewallPolicy, loadGithubForwardConfig } from "@fx/runner";
 import { buildWorker, type BuildWorkerOptions } from "../src/compositionRoot.js";
 import { createConnectionStatusPort, createDecryptTenantKey, createModelConnectionPort, ModelConnectionUnavailableError } from "../src/ports.js";
@@ -61,6 +61,28 @@ describe("decryptTenantKey (AAD = account + connection ids)", () => {
     await expect(decrypt(sealed, { accountId: ACCOUNT, connectionId: randomUUID() })).rejects.toThrow();
   });
 
+  it("D#221 MC1: opens a key sealed under AAD version 2 only with the kind it was sealed for", async () => {
+    const s = seal({ kek: KEK, aad: connectionAad({ accountId: ACCOUNT, connectionId: CONNECTION, credentialKind: "ai_gateway", aadVersion: 2 }) }, PLAINTEXT);
+    const sealed = { ciphertext: new Uint8Array(s.ciphertext), nonce: new Uint8Array(s.nonce), wrappedDek: new Uint8Array(s.wrappedDek), kekVersion: 1 };
+    const ctx = { accountId: ACCOUNT, connectionId: CONNECTION };
+    await expect(decrypt({ ...sealed, credentialKind: "ai_gateway", aadVersion: 2 }, ctx)).resolves.toBe(PLAINTEXT);
+    // Another kind, the original kind-less AAD, a missing kind and an unknown version all fail closed.
+    await expect(decrypt({ ...sealed, credentialKind: "anthropic", aadVersion: 2 }, ctx)).rejects.toThrow();
+    await expect(decrypt({ ...sealed, credentialKind: "ai_gateway", aadVersion: 1 }, ctx)).rejects.toThrow();
+    await expect(decrypt({ ...sealed, aadVersion: 2 }, ctx)).rejects.toThrow();
+    await expect(decrypt({ ...sealed, credentialKind: "ai_gateway", aadVersion: 3 }, ctx)).rejects.toThrow();
+    await expect(decrypt(sealed, ctx)).rejects.toThrow();
+  });
+
+  it("D#221 MC1: a key sealed before kinds (no kind, no version, or version 1 with an original kind) still opens", async () => {
+    const sealed = sealedFor(ACCOUNT, CONNECTION);
+    const ctx = { accountId: ACCOUNT, connectionId: CONNECTION };
+    await expect(decrypt({ ...sealed, credentialKind: "ai_gateway", aadVersion: 1 }, ctx)).resolves.toBe(PLAINTEXT);
+    await expect(decrypt({ ...sealed, credentialKind: "anthropic", aadVersion: 1 }, ctx)).resolves.toBe(PLAINTEXT);
+    // An OpenAI kind can never be a version-1 row.
+    await expect(decrypt({ ...sealed, credentialKind: "openai_api_key", aadVersion: 1 }, ctx)).rejects.toThrow();
+  });
+
   it("fails for a KEK version the platform does not have, and for a tampered ciphertext", async () => {
     const sealed = sealedFor(ACCOUNT, CONNECTION);
     await expect(decrypt({ ...sealed, kekVersion: 2 }, { accountId: ACCOUNT, connectionId: CONNECTION })).rejects.toThrow();
@@ -84,7 +106,7 @@ describe("decryptTenantKey (AAD = account + connection ids)", () => {
 });
 
 describe("modelConnection port (ciphertext only, tenant-scoped)", () => {
-  const row = { id: CONNECTION, provider: "ai_gateway", status: "ok", ...sealedFor(ACCOUNT, CONNECTION), kek_version: 1, wrappedDek: Buffer.from("w"), nonce: Buffer.from("n"), ciphertext: Buffer.from("c") };
+  const row = { id: CONNECTION, provider: "ai_gateway", status: "ok", credential_kind: "ai_gateway", aad_version: 2, ...sealedFor(ACCOUNT, CONNECTION), kek_version: 1, wrappedDek: Buffer.from("w"), nonce: Buffer.from("n"), ciphertext: Buffer.from("c") };
 
   it("reads the account's row under its tenant scope and returns provider, connection id and ciphertext", async () => {
     const { pool, log } = fakePool((sql) => (sql.includes("FROM model_connections") ? [row] : []));
@@ -92,14 +114,18 @@ describe("modelConnection port (ciphertext only, tenant-scoped)", () => {
     expect(got.provider).toBe("ai_gateway");
     expect(got.connectionId).toBe(CONNECTION);
     expect(got.encryptedKey.kekVersion).toBe(1);
+    // D#221 MC1: the sealing context rides with the ciphertext, so the decryptor can rebuild the AAD.
+    expect(got.encryptedKey.credentialKind).toBe(row.credential_kind);
+    expect(got.encryptedKey.aadVersion).toBe(row.aad_version);
     expect(JSON.stringify(got)).not.toContain(PLAINTEXT);
     const select = log.find((q) => q.sql.includes("FROM model_connections"))!;
     expect(select.params).toEqual([ACCOUNT]);
     expect(log.some((q) => q.params.includes(ACCOUNT) && q.sql.includes("set_config"))).toBe(true);
   });
 
-  it("refuses a missing, broken or unknown-provider connection with one fixed error naming no account", async () => {
-    for (const rows of [[], [{ ...row, status: "broken" }], [{ ...row, provider: "mystery" }]]) {
+  // An OpenAI connection exists in the table now but no backend can use it yet: the port refuses it rather than hand its key to a run.
+  it("refuses a missing, broken, unknown-provider or OpenAI connection with one fixed error naming no account", async () => {
+    for (const rows of [[], [{ ...row, status: "broken" }], [{ ...row, provider: "mystery" }], [{ ...row, provider: "openai", credential_kind: "openai_api_key" }]]) {
       const { pool } = fakePool((sql) => (sql.includes("FROM model_connections") ? rows : []));
       const err = await createModelConnectionPort(pool).get(ACCOUNT).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ModelConnectionUnavailableError);

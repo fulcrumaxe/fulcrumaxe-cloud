@@ -29,12 +29,13 @@ vi.mock('@fx/telemetry', async (importOriginal) => {
  */
 const GATEWAY_KEY = 'vck_h2e2_known_gateway_key_0001';
 const ANTHROPIC_KEY = 'sk-ant-h2e2-known-anthropic-key-0001';
+const OPENAI_KEY = 'sk-proj-mc1-known-openai-key-0001';
 
 describe('H2e: the request and the status mapping, against strict provider fakes', () => {
   let world: StrictProviders;
 
   beforeAll(async () => {
-    world = await startStrictProviders({ ai_gateway: [GATEWAY_KEY], anthropic: [ANTHROPIC_KEY] });
+    world = await startStrictProviders({ ai_gateway: [GATEWAY_KEY], anthropic: [ANTHROPIC_KEY], openai: [OPENAI_KEY] });
   });
   afterAll(async () => {
     await world.close();
@@ -46,7 +47,7 @@ describe('H2e: the request and the status mapping, against strict provider fakes
   });
 
   const client = (timeoutMs = 5000) => fetchValidationHttpClient(timeoutMs, world.transport);
-  const keyFor = (provider: Provider) => (provider === 'ai_gateway' ? GATEWAY_KEY : ANTHROPIC_KEY);
+  const keyFor = (provider: Provider) => (provider === 'ai_gateway' ? GATEWAY_KEY : provider === 'openai' ? OPENAI_KEY : ANTHROPIC_KEY);
 
   describe('criterion 1: the gateway request', () => {
     it('is a GET of /v1/credits with an Authorization Bearer header and redirect: error', () => {
@@ -66,6 +67,24 @@ describe('H2e: the request and the status mapping, against strict provider fakes
         redirect: 'error',
         headers: { 'x-api-key': 'sk-ant-unit', 'anthropic-version': '2023-06-01' },
       });
+    });
+
+    it('D#221 MC1: the OpenAI request is a read-only GET /v1/models on api.openai.com with a Bearer header and redirect: error', () => {
+      expect(requestFor('openai', 'sk-proj-unit')).toEqual({
+        url: 'https://api.openai.com/v1/models',
+        method: 'GET',
+        redirect: 'error',
+        headers: { Authorization: 'Bearer sk-proj-unit' },
+      });
+    });
+
+    it('D#221 MC1: reaches the OpenAI fake as exactly one GET /v1/models over TLS to the real hostname', async () => {
+      expect(await client().validate({ provider: 'openai', plaintextKey: OPENAI_KEY })).toEqual({ kind: 'ok' });
+      expect(world.openai.seen).toHaveLength(1);
+      const seen = world.openai.seen[0]!;
+      expect([seen.method, seen.path, seen.headers['authorization'], seen.servername]).toEqual(['GET', '/v1/models', `Bearer ${OPENAI_KEY}`, 'api.openai.com']);
+      expect(world.ai_gateway.seen).toHaveLength(0);
+      expect(world.anthropic.seen).toHaveLength(0);
     });
 
     it('reaches the fake as exactly one GET /v1/credits with the Bearer key, over TLS to the real hostname', async () => {
@@ -94,6 +113,13 @@ describe('H2e: the request and the status mapping, against strict provider fakes
       world.anthropic.seen.length = 0;
     });
 
+    it('D#221 MC1: a made-up OpenAI key is rejected, and so is a known key sent in the x-api-key header', async () => {
+      expect(await client().validate({ provider: 'openai', plaintextKey: 'sk-proj-made-up' })).toMatchObject({ kind: 'rejected', code: '401' });
+      const wrongHeader = await world.transport('https://api.openai.com/v1/models', { method: 'GET', headers: { 'x-api-key': OPENAI_KEY } });
+      expect(wrongHeader.status).toBe(401);
+      world.openai.seen.length = 0;
+    });
+
     it('the known keys are accepted', async () => {
       expect(await client().validate({ provider: 'anthropic', plaintextKey: ANTHROPIC_KEY })).toEqual({ kind: 'ok' });
       expect(await client().validate({ provider: 'ai_gateway', plaintextKey: GATEWAY_KEY })).toEqual({ kind: 'ok' });
@@ -117,6 +143,14 @@ describe('H2e: the request and the status mapping, against strict provider fakes
       ['anthropic', '429', { status: 429 }, 'network_error', '429'],
       ['anthropic', '500', { status: 500 }, 'network_error', '500'],
       ['anthropic', 'timeout', 'hang', 'network_error', 'fetch_failed'],
+      // D#221 MC1: a 403 from OpenAI is a region or project restriction, so it cannot prove the key is bad.
+      ['openai', '200', { status: 200 }, 'ok', null],
+      ['openai', '401', { status: 401 }, 'rejected', '401'],
+      ['openai', '403', { status: 403 }, 'network_error', '403'],
+      ['openai', '402', { status: 402 }, 'network_error', '402'],
+      ['openai', '429', { status: 429 }, 'network_error', '429'],
+      ['openai', '500', { status: 500 }, 'network_error', '500'],
+      ['openai', 'timeout', 'hang', 'network_error', 'fetch_failed'],
     ];
 
     it.each(table)('%s answering %s is %s', async (provider, _label, mode, kind, code) => {
@@ -130,7 +164,7 @@ describe('H2e: the request and the status mapping, against strict provider fakes
 
   describe('criterion 9: never generates', () => {
     it('every request over every outcome is one GET on the one allowed path', async () => {
-      for (const provider of ['ai_gateway', 'anthropic'] as const) {
+      for (const provider of ['ai_gateway', 'anthropic', 'openai'] as const) {
         for (const mode of [null, { status: 401 }, { status: 403 }, { status: 429 }, { status: 500 }] as const) {
           world[provider].mode = mode;
           await client().validate({ provider, plaintextKey: keyFor(provider) });
@@ -138,7 +172,7 @@ describe('H2e: the request and the status mapping, against strict provider fakes
         }
       }
       const seen = world.seen();
-      expect(seen).toHaveLength(10);
+      expect(seen).toHaveLength(15);
       expect(new Set(seen.map((r) => `${r.method} ${r.path}`))).toEqual(new Set(['GET /v1/credits', 'GET /v1/models']));
       expect(seen.filter((r) => r.path === '/v1/models' && r.servername === 'ai-gateway.vercel.sh')).toEqual([]);
     });
@@ -147,15 +181,17 @@ describe('H2e: the request and the status mapping, against strict provider fakes
       const post = await world.transport('https://ai-gateway.vercel.sh/v1/credits', { method: 'POST', headers: { Authorization: `Bearer ${GATEWAY_KEY}` } });
       const chat = await world.transport('https://ai-gateway.vercel.sh/v1/chat/completions', { method: 'GET', headers: { Authorization: `Bearer ${GATEWAY_KEY}` } });
       const messages = await world.transport('https://api.anthropic.com/v1/messages', { method: 'GET', headers: { 'x-api-key': ANTHROPIC_KEY } });
-      expect([post.status, chat.status, messages.status]).toEqual([405, 404, 404]);
-      expect(world.refused()).toHaveLength(3);
+      const completions = await world.transport('https://api.openai.com/v1/chat/completions', { method: 'GET', headers: { Authorization: `Bearer ${OPENAI_KEY}` } });
+      expect([post.status, chat.status, messages.status, completions.status]).toEqual([405, 404, 404, 404]);
+      expect(world.refused()).toHaveLength(4);
       // Cleared here on purpose: this test asserts the refusals; the suite-wide check is for every other test.
       world.ai_gateway.refused.length = 0;
       world.anthropic.refused.length = 0;
+      world.openai.refused.length = 0;
     });
 
     it('the transport cannot reach any other host', async () => {
-      await expect(world.transport('https://api.openai.com/v1/models', { method: 'GET' })).rejects.toThrow(/not a provider fake/);
+      await expect(world.transport('https://example.com/v1/models', { method: 'GET' })).rejects.toThrow(/not a provider fake/);
     });
   });
 });
@@ -165,7 +201,7 @@ describe('criterion 11: key values never leave memory', () => {
   let world: StrictProviders;
 
   beforeAll(async () => {
-    world = await startStrictProviders({ ai_gateway: [SENTINEL], anthropic: [SENTINEL] });
+    world = await startStrictProviders({ ai_gateway: [SENTINEL], anthropic: [SENTINEL], openai: [SENTINEL] });
   });
   afterAll(async () => {
     await world.close();
@@ -196,7 +232,7 @@ describe('criterion 11: key values never leave memory', () => {
     }) as typeof process.stderr.write);
 
     const outcomes: ValidationOutcome[] = [];
-    for (const provider of ['ai_gateway', 'anthropic'] as const) {
+    for (const provider of ['ai_gateway', 'anthropic', 'openai'] as const) {
       for (const mode of [null, { status: 401 }, { status: 403 }, { status: 402 }, { status: 429 }, { status: 500 }, 'hang'] as const) {
         world[provider].mode = mode;
         outcomes.push(await fetchValidationHttpClient(mode === 'hang' ? 100 : 5000, world.transport).validate({ provider, plaintextKey: SENTINEL }));

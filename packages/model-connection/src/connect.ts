@@ -6,16 +6,30 @@ import { fingerprintOf, seal } from './crypto.js';
 import { recordInitialValidation } from './validate.js';
 import { getStatus } from './summary.js';
 import {
-  buildAad,
+  connectionAad,
+  CURRENT_AAD_VERSION,
+  DEFAULT_KIND_OF_PROVIDER,
   isAnthropicProviderEnabled,
+  isCredentialKind,
+  PROVIDER_OF_KIND,
   type ConnectionStatusView,
+  type CredentialKind,
   type ModelConnectionCtx,
   type Provider,
 } from './types.js';
+import { checkCredentialPolicy, defaultBackendFor, type CredentialBackend } from './credentialPolicy.js';
+import { isPlanPathKind } from './planKinds.js';
 
 export interface ConnectParams {
   provider: Provider;
   key: string;
+  /** D#221 MC1: which credential this is. Omitted means the provider's API key. */
+  credentialKind?: CredentialKind;
+  /**
+   * D#221 MC1: the backend the connection is for. Omitted keeps the stored backend while the credential policy still
+   * allows it for the (possibly new) kind, else the kind's default (claude-code for gateway and Anthropic keys, codex for OpenAI).
+   */
+  backend?: CredentialBackend;
 }
 
 /**
@@ -30,7 +44,7 @@ export interface ConnectParams {
  * attached. The DB's own CHECK constraint would eventually reject the
  * row, but only after the key had already gone out over the network.
  */
-const ALLOWED_PROVIDERS: readonly Provider[] = ['ai_gateway', 'anthropic'];
+const ALLOWED_PROVIDERS: readonly Provider[] = ['ai_gateway', 'anthropic', 'openai'];
 
 /**
  * Security review finding 1: printable-ASCII gate, checked BEFORE any
@@ -120,6 +134,23 @@ export async function connect(ctx: ModelConnectionCtx, params: ConnectParams): P
     );
   }
 
+  // D#221 MC1: the credential kind belongs to the provider, the pairing with the backend is the policy matrix's, and a
+  // plan-based kind has no connect path in this change (its sign-in and token handling come with the changes that build
+  // them), so it is refused here by name rather than stored without being able to prove it. All before any network call.
+  const credentialKind = params.credentialKind ?? DEFAULT_KIND_OF_PROVIDER[provider];
+  if (!isCredentialKind(credentialKind) || PROVIDER_OF_KIND[credentialKind] !== provider) {
+    throw new InvalidModelKeyError('model connection: that credential kind does not belong to the provider', 'invalid_credential_kind');
+  }
+  if (isPlanPathKind(credentialKind)) {
+    throw new InvalidModelKeyError('model connection: plan-based credentials cannot be connected here yet', 'kind_not_connectable');
+  }
+  if (params.backend !== undefined) {
+    const decision = checkCredentialPolicy({ backend: params.backend, credentialKind, placement: 'hosted' });
+    if (!decision.ok) {
+      throw new InvalidModelKeyError('model connection: that credential is not allowed for that backend', decision.reason);
+    }
+  }
+
   // Authorization check first (cheap, no network call) -- criterion 6.
   const role = await getMemberRole(ctx.pool, accountId, userId);
   requireOwnerOrAdmin(role);
@@ -146,15 +177,21 @@ export async function connect(ctx: ModelConnectionCtx, params: ConnectParams): P
   let writtenNonce!: Buffer;
 
   await withTenant(ctx.pool, accountId, userId, async (client) => {
-    const existing = await client.query<{ id: string }>(
-      `SELECT id FROM model_connections WHERE account_id = $1`,
+    const existing = await client.query<{ id: string; backend: string }>(
+      `SELECT id, backend FROM model_connections WHERE account_id = $1`,
       [accountId],
     );
     const connectionId = existing.rows[0]?.id ?? randomUUID();
+    const kept = existing.rows[0]?.backend;
+    const backend =
+      params.backend ??
+      (kept !== undefined && checkCredentialPolicy({ backend: kept, credentialKind, placement: 'hosted' }).ok
+        ? kept
+        : defaultBackendFor(credentialKind));
 
     const kekVersion = ctx.kek.currentVersion();
     const kekBytes = ctx.kek.keyFor(kekVersion);
-    const sealed = seal({ kek: kekBytes, aad: buildAad(accountId, connectionId) }, plaintextKey);
+    const sealed = seal({ kek: kekBytes, aad: connectionAad({ accountId, connectionId, credentialKind, aadVersion: CURRENT_AAD_VERSION }) }, plaintextKey);
     const fingerprint = fingerprintOf(plaintextKey, kekBytes);
     writtenConnectionId = connectionId;
     writtenNonce = sealed.nonce;
@@ -167,16 +204,17 @@ export async function connect(ctx: ModelConnectionCtx, params: ConnectParams): P
       await client.query(
         `UPDATE model_connections
            SET provider = $2, key_ciphertext = $3, key_nonce = $4, wrapped_dek = $5,
-               kek_version = $6, key_fingerprint = $7
+               kek_version = $6, key_fingerprint = $7, credential_kind = $8, aad_version = $9, backend = $10
          WHERE id = $1`,
-        [connectionId, provider, sealed.ciphertext, sealed.nonce, sealed.wrappedDek, kekVersion, fingerprint],
+        [connectionId, provider, sealed.ciphertext, sealed.nonce, sealed.wrappedDek, kekVersion, fingerprint, credentialKind, CURRENT_AAD_VERSION, backend],
       );
     } else {
       await client.query(
         `INSERT INTO model_connections
-           (id, account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [connectionId, accountId, provider, sealed.ciphertext, sealed.nonce, sealed.wrappedDek, kekVersion, fingerprint],
+           (id, account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint,
+            credential_kind, aad_version, backend)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [connectionId, accountId, provider, sealed.ciphertext, sealed.nonce, sealed.wrappedDek, kekVersion, fingerprint, credentialKind, CURRENT_AAD_VERSION, backend],
       );
     }
 

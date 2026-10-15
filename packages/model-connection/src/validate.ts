@@ -8,7 +8,7 @@ import { markBrokenWithClient, type BrokenConnectionCode } from './markBroken.js
 import type { KekSource } from './kek.js';
 import { open, type Sealed } from './crypto.js';
 import type { ValidationHttpClient, ValidationOutcome } from './httpClient.js';
-import { buildAad, type ModelConnectionCtx, type Provider } from './types.js';
+import { connectionAad, type ModelConnectionCtx, type Provider } from './types.js';
 
 interface LockedRow {
   id: string;
@@ -147,6 +147,8 @@ interface SealedRow extends Sealed {
   provider: Provider;
   key_nonce: Buffer;
   kek_version: number;
+  credential_kind: string;
+  aad_version: number;
 }
 
 /**
@@ -160,7 +162,8 @@ async function readAndOpenKey(
 ): Promise<{ encrypted: SealedRow; plaintextKey: string }> {
   const encrypted = await withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<SealedRow>(
-      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce, wrapped_dek AS "wrappedDek", kek_version
+      `SELECT id, provider, key_ciphertext AS ciphertext, key_nonce, wrapped_dek AS "wrappedDek", kek_version,
+              credential_kind, aad_version
          FROM model_connections WHERE account_id = $1`,
       [accountId],
     );
@@ -170,7 +173,12 @@ async function readAndOpenKey(
     throw new NotFoundError(`model_connections: no connection for account ${accountId}`);
   }
   const kekBytes = kek.keyFor(encrypted.kek_version);
-  const aad = buildAad(accountId, encrypted.id);
+  const aad = connectionAad({
+    accountId,
+    connectionId: encrypted.id,
+    credentialKind: encrypted.credential_kind,
+    aadVersion: encrypted.aad_version,
+  });
   const plaintextKey = open(
     { kek: kekBytes, aad },
     { ciphertext: encrypted.ciphertext, nonce: encrypted.key_nonce, wrappedDek: encrypted.wrappedDek },

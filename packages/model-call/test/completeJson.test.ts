@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { z } from 'zod';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
-import { connect } from '@fx/model-connection';
+import { buildAad, connect, seal } from '@fx/model-connection';
 import { fakeKekSource } from '../../model-connection/test/helpers/fakeKek.js';
 import { seedAccountWithMember } from '../../model-connection/test/helpers/seed.js';
 import { completeJson, ModelCallError, type ModelCallCtx } from '../src/index.js';
@@ -34,12 +34,22 @@ describe('completeJson (fake provider only)', () => {
     vi.unstubAllEnvs();
   });
 
-  /** A tenant with a stored key. `provider` is set on the row directly: connect() refuses 'anthropic' until S11. */
+  /**
+   * A tenant with a stored key. connect() refuses 'anthropic' until S11, so that row is written as a row sealed before
+   * kinds existed: provider and kind set directly, the key re-sealed under the original AAD (version 1).
+   */
   async function tenant(key: string, provider = 'ai_gateway', onCall?: () => void) {
     const t = await seedAccountWithMember(admin, 'owner');
     const httpClient = { validate: async () => ({ kind: 'ok' as const }) };
     await connect({ pool, platformOpsPool: opsPool, principal: t, httpClient, kek }, { provider: 'ai_gateway', key });
-    if (provider !== 'ai_gateway') await admin.query(`UPDATE model_connections SET provider = $2 WHERE account_id = $1`, [t.accountId, provider]);
+    if (provider !== 'ai_gateway') {
+      const { id } = (await admin.query(`SELECT id FROM model_connections WHERE account_id = $1`, [t.accountId])).rows[0];
+      const old = seal({ kek: kek.keyFor(1), aad: buildAad(t.accountId, id) }, key);
+      await admin.query(
+        `UPDATE model_connections SET provider = $2, credential_kind = $2, aad_version = 1, key_ciphertext = $3, key_nonce = $4, wrapped_dek = $5 WHERE account_id = $1`,
+        [t.accountId, provider, old.ciphertext, old.nonce, old.wrappedDek],
+      );
+    }
     const ctx: ModelCallCtx = { pool, platformOpsPool: opsPool, principal: t, kek, fetchImpl: fake.fetchImpl(onCall) };
     return { ...t, ctx };
   }
@@ -57,6 +67,15 @@ describe('completeJson (fake provider only)', () => {
     expect(fake.seen.map(keyOf)).toEqual(['vck_gatewaykey_0123456789', 'sk-ant-api03-anthropickey_0123456789']);
     expect(JSON.parse(fake.seen[1]!.body)).toMatchObject({ max_tokens: 1024, system: 'sys' });
     expect(fake.seen[1]!.body).not.toMatch(/tools|stream/);
+  });
+
+  it('D#221 MC1: a stored key sealed for one kind does not open as another: a retagged row fails before any request leaves', async () => {
+    const t = await tenant('vck_retagged_0123456789');
+    await admin.query(`UPDATE model_connections SET provider = 'anthropic', credential_kind = 'anthropic' WHERE account_id = $1`, [t.accountId]);
+    fake.reply(anthropicReply(GOOD));
+    await expect(completeJson(t.ctx, params)).rejects.toThrow();
+    expect(fake.seen).toHaveLength(0);
+    expect(fake.requestedHosts).toHaveLength(0);
   });
 
   it('invalid output (not JSON, wrong schema, wrong envelope) is "no follow-up", not an error, and is not retried', async () => {

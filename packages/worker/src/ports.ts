@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { buildAad, markBrokenWithClient, open, type KekSource } from "@fx/model-connection";
+import { connectionAad, markBrokenWithClient, open, type KekSource } from "@fx/model-connection";
 import type { BrokenConnectionCode, ConnectionStatusPort, DecryptTenantKey, ModelConnectionPort } from "@fx/runner";
 
 /**
@@ -24,14 +24,22 @@ export class ModelConnectionUnavailableError extends Error {
 
 /**
  * Opens a sealed key with the platform KEK version the row names. The AAD is
- * built from the run's account and the connection row (the same
- * `accountId:rowId:model_key` the connect flow sealed it under), so a
- * ciphertext copied onto another account or row fails GCM authentication.
+ * built from the run's account, the connection row and the credential kind
+ * (the same context the connect flow sealed it under), so a ciphertext copied
+ * onto another account, row or kind fails GCM authentication.
  */
 export function createDecryptTenantKey(kek: KekSource): DecryptTenantKey {
   return async (encrypted, context) =>
     open(
-      { kek: kek.keyFor(encrypted.kekVersion), aad: buildAad(context.accountId, context.connectionId) },
+      {
+        kek: kek.keyFor(encrypted.kekVersion),
+        aad: connectionAad({
+          accountId: context.accountId,
+          connectionId: context.connectionId,
+          credentialKind: encrypted.credentialKind,
+          aadVersion: encrypted.aadVersion,
+        }),
+      },
       {
         ciphertext: Buffer.from(encrypted.ciphertext),
         nonce: Buffer.from(encrypted.nonce),
@@ -48,6 +56,8 @@ interface ConnectionRow {
   nonce: Buffer;
   wrappedDek: Buffer;
   kek_version: number;
+  credential_kind: string;
+  aad_version: number;
 }
 
 /** Reads the account's sealed key on the runner login's pool, inside the tenant's RLS scope. Ciphertext only. */
@@ -56,7 +66,8 @@ export function createModelConnectionPort(runnerPool: Pool): ModelConnectionPort
     async get(accountId) {
       const row = await withTenant(runnerPool, accountId, async (client) => {
         const { rows } = await client.query<ConnectionRow>(
-          `SELECT id, provider, status, key_ciphertext AS ciphertext, key_nonce AS nonce, wrapped_dek AS "wrappedDek", kek_version
+          `SELECT id, provider, status, key_ciphertext AS ciphertext, key_nonce AS nonce, wrapped_dek AS "wrappedDek", kek_version,
+                  credential_kind, aad_version
              FROM model_connections WHERE account_id = $1
             ORDER BY CASE status WHEN 'ok' THEN 0 WHEN 'unvalidated' THEN 1 ELSE 2 END,
                      last_validated_at DESC NULLS LAST, created_at DESC, id DESC
@@ -71,7 +82,14 @@ export function createModelConnectionPort(runnerPool: Pool): ModelConnectionPort
       return {
         provider: row.provider,
         connectionId: row.id,
-        encryptedKey: { ciphertext: row.ciphertext, nonce: row.nonce, wrappedDek: row.wrappedDek, kekVersion: row.kek_version },
+        encryptedKey: {
+          ciphertext: row.ciphertext,
+          nonce: row.nonce,
+          wrappedDek: row.wrappedDek,
+          kekVersion: row.kek_version,
+          credentialKind: row.credential_kind,
+          aadVersion: row.aad_version,
+        },
       };
     },
   };
