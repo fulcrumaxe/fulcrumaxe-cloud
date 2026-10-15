@@ -409,6 +409,18 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(t.inputs[1]).not.toHaveProperty("contextSections");
     });
 
+    it("D#601 MEM-3: the memory token figure reaches the run's input when it is a whole number of zero or more (0 included), and is dropped otherwise", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const t = build();
+      const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD };
+      const figures: unknown[] = [0, 37, -1, 1.5, "9", undefined];
+      for (const [i, memoryTokens] of figures.entries()) await t.module.advanceStartRun({ ...base, step: `review:${HEAD}:mem-${i}`, memoryTokens } as never);
+      expect(t.inputs[0]).toMatchObject({ memoryTokens: 0 });
+      expect(t.inputs[1]).toMatchObject({ memoryTokens: 37 });
+      for (const i of [2, 3, 4, 5]) expect(t.inputs[i]).not.toHaveProperty("memoryTokens");
+    });
+
     it("two starts racing for one executor lose to the database's one-live-executor index: the loser is told already_running, nothing is left behind", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "spec_ready" });

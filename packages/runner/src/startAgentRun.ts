@@ -80,6 +80,8 @@ export interface StartAgentRunInput {
   specVersionId?: string | null;
   /** D#600 CX-2: see `ExecutionRun.contextSections`. */
   contextSections?: readonly ContextSection[];
+  /** D#601 MEM-3: see `ExecutionRun.memoryTokens`. */
+  memoryTokens?: number;
   /** D#600 CX-2: see `ExecutionRun.fallbackPrompt`. */
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
@@ -182,6 +184,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,
+    memoryTokens: input.memoryTokens,
     fallbackPrompt: input.fallbackPrompt,
     fallbackContextSections: input.fallbackContextSections,
     capUsd: input.capUsd,

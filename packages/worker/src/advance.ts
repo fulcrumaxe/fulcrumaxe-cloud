@@ -295,6 +295,8 @@ export interface AdvanceRunRequest {
   specVersionId?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#601 MEM-3: the token estimate of the memory in the prompt, stored on the run's context ledger. Absent: not recorded. */
+  memoryTokens?: number;
 }
 
 /** The assembler's section list when it is an array the ledger can hold (at most 64 entries); anything else is dropped, and the run is simply not given sections. The definer checks every entry. */
@@ -716,6 +718,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
       ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
       ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
+      ...(Number.isSafeInteger(req.memoryTokens) && req.memoryTokens! >= 0 ? { memoryTokens: req.memoryTokens } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.

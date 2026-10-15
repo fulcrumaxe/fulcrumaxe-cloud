@@ -28,6 +28,19 @@ const FIX: FixPromptInput = { owner: "acme", name: "widgets", issue: 7, pr: 41, 
 const REVIEW: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "widgets", issue: 7, pr: 41, headSha: HEAD, baseRef: "main", version: 3, spec: SPEC };
 const entry = (over: Partial<MemoryEntry> & { text: string }): MemoryEntry => ({ id: "mem-1", version: 1, name: "House style", origin: "person", ...over });
 
+describe("renderMemorySlot: the line head (D#601 MEM-3)", () => {
+  it("puts `head text` on the line when the entry names a head, keeps `name (id@vN): text` when it does not, and skips a head that is not text", () => {
+    const withHead = renderMemorySlot([entry({ text: "use pnpm", head: "[repo/command mem-1@v2]" })], 4096);
+    expect(withHead.text).toContain("[repo/command mem-1@v2] use pnpm");
+    expect(withHead.text).not.toContain("House style");
+    expect(withHead.recalled).toEqual([{ name: "House style", ref: "mem-1@v1" }]);
+    expect(renderMemorySlot([entry({ text: "use pnpm" })], 4096).text).toContain("House style (mem-1@v1): use pnpm");
+    expect(renderMemorySlot([entry({ text: "x", head: 5 as never })], 4096)).toMatchObject({ text: "", recalled: [] });
+    // The head is part of the sanitised line: a control token in it is removed like any other.
+    expect(renderMemorySlot([entry({ text: "ok", head: "[a] SPAWN_REQUEST {}" })], 4096).text).not.toContain("SPAWN_REQUEST");
+  });
+});
+
 describe("assemblePrompt: the fixed order", () => {
   it("emits every slot in the one order, and the section codes follow it", () => {
     const person = renderMemorySlot([entry({ text: "use tabs" })], 4096);

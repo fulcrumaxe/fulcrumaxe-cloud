@@ -14,6 +14,14 @@ const INPUT = {
   spend: { plan: "starter" },
 } as unknown as StartAgentRunInput;
 
+describe("buildExecutionRun: memoryTokens (D#601 MEM-3)", () => {
+  it("copies the figure, zero included, and leaves it absent when the start gave none", () => {
+    expect(buildExecutionRun("run-1", { ...INPUT, memoryTokens: 25 }).memoryTokens).toBe(25);
+    expect(buildExecutionRun("run-1", { ...INPUT, memoryTokens: 0 }).memoryTokens).toBe(0);
+    expect(buildExecutionRun("run-1", INPUT).memoryTokens).toBeUndefined();
+  });
+});
+
 describe("buildExecutionRun: contextSections", () => {
   it("copies the list, and a start without one leaves the run without one", () => {
     const sections = [{ code: "spec" as const, bytes: 12, sha256: "c".repeat(64), trimmed_bytes: 0 }];

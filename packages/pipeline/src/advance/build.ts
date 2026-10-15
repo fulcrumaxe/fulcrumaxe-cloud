@@ -7,7 +7,8 @@ import { isBuildableKind } from "@fx/discussions";
 import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { agentOutputBlock } from "../plan/envelope.js";
-import { assemblePrompt, emptyMemoryPort, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
@@ -193,7 +194,7 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
  */
 async function recallMemory(pool: Pool, accountId: string, repoId: string | null, workItemId: string, port: MemoryPort): Promise<{ stable?: RenderedMemory; item?: RenderedMemory } | undefined> {
   if (repoId === null) return undefined;
-  const [stable, item] = await Promise.all([port.recall({ accountId, repoId, slot: "stable" }), port.recall({ accountId, repoId, workItemId, slot: "item" })]);
+  const [stable, item] = await Promise.all([port.recall({ accountId, repoId, workItemId, role: "executor", slot: "stable" }), port.recall({ accountId, repoId, workItemId, role: "executor", slot: "item" })]);
   if (stable.length === 0 && item.length === 0) return undefined;
   const budget = await readMemorySlotBytes(pool, accountId, repoId);
   const first = renderMemorySlot(stable, budget);
@@ -236,8 +237,8 @@ export async function startBuildForItem(
   // run exists: nothing is recorded, no job is issued, the item stays where it is, and the customer's machine spends nothing. It is the row `readFacts` just read
   // (the latest unerased version, the one the run will pin), through the same parser the done check uses. Hosted (sandbox) builds are not checked and still start.
   if (isRunnerMode(executionMode) && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
-  // D#600 CX-2: recalled memory goes through the port (until D#601 supplies one, nothing), cut to the repository's slot size.
-  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? emptyMemoryPort);
+  // D#600 CX-2: recalled memory goes through the port (D#601 MEM-3: the approved entries in Postgres), cut to the repository's slot size.
+  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? createMemoryPort(pool));
   // D#597 CC-3: the accepted run notes ride on this run. Their ids are pinned into the step key, so a replay of this step names the same run. A replay whose
   // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
   const baseStep = `build:v${facts.version}:${approvalId}`;
@@ -245,7 +246,7 @@ export async function startBuildForItem(
   const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
   const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(memory ? { memory } : {}) });
-  const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+  const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
   // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
   if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
 
