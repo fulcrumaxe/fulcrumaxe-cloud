@@ -54,8 +54,11 @@ export function isNextRoleRequestField(value: unknown): value is NextRoleRequest
  *   fewer results than expected.
  * - `"request_refused"` — the orchestrator declined to start a role you
  *   requested (e.g. a per-work-item round cap). `reason` explains why.
+ * - `"decision_resolved"` — a `decision_request` you made was answered (by a person, or by policy
+ *   that let the work go ahead). How the chosen option reaches the role is the resume task's to add.
+ * - `"decision_denied"` — a `decision_request` you made was refused. Do not take the action.
  */
-export type ResumeCause = "child_result" | "timeout" | "request_refused";
+export type ResumeCause = "child_result" | "timeout" | "request_refused" | "decision_resolved" | "decision_denied";
 
 /** The typed context the orchestrator attaches to every resumed run. */
 export interface ResumeContext {
@@ -65,7 +68,7 @@ export interface ResumeContext {
   reason?: string;
 }
 
-export const RESUME_CAUSES: readonly ResumeCause[] = ["child_result", "timeout", "request_refused"];
+export const RESUME_CAUSES: readonly ResumeCause[] = ["child_result", "timeout", "request_refused", "decision_resolved", "decision_denied"];
 
 export function isResumeCause(value: unknown): value is ResumeCause {
   return typeof value === "string" && (RESUME_CAUSES as readonly string[]).includes(value);
