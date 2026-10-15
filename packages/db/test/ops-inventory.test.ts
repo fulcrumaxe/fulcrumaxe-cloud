@@ -69,5 +69,10 @@ describe('ops inventory (OPS-C1)', () => {
     expect(await inventory(fn({ definer: true, searchPath: true, acl: 'GRANT EXECUTE ON FUNCTION ops_fixture_fn() TO PUBLIC;' }))).toEqual([
       'function:ops_fixture_fn():execute:public',
     ]);
+    for (const role of ['platform_ops', 'partner_user']) {
+      expect(await inventory(fn({ definer: true, searchPath: true, acl: `GRANT EXECUTE ON FUNCTION ops_fixture_fn() TO ${role};` }))).toEqual([
+        `function:ops_fixture_fn():execute:${role}`,
+      ]);
+    }
   });
 });

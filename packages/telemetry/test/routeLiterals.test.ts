@@ -14,6 +14,9 @@ describe("routeTemplate keeps the adopted routes readable and still hides anythi
     ["/api/gh-proxy/repos/octo-org/secret-repo/pulls", "/api/gh-proxy/:id/:id/:id/:id"],
     ["/api/csp-report", "/api/csp-report"],
     ["/api/rum", "/api/rum"],
+    ["/api/auth/login/options", "/api/auth/login/options"],
+    ["/api/auth/enroll/verify?token=abc", "/api/auth/enroll/verify"],
+    ["/api/health", "/api/health"],
   ])("%s -> %s", (input, expected) => {
     expect(routeTemplate(input)).toBe(expected);
   });

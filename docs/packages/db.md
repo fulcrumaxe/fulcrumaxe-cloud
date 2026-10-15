@@ -175,6 +175,14 @@ functions. Staff identity lives in `platform_staff`, `staff_webauthn_credentials
 anyone but `ops_console`, and an ops function that is not SECURITY DEFINER with a pinned `search_path` or is executable by `PUBLIC` or
 `app_user`.
 
+**Staff enrollment (migration 0802).** Four more `ops_owner` definer functions, executable by `ops_console` only:
+`ops_enroll_lookup` and `ops_enroll_complete` (a single-use, 15-minute enrollment token is spent together with the one passkey it
+registers, in one statement), `ops_challenge_consume` (spends a signed WebAuthn challenge once, so a replay is refused) and
+`ops_auth_rate_take` (the rate limit on `/api/auth/*`, keyed on a hash of the client address, and the sign-out deny-list, keyed on a
+hash of the session id; rows older than 8 hours are swept in the same call). `ops_owner` gains exactly the column grants they need,
+plus the insert-only tables `staff_used_challenges` and `staff_auth_rate`; `ops_console` still holds no table, column or sequence
+privilege.
+
 See [`../security.md`](../security.md) for the tenant-isolation model this
 package implements. `withTenant`'s own comment flags one specific
 Postgres behavior worth knowing: for a table whose SELECT policy is more

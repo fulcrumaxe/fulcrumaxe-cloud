@@ -190,9 +190,9 @@ describe('staff console roles, tables and functions (OPS-C1)', () => {
 
       // The insert works as ops_owner, and the table refuses an empty reason.
       const insert = `INSERT INTO staff_audit_log (staff_id, action, reason) VALUES ($1, 'ops.test', $2)`;
-      await run('ops_owner', async (c) => expect((await c.query(insert, [staff, 'because'])).rowCount).toBe(1));
-      await expect(run('ops_owner', (c) => c.query(insert, [staff, '  ']))).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
-      await expect(run('ops_owner', (c) => c.query(`INSERT INTO staff_audit_log (staff_id, action) VALUES ($1, 'ops.test')`, [staff]))).rejects.toMatchObject({ code: '23502' });
+      await run('ops_owner', async (c) => expect((await c.query(insert, [staff, 'because'])).rowCount).toBe(1), staff);
+      await expect(run('ops_owner', (c) => c.query(insert, [staff, '  ']), staff)).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
+      await expect(run('ops_owner', (c) => c.query(`INSERT INTO staff_audit_log (staff_id, action) VALUES ($1, 'ops.test')`, [staff]), staff)).rejects.toMatchObject({ code: '23502' });
     } finally {
       await admin.query(`DELETE FROM platform_staff WHERE id = $1`, [staff]);
     }
