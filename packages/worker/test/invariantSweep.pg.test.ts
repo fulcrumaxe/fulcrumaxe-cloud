@@ -6,7 +6,7 @@ import { writeRunStatus } from "@fx/runner";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
-import { INVARIANTS, sweepInvariants } from "../src/invariantSweep.js";
+import { HIT_LIMIT, INVARIANTS, sweepInvariants } from "../src/invariantSweep.js";
 
 /**
  * [pg] D#597 CC-8: the three invariants, each against a real Postgres through the run-writer login the cron uses. A fixture per rule raises
@@ -23,24 +23,51 @@ describe("platform invariant sweep [pg]", () => {
   const reports: Array<{ code?: string }> = [];
   const warns: string[] = [];
 
-  const sweep = (o: { i2?: boolean; graceSeconds?: number; pool?: Pick<Pool, "query"> } = {}) =>
+  /** Every run this file ever made (never cleared): a hit on any other id belongs to a concurrent suite sharing the database and is not ours to count. */
+  const ever = new Set<string>();
+  let lastHit: string | undefined;
+
+  /** One raw pass of the three rules. Its `raised` counts are database-wide, so only the structural cases (`checked`, `failed`, query count) read it. */
+  const pass = (o: { i2?: boolean; graceSeconds?: number; pool?: Pick<Pool, "query"> } = {}) =>
     sweepInvariants({
       pool: (o.pool ?? writerPool) as Pool,
-      report: (_e, ctx) => reports.push({ code: ctx.code }),
-      warn: (l) => warns.push(l),
+      // The sweep warns with the hit's run id and then reports it; a report counts only when that run is one of ours.
+      report: (_e, ctx) => {
+        if (lastHit !== undefined && ever.has(lastHit)) reports.push({ code: ctx.code });
+      },
+      warn: (l) => {
+        warns.push(l);
+        try {
+          lastHit = (JSON.parse(l) as { run_id?: string }).run_id;
+        } catch {
+          lastHit = undefined;
+        }
+      },
       i2Enabled: o.i2 ?? false,
       graceSeconds: o.graceSeconds ?? 0,
       windowSeconds: 3600,
     });
 
-  /** One sweep returns at most `limit` hits per rule, and the database is shared with other suites' runs, so sweep until a pass raises nothing. */
-  const drain = async (o: { i2?: boolean } = {}): Promise<void> => {
+  /**
+   * Sweep until no rule is cut off by its per-pass hit limit (the database is shared with other suites' runs, so one pass may not reach our
+   * rows), then answer with the hits on OUR runs only. `raised` counts how many of this file's runs the sweep alerted, per rule.
+   */
+  const sweep = async (o: { i2?: boolean; graceSeconds?: number } = {}): Promise<{ raised: Record<string, number>; failed: number }> => {
+    const raised: Record<string, number> = { stage_not_moved: 0, no_activity: 0, usage_not_recorded: 0 };
+    let failed = 0;
     for (let i = 0; i < 100; i++) {
-      const out = await sweep(o);
-      if (Object.values(out.raised).every((n) => n === 0)) return;
+      const before = warns.length;
+      const out = await pass(o);
+      failed += out.failed;
+      for (const l of warns.slice(before)) {
+        const hit = JSON.parse(l) as { event: string; invariant: string; run_id?: string };
+        if (hit.event === "platform.invariant" && hit.run_id !== undefined && ever.has(hit.run_id)) raised[hit.invariant]!++;
+      }
+      if (Object.values(out.raised).every((n) => n < HIT_LIMIT)) return { raised, failed };
     }
     throw new Error("the sweep never ran dry");
   };
+  const drain = async (o: { i2?: boolean } = {}): Promise<void> => void (await sweep(o));
 
   beforeAll(async () => {
     adminPool = createPool(process.env.WORKER_DATABASE_URL!);
@@ -78,6 +105,7 @@ describe("platform invariant sweep [pg]", () => {
       [id, acct.accountId, o.item === undefined ? null : o.item, o.role ?? "executor", o.runtime ?? "local", o.status ?? "succeeded", o.envelope === undefined ? null : JSON.stringify(o.envelope), runner ? "runner_local" : null, runner ? acct.repoId : null],
     );
     made.push(id);
+    ever.add(id);
     return id;
   }
   let seq = 1;
@@ -158,7 +186,7 @@ describe("platform invariant sweep [pg]", () => {
 
     it("the rule does not run while the constant is off", async () => {
       const r = await run(A, { runtime: "runner" });
-      const out = await sweep({ i2: false });
+      const out = await pass({ i2: false });
       expect(out.raised.no_activity).toBeUndefined();
       expect(out.checked).toBe(2);
       expect(await alerts(r)).toEqual([]);
@@ -223,10 +251,10 @@ describe("platform invariant sweep [pg]", () => {
   it("a whole sweep is at most three queries, and a failing rule does not stop the others", async () => {
     const seen: string[] = [];
     const counting = { query: ((text: string, values?: unknown[]) => (seen.push(text), writerPool.query(text, values))) as Pool["query"] };
-    await sweep({ i2: true, pool: counting });
+    await pass({ i2: true, pool: counting });
     expect(seen.length).toBe(3);
     const broken = { query: (async (text: string) => { if (text.includes("no_activity")) throw new Error("boom"); return { rows: [] }; }) as unknown as Pool["query"] };
-    const out = await sweep({ i2: true, pool: broken });
+    const out = await pass({ i2: true, pool: broken });
     expect(out).toMatchObject({ checked: 3, failed: 1 });
     expect(warns.at(-1)).toBe(JSON.stringify({ event: "platform.invariant_failed", invariant: "no_activity" }));
   });
