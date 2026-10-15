@@ -16,6 +16,7 @@
     "@fx/billing": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/decisions": "workspace:*",
     "@fx/discussions": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",

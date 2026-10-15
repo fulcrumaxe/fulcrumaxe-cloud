@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { withTenant } from './withTenant.js';
+import { getCatalogueEntry } from '@fx/decisions';
 
 /**
  * Typed reads and the append-only dial write over the two tables
@@ -199,52 +200,74 @@ export async function writeDialSetting(
   const { accountId, repoId, decisionType, disposition } = input;
   const preset = input.preset ?? null;
 
-  return withTenant(pool, accountId, changedBy, async (client) => {
-    // Deliberately NOT "... FOR UPDATE": Postgres requires the UPDATE
-    // privilege (not just SELECT) to take a row lock via a locking clause,
-    // and app_user is deliberately never granted UPDATE on
-    // decision_settings at all (DP2 item 2, C8) -- a FOR UPDATE here would
-    // make every legitimate owner/admin write fail with "permission denied"
-    // before it ever reached the owner/admin check. Two concurrent writers
-    // for the same (repoId, decisionType) key can therefore both read the
-    // same "current" version and both compute the same nextVersion; the
-    // loser is caught instead by decision_settings' UNIQUE (account_id,
-    // repo_id, decision_type, version) constraint, failing with a 23505
-    // unique violation rather than silently overwriting the winner's row.
-    const { rows: previousRows } = await client.query<DecisionSettingRow>(
-      `SELECT * FROM decision_settings
-       WHERE account_id = $1 AND repo_id = $2 AND decision_type = $3
-       ORDER BY version DESC
-       LIMIT 1`,
-      [accountId, repoId, decisionType],
-    );
-    const previous = previousRows[0] ? mapDecisionSettingRow(previousRows[0]) : null;
-    const nextVersion = previous ? previous.version + 1 : 1;
+  return withTenant(pool, accountId, changedBy, (client) =>
+    appendDialVersion(client, { accountId, repoId, decisionType, disposition, preset, changedBy }),
+  );
+}
 
-    const { rows: insertedRows } = await client.query<DecisionSettingRow>(
-      `INSERT INTO decision_settings
-         (account_id, repo_id, decision_type, disposition, preset, version, changed_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [accountId, repoId, decisionType, disposition, preset, nextVersion, changedBy],
-    );
-    const inserted = mapDecisionSettingRow(insertedRows[0]!);
+export interface AppendDialVersionInput {
+  accountId: string;
+  repoId: string;
+  decisionType: string;
+  disposition: string;
+  preset: string | null;
+  /** The authenticated caller; see `WriteDialSettingContext`. */
+  changedBy: string;
+}
 
-    await client.query(
-      `SELECT audit_write('decision_dial_changed', $1::jsonb)`,
-      [
-        JSON.stringify({
-          actor: changedBy,
-          decision_type: decisionType,
-          repo_id: repoId,
-          previous: previous ? previous.disposition : null,
-          new: disposition,
-        }),
-      ],
-    );
+/**
+ * The body of `writeDialSetting`, for a caller that already holds a `withTenant`
+ * transaction opened as `changedBy` and wants several dials in one commit (the
+ * Autonomy preset, D#7 DP10a): one version row plus one `audit_write`, so the
+ * dial history and its audit trail are never out of step.
+ */
+export async function appendDialVersion(client: PoolClient, input: AppendDialVersionInput): Promise<DecisionSetting> {
+  const { accountId, repoId, decisionType, disposition, preset, changedBy } = input;
+  // Deliberately NOT "... FOR UPDATE": Postgres requires the UPDATE
+  // privilege (not just SELECT) to take a row lock via a locking clause,
+  // and app_user is deliberately never granted UPDATE on
+  // decision_settings at all (DP2 item 2, C8) -- a FOR UPDATE here would
+  // make every legitimate owner/admin write fail with "permission denied"
+  // before it ever reached the owner/admin check. Two concurrent writers
+  // for the same (repoId, decisionType) key can therefore both read the
+  // same "current" version and both compute the same nextVersion; the
+  // loser is caught instead by decision_settings' UNIQUE (account_id,
+  // repo_id, decision_type, version) constraint, failing with a 23505
+  // unique violation rather than silently overwriting the winner's row.
+  const { rows: previousRows } = await client.query<DecisionSettingRow>(
+    `SELECT * FROM decision_settings
+     WHERE account_id = $1 AND repo_id = $2 AND decision_type = $3
+     ORDER BY version DESC
+     LIMIT 1`,
+    [accountId, repoId, decisionType],
+  );
+  const previous = previousRows[0] ? mapDecisionSettingRow(previousRows[0]) : null;
+  const nextVersion = previous ? previous.version + 1 : 1;
 
-    return inserted;
-  });
+  const { rows: insertedRows } = await client.query<DecisionSettingRow>(
+    `INSERT INTO decision_settings
+       (account_id, repo_id, decision_type, disposition, preset, version, changed_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [accountId, repoId, decisionType, disposition, preset, nextVersion, changedBy],
+  );
+  const inserted = mapDecisionSettingRow(insertedRows[0]!);
+
+  await client.query(
+    `SELECT audit_write('decision_dial_changed', $1::jsonb)`,
+    [
+      JSON.stringify({
+        actor: changedBy,
+        decision_type: decisionType,
+        repo_id: repoId,
+        // First write: the value in force until now was the catalogue default (null only for a type the catalogue does not know).
+        previous: previous ? previous.disposition : (getCatalogueEntry(decisionType)?.defaultDisposition ?? null),
+        new: disposition,
+      }),
+    ],
+  );
+
+  return inserted;
 }
 
 /** Receipts for one work item, newest first -- a typed read over decision_receipts (app_user is SELECT-only; see migrations/0400_decisions.sql). */

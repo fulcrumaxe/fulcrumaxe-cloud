@@ -317,7 +317,7 @@ describe("runner-run approval and the dial [pg]", () => {
       ]);
       expect((await get(f, f.m1, repo)).body).toMatchObject({ disposition: "act", source: "preset", version: 2, can_change: false });
       expect(await audits(f)).toEqual([
-        { actor: f.o1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: null, new: "ask" },
+        { actor: f.o1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "announce", new: "ask" },
         { actor: f.a1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "ask", new: "act" },
       ]);
     });

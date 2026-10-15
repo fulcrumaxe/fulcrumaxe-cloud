@@ -184,6 +184,21 @@ describe('writeDialSetting: owner/admin only, append-only, audited', () => {
     expect(rows[0].payload.new).toBe('ask');
   });
 
+  it('the first write of a catalogue dial records the catalogue default in force as previous, not null', async () => {
+    await writeDialSetting(
+      { pool: appUserPool, principal: refs.userId },
+      { accountId: refs.accountId, repoId: refs.repoId, decisionType: 'test_strategy_choice', disposition: 'act' },
+    );
+    const { rows } = await admin.query<{ payload: AuditPayload }>(
+      `SELECT payload FROM audit_log WHERE account_id = $1 AND action = 'decision_dial_changed'
+       AND payload->>'decision_type' = 'test_strategy_choice'`,
+      [refs.accountId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload.previous).toBe('ask');
+    expect(rows[0].payload.new).toBe('act');
+  });
+
   it('an admin (not just an owner) can also write a dial as themselves, and audit_log.actor is the caller', async () => {
     const adminMemberUserId = randomUUID();
     await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [
