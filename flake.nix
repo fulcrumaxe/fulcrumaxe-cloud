@@ -138,7 +138,8 @@
         # pkgs.actionlint: ci-workflow.test.mjs validates every workflow file with it.
         # pkgs.dash and pkgs.shellcheck: the runner's installSh test requires both under CI=1 (it runs install.sh under dash and lints it).
         # pkgs.curl: infra/microvm-image/fetch-pin.sh calls curl (ci-workflow.test.mjs runs it with a wrong sha256).
-        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint pkgs.dash pkgs.shellcheck pkgs.curl ];
+        # pkgs.gawk, pkgs.diffutils, pkgs.perl: the runner's installSh and release-verify-draft tests call awk, cmp and shasum (perl ships shasum). The NixOS runner has none of them on its own PATH.
+        packages = sharedPackages ++ [ (pkgs.python312.withPackages (ps: [ ps.pyyaml ])) pkgs.actionlint pkgs.dash pkgs.shellcheck pkgs.curl pkgs.gawk pkgs.diffutils pkgs.perl ];
         LD_LIBRARY_PATH = sharedLdLibraryPath;
         # The nix-provided browsers, as a derivation attribute (see sharedShellHook).
         PLAYWRIGHT_BROWSERS_PATH = "${playwrightBrowsers}";

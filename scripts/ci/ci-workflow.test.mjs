@@ -794,7 +794,7 @@ test("flake: the ci shell shares its packages with default and has only python3 
   const flake = readFileSync(path.join(repoRoot, "flake.nix"), "utf8");
   const ciShell = /\bci = pkgs\.mkShell \{([\s\S]*?)\n      \};/.exec(flake)?.[1];
   assert.ok(ciShell, "no ci shell in flake.nix");
-  assert.match(ciShell, /packages = sharedPackages \+\+ \[ \(pkgs\.python312\.withPackages \(ps: \[ ps\.pyyaml \]\)\) pkgs\.actionlint pkgs\.dash pkgs\.shellcheck pkgs\.curl \];/);
+  assert.match(ciShell, /packages = sharedPackages \+\+ \[ \(pkgs\.python312\.withPackages \(ps: \[ ps\.pyyaml \]\)\) pkgs\.actionlint pkgs\.dash pkgs\.shellcheck pkgs\.curl pkgs\.gawk pkgs\.diffutils pkgs\.perl \];/);
   assert.doesNotMatch(ciShell.replace(/^\s*#.*$/gm, ""), /pythonEnv|python312Override|anthropic|fastapi|sqlite|duckdb/);
   const defaultShell = /\bdefault = pkgs\.mkShell \{([\s\S]*?)\n        shellHook/.exec(flake)?.[1] ?? "";
   assert.match(defaultShell, /sharedPackages \+\+/);

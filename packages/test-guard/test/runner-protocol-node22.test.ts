@@ -12,6 +12,9 @@ import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const ci = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
+// runner-protocol first, then fx-runner; each inside the ci shell, Node 22 from the same flake, vitest's entry run by that node.
+const TWO_PACKAGE_SHAPE =
+  /nix develop \.#ci --command sh -c 'cd packages\/runner-protocol && nix shell --inputs-from \.\.\/\.\. nixpkgs#nodejs_22 --command node node_modules\/vitest\/vitest\.mjs run'\n\s+nix develop \.#ci --command sh -c 'cd packages\/fx-runner && nix shell --inputs-from \.\.\/\.\. nixpkgs#nodejs_22 --command node node_modules\/vitest\/vitest\.mjs run'/;
 const STEP = "Runner protocol tests on Node 22";
 
 /** The text of the named step, up to the next step or job. */
@@ -62,8 +65,16 @@ describe("the Node 22 step in CI", () => {
     expect(step).not.toMatch(/pnpm|npx/);
   });
 
-  it("then runs the local runner package the same way, under the same Node", () => {
-    expect(step).toMatch(/cd packages\/runner-protocol\n.*vitest\.mjs run\n\s+cd \.\.\/fx-runner\n\s+nix shell --inputs-from \.\.\/\.\. nixpkgs#nodejs_22 --command node node_modules\/vitest\/vitest\.mjs run/);
+  it("then runs the local runner package the same way, under the same Node, inside the ci shell", () => {
+    expect(step).toMatch(TWO_PACKAGE_SHAPE);
+  });
+
+  it("the two-package shape rejects a step without nodejs_22, with npx, or in the wrong order", () => {
+    const good = step.split("\n").filter((l) => /nix develop/.test(l)).join("\n");
+    expect(good).toMatch(TWO_PACKAGE_SHAPE);
+    expect(good.replaceAll("nixpkgs#nodejs_22", "nixpkgs#nodejs_24")).not.toMatch(TWO_PACKAGE_SHAPE);
+    expect(good.replaceAll("--command node node_modules/vitest/vitest.mjs run", "--command npx vitest run")).not.toMatch(TWO_PACKAGE_SHAPE);
+    expect(good.split("\n").reverse().join("\n")).not.toMatch(TWO_PACKAGE_SHAPE);
   });
 });
 
