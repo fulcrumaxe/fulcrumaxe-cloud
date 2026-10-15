@@ -1,3 +1,5 @@
+import type { ContextSection } from "@fx/runner";
+
 /**
  * D#483 P2: what the stage driver's pipeline steps may do with agent runs. The worker (which owns the runner pool and
  * knows the account and the work item) implements these over its run starter; this package never sees the pool that
@@ -29,6 +31,8 @@ export interface AdvanceRunRequest {
    * version it was started from. Absent: the run pins no version.
    */
   specVersionId?: string;
+  /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
+  contextSections?: readonly ContextSection[];
 }
 
 export type AdvanceRunStart = { ok: true; runId: string } | { ok: false; reason: string };

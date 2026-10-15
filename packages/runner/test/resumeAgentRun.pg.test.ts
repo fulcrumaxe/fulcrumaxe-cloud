@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { startAgentRun, buildExecutionRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { insertAgentRun } from "../src/runStatusWriter.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
@@ -145,5 +145,45 @@ describe("D#2 H09b2, H09.9: resume [pg]", () => {
     // proving the fallback actually ran, not just that `resume` itself
     // didn't throw.
     expect(harness.fakeSandbox.state.created.some((c) => c.sandboxName === sandboxName)).toBe(true);
+  });
+
+  it("D#600 CX-2: the fresh session a lost snapshot falls back to gets the prompt that carries the Spec body, not the 'unchanged' one", async () => {
+    const { accountId, repoId, workItemId } = await seedExecutorFixture();
+    const harness = createSandboxTargetHarness(db.runWriterPool);
+    const input: StartAgentRunInput = {
+      ...executorInput(accountId, repoId, workItemId),
+      prompt: "Spec v3 unchanged (sha256 abc)",
+      fallbackPrompt: "SPEC (version 3):\nthe whole Spec body",
+      fallbackContextSections: [{ code: "spec", bytes: 38, sha256: "d".repeat(64), trimmed_bytes: 0 }],
+    };
+    const sandboxName = sandboxNameFor({ role: "executor", runId: "unused-for-persistent-roles", accountId, repoId, pr: 7 });
+    harness.fakeSandbox.failResumeWithNotFound(sandboxName);
+    const target = new SandboxTarget(harness.deps);
+    const { id: runId } = await insertAgentRun(db.runWriterPool, {
+      id: randomUUID(), accountId, workItemId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: repoId, dispatchPrNumber: 7,
+    });
+    const run = buildExecutionRun(runId, input);
+    await target.admit(run, db.admin);
+    await target.resume(run, "some-expired-session-id");
+    await vi.waitFor(() => expect(harness.runtime.startCalls).toHaveLength(1));
+    expect(harness.runtime.startCalls[0]!.prompt).toBe("SPEC (version 3):\nthe whole Spec body");
+    expect(harness.runtime.startCalls[0]!.prompt).not.toContain("unchanged");
+  });
+
+  it("D#600 CX-2: with no fallback prompt the fresh session gets the run's own prompt, as before", async () => {
+    const { accountId, repoId, workItemId } = await seedExecutorFixture();
+    const harness = createSandboxTargetHarness(db.runWriterPool);
+    const input = executorInput(accountId, repoId, workItemId);
+    const sandboxName = sandboxNameFor({ role: "executor", runId: "unused-for-persistent-roles", accountId, repoId, pr: 7 });
+    harness.fakeSandbox.failResumeWithNotFound(sandboxName);
+    const target = new SandboxTarget(harness.deps);
+    const { id: runId } = await insertAgentRun(db.runWriterPool, {
+      id: randomUUID(), accountId, workItemId, role: "executor", runtime: "production", executionMode: "sandbox", dispatchRepoId: repoId, dispatchPrNumber: 7,
+    });
+    const run = buildExecutionRun(runId, input);
+    await target.admit(run, db.admin);
+    await target.resume(run, "some-expired-session-id");
+    await vi.waitFor(() => expect(harness.runtime.startCalls).toHaveLength(1));
+    expect(harness.runtime.startCalls[0]!.prompt).toBe("implement it");
   });
 });

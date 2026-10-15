@@ -260,6 +260,13 @@ export interface ExecutionRun {
   workdir?: string;
   /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
   contextSections?: readonly ContextSection[];
+  /**
+   * D#600 CX-2: a fix round's resume may send a short prompt (the Spec "unchanged") because the session it continues holds the Spec. When that session's
+   * snapshot has expired, `SandboxTarget.resume` starts a fresh session instead, which holds nothing: it is given this prompt (the same round with the
+   * Spec body) and these sections instead. Absent: the fresh session gets `prompt`.
+   */
+  fallbackPrompt?: string;
+  fallbackContextSections?: readonly ContextSection[];
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
   cloneRepo?: { owner: string; name: string };
   capUsd: number;

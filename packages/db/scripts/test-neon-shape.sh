@@ -2595,6 +2595,10 @@ RUNNER_NAME_INITIAL_DEFINER_PRIVILEGES="'column runner_settings.runner_id SELECT
 RUNNER_REPOS_DEFINER_FUNCTIONS="'runner_repos_set'"
 RUNNER_REPOS_DEFINER_PRIVILEGES="'column runners.id SELECT','column runners.account_id SELECT','column runners.registered_by SELECT','column runners.allowed_repo_ids SELECT','column runners.revoked_at SELECT','column runners.allowed_repo_ids UPDATE','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT'"
 
+# D#600 CX-2 (0796): the role that writes repo_context_settings (see the migration header): its exact privileges, its one function, and the table's shape.
+REPO_CONTEXT_SETTINGS_DEFINER_FUNCTIONS="'repo_context_settings_apply'"
+REPO_CONTEXT_SETTINGS_DEFINER_PRIVILEGES="'column repo_context_settings.account_id SELECT','column repo_context_settings.repo_id SELECT','column repo_context_settings.memory_slot_bytes SELECT','column repo_context_settings.account_id INSERT','column repo_context_settings.repo_id INSERT','column repo_context_settings.memory_slot_bytes INSERT','column repo_context_settings.updated_by INSERT','column repo_context_settings.memory_slot_bytes UPDATE','column repo_context_settings.updated_by UPDATE','column repo_context_settings.updated_at UPDATE','table repo_context_settings DELETE','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
+
 # Prints the oid(s) of the function(s) <role> owns when each is exactly one of the given signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp,
 # with an ACL that holds app_user and nobody else but the owner, no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
 check_runner_fleet_exception_shape() {
@@ -3310,7 +3314,8 @@ RUNNER_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_sett
 RUNNER_NAME_INITIAL_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_name_initial_definer 'public.runner_name_initial(uuid,text)')"
 RUNNER_PROVISIONING_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_provisioning_definer 'public.runner_provisioning_token_mint(text,text,text,uuid[],text[],integer)' 'public.runner_provisioning_token_list()' 'public.runner_provisioning_token_revoke(uuid)' 'public.runner_provisioning_token_account(text)' 'public.runner_provisioning_register(text,jsonb,text,integer,text)' 'public.runner_provisioning_token_revoke_for_member()')"
 RUNNER_REPOS_RESULT="$(check_runner_fleet_exception_shape fx_neon runner_repos_definer 'public.runner_repos_set(uuid,uuid[])')"
-for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT" "$RUNNER_PROVISIONING_RESULT" "$RUNNER_NAME_INITIAL_RESULT" "$RUNNER_REPOS_RESULT"; do
+REPO_CONTEXT_SETTINGS_RESULT="$(check_runner_fleet_exception_shape fx_neon repo_context_settings_definer 'public.repo_context_settings_apply(uuid,integer)')"
+for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT" "$RUNNER_PROVISIONING_RESULT" "$RUNNER_NAME_INITIAL_RESULT" "$RUNNER_REPOS_RESULT" "$REPO_CONTEXT_SETTINGS_RESULT"; do
   if [[ "$fleet_result" == SHAPE_FAIL:* ]]; then
     echo "neon-shape: ${fleet_result#SHAPE_FAIL:}" >&2
     exit 1
@@ -3320,7 +3325,7 @@ for fleet_result in "$RUNNER_FACTS_RESULT" "$RUNNER_SETTINGS_RESULT" "$RUNNER_PR
     exit 1
   fi
 done
-RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUN_HANDOFF_RESULT:-0}, ${RUN_HANDOFF_COMPLETE_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}, ${RUNNER_PROVISIONING_RESULT:-0}, ${RUNNER_NAME_INITIAL_RESULT:-0}, ${RUNNER_REPOS_RESULT:-0}, ${RUN_CONTEXT_LEDGER_RESULT:-0}, ${MEMORY_RESULT:-0}"
+RECEIPT_FILTER="${RECEIPT_RESULT:-0}, ${RECEIPT1_RESULT:-0}, ${ASK_RESULT:-0}, ${METERING_RESULT:-0}, ${ERROR_EVENT_RESULT:-0}, ${GUARD_DEFINER_RESULT:-0}, ${SANDBOX_REAPER_RESULT:-0}, ${SANDBOX_EPHEMERAL_RESULT:-0}, ${SANDBOX_INVENTORY_RESULT:-0}, ${SANDBOX_IDLE_RESULT:-0}, ${SANDBOX_CLAIM_GUARD_RESULT:-0}, ${PLAN_KIND_AUDIT_RESULT:-0}, ${SANDBOX_REAP_SETTINGS_RESULT:-0}, ${SANDBOX_SETTLE_RESULT:-0}, ${WORK_ITEM_HALT_RESULT:-0}, ${PROPOSAL_WI_RESULT:-0}, ${RUNNER_LEASE_RESULT:-0}, ${RUNNER_APPROVAL_RESULT:-0}, ${RUNNER_NOTICE_RESULT:-0}, ${RUNNER_MODE_SWITCH_RESULT:-0}, ${WORK_ITEM_PLACEMENT_RESULT:-0}, ${RUN_HANDOFF_RESULT:-0}, ${RUN_HANDOFF_COMPLETE_RESULT:-0}, ${RUNNER_SANDBOX_STATUS_RESULT:-0}, ${RUNNER_GIT_RESULT:-0}, ${RUNNER_GIT_BYTES_RESULT:-0}, ${RUNNER_CONSENT_RESULT:-0}, ${RUNNER_AUTO_APPROVE_RESULT:-0}, ${RUNNER_USAGE_RESULT:-0}, ${RUNNER_ALLOWANCE_RESULT:-0}, ${INVARIANT_SWEEP_RESULT:-0}, ${RUNNER_CAPACITY_RESULT:-0}, ${WORK_ITEM_CORRECTION_RESULT:-0}, ${RUNNER_FACTS_RESULT:-0}, ${RUNNER_SETTINGS_RESULT:-0}, ${RUNNER_CONCURRENCY_RESULT:-0}, ${RUNNER_PROVISIONING_RESULT:-0}, ${RUNNER_NAME_INITIAL_RESULT:-0}, ${RUNNER_REPOS_RESULT:-0}, ${RUN_CONTEXT_LEDGER_RESULT:-0}, ${MEMORY_RESULT:-0}, ${REPO_CONTEXT_SETTINGS_RESULT:-0}"
 BAD_DEFINERS="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "
   SELECT string_agg(n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') owner=' || pg_get_userbyid(p.proowner), ', ')
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -3384,6 +3389,8 @@ check_runner_claim_index_shape fx_neon
 check_runner_fleet_table_shape fx_neon runner_provisioning_tokens
 check_sandbox_net_role_shape fx_neon memory_definer MEMORY_DEFINER
 check_memory_table_shape fx_neon
+check_sandbox_net_role_shape fx_neon repo_context_settings_definer REPO_CONTEXT_SETTINGS_DEFINER
+check_runner_fleet_table_shape fx_neon repo_context_settings
 OPS_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','platform_ops','USAGE');")"
 APP_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','app_user','USAGE');")"
 PARTNER_USAGE="$("${PSQL[@]}" -U fx_migrator -d fx_neon -tA -c "SELECT pg_has_role('fx_migrator','partner_user','USAGE');")"

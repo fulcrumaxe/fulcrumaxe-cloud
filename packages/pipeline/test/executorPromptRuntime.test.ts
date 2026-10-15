@@ -83,7 +83,7 @@ describe("buildExecutorPrompt by runtime", () => {
 });
 
 describe("buildFixPrompt by runtime", () => {
-  it("A2: the sandbox fix prompt is byte-identical to the one before this change", () => {
+  it("A2: the sandbox fix prompt is its golden: the same text as before, with the findings after the Spec (D#600 CX-2)", () => {
     expect(buildFixPrompt(FIX)).toBe(golden("fix-prompt.sandbox.txt"));
     expect(buildFixPrompt({ ...FIX, runtime: "sandbox" })).toBe(golden("fix-prompt.sandbox.txt"));
   });

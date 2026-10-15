@@ -691,8 +691,13 @@ export class SandboxTarget implements ExecutionTarget {
       if (err instanceof SandboxNotFoundError) {
         // H09.9's own fallback: the snapshot is gone, so there is nothing
         // to resume -- dispatch a fresh sandbox under this same run
-        // instead of failing the whole fix round.
-        return this.dispatch(run);
+        // instead of failing the whole fix round. D#600 CX-2: that fresh session holds nothing the resumed one did, so a
+        // round that sent only "Spec unchanged" supplies the prompt that carries the Spec body for exactly this case.
+        return this.dispatch(
+          run.fallbackPrompt === undefined
+            ? run
+            : { ...run, prompt: run.fallbackPrompt, contextSections: run.fallbackContextSections },
+        );
       }
       throw err;
     }

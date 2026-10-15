@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { RunPrecheckRefusedError, insertAgentRun, writeRunStatus, type CancelResult, type ExecutionRun, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
@@ -232,6 +232,42 @@ describe("advance: placement at run boundaries [pg]", { timeout: 60_000 }, () =>
     const none = await setup("runner_local");
     expect(await m.module.advanceLoadItem(none.a.accountId, none.w)).toMatchObject({ executionMode: "runner_local", prExecutionMode: "runner_local" });
   });
+  it("a cross-side fix round starts the fresh session from the body-carrying prompt, its sections and the parent's pin; without a fallback it sends the caller's prompt", async () => {
+    const sections = [{ code: "spec", bytes: 4, sha256: "c".repeat(64), trimmed_bytes: 0 }] as const;
+    const held = { version: 1, sha256: createHash("sha256").update("spec").digest("hex") };
+
+    // The held pin matches the parent's, so the short prompt would be valid for a resume; a fresh session holds nothing and must get the body.
+    const t = await setup("sandbox");
+    const m = module();
+    await builtRun(t, "sandbox");
+    await place(t, "runner");
+    await t.note("check the migration first");
+    const fix = await m.module.advanceStartFix(t.who, { ...fixReq(t), prompt: "Spec v1 unchanged", held, fallbackPrompt: "SPEC v1: the full body", fallbackContextSections: sections });
+    expect(fix.ok).toBe(true);
+    expect(m.resumed).toEqual([]);
+    expect(m.started).toHaveLength(1);
+    const input = m.started[0]!;
+    expect(input.prompt.startsWith("SPEC v1: the full body")).toBe(true);
+    expect(input.prompt).toContain("check the migration first");
+    expect(input.prompt).not.toContain("unchanged");
+    expect(input.contextSections).toEqual(sections);
+    expect(input.specVersionId).toBe(t.specVersionId);
+
+    // No fallback: the caller's own prompt and sections, with the notes.
+    const u = await setup("sandbox");
+    const um = module();
+    await builtRun(u, "sandbox");
+    await place(u, "runner");
+    await u.note("second note");
+    const own = [{ code: "findings", bytes: 7, sha256: "d".repeat(64), trimmed_bytes: 0 }] as const;
+    expect((await um.module.advanceStartFix(u.who, { ...fixReq(u), prompt: "FIX IT", contextSections: own })).ok).toBe(true);
+    const plain = um.started[0]!;
+    expect(plain.prompt.startsWith("FIX IT")).toBe(true);
+    expect(plain.prompt).toContain("second note");
+    expect(plain.contextSections).toEqual(own);
+    expect(plain.specVersionId).toBe(u.specVersionId);
+  });
+
   // AC4 (R-599-PL2c): the driver half. PL-3 builds the setter that calls the cancel in production; here the test calls PL-1's item-scoped cancel directly.
   const leave = async (t: Awaited<ReturnType<typeof setup>>, to: string | null, leaving: "cloud" | "runner") => {
     await place(t, to);

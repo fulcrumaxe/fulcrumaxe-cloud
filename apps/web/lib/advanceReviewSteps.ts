@@ -3,8 +3,8 @@ import type { InstallationHttp, InstallationHttpKind, InstallationHttpTarget } f
 import { toCode } from "@fx/core/src/work-items/driverEvents.js";
 import {
   ReviewPromptInputError,
-  buildFixPrompt,
-  buildReviewPrompt,
+  assembleFixPrompt,
+  assembleReviewPrompt,
   findPullRequestForItem,
   isLocalGitHubHttp,
   listChangedFiles,
@@ -13,6 +13,7 @@ import {
   readVerdict,
   reviewPlanFor,
   securityTriggers,
+  type AssembledPrompt,
   type FixFinding,
   type ReviewPromptRole,
 } from "@fx/pipeline";
@@ -194,9 +195,9 @@ export async function startReviewerBody(
       priorSummaries.push({ role: p.role, summary: readVerdict(o.status, o.envelope).summary });
     }
   }
-  let prompt: string;
+  let assembled: AssembledPrompt;
   try {
-    prompt = buildReviewPrompt({
+    assembled = assembleReviewPrompt({
       role: role as ReviewPromptRole,
       owner: ctx.owner,
       name: ctx.name,
@@ -220,7 +221,8 @@ export async function startReviewerBody(
     haltEpoch: who.haltEpoch,
     step: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`,
     role,
-    prompt,
+    prompt: assembled.prompt,
+    contextSections: assembled.sections,
     clone: true,
     headSha: pr.headSha,
     expectedExecutionMode: ctx.executionMode,
@@ -311,9 +313,22 @@ export async function startFixBody(
     const v = readVerdict(o.status, o.envelope);
     findings.push({ role: f.role, verdict: v.verdict, findings: v.findings, summary: v.summary });
   }
-  let prompt: string;
+  let assembled: AssembledPrompt;
+  // The same round with the Spec body: what a fresh session needs (a lost snapshot starts one), and what the worker sends instead when the session's pinned Spec is not the one held.
+  let withBody: AssembledPrompt | null = null;
+  let heldSpec: { version: number; sha256: string } | null = null;
   try {
-    prompt = buildFixPrompt({ owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime: promptRuntimeOf(ctx.executionMode) });
+    const runtime = promptRuntimeOf(ctx.executionMode);
+    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime };
+    // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
+    // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
+    if (runtime === "sandbox" && spec.sha256 !== undefined) {
+      heldSpec = { version: spec.version, sha256: spec.sha256 };
+      assembled = assembleFixPrompt({ ...base, heldSpec });
+      withBody = assembleFixPrompt(base);
+    } else {
+      assembled = assembleFixPrompt(base);
+    }
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
@@ -321,7 +336,9 @@ export async function startFixBody(
   const started = await worker.advanceStartFix(who, {
     issue: ctx.issue,
     headSha: pr.headSha,
-    prompt,
+    prompt: assembled.prompt,
+    contextSections: assembled.sections,
+    ...(heldSpec && withBody ? { held: heldSpec, fallbackPrompt: withBody.prompt, fallbackContextSections: withBody.sections } : {}),
     round,
     actionId,
     ...(retry > 0 ? { retry } : {}),
