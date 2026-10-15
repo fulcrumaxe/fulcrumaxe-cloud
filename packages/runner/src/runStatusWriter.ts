@@ -501,8 +501,24 @@ export const RUNNER_DISPATCH_BASE_KIND = "runner.dispatch_base";
  * row per dispatch; `done` reads the newest.
  */
 export async function recordRunnerDispatchBase(pool: Pool, p: { accountId: string; runId: string; headOid: string | null }): Promise<void> {
-  if (p.headOid !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(p.headOid)) throw new TypeError("recordRunnerDispatchBase: headOid must be a git object id or null");
-  await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, RUNNER_DISPATCH_BASE_KIND, { head_oid: p.headOid }));
+  await withTenant(pool, p.accountId, (client) => recordRunnerDispatchBaseOn(client, p));
+}
+
+/** The same row on the caller's client, so it commits with the caller's other writes (D#599 HO-2b: the handoff's child gets its base in the transaction that makes it). */
+export async function recordRunnerDispatchBaseOn(client: PoolClient, p: { accountId: string; runId: string; headOid: string | null }): Promise<void> {
+  if (p.headOid !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(p.headOid)) throw new TypeError("recordRunnerDispatchBase: headOid must be an object id or null");
+  await insertRunEvent(client, p.accountId, p.runId, RUNNER_DISPATCH_BASE_KIND, { head_oid: p.headOid });
+}
+
+/** The `run_events` kind that says how a move of a running run to the other side ended (D#599 HO-2b). Fixed words and a run branch only. */
+export const RUN_HANDOFF_KIND = "run.handoff";
+export const RUN_HANDOFF_STATES = ["handed_off", "forced", "failed"] as const;
+export type RunHandoffState = (typeof RUN_HANDOFF_STATES)[number];
+
+/** Written on the run that was moved, in the transaction that ended its handoff. `branch` is the run branch the work was saved on (checked against the one pattern), else absent. */
+export async function recordRunHandoffEvent(client: PoolClient, p: { accountId: string; runId: string; state: RunHandoffState; branch: string | null }): Promise<void> {
+  if (!(RUN_HANDOFF_STATES as readonly string[]).includes(p.state)) throw new TypeError("recordRunHandoffEvent: unknown state");
+  await insertRunEvent(client, p.accountId, p.runId, RUN_HANDOFF_KIND, { state: p.state, ...(p.branch !== null && RUNNER_RUN_BRANCH.test(p.branch) ? { branch: p.branch } : {}) });
 }
 
 /**

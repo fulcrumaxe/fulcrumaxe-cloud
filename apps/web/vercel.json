@@ -26,6 +26,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/handoff-sweep",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/reconcile",
       "schedule": "7,22,37,52 * * * *"
     }

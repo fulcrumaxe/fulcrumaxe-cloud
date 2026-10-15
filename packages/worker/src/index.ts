@@ -6,6 +6,7 @@ export type { RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunne
 export type { RunnerGitTicketFacade, GitTicketContext, GitTicketContextResult, SignGitTicketInput, SignedGitTicket } from "./runnerGitTicket.js";
 export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";
 export type { RunnerLeaseSweeper, RunnerLeaseSweepResult } from "./runnerLeaseSweep.js";
+export type { RunHandoffs, RunHandoffSweepResult, CompleteRunHandoffInput, CompleteRunHandoffResult, DoneHandoffResult } from "./runHandoffs.js";
 export type { RunnerQueueSweeper, RunnerQueueSweepResult } from "./runnerQueueSweep.js";
 export type { RunnerNoticeSweeper, RunnerNoticeResult } from "./runnerNotices.js";
 export type { InvariantSweeper, InvariantSweepResult } from "./invariantSweep.js";

@@ -137,6 +137,8 @@ export interface RunnerClaimDeps {
   followUp?: FollowUpPorts;
   /** Told when the work after an accepted batch (the follow-up's dispatch) failed; the batch itself stays accepted. */
   onError?: (runId: string, error: unknown) => void;
+  /** D#599 HO-2b: called once a batch that stored the runner's `run_ended handed_off` has committed, to finish the handoff (read the head, make the child). Its failure is reported through `onError`; the sweep tries again. */
+  onHandedOff?: (input: { accountId: string; runId: string }) => Promise<unknown>;
 }
 
 interface CandidateRow {
@@ -187,9 +189,9 @@ const RUN_ENDED_ENDINGS = {
   push_rejected: { to: "failed", reason: "push_rejected", followUp: false },
 } as const satisfies Record<Exclude<RunEndedReason, "handed_off">, Ending>;
 /**
- * D#599 HO-1: `handed_off` is deliberately not in the table. The cloud must accept the event before any runner sends it (the cloud
- * deploys first), but it ends nothing until the handoff completion (HO-2b) makes the parent terminal and the child run in one
- * transaction. Until then the event is stored and the run stays as it is.
+ * D#599 HO-1: `handed_off` is deliberately not in the table. The event is stored and ends nothing here; the handoff completion
+ * (HO-2b, `runHandoffs.ts`) makes the parent terminal and the child run in one transaction, after this batch commits (`onHandedOff`),
+ * because it must ask GitHub for the branch head first and a network call does not belong inside this transaction.
  */
 const RUN_ENDED_ENDINGS_BY_REASON: Readonly<Partial<Record<RunEndedReason, Ending>>> = RUN_ENDED_ENDINGS;
 
@@ -432,6 +434,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND a.dispatch_repo_id = ANY($2::uuid[]) AND a.role = ANY($3::text[])
                   AND ($4 <> 'subscription' OR a.initiated_by = $5 OR a.approved_by = $5 OR (a.approved_by IS NULL AND a.dispatch_repo_id = ANY($9::uuid[])))
                   AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])
+                  AND (a.excluded_runner_id IS NULL OR a.excluded_runner_id <> $7)
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
@@ -492,7 +495,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
         // In the batch the numbers strictly increase (C21 section 2); a batch that does not is refused before anything is read.
         for (let i = 1; i < input.events.length; i++) if (input.events[i]!.seq <= input.events[i - 1]!.seq) return { outcome: "seq_order" };
         const maxWallClockMs = limits(input.accountId).maxRunWallClockMs;
-        const result = await withTenant(runnerPool, input.accountId, async (client): Promise<IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null }> => {
+        const result = await withTenant(runnerPool, input.accountId, async (client): Promise<IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean }> => {
           const at = new Date(now());
           // Fence first, without moving the lease: a refused batch must leave it alone. The fence takes the run row's lock and
           // holds it to the end of this transaction, so the last accepted number read below cannot move under it.
@@ -509,6 +512,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           let duplicates = 0;
           let conflicts = 0;
           let ending: Ending | null = null;
+          let handedOff = false;
           const newlyStored: LocalOnlyEvent[] = [];
           const cleanStored: LocalOnlyEvent[] = [];
           // C42-1: at most this many raw tool_use / file_changed rows per run. Past it they are acknowledged and not stored; every other type always is.
@@ -547,6 +551,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
               if (outcome === "conflict") conflicts++;
             }
             if (outcome === "stored" && ending === null) ending = endingOf(event);
+            if (outcome === "stored" && event.type === "run_ended" && event.reason === "handed_off") handedOff = true;
           }
           // D#6 R2b-5a: the API-equivalent figure for the usage events stored just now. Information only; it is written to its own table.
           await recordRunnerUsage(client, { accountId: input.accountId, runId: input.runId, runnerId: input.runnerId, stored: newlyStored });
@@ -554,7 +559,7 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           await projectRunnerProgress(client, { accountId: input.accountId, runId: input.runId, stored: cleanStored });
           if (ending === null) {
             await leaseVerdict(client, input, at, RUNNER_LEASE_SECONDS, maxWallClockMs);
-            return { outcome: "accepted", stored, duplicates, conflicts, ended: null, leaseExpiresAt: new Date(at.getTime() + RUNNER_LEASE_SECONDS * 1000) };
+            return { outcome: "accepted", stored, duplicates, conflicts, ended: null, leaseExpiresAt: new Date(at.getTime() + RUNNER_LEASE_SECONDS * 1000), ...(handedOff ? { handedOff } : {}) };
           }
           await noteRunnerActivityCap(client, { accountId: input.accountId, runId: input.runId });
           await writeRunStatusOn(client, { accountId: input.accountId, runId: input.runId, from: "running", to: ending.to, failureReason: ending.reason });
@@ -563,7 +568,9 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
           const lease = await client.query<{ lease_expires_at: Date }>("SELECT lease_expires_at FROM agent_runs WHERE id = $1 AND account_id = $2", [input.runId, input.accountId]);
           return { outcome: "accepted", stored, duplicates, conflicts, ended: ending.reason as RunnerEndReason, leaseExpiresAt: lease.rows[0]!.lease_expires_at, followUp };
         });
-        const { followUp, ...reply } = result as IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null };
+        const { followUp, handedOff, ...reply } = result as IngestRunnerEventsResult & { followUp?: FollowUpOutcome | null; handedOff?: boolean };
+        // After the commit, and whatever happens the batch stays accepted: the handoff finishes here or on the next sweep tick.
+        if (handedOff && deps.onHandedOff) await deps.onHandedOff({ accountId: input.accountId, runId: input.runId }).catch((error: unknown) => deps.onError?.(input.runId, error));
         if (followUp && deps.followUp) {
           // After the commit. The batch is accepted whatever happens here; a child that could not be dispatched has been failed by the port.
           await settleFollowUp(deps.followUp, input.accountId, input.runId, followUp).catch((error: unknown) => deps.onError?.(input.runId, error));

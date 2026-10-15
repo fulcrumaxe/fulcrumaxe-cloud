@@ -32,6 +32,7 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  *  1. the request is verified; the body must name the path's run. `begin` fences it (generation, runner, lease end, wall clock), extends the
  *     lease while GitHub is asked, and answers the STORED verdict again when this runner's earlier `done` already finished the run at
  *     this generation. Any other finished or fenced run is 409 `{continue:false, reason}`.
+ *  1a. a run with a live handoff (D#599 HO-2b) is not judged: the handoff ends it and makes the next run (`completeHandoffOnDone`); the reply says `succeeded` with no pull request, which the runner reads only as "stop".
  *  1b. a run whose runner sent `taken_over` ends `failed taken_over` at once, with no envelope and no pull request (D#6 R4a-7).
  *  2. a reviewer (or any role that is neither the executor nor the docs-writer) makes no commit: its run ends `succeeded`.
  *  3. an executor or a docs-writer is judged, in this order (C21 section 5.4, C25 section 3.1): a continuation with no recorded dispatch head
@@ -69,6 +70,14 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
   const begun = await asRunner(() => leases.beginRunnerDone(lease));
   if (begun.kind === "fenced") return stopReply(begun.reason);
   if (begun.kind === "replay") return doneReply(begun.verdict);
+
+  // D#599 HO-2b: a run that is being moved to the other side is not judged. Its work is on the branch; the handoff ends the run and makes the next one.
+  if (leases.completeHandoffOnDone) {
+    const handed = await asRunner(() => leases.completeHandoffOnDone!(lease));
+    if (handed.kind === "fenced") return stopReply(handed.reason);
+    if (handed.kind === "retry") return retryReply();
+    if (handed.kind === "completed") return doneReply({ outcome: "succeeded", failureReason: null, prNumber: null });
+  }
 
   const decided = await decide(deps, lease);
   if (decided.kind === "retry") return retryReply();

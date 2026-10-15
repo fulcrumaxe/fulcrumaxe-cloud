@@ -145,6 +145,12 @@ export interface RunnerLeaseOps {
   >;
   /** `git-ticket`, second half: the signed ticket, or null while the signing key or the forward host is not configured (the route then answers 503). */
   signGitTicket(input: { issuer: string; runnerId: string; accountId: string; runId: string; leaseGeneration: number; repo: { id: string; owner: string; name: string }; ref: string }): Promise<{ ticket: string; expiresAt: Date; proxyOrigin: string } | null>;
+  /**
+   * D#599 HO-2b: `done` from a run that has a live handoff finishes the handoff instead of judging the run: the parent ends handed off (it
+   * has no result of its own) and the new run is made on the other side. `none` means no handoff was live and the ordinary `done` goes on;
+   * `retry` means GitHub could not be asked and nothing was written. Absent from an older worker.
+   */
+  completeHandoffOnDone?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<{ kind: "completed" } | { kind: "none" } | { kind: "retry" } | { kind: "fenced"; reason: StopReason }>;
   /** `done`, second half: records the cloud's verdict under the fence, in one transaction. */
   finishRunnerDone(input: {
     accountId: string;

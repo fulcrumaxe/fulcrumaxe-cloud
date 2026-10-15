@@ -87,7 +87,9 @@ export type FailureReason =
   /** D#6 R4a-3b (C25 section 1.4): a fix round's push was rejected because the pull request's branch moved while the agent worked. A retry runs on the new head, so no follow-up. */
   | "push_rejected"
   /** D#6 R4a-7: the owner took the run over by hand on the runner machine (`fx-runner attach --take-over`). The run ends with no result and no push, so it never counts toward a merge gate. */
-  | "taken_over";
+  | "taken_over"
+  /** D#599 HO-2b: the run stopped at a checkpoint (or at its deadline) so the other side can continue it. It ends `cancelled` with no result and no pull request; its work is on the run branch and the next run continues from there. */
+  | "handed_off";
 
 /** What a target reports once a dispatched run reaches a terminal
  * outcome. `SandboxTarget` builds this from the sandbox's last

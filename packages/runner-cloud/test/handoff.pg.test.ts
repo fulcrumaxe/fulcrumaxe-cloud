@@ -461,7 +461,9 @@ describe("run handoff request, cancel and heartbeat [pg]", () => {
         return id;
       };
       const set = (id: string, state: string) => h.admin.query("UPDATE run_handoffs SET state = $2 WHERE id = $1", [id, state]);
-      const legal = new Set(["requested>checkpointing", "requested>cancelled", "requested>failed", "requested>forced", "checkpointing>handed_off", "checkpointing>forced", "checkpointing>failed"]);
+      const legal = new Set(["requested>checkpointing", "requested>cancelled", "requested>failed", "requested>forced", "checkpointing>handed_off", "checkpointing>forced", "checkpointing>failed",
+        // 0794 (HO-2b): a child that was made but could not start fails its completed handoff. Nothing else leaves a finished row.
+        "handed_off>failed", "forced>failed"]);
       const path: Record<string, string[]> = { requested: [], checkpointing: ["checkpointing"], handed_off: ["checkpointing", "handed_off"], forced: ["forced"], cancelled: ["cancelled"], failed: ["failed"] };
       for (const from of Object.keys(path)) {
         for (const to of Object.keys(path).filter((s) => s !== from)) {

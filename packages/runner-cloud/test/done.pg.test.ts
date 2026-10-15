@@ -34,6 +34,8 @@ describe("done route [pg]", () => {
   const finished: Array<Record<string, unknown>> = [];
   let begin: Awaited<ReturnType<RunnerLeaseOps["beginRunnerDone"]>> = { kind: "proceed" };
   let finish: "echo" | Awaited<ReturnType<RunnerLeaseOps["finishRunnerDone"]>> = "echo";
+  const handed: Array<Record<string, unknown>> = [];
+  let handoff: Awaited<ReturnType<NonNullable<RunnerLeaseOps["completeHandoffOnDone"]>>> = { kind: "none" };
   const never = async () => {
     throw new Error("not used by these tests");
   };
@@ -45,6 +47,7 @@ describe("done route [pg]", () => {
     signGitTicket: never,
     beginRunnerDone: async (input) => (begun.push({ ...input }), begin),
     finishRunnerDone: async (input) => (finished.push({ ...input }), finish === "echo" ? { kind: "recorded", verdict: input.verdict } : finish),
+    completeHandoffOnDone: async (input) => (handed.push({ ...input }), handoff),
   };
 
   beforeAll(async () => {
@@ -61,6 +64,8 @@ describe("done route [pg]", () => {
     finished.length = 0;
     begin = { kind: "proceed" };
     finish = "echo";
+    handed.length = 0;
+    handoff = { kind: "none" };
   });
 
   interface Scene {
@@ -862,6 +867,41 @@ describe("done route [pg]", () => {
       expect((await toResponse(() => doneRun(h.deps({ leases }), huge, s.runId))).status).toBe(413);
       expect((await toResponse(() => doneRun(h.deps({ leases }), huge, "not-a-uuid"))).status).toBe(404);
       expect(begun).toEqual([]);
+    });
+
+    it("a run with a live handoff is finished by the handoff and not judged (D#599 HO-2b): no GitHub call, no verdict stored, and a reply the runner reads only as stop", async () => {
+      const s = await scene();
+      handoff = { kind: "completed" };
+      const res = await s.call();
+      expect(res.status).toBe(200);
+      expect(parsedDone(res)).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: null });
+      expect(handed).toEqual([{ accountId: A.accountId, runnerId, runId: s.runId, leaseGeneration: s.gen }]);
+      expect(s.fake.calls).toEqual([]);
+      expect(finished).toEqual([]);
+      expect(s.repo.pulls).toEqual([]);
+    });
+
+    it("a handoff that could not read the branch head from GitHub answers 503 with a retry and writes nothing; a run that is no longer the runner's is stopped", async () => {
+      const s = await scene();
+      handoff = { kind: "retry" };
+      const retry = await s.call();
+      expect(retry.status).toBe(503);
+      expect(DoneRetryReply.parse(retry.body).retry_after).toBeGreaterThan(0);
+      expect(finished).toEqual([]);
+      handoff = { kind: "fenced", reason: "stale_generation" };
+      const fenced = await s.call();
+      expect(fenced.status).toBe(409);
+      expect(StopReply.parse(fenced.body)).toMatchObject({ continue: false, reason: "stale_generation" });
+      expect(s.fake.calls).toEqual([]);
+    });
+
+    it("is not asked at all when the fence already stopped the run or answered its stored verdict", async () => {
+      const s = await scene();
+      begin = { kind: "fenced", reason: "run_terminal" };
+      expect((await s.call()).status).toBe(409);
+      begin = { kind: "replay", verdict: { outcome: "succeeded", failureReason: null, prNumber: 3 } };
+      expect((await s.call()).status).toBe(200);
+      expect(handed).toEqual([]);
     });
 
     it("answers a worker that is not configured with 503", async () => {

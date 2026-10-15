@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { QUEUE_TTL_MS } from "@fx/runner";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
@@ -193,6 +194,8 @@ export async function requestHandoff(deps: HandoffDeps, principal: SessionPrinci
     }
   });
   if ("refused" in outcome) throw outcome.refused;
+  // The handoff sweep finishes a move whose side never answers (HO-2b): wake it at the deadline. Best effort; the backstop tick finds it either way.
+  void markWorkPending("handoff-sweep", { since: deadline.getTime() });
   return {
     status: 202,
     body: { handoff_id: outcome.made.handoff_id, run_id: runId, state: "requested", from: outcome.made.from_side, to: target, deadline: deadline.toISOString() },
