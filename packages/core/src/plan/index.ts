@@ -6,4 +6,5 @@ export * from './persist.js';
 export * from './read.js';
 export * from './referenceLine.js';
 export * from './roadmapFile.js';
+export * from './roadmapWriter.js';
 export * from './specTables.js';
