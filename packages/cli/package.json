@@ -1,0 +1,27 @@
+{
+  "name": "fulcrumaxe",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "The fulcrumaxe command line: sign in with a Developer-app token and work with your account from a terminal.",
+  "bin": {
+    "fulcrumaxe": "bin/fulcrumaxe.mjs",
+    "fx": "bin/fulcrumaxe.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@fx/api": "workspace:*",
+    "@fx/api-client": "workspace:*",
+    "@types/node": "^24.19.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

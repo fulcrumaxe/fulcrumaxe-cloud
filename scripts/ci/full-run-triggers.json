@@ -63,6 +63,7 @@
   "active_edge_kinds": ["src","test"],
   "extra_edges": [
     {"from":"packages/api-client","to":"packages/api","kind":"src","reason":"its generator reads packages/api/openapi.json and its tests read packages/api/fixtures (scripts/gen-client.ts, test/drift.test.ts)"},
+    {"from":"packages/cli","to":"packages/api","kind":"test","reason":"tests read packages/api/fixtures and import packages/api/src/tokens/format.ts (packages/cli/test/helpers.ts)"},
     {"from":"packages/core","to":"packages/github","kind":"test","reason":"relative import in packages/core/test/unit/strict-github-oauth.test.ts"},
     {"from":"packages/db","to":"packages/api","kind":"test","reason":"relative import in packages/db/test/domain-events-nudge.test.ts"},
     {"from":"packages/db","to":"packages/webhooks","kind":"test","reason":"relative import in packages/db/test/helpers/pgTls.ts"},

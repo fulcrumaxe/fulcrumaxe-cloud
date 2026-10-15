@@ -426,11 +426,13 @@ describe("the env scan itself", () => {
     expect(reads).toEqual([]);
   });
 
-  it("leaves out only the named not-deployed packages: fx-runner, and nothing else under packages", () => {
-    expect(Object.keys(NOT_DEPLOYED_PACKAGES)).toEqual(["packages/fx-runner"]);
+  it("leaves out only the named not-deployed packages: fx-runner and the CLI, and nothing else under packages", () => {
+    expect(Object.keys(NOT_DEPLOYED_PACKAGES)).toEqual(["packages/fx-runner", "packages/cli"]);
     expect(existsSync(path.join(ROOT, "packages/fx-runner/src/job/cleanEnv.ts"))).toBe(true);
+    expect(existsSync(path.join(ROOT, "packages/cli/src/session.ts"))).toBe(true);
     const files = listSourceFiles(ROOT).map((f) => path.relative(ROOT, f));
     expect(files.filter((f) => f.startsWith("packages/fx-runner/"))).toEqual([]);
+    expect(files.filter((f) => f.startsWith("packages/cli/"))).toEqual([]);
     // the sibling the runner depends on, and the web app, are still scanned
     expect(files.some((f) => f.startsWith("packages/runner-protocol/src/"))).toBe(true);
     expect(files.some((f) => f.startsWith("packages/runner/src/"))).toBe(true);

@@ -68,7 +68,10 @@ export function buildRequest<K extends OperationId>(
   const route = op.path.replace(/\{([^}]+)\}/g, (_m, name: string) => {
     const v = path[name];
     if (v === undefined || v === null || v === "") throw new ApiClientUsageError(`${id} requires path parameter ${name}`);
-    return encodeURIComponent(String(v));
+    const text = String(v);
+    // "." and ".." survive encodeURIComponent and a URL parser would resolve them away, turning the call into a different route
+    if (text === "." || text === "..") throw new ApiClientUsageError(`${id} path parameter ${name} is not a valid identifier`);
+    return encodeURIComponent(text);
   });
   const search = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {

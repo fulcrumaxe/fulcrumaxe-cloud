@@ -120,6 +120,10 @@ describe("buildRequest", () => {
     expect(() => buildRequest(c, "retryRun", { path: { id: "r" } })).toThrow(/requires an Idempotency-Key/);
     expect(() => buildRequest({ ...c, token: "" }, "listRuns")).toThrow(/token is empty/);
   });
+  it.each([".", ".."])("refuses %s as a path parameter instead of letting the URL resolve it away", (v) => {
+    expect(() => buildRequest(c, "retryRun", { path: { id: v } }, { idempotencyKey: "k" })).toThrow(/not a valid identifier/);
+    expect(buildRequest(c, "retryRun", { path: { id: "a.b" } }, { idempotencyKey: "k" }).url).toContain("/a.b");
+  });
   it("lets the caller replace Accept, for streams", () => {
     const { init, url } = buildRequest(c, "listEvents", undefined, { headers: { Accept: "text/event-stream" } });
     expect((init.headers as Record<string, string>).accept).toBe("text/event-stream");
