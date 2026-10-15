@@ -285,8 +285,8 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
 
   async function loadRunner(accountId: string, runnerId: string) {
     const runner = await withTenant(runnerPool, accountId, async (client) => {
-      const { rows } = await client.query<{ registered_by: string; credential_mode: string; allowed_repo_ids: string[]; allowed_roles: string[]; revoked_at: Date | null }>(
-        "SELECT registered_by, credential_mode, allowed_repo_ids, allowed_roles, revoked_at FROM runners WHERE id = $1 AND account_id = $2",
+      const { rows } = await client.query<{ registered_by: string; credential_mode: string; allowed_repo_ids: string[]; allowed_roles: string[]; revoked_at: Date | null; protocol_version: number | null }>(
+        "SELECT registered_by, credential_mode, allowed_repo_ids, allowed_roles, revoked_at, protocol_version FROM runners WHERE id = $1 AND account_id = $2",
         [runnerId, accountId],
       );
       return rows[0];
@@ -445,11 +445,14 @@ export function createRunnerClaimFacade(runnerPool: Pool, deps: RunnerClaimDeps)
                   AND a.id <> ALL($6::uuid[]) AND a.dispatch_repo_id <> ALL($13::uuid[])
                   AND (a.excluded_runner_id IS NULL OR a.excluded_runner_id <> $7)
                   AND (a.claimable_after IS NULL OR a.claimable_after <= $8::timestamptz)
+                  -- D#599 PL-2b: a job in the cross-side shape is read by no runner that predates it (its strict parse would fail the whole reply). NULL means any runner;
+                  -- a runner that has not said hello (no stored version) counts as below every version.
+                  AND (a.min_protocol_version IS NULL OR a.min_protocol_version <= $20::int)
                   AND (CASE WHEN a.role = ANY($10::text[]) THEN $11::int ELSE $12::int END) > 0
                   ${ROUTING_WHERE_SQL}
                 ORDER BY ($4 = 'subscription' AND COALESCE(a.initiated_by = $5 OR a.approved_by = $5, false)) DESC, (p.runner_id IS NOT NULL AND p.runner_id = $7) DESC, a.created_at, a.id
                 LIMIT 1`,
-              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing)],
+              [accountId, runner.allowed_repo_ids, roles, runner.credential_mode, runner.registered_by, tried, runnerId, new Date(now()), autoRepos, LIGHT_JOB_ROLES, free.light, heavyBlocked ? 0 : free.heavy, fullRepos, ...routingParams(routing), runner.protocol_version ?? 0],
             );
             return rows;
           });

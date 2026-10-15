@@ -162,8 +162,12 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           ...(job.continues ? { continuesBranch: job.continues.branch } : {}),
         };
         const target = resolveExecutionTarget(isRunnerMode(child.execution_mode) ? child.execution_mode : "runner_local", deps.registry);
-        if (job.continues) await target.resume(run, job.continues.session_id);
-        else await target.dispatch(run);
+        if (job.continues) {
+          // D#599 PL-2b-1: a parent that claimed no session (a cross-side round) has no session to resume, and its child would need the same
+          // pull request binding again. That follow-up is not built yet, so it fails closed (the child ends `internal_error`) instead of resuming nothing.
+          if (job.continues.session_id === null) throw new JobIssueError("continues_session_invalid");
+          await target.resume(run, job.continues.session_id);
+        } else await target.dispatch(run);
       } catch (error) {
         // A dispatch that lost a race with another one (the job is written once only) found its job already there: nothing to undo.
         const written = await withTenant(deps.pool, accountId, async (client) => {

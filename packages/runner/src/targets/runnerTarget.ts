@@ -67,7 +67,13 @@ export interface RepoVisibilityPort {
 /** What a run continues when it is a fix round: the earlier run and its session. */
 export interface RunContinues {
   parentRunId: string | null;
-  sessionId: string;
+  /** The session the round continues; null when none is claimed (a round from the other side of a hand-over starts a fresh session on the branch). */
+  sessionId: string | null;
+  /**
+   * D#599 PL-2b: the pull request number the caller recorded for the item, only with a branch that is the item's own pull request branch
+   * (`fx/issue-<n>`). The issuer reads GitHub and signs the number only if GitHub says the same; it never takes this on trust.
+   */
+  prNumber?: number;
   /**
    * The branch of the pull request being fixed, carried unchanged by a follow-up of a fix round (C22 section 2). When it is not set, the issuer
    * reads the branch `done` recorded for `parentRunId` (C25 section 1.2); it never derives one from the issue. Either way the issuer checks it

@@ -76,9 +76,14 @@ describe("a fix round's branch must have the shape of a run branch (C25 section 
   const U = "2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e";
   const continuesOn = (branch: string) => ({ parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch });
   it("refuses anything else, though the signature, the digests and the role are good", () => {
-    for (const branch of ["main", "fx/issue-12", `fx/${U}-g0`, "refs/heads/x", `fx/${U}-g01`, `fx/${U}-g1000000000`, `fx/${U}-g1x`, `fx/${U}`, `fx/${U.toUpperCase()}-g1`, `FX/${U}-g1`, `fx/${U}-g1/x`, `x/fx/${U}-g1`]) {
-      expect(check(signRaw(jobFor({ continues: continuesOn(branch) }))), branch).toEqual({ ok: false, reason: "continues_branch_invalid" });
+    for (const branch of ["main", "fx/feature-12", `fx/${U}-g0`, "refs/heads/x", `fx/${U}-g01`, `fx/${U}-g1000000000`, `fx/${U}-g1x`, `fx/${U}`, `fx/${U.toUpperCase()}-g1`, `FX/${U}-g1`, `fx/${U}-g1/x`, `x/fx/${U}-g1`]) {
+      // The job schema narrows the branch to a run branch or the item's pull request branch (D#599 PL-2b-1), so these are refused before the shape check here.
+      expect(check(signRaw(jobFor({ continues: continuesOn(branch) }))).ok, branch).toBe(false);
     }
+  });
+  it("the item's pull request branch with a null session is read by the schema (D#599 PL-2b-1) and still refused here until the runner learns it (PL-2b-3)", () => {
+    const cross = { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: null, branch: "fx/issue-12", pr_number: 41 };
+    expect(check(signRaw(jobFor({ continues: cross })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
   });
   it("a name with .. fails the job schema, so it is refused before the shape check is reached", () => {
     expect(check(signRaw(jobFor({ continues: continuesOn(`fx/${U}-g1/../../main`) }))).ok).toBe(false);

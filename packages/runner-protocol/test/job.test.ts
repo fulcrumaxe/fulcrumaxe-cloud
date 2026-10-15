@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION } from "../src/messages.js";
+import { SESSION_ID_PATTERN } from "../src/job.js";
+import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
+
+/** `continues` is an object with a refinement (D#599 PL-2b), so its keys sit one wrapper down. */
+const continuesObject = () => (JobSchema.shape.continues.unwrap() as unknown as z.ZodEffects<z.AnyZodObject>).innerType();
+
+const RUN_BRANCH = "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1";
 
 describe("job schema", () => {
   it("has exactly the Spec's top-level keys", () => {
@@ -15,7 +22,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape.spec.unwrap().shape).sort()).toEqual(["discussion", "sha256", "text", "version"]);
     expect(Object.keys(JobSchema.shape.task.shape).sort()).toEqual(["kind", "prompt", "prompt_sha256"]);
     expect(Object.keys(JobSchema.shape.role_card.shape).sort()).toEqual(["sha256", "text"]);
-    expect(Object.keys(JobSchema.shape.continues.unwrap().shape).sort()).toEqual(["branch", "parent_run_id", "session_id"]);
+    expect(Object.keys(continuesObject().shape).sort()).toEqual(["branch", "parent_run_id", "pr_number", "session_id"]);
   });
 
   it("accepts a well-formed job", () => {
@@ -43,6 +50,7 @@ describe("job schema", () => {
         for (const [key, child] of Object.entries(schema.shape)) walk(child as z.ZodTypeAny, `${path}.${key}`);
         return;
       }
+      if (schema instanceof z.ZodEffects) return walk(schema.innerType(), path);
       if (schema instanceof z.ZodNullable || schema instanceof z.ZodOptional) return walk(schema.unwrap(), path);
       expect(schema instanceof z.ZodRecord || schema instanceof z.ZodAny || schema instanceof z.ZodUnknown || schema instanceof z.ZodUnion, path).toBe(false);
       if (schema instanceof z.ZodString && !schema._def.checks.some((c) => c.kind === "regex" || c.kind === "uuid" || c.kind === "datetime")) freeText.push(path);
@@ -113,11 +121,68 @@ describe("job schema", () => {
     const parent = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f";
     const ok = (c: unknown) => JobSchema.safeParse(sampleJob({ continues: c })).success;
     expect(ok(null)).toBe(true);
-    expect(ok({ parent_run_id: parent, session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab", branch: "fx/issue-12" })).toBe(true);
+    expect(ok({ parent_run_id: parent, session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab", branch: RUN_BRANCH })).toBe(true);
     expect(ok(undefined)).toBe(false);
     expect(ok({ parent_run_id: "not-a-uuid", session_id: "s", branch: "fx/a" })).toBe(false);
     for (const session_id of ["", "a b", "s;rm -rf /", "x".repeat(129)]) expect(ok({ parent_run_id: parent, session_id, branch: "fx/a" }), session_id).toBe(false);
     for (const branch of ["", "../x", "fx/../x", "/abs", "fx//a", "a b", "https://example.test/x", "x".repeat(201)]) expect(ok({ parent_run_id: parent, session_id: "s", branch }), branch).toBe(false);
+  });
+
+  describe("continues across sides (D#599 PL-2b-1)", () => {
+    const parent = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f";
+    const ok = (c: unknown) => JobSchema.safeParse(sampleJob({ continues: c })).success;
+
+    it.each([
+      ["a null session id on a run branch", { parent_run_id: parent, session_id: null, branch: RUN_BRANCH }, true],
+      ["a session id on a run branch", { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH }, true],
+      ["the item pull request branch with its number and no session", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7 }, true],
+      ["the item pull request branch without a number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12" }, false],
+      ["the item pull request branch with a session id", { parent_run_id: parent, session_id: "s-1", branch: "fx/issue-12", pr_number: 7 }, false],
+      ["a run branch with a number", { parent_run_id: parent, session_id: null, branch: RUN_BRANCH, pr_number: 7 }, false],
+      ["main with a number", { parent_run_id: parent, session_id: null, branch: "main", pr_number: 7 }, false],
+      ["main without a number", { parent_run_id: parent, session_id: null, branch: "main" }, false],
+      ["main with a session id", { parent_run_id: parent, session_id: "s-1", branch: "main" }, false],
+      ["fx/issue-0 without a number", { parent_run_id: parent, session_id: null, branch: "fx/issue-0" }, false],
+      ["fx/issue-12/x without a number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12/x" }, false],
+      ["fx/issues-12 without a number", { parent_run_id: parent, session_id: null, branch: "fx/issues-12" }, false],
+      ["refs/heads/fx/issue-12 without a number", { parent_run_id: parent, session_id: null, branch: "refs/heads/fx/issue-12" }, false],
+      ["a run branch with a zero generation", { parent_run_id: parent, session_id: "s-1", branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g0" }, false],
+      ["fx/issue-0 (not an item branch, so no number allowed)", { parent_run_id: parent, session_id: null, branch: "fx/issue-0", pr_number: 7 }, false],
+      ["fx/issue-12/x with a number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12/x", pr_number: 7 }, false],
+      ["fx/issues-12 with a number", { parent_run_id: parent, session_id: null, branch: "fx/issues-12", pr_number: 7 }, false],
+      ["refs/heads/fx/issue-12 with a number", { parent_run_id: parent, session_id: null, branch: "refs/heads/fx/issue-12", pr_number: 7 }, false],
+      ["a number of 0", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 0 }, false],
+      ["a number above the integer range", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 2 ** 31 }, false],
+      ["the largest number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 2 ** 31 - 1 }, true],
+      ["a null number", { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: null }, false],
+    ] as const)("%s", (_name, continues, expected) => {
+      // The schema narrows the branch to a run branch or the item's pull request branch (ruling R-599-PL2b-1-a), with or without a number.
+      expect(ok(continues)).toBe(expected);
+    });
+
+    it("pins ITEM_PR_BRANCH to fx/issue-<n> with n of 1 to 10 digits and no leading zero", () => {
+      for (const good of ["fx/issue-1", "fx/issue-12", "fx/issue-9999999999"]) expect(ITEM_PR_BRANCH.test(good), good).toBe(true);
+      for (const bad of ["fx/issue-0", "fx/issue-07", "fx/issue-12/x", "fx/issues-12", "fx/issue-12 ", "refs/heads/fx/issue-12", "fx/issue-", "fx/issue-12345678901", "main", "fx/docs/x", "xfx/issue-12"]) expect(ITEM_PR_BRANCH.test(bad), bad).toBe(false);
+    });
+
+    it("refuses a job with a null session id on a runner whose parse predates the field (why the cloud gates the claim)", () => {
+      // A pinned copy of the strict `continues` before PL-2b: the session id was always a string and no pull request number existed.
+      const before = z.object({ parent_run_id: z.string().uuid(), session_id: z.string().regex(SESSION_ID_PATTERN), branch: z.string() }).strict().nullable();
+      const previousJob = JobSchema.extend({ continues: before });
+      const nullSession = sampleJob({ continues: { parent_run_id: parent, session_id: null, branch: RUN_BRANCH } });
+      const withNumber = sampleJob({ continues: { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 7 } });
+      expect(previousJob.safeParse(sampleJob({ continues: { parent_run_id: parent, session_id: "s-1", branch: RUN_BRANCH } })).success).toBe(true);
+      expect(previousJob.safeParse(nullSession).success).toBe(false);
+      expect(previousJob.safeParse(withNumber).success).toBe(false);
+      expect(JobSchema.safeParse(nullSession).success).toBe(true);
+      expect(JobSchema.safeParse(withNumber).success).toBe(true);
+    });
+
+    it("sets the cross-side protocol floor one above the handoff version, and leaves the hello floor alone", () => {
+      expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBe(HANDOFF_MIN_PROTOCOL_VERSION + 1);
+      // Until the runner release (PL-2b-3) raises the current version, no runner can claim a gated job, and none is cut off for it.
+      expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBeGreaterThanOrEqual(CURRENT_PROTOCOL_VERSION);
+    });
   });
 
   it("jobDigestMismatches names a digest that does not match its text", () => {

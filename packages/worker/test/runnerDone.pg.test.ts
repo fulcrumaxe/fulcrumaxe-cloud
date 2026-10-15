@@ -74,7 +74,7 @@ describe("runner done [pg]", () => {
   }
 
   /** A pending runner run with a real signed job, ready to be claimed. */
-  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string } } = {}): Promise<string> {
+  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number } } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -87,7 +87,7 @@ describe("runner done [pg]", () => {
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
-      continues: o.continues ? { parent_run_id: randomUUID(), session_id: "sess-1", branch: o.continues.branch } : null,
+      continues: o.continues ? { parent_run_id: randomUUID(), ...(o.continues.prNumber === undefined ? { session_id: "sess-1" } : { session_id: null, pr_number: o.continues.prNumber }), branch: o.continues.branch } : null,
       branch_prefix: "fx/",
       model_hint: null,
       issued_at: new Date(T0 - 1000).toISOString(),
@@ -356,7 +356,7 @@ describe("runner done [pg]", () => {
         { verdict: { outcome: "paused", failureReason: null, prNumber: null } as never },
         { verdict: { ...ok, prNumber: 0 } },
         { verdict: { ...ok, prNumber: 1.5 } },
-        // A branch must be a run branch and may only accompany a pull request number.
+        // A branch must be a run branch (or, bound to this run, the item pull request branch: fx/issue-12 here has no bound event, so it is refused in the transaction) and may only accompany a pull request number.
         { verdict: { ...ok, branch: "fx/issue-12" } },
         { verdict: { ...ok, branch: "main" } },
         { verdict: { ...ok, branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g0" } },
@@ -372,6 +372,62 @@ describe("runner done [pg]", () => {
       ];
       for (const patch of bad) await expect(facade.finishRunnerDone({ ...lease(id, g), verdict: ok, ...patch }), JSON.stringify(patch)).rejects.toBeInstanceOf(RunActionInputError);
       await nothingWritten(id);
+    });
+  });
+
+  describe("the item's pull request branch is recorded only for the run bound to it (D#599 PL-2b-1)", () => {
+    const ITEM = "fx/issue-12";
+    const bind = (runId: string, payload: Record<string, unknown>) =>
+      admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, (SELECT COALESCE(max(seq), 0) + 1 FROM run_events WHERE run_id = $2), 'runner.continues_bound', $3::jsonb)", [A.accountId, runId, JSON.stringify(payload)]);
+    const verdict: RunnerDoneVerdict = { outcome: "succeeded", failureReason: null, prNumber: 41, branch: ITEM };
+    beforeEach(async () => {
+      await admin.query("UPDATE work_items SET gh_number = 12 WHERE id = $1", [A.workItemId]);
+    });
+
+    it("records the verdict, replays it, and the recorded-branch read gives it back when the bound event, the signed job and the item's issue all agree", async () => {
+      const id = await pending({ continues: { branch: ITEM, prNumber: 41 } });
+      await bind(id, { pr_number: 41, branch: ITEM });
+      const g = await claimed(id);
+      expect(await facade.finishRunnerDone({ ...lease(id, g), verdict })).toEqual({ kind: "recorded", verdict });
+      expect((await statusEvents(id)).at(-1)).toEqual({ from: "running", to: "succeeded", viaRunnerDone: true, prNumber: 41, branch: ITEM });
+      expect(await facade.beginRunnerDone(lease(id, g))).toEqual({ kind: "replay", verdict });
+      expect(await withTenant(writerPool, A.accountId, (c) => readRecordedRunnerBranch(c, { accountId: A.accountId, runId: id }))).toBe(ITEM);
+    });
+
+    it.each([
+      ["no bound event", null],
+      ["a bound event for another branch", { pr_number: 41, branch: "fx/issue-8" }],
+      ["a bound event for another pull request number", { pr_number: 42, branch: ITEM }],
+    ])("refuses the verdict and writes nothing: %s", async (_name, event) => {
+      const id = await pending({ continues: { branch: ITEM, prNumber: 41 } });
+      if (event) await bind(id, event);
+      const g = await claimed(id);
+      await expect(facade.finishRunnerDone({ ...lease(id, g), verdict })).rejects.toBeInstanceOf(RunActionInputError);
+      await nothingWritten(id);
+    });
+
+    it("refuses it when the signed job names a different branch than the verdict, even with a matching event", async () => {
+      const id = await pending();
+      await bind(id, { pr_number: 41, branch: ITEM });
+      const g = await claimed(id);
+      await expect(facade.finishRunnerDone({ ...lease(id, g), verdict })).rejects.toBeInstanceOf(RunActionInputError);
+      await nothingWritten(id);
+    });
+
+    it("refuses it when the item's issue number is not the branch's", async () => {
+      const id = await pending({ continues: { branch: ITEM, prNumber: 41 } });
+      await bind(id, { pr_number: 41, branch: ITEM });
+      const g = await claimed(id);
+      await admin.query("UPDATE work_items SET gh_number = 13 WHERE id = $1", [A.workItemId]);
+      await expect(facade.finishRunnerDone({ ...lease(id, g), verdict })).rejects.toBeInstanceOf(RunActionInputError);
+      await nothingWritten(id);
+    });
+
+    it("a run branch needs no binding, as before", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const branch = `fx/${id}-g${g}`;
+      expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: { ...verdict, branch } })).toMatchObject({ kind: "recorded" });
     });
   });
 

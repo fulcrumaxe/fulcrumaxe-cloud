@@ -62,7 +62,7 @@ describe("job signature", () => {
     const changes: Array<[string, (j: Loose) => void]> = [
       ["job_id", (j) => (j.job_id = "7b9d1c6e-4f0a-4c53-9a58-2f0d5b6c3a12")], ["run_id", (j) => (j.run_id = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f")],
       ["repo.id", (j) => (j.repo.id = "3c1e5a7b-2d4f-4a6c-8e0b-1a2b3c4d5e70")], ["repo.owner", (j) => (j.repo.owner = "evil")],
-      ["repo.name", (j) => (j.repo.name = "other")], ["role_tools_sha256", (j) => (j.role_tools_sha256 = "c".repeat(64))], ["task.kind", (j) => (j.task.kind = "review")], ["task.prompt", (j) => (j.task.prompt += " ")], ["role_card.text", (j) => (j.role_card.text += " ")], ["continues", (j) => (j.continues = { parent_run_id: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f", session_id: "s1", branch: "fx/issue-1" })], ["spec", (j) => (j.spec = null as never)],
+      ["repo.name", (j) => (j.repo.name = "other")], ["role_tools_sha256", (j) => (j.role_tools_sha256 = "c".repeat(64))], ["task.kind", (j) => (j.task.kind = "review")], ["task.prompt", (j) => (j.task.prompt += " ")], ["role_card.text", (j) => (j.role_card.text += " ")], ["continues", (j) => (j.continues = { parent_run_id: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f", session_id: "s1", branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" })], ["spec", (j) => (j.spec = null as never)],
       ["role", (j) => (j.role = "docs-writer")], ["mode", (j) => (j.mode = "verified")],
       ["spec.discussion", (j) => (j.spec.discussion = 7)], ["spec.version", (j) => (j.spec.version = 2)],
       ["spec.sha256", (j) => (j.spec.sha256 = "b".repeat(64))], ["spec.text", (j) => (j.spec.text += " ")],
@@ -120,7 +120,7 @@ describe("job signature", () => {
   it("signs and verifies a job with a null spec and one that continues a session", () => {
     const review = { ...job, spec: null, role: "code-reviewer", task: { ...job.task, kind: "review" } } as Job;
     expect(verifyJob(signJob(review, privateKey), keyring, { now: NOW })).toEqual(review);
-    const fix = { ...job, task: { ...job.task, kind: "fix" }, continues: { parent_run_id: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f", session_id: "sess_01-a.b", branch: "fx/issue-12" } } as Job;
+    const fix = { ...job, task: { ...job.task, kind: "fix" }, continues: { parent_run_id: "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5f", session_id: "sess_01-a.b", branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" } } as Job;
     expect(verifyJob(signJob(fix, privateKey), keyring, { now: NOW })).toEqual(fix);
   });
 

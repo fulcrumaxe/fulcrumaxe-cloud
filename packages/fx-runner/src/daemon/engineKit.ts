@@ -49,7 +49,7 @@ export interface EngineKit {
     limits?: JobLimits;
   }): InterruptibleRuntime;
   /** Resume or fresh, from the local session index in the state directory. */
-  planSession(stateDir: string, continues: { session_id: string; branch: string } | null): SessionPlan;
+  planSession(stateDir: string, continues: { session_id: string | null; branch: string } | null): SessionPlan;
   recordSession(stateDir: string, sessionId: string, workspace: string): Promise<void>;
   /** The session a run was in, read from the run's own local transcript; undefined when it has none. The checkpoint turn of a handed-off run resumes it. Absent: no such lookup is wired. */
   sessionOfRun?(stateDir: string, runId: string): string | undefined;
