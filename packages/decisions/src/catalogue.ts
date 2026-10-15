@@ -26,7 +26,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 2;
+export const CATALOGUE_VERSION = 3;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -86,6 +86,49 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
   },
+  // D#483 S5-a: starting work. The three small kinds share one shape: the person's dial moves them (Cautious asks, Balanced
+  // starts and says so, Autonomous starts). With no dial row the default is `ask`: starting work is a person's approval until they
+  // choose a preset or set the dial; the start gate
+  // still needs a confirmed weekly auto-start envelope and the hard rules in `resolveStart` before anything starts.
+  {
+    id: "start_work_small",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    id: "start_work_bug",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    id: "start_work_doc",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    // Launching a sub-item of a parent a person already approved: a planned PR or task of its approved Spec, a fix round, or a
+    // follow-up child inside the parent's scope. The envelope limit is the same at every preset (a sub-item never passes the
+    // parent's envelope); `resolveSubItemLaunch` checks that before this dial is read.
+    id: "launch_sub_item",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
   {
     id: "publish_deprecation_notice",
     class: "human_over_the_loop",
@@ -123,6 +166,39 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
       availability: "not_reversible",
       reason: "money already spent cannot be unspent by this system",
     },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    // The first start of a feature, project or critical item. Always asked, at every preset.
+    id: "start_parent_item",
+    class: "human_in_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["ask"],
+    reversal: { availability: "reversible_before_build" },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    // An item reached its spend envelope and would go past it.
+    id: "spend_past_envelope",
+    class: "human_in_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "money already spent cannot be unspent",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+  },
+  {
+    // An item that started as small, doc or bug and that triage then classifies higher.
+    id: "start_after_reclassify",
+    class: "human_in_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["ask"],
+    reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
   },

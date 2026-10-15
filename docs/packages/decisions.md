@@ -43,9 +43,14 @@ which re-exports:
 
 ## How it works
 
-`catalogue.ts`'s `CATALOGUE` is a fixed array of 7 entries at HEAD (2 in
-`automated_with_monitoring`, 3 in `human_over_the_loop`, 2 in
-`human_in_the_loop`), each declaring an id, its class, a default
+`catalogue.ts`'s `CATALOGUE` is a fixed array of 15 entries at version 3 (2 in
+`automated_with_monitoring`, 8 in `human_over_the_loop`, 5 in
+`human_in_the_loop`). D#483 S5-a added seven: `start_work_small`,
+`start_work_bug`, `start_work_doc` and `launch_sub_item` (class 2, default
+`ask`), and `start_parent_item`, `spend_past_envelope` and
+`start_after_reclassify` (class 3, ask only). The pure resolvers that read them,
+`resolveStart` and `resolveSubItemLaunch`, live in `packages/core/src/autonomy/`.
+Each entry declares an id, its class, a default
 disposition, the set of dispositions that entry is allowed to resolve to,
 and how its effect can be reversed (`reversible_before_build`,
 `compensating_work`, or `not_reversible` with a required reason string).
@@ -74,6 +79,36 @@ escalates past what the preset asked for. `decide()` never reads
 `entry.reversal`, `entry.customerProximity` or `entry.dataSensitivity`;
 those three fields exist on `CatalogueEntry` for later routing/reporting
 uses, not for this resolution step.
+
+## Start-resolver reason vocabulary
+
+`resolveStart` and `resolveSubItemLaunch` (in `packages/core/src/autonomy/`) answer with a fixed set of reason names. They are vocabulary, not free text: callers, receipts and screens key on them, and `packages/core/test/autonomy-reasons-doc.test.ts` fails if this list and the exported `START_REASONS` / `SUB_ITEM_REASONS` differ. Both resolvers take a preset, not a stored dial row. The caller that starts work must map "no row" and a single-dial override to the disposition the person actually set before it passes a preset in.
+
+### Start reasons
+
+- `owned_by_internal_loop` — the repo's own development loop owns the item; refused.
+- `engine_loop_repo` — the default branch holds the engine loop's project file; the person decides.
+- `external_needs_approval` — the proposal came from someone without write access; the person decides.
+- `not_checked` — the verifier has not confirmed the proposal (pending, refuted, failed or not run); the person decides.
+- `category_unknown` — no category yet, or the category is a question or outside the known set; the person decides.
+- `free_preview` — the account is still on the free preview; refused.
+- `no_write_install` — the repo has no active write App install; refused.
+- `parent_first_start` — a feature, project or critical item; its first start is always asked.
+- `dial` — no hard rule applied and the person's dial for this decision gave the answer.
+
+### Sub-item launch reasons
+
+- `parent_not_approved` — the parent has no person's approval record; ask.
+- `respec_needs_approval` — the Spec changed since the parent was approved; ask for a new approval.
+- `spec_version_unknown` — the approved or current Spec version is missing; ask.
+- `spec_keys_unknown` — the approved Spec's list of planned keys was not supplied; ask.
+- `sub_item_kind_unknown` — the sub-item kind is not one of the four known kinds; ask.
+- `sub_item_widens_scope` — a feature-sized or unclassified child, or a key outside the approved Spec; handled as a new item.
+- `parent_envelope_reached` — the parent's envelope does not cover the first run; wait.
+- `owned_by_internal_loop` — the parent is owned by the repo's own loop; refused.
+- `engine_loop_repo` — the parent's repo holds the engine loop's project file; ask.
+- `external_needs_approval` — the parent came from someone without write access; ask.
+- `dial` — every guardrail passed and the `launch_sub_item` dial gave the answer.
 
 ## The declared-classes guard
 
