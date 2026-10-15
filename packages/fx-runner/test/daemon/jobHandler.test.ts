@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { LocalOnlyEvent, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { JobSchema, type LocalOnlyEvent, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { readyOrCode } from "../../src/commands/run.js";
 import type { CommandContext } from "../../src/context.js";
 import { API_KEY_FILE, CREDENTIALS_DIR, clearApiKey, perJobApiKey, writeApiKey } from "../../src/credentials.js";
@@ -822,23 +822,9 @@ describe("git path B around the run (D#6 R4a-3)", () => {
   const RUN_BRANCH = "fx/22222222-2222-4222-8222-222222222222-g1";
   const continuing = (branch: string = RUN_BRANCH, over: Partial<ReturnType<typeof jobFor>> = {}) => jobFor({ continues: { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch }, ...over });
 
-  it("a fix round whose branch is not a run branch is refused as job_refused before anything is made, whatever it is", async () => {
-    // The claim client parses the job schema first, so a name with ".." never reaches the handler; verifyJob.test.ts covers the whole list.
-    const bad = ["main", "fx/issue-12", "fx/22222222-2222-4222-8222-222222222222-g0", "refs/heads/x", "fx/22222222-2222-4222-8222-222222222222-g1000000000", "fx/22222222-2222-4222-8222-222222222222-g01", "FX/22222222-2222-4222-8222-222222222222-g1"];
-    for (const branch of bad) {
-      const git = fakeGitPath();
-      const rig = makeRig({ handler: { git } });
-      const claimed = await rig.claim(signRaw(continuing(branch)) as never);
-      expect(await rig.handle(claimed), branch).toEqual({ status: "refused", reason: "continues_branch_invalid" });
-      expect(rig.runJobCalls(), branch).toBe(0);
-      expect(git.calls, branch).toEqual([]);
-      expect(rig.port.calls, branch).toEqual([]);
-      expect(existsSync(rig.workspaces), branch).toBe(false);
-      const end = cloud.runs.get(claimed.runId)?.endedBy;
-      expect(end, branch).toMatchObject({ type: "run_ended", reason: "job_refused" });
-      expect(end?.detail, branch).toBeUndefined();
-      rig.ledger.close();
-    }
+  it("a fix round whose branch is not a run branch never reaches the handler: the job schema refuses it first (D#599 PL-2b-1), and verifyJob.test.ts covers the runner's own shape check", () => {
+    const bad = ["main", "fx/feature-12", "fx/22222222-2222-4222-8222-222222222222-g0", "refs/heads/x", "fx/22222222-2222-4222-8222-222222222222-g1000000000", "fx/22222222-2222-4222-8222-222222222222-g01", "FX/22222222-2222-4222-8222-222222222222-g1"];
+    for (const branch of bad) expect(JobSchema.safeParse(continuing(branch)).success, branch).toBe(false);
   });
 
   it("a fix round on a run branch is accepted: the branch need not belong to the parent run", async () => {

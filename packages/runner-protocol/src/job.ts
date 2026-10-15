@@ -86,6 +86,44 @@ const branchName = z
   .max(200)
   .refine((value) => !value.includes(".."));
 
+/**
+ * D#599 PL-2b: the one extra branch a continuation may push to besides a run branch: the item's own pull request head, `fx/issue-<n>`. `n` is
+ * the item's issue number (1 to 10 digits, no leading zero). The pattern is exported once and every check that widens a branch rule imports
+ * it: no copy, no prefix, no wildcard.
+ */
+export const ITEM_PR_BRANCH = /^fx\/issue-[1-9][0-9]{0,9}$/;
+
+/**
+ * The shape of every branch a runner run pushes, and so of every branch a continuation may continue: `fx/<run id>-g<lease generation>`, the
+ * generation a positive integer of at most nine places. The one copy: the schema below, the job issuer, `done` and the verdict writer all import it.
+ */
+export const RUNNER_RUN_BRANCH = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
+
+/** The largest value of a Postgres `integer`; a pull request number in a job stays inside it. */
+const PR_NUMBER_MAX = 2_147_483_647;
+
+/**
+ * `continues`: the earlier run a fix round carries on from, and the one branch it works on.
+ *  - `session_id` is null when no session is claimed: a round on the other side of a hand-over never claims to continue a session it did not run.
+ *  - `pr_number` is present if and only if `branch` is an item pull request branch (`ITEM_PR_BRANCH`); the cloud binds it to the item's open pull
+ *    request at issue time. An item pull request branch with a session id is refused.
+ */
+const ContinuesSchema = z
+  .object({
+    parent_run_id: uuid,
+    session_id: z.string().regex(SESSION_ID_PATTERN).nullable(),
+    branch: branchName,
+    pr_number: z.number().int().min(1).max(PR_NUMBER_MAX).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    // The branch is one of exactly two shapes, whether or not a pull request number is present: a run branch or the item's pull request branch.
+    if (!RUNNER_RUN_BRANCH.test(value.branch) && !ITEM_PR_BRANCH.test(value.branch)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a continuation branch is a run branch or an item pull request branch", path: ["branch"] });
+    const itemBranch = ITEM_PR_BRANCH.test(value.branch);
+    if (itemBranch !== (value.pr_number !== undefined)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pr_number is present exactly when the branch is an item pull request branch", path: ["pr_number"] });
+    if (itemBranch && value.session_id !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a foreign session is never claimed on an item pull request branch", path: ["session_id"] });
+  });
+
 /** SHA-256 of a string's UTF-8 bytes, lowercase hex: the digest `task.prompt_sha256` and `role_card.sha256` hold. */
 export function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -113,7 +151,7 @@ export const JobSchema = z
     role_card: z.object({ text: z.string().min(1).max(MAX_ROLE_CARD_CHARS), sha256: sha256Hex }).strict(),
     // SHA-256 of the canonical JSON of the role's tool allow list. A runner refuses a job whose value differs from its own table's entry for the role.
     role_tools_sha256: sha256Hex,
-    continues: z.object({ parent_run_id: uuid, session_id: z.string().regex(SESSION_ID_PATTERN), branch: branchName }).strict().nullable(),
+    continues: ContinuesSchema.nullable(),
     // D#6 R4d-4 (C33): present exactly on a review-role job (REVIEW_JOB_ROLES), omitted (never null) on every other job so their canonical JSON
     // and signature are unchanged. The signature covers it. 40 or 64 lowercase hex, the commit under review.
     review: z.object({ head_sha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) }).strict().optional(),

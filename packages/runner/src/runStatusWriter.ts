@@ -12,6 +12,7 @@ import { assertLegalRunTransition, type RunStatus } from "./statusTransitions.js
 import type { ExtensionProgress } from "./runLimitDecision.js";
 import type { Role } from "./types.js";
 import { isRunnerMode } from "./runnerModes.js";
+import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#2 H09b, correction C10, pass/fail 13: "Every write of
@@ -489,14 +490,64 @@ export async function insertAgentRun(pool: Pool, params: InsertAgentRunParams): 
  * Returns whether this call wrote it; false means the run was not in that state (already has a job, already claimed,
  * cancelled) and nothing changed.
  */
-export async function writeRunnerJob(pool: Pool, p: { accountId: string; runId: string; job: Record<string, unknown> }): Promise<boolean> {
+export async function writeRunnerJob(
+  pool: Pool,
+  p: {
+    accountId: string;
+    runId: string;
+    job: Record<string, unknown>;
+    /** D#599 PL-2b: the lowest protocol version of a runner that may claim this job (null/absent: any runner). Stored on the row by the same write. */
+    minProtocolVersion?: number | null;
+    /** D#599 PL-2b: the item pull request branch this job may push to, recorded as `runner.continues_bound` in the SAME transaction as the job (only when the job is written). */
+    continuesBound?: { prNumber: number; branch: string };
+  },
+): Promise<boolean> {
+  const min = p.minProtocolVersion ?? null;
+  if (min !== null && !(Number.isSafeInteger(min) && min >= 1 && min <= 2_147_483_647)) throw new TypeError("writeRunnerJob: minProtocolVersion must be a positive integer or null");
+  if (p.continuesBound !== undefined && !(ITEM_PR_BRANCH.test(p.continuesBound.branch) && Number.isSafeInteger(p.continuesBound.prNumber) && p.continuesBound.prNumber >= 1)) throw new TypeError("writeRunnerJob: continuesBound must name an item pull request branch and a pull request number");
   return withTenant(pool, p.accountId, async (client) => {
-    const { rows } = await client.query<{ written: boolean }>(
-      `SELECT agent_run_set_runner_job($1::uuid, $2::uuid, $3::jsonb) AS written`,
-      [p.accountId, p.runId, JSON.stringify(p.job)],
-    );
-    return rows[0]?.written === true;
+    // The value rides in a transaction-local setting that the agent_runs guard copies into the column in the UPDATE that first sets the job (0805), so the
+    // definer keeps its signature and no role gains a privilege. Cleared right after, whether or not the job was written.
+    await client.query("SELECT set_config('fx.job_min_protocol', $1, true)", [min === null ? "" : String(min)]);
+    const { rows } = await client.query<{ written: boolean }>(`SELECT agent_run_set_runner_job($1::uuid, $2::uuid, $3::jsonb) AS written`, [p.accountId, p.runId, JSON.stringify(p.job)]);
+    await client.query("SELECT set_config('fx.job_min_protocol', '', true)");
+    const written = rows[0]?.written === true;
+    if (written && p.continuesBound !== undefined) {
+      await insertRunEvent(client, p.accountId, p.runId, RUNNER_CONTINUES_BOUND_KIND, { pr_number: p.continuesBound.prNumber, branch: p.continuesBound.branch });
+    }
+    return written;
   });
+}
+
+/**
+ * D#599 PL-2b: the `run_events` kind that records which item pull request branch a continuation may push to. Written by the issuer in the
+ * transaction that records the job, and only after it checked the pull request on GitHub. Every later check (the ticket route, `done`, the verdict
+ * writer, the recorded-branch reads) re-reads it and demands that it, the signed job's `continues.branch` and `fx/issue-<item issue number>` agree.
+ */
+export const RUNNER_CONTINUES_BOUND_KIND = "runner.continues_bound";
+
+/**
+ * The item pull request branch run `runId` is bound to, or null. It is non-null only when ALL THREE agree: the run's `runner.continues_bound` event,
+ * the `continues.branch` of the run's own signed job, and `fx/issue-<issue number of the run's work item>`. Anything else (no event, an event for
+ * another branch, a job that names a different one, an item with another issue number) is null, never a fallback. `client` must be under the run's tenant.
+ */
+export async function readBoundItemBranch(client: PoolClient, p: { accountId: string; runId: string }): Promise<{ branch: string; prNumber: number } | null> {
+  const { rows } = await client.query<{ branch: string | null; pr: string | null }>(
+    `SELECT e.payload->>'branch' AS branch, e.payload->>'pr_number' AS pr
+       FROM run_events e
+       JOIN agent_runs a ON a.account_id = e.account_id AND a.id = e.run_id
+       JOIN work_items w ON w.account_id = a.account_id AND w.id = a.work_item_id
+      WHERE e.account_id = $1 AND e.run_id = $2 AND e.kind = '${RUNNER_CONTINUES_BOUND_KIND}'
+        AND e.payload->>'branch' = a.job_signed->'job'->'continues'->>'branch'
+        AND e.payload->>'pr_number' = a.job_signed->'job'->'continues'->>'pr_number'
+        AND e.payload->>'branch' = 'fx/issue-' || w.gh_number::text
+      ORDER BY e.seq DESC LIMIT 1`,
+    [p.accountId, p.runId],
+  );
+  const row = rows[0];
+  if (!row || typeof row.branch !== "string" || !ITEM_PR_BRANCH.test(row.branch) || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;
+  const prNumber = Number(row.pr);
+  return Number.isSafeInteger(prNumber) ? { branch: row.branch, prNumber } : null;
 }
 
 /** The `run_events` kind that records a continuation's branch head at dispatch (D#6 R2b-3f, C22 section 2). */
@@ -534,7 +585,7 @@ export async function recordRunHandoffEvent(client: PoolClient, p: { accountId: 
  * `fx/<run id>-g<lease generation>`. The generation is a positive integer of at most nine digits. The issuer, `done` and the verdict
  * writer all check this one pattern.
  */
-export const RUNNER_RUN_BRANCH = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
+export { RUNNER_RUN_BRANCH };
 
 /**
  * The run branch a finished runner run's `done` recorded next to its pull request number (C25 section 1.2), or null when the run has none
@@ -547,7 +598,11 @@ export async function readRecordedRunnerBranch(client: PoolClient, p: { accountI
     [p.accountId, p.runId],
   );
   const branch = rows[0]?.branch;
-  return typeof branch === "string" && RUNNER_RUN_BRANCH.test(branch) ? branch : null;
+  if (typeof branch !== "string") return null;
+  if (RUNNER_RUN_BRANCH.test(branch)) return branch;
+  // D#599 PL-2b: an item pull request branch counts only when this run is bound to exactly it.
+  if (ITEM_PR_BRANCH.test(branch)) return (await readBoundItemBranch(client, p))?.branch === branch ? branch : null;
+  return null;
 }
 
 /**
@@ -557,8 +612,8 @@ export async function readRecordedRunnerBranch(client: PoolClient, p: { accountI
  * Null when no succeeded executor run of the item recorded both, or when what was recorded is not a positive pull request number and a run branch. `client` must be under the run's tenant.
  */
 export async function readRecordedRunnerPullRequest(client: PoolClient, p: { accountId: string; workItemId: string }): Promise<{ number: number; branch: string } | null> {
-  const { rows } = await client.query<{ branch: string | null; pr: string | null }>(
-    `SELECT e.payload->>'branch' AS branch, e.payload->>'prNumber' AS pr
+  const { rows } = await client.query<{ branch: string | null; pr: string | null; run_id: string }>(
+    `SELECT e.payload->>'branch' AS branch, e.payload->>'prNumber' AS pr, e.run_id
        FROM run_events e JOIN agent_runs r ON r.account_id = e.account_id AND r.id = e.run_id
       WHERE e.account_id = $1 AND r.work_item_id = $2 AND r.role = 'executor' AND e.kind = 'run.status_changed'
         AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'to' = 'succeeded' AND e.payload->>'branch' IS NOT NULL AND e.payload->>'prNumber' IS NOT NULL
@@ -566,9 +621,16 @@ export async function readRecordedRunnerPullRequest(client: PoolClient, p: { acc
     [p.accountId, p.workItemId],
   );
   const row = rows[0];
-  if (!row || typeof row.branch !== "string" || !RUNNER_RUN_BRANCH.test(row.branch) || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;
+  if (!row || typeof row.branch !== "string" || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;
   const number = Number(row.pr);
-  return Number.isSafeInteger(number) ? { number, branch: row.branch } : null;
+  if (!Number.isSafeInteger(number)) return null;
+  if (RUNNER_RUN_BRANCH.test(row.branch)) return { number, branch: row.branch };
+  // D#599 PL-2b: an item pull request branch is the item's recorded one only when that run is bound to this very branch and number.
+  if (ITEM_PR_BRANCH.test(row.branch)) {
+    const bound = await readBoundItemBranch(client, { accountId: p.accountId, runId: row.run_id });
+    return bound !== null && bound.branch === row.branch && bound.prNumber === number ? { number, branch: row.branch } : null;
+  }
+  return null;
 }
 
 export interface WriteRunStatusParams {

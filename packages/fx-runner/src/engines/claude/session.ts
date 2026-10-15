@@ -76,8 +76,10 @@ export type SessionPlan = { kind: "resume"; sessionId: string; workspace: string
  * Resume only when this machine's own index holds the id AND that workspace still exists; then the job runs in that
  * workspace. Anything else is a fresh session in a new workspace on `continues.branch`.
  */
-export function planSession(continues: { session_id: string; branch: string } | null, index: SessionIndex, dirExists: (dir: string) => boolean = existsSync): SessionPlan {
+export function planSession(continues: { session_id: string | null; branch: string } | null, index: SessionIndex, dirExists: (dir: string) => boolean = existsSync): SessionPlan {
   if (continues === null) return { kind: "fresh", branch: null };
+  // D#599 PL-2b: no session is claimed (a round from the other side): fresh on the branch, and the index is never read for it.
+  if (continues.session_id === null) return { kind: "fresh", branch: continues.branch };
   const known = Object.hasOwn(index, continues.session_id) ? index[continues.session_id] : undefined;
   if (known !== undefined && dirExists(known.workspace)) return { kind: "resume", sessionId: continues.session_id, workspace: known.workspace };
   return { kind: "fresh", branch: continues.branch };

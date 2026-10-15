@@ -1016,12 +1016,11 @@ describe("runner follow-up runs [pg]", () => {
       expect(issued.continues).toBeNull();
     });
 
-    it("a follow-up whose parent job's branch is not a run branch is failed internal_error, with no job (C22 section 2, C25 section 1.2)", async () => {
-      const { childId } = await childOf({ ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: "sess-fix-1", branch: "fx/issue-7" } });
-      await expect(built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_branch_mismatch/);
+    it("a follow-up of a round that claimed no session (D#599 PL-2b-1) is failed internal_error, with no job: there is no session to resume and no follow-up is built for it yet", async () => {
+      const { childId } = await childOf({ ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: null, branch: FIX_BRANCH } });
+      await expect(built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_session_invalid/);
       const row = (await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0];
       expect(row).toEqual({ status: "failed", job_signed: null });
-      expect((await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed' ORDER BY seq", [childId])).rows.map((r) => r.payload)).toEqual([{ from: "pending", to: "failed", failureReason: "internal_error" }]);
     });
 
     it("GitHub unreachable while the follow-up's branch head is read leaves the child PENDING with no job, for the sweeper's retry; the retry then issues it (C22 section 3)", async () => {

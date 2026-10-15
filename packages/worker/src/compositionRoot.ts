@@ -40,6 +40,7 @@ import {
   type GithubForwardConfig,
   type HookResumePort,
   type ContinuationBasePort,
+  type ContinuationBindingPort,
   type JobIssuer,
   type ModelConnectionPort,
   type RepoVisibilityPort,
@@ -108,6 +109,8 @@ export interface WorkerPorts {
   repoVisibility?: RepoVisibilityPort;
   /** D#6 R2b-3f: reads a continuation's branch head at dispatch (apps/web supplies the live GitHub read). Absent, a continuation (a fix round or a follow-up of one) cannot be issued. */
   continuationBase?: ContinuationBasePort;
+  /** D#599 PL-2b: reads the item's pull request, the default branch and a branch's protection to bind a continuation on `fx/issue-<n>`. Absent, such a continuation is refused (`continues_base_unavailable`) and nothing is recorded; a continuation on a run branch does not need it. */
+  continuationBinding?: ContinuationBindingPort;
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
   runnerLimits?: RunnerLimitsPort;
 }
@@ -275,7 +278,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#6 R3b: the job-signing key is read here, once, and goes straight into the signer. Without it the issuer stays unwired and a runner run cannot be dispatched.
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
-    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}) }) : unwiredJobIssuer);
+    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}), ...(options.ports.continuationBinding ? { continuationBinding: options.ports.continuationBinding } : {}) }) : unwiredJobIssuer);
     const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor('runner').runsPerDay };
     const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_local");
     // D#6 R5b-2a: a cloud-verified repository's agents run on the runner, and its four reviewers in the sandbox target above, on the customer's key.

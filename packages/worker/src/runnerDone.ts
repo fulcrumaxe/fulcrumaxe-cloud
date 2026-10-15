@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
-import { MAX_ENVELOPE_INPUT_BYTES, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -86,9 +86,21 @@ function requireVerdict(verdict: RunnerDoneVerdict): void {
   const okReason = verdict.outcome === "succeeded" ? verdict.failureReason === null : verdict.outcome === "failed" && typeof verdict.failureReason === "string" && REASONS.has(verdict.failureReason);
   if (!okReason) throw new RunActionInputError();
   if (verdict.prNumber !== null && !(Number.isSafeInteger(verdict.prNumber) && verdict.prNumber >= 1)) throw new RunActionInputError();
-  if (verdict.branch !== undefined && !(verdict.prNumber !== null && typeof verdict.branch === "string" && RUNNER_RUN_BRANCH.test(verdict.branch))) throw new RunActionInputError();
+  // A run branch, or (D#599 PL-2b) the item's pull request branch; the latter is checked against the run's bound event in `requireBoundBranch`, in the writing transaction.
+  if (verdict.branch !== undefined && !(verdict.prNumber !== null && typeof verdict.branch === "string" && (RUNNER_RUN_BRANCH.test(verdict.branch) || ITEM_PR_BRANCH.test(verdict.branch)))) throw new RunActionInputError();
   if (verdict.prHttpStatus !== undefined && !(Number.isInteger(verdict.prHttpStatus) && verdict.prHttpStatus >= 100 && verdict.prHttpStatus <= 599)) throw new RunActionInputError();
   if (verdict.detail !== undefined && !((verdict.detail === "renamed" || verdict.detail === "unknown_change_type" || verdict.detail === "no_file_list") && verdict.failureReason === "scope_unknown")) throw new RunActionInputError();
+}
+
+/**
+ * D#599 PL-2b security model 3: a verdict naming an item pull request branch is recorded only when it is the branch this run is bound to (the
+ * `runner.continues_bound` event, the signed job's `continues.branch` and `fx/issue-<item issue>` all agree) and the pull request number is the bound one.
+ * Anything else is a refusal, never a fallback. A run branch needs no binding. `client` is the writing transaction.
+ */
+async function requireBoundBranch(client: PoolClient, i: { accountId: string; runId: string }, verdict: RunnerDoneVerdict): Promise<void> {
+  if (verdict.branch === undefined || !ITEM_PR_BRANCH.test(verdict.branch)) return;
+  const bound = await readBoundItemBranch(client, i);
+  if (bound === null || bound.branch !== verdict.branch || bound.prNumber !== verdict.prNumber) throw new RunActionInputError();
 }
 
 /** The stored output: redacted (G2) first, then dropped whole if it is still over the cap in UTF-8 bytes. */
@@ -122,11 +134,13 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
   const failureReason = typeof p.failureReason === "string" && REASONS.has(p.failureReason) ? (p.failureReason as DoneFailureReason) : null;
   if ((p.to === "succeeded") !== (failureReason === null)) return null;
   const prNumber = typeof p.prNumber === "number" && Number.isSafeInteger(p.prNumber) && p.prNumber >= 1 ? p.prNumber : null;
+  // An item pull request branch in a stored verdict is replayed only while the run's binding still agrees (the same rule that let it be written).
+  const bound = typeof p.branch === "string" && ITEM_PR_BRANCH.test(p.branch) ? await readBoundItemBranch(client, { accountId: i.accountId, runId: i.runId }) : null;
   return {
     outcome: p.to,
     failureReason,
     prNumber,
-    ...(prNumber !== null && typeof p.branch === "string" && RUNNER_RUN_BRANCH.test(p.branch) ? { branch: p.branch } : {}),
+    ...(prNumber !== null && typeof p.branch === "string" && (RUNNER_RUN_BRANCH.test(p.branch) || (ITEM_PR_BRANCH.test(p.branch) && bound?.branch === p.branch && bound.prNumber === prNumber)) ? { branch: p.branch } : {}),
     ...(typeof p.prHttpStatus === "number" ? { prHttpStatus: p.prHttpStatus } : {}),
     ...(p.detail === "renamed" || p.detail === "unknown_change_type" || p.detail === "no_file_list" ? { detail: p.detail } : {}),
   };
@@ -194,6 +208,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
           }
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
           const { verdict } = input;
+          await requireBoundBranch(client, input, verdict);
           const moved = await writeRunStatusOn(client, {
             accountId: input.accountId,
             runId: input.runId,

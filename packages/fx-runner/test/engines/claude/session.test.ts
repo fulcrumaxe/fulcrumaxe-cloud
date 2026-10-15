@@ -16,6 +16,7 @@ describe("session planning", () => {
     ["known id, workspace gone", continues, index, false, { kind: "fresh", branch: "fx/fix-1" }],
     ["id not in this machine's index", continues, {}, true, { kind: "fresh", branch: "fx/fix-1" }],
     ["inherited name is not an id", { session_id: "constructor", branch: "b" }, {}, true, { kind: "fresh", branch: "b" }],
+    ["no session claimed (a round from the other side): fresh on the branch, whatever the index holds", { session_id: null, branch: "fx/fix-1" }, index, true, { kind: "fresh", branch: "fx/fix-1" }],
   ] as const)("%s", (_name, cont, idx, exists, expected) => {
     expect(planSession(cont as never, idx as never, () => exists)).toEqual(expected);
   });

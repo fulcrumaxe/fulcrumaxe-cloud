@@ -219,6 +219,13 @@ export const MIN_SUPPORTED_PROTOCOL_VERSION = 1;
  * signal only to a run whose runner has declared at least this version (the cloud-side gate); an older runner gets a plain reply and keeps running.
  */
 export const HANDOFF_MIN_PROTOCOL_VERSION = 2;
+/**
+ * D#599 PL-2b: the first version whose runner can read a job whose `continues` has a null `session_id` or a `pr_number` (the cross-side
+ * continuation). The runner's job parse is strict, so the cloud never offers such a job to a runner whose stored version is lower (the claim gate,
+ * `agent_runs.min_protocol_version`). It is HANDOFF's version plus one, per owner question R-599-PL2b-1; the runner release that carries it
+ * (PL-2b-3) raises `CURRENT_PROTOCOL_VERSION` to this value, so until then the gated job simply waits for an updated runner.
+ */
+export const CONTINUES_CROSS_SIDE_MIN_PROTOCOL = 3;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;

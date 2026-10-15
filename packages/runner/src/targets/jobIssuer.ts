@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import type { Pool } from "pg";
 import {
+  CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
+  ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
   SESSION_ID_PATTERN,
@@ -50,6 +52,9 @@ export type JobIssueErrorCode =
   | "continues_without_branch"
   | "continues_branch_mismatch"
   | "continues_base_unavailable"
+  | "continues_pr_not_open"
+  | "continues_pr_mismatch"
+  | "continues_branch_protected"
   | "continues_role_not_executor"
   | "review_without_head"
   | "review_sha_prompt_mismatch"
@@ -105,6 +110,8 @@ export interface JobContext {
    * fix round's branch comes from: it is never derived from the issue.
    */
   parentBranch: string | null;
+  /** D#599 PL-2b: the work item's own issue number (`work_items.gh_number`), the only `n` an `fx/issue-<n>` continuation branch may carry; null/absent when the item has none. */
+  issueNumber?: number | null;
   /**
    * D#6 R7a (C35): the repo's approved sandbox allowances as stored (the newest approval, unless it was set aside), or null/absent when there
    * are none. Read from the database only: nothing here comes from the repository's contents.
@@ -133,8 +140,9 @@ export function createPgJobContext(pool: Pool): JobContextPort {
           body: string | null;
           body_sha256: string | null;
           discussion_number: string | null;
+          gh_number: string | null;
         }>(
-          `SELECT r.gh_owner, r.gh_name, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number
+          `SELECT r.gh_owner, r.gh_name, sv.version, sv.body, sv.body_sha256, d.number AS discussion_number, w.gh_number
              FROM agent_runs ar
              LEFT JOIN repos r ON r.account_id = ar.account_id AND r.id = $3
              LEFT JOIN work_items w ON w.account_id = ar.account_id AND w.id = ar.work_item_id
@@ -164,7 +172,8 @@ export function createPgJobContext(pool: Pool): JobContextPort {
         );
         const latest = approved[0];
         const sandboxAllowances = latest && !latest.set_aside ? { entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }) } : null;
-        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, sandboxAllowances };
+        const issueNumber = row.gh_number === null ? null : Number(row.gh_number);
+        return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, issueNumber: issueNumber !== null && Number.isSafeInteger(issueNumber) && issueNumber >= 1 ? issueNumber : null, sandboxAllowances };
       });
     },
   };
@@ -180,6 +189,31 @@ export interface ContinuationBasePort {
   headOid(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<string | null>;
 }
 
+/** A pull request as GitHub lists it, reduced to the fields the binding reads: structured values only, never a title, body or comment. */
+export interface BoundPullRequestView {
+  number: number;
+  state: "open" | "closed";
+  /** `head.repo.id`; null when the head repository is gone (a deleted fork). */
+  headRepoId: number | null;
+  /** `base.repo.id`. */
+  baseRepoId: number | null;
+  headRef: string;
+}
+
+/**
+ * D#599 PL-2b: the GitHub reads that bind a cross-side continuation to the item's own pull request. The live implementation goes through the same fenced
+ * client the pipeline uses: the pulls-by-head list (allowlist A3, every state), the repository read (A2) and the branch-protection read (A8), so a
+ * `runner_local` repo needs nothing the fence does not already allow. A port, because this package cannot import the GitHub clients.
+ */
+export interface ContinuationBindingPort {
+  /** Pull requests whose head is `branch` in this repository's owner (state `all`), as listed. A non-200 answer is a `status` and no list. */
+  pullRequestsByHead(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<{ status: number; pulls?: readonly BoundPullRequestView[] }>;
+  /** The repository's `default_branch`; null when it could not be read. */
+  defaultBranch(input: { repo: { id: string; owner: string; name: string } }): Promise<string | null>;
+  /** The HTTP status of the branch's protection read: 200 means protected, 404 means not. Any other status is "could not tell". */
+  branchProtection(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<{ status: number }>;
+}
+
 export interface JobIssuerDeps {
   /** The runner login's pool: it records the signed job through the definer. */
   pool: Pool;
@@ -191,6 +225,11 @@ export interface JobIssuerDeps {
    * refused (`continues_base_unavailable`) and nothing is recorded, so no continuation is ever queued whose `done` could not be judged.
    */
   continuationBase?: ContinuationBasePort;
+  /**
+   * Required to issue a continuation on the item's pull request branch (`fx/issue-<n>`): without it that continuation is refused
+   * (`continues_base_unavailable`). A continuation on a run branch does not use it.
+   */
+  continuationBinding?: ContinuationBindingPort;
   /** Tests pass a fixed clock and id source. */
   now?: () => Date;
   newId?: () => string;
@@ -200,6 +239,57 @@ export interface JobIssuerDeps {
 const REVIEW_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const MODEL_HINT = /^[A-Za-z0-9._:-]{1,100}$/;
+
+/** The prefix of an item pull request branch; `n` is appended. */
+const ITEM_BRANCH_PREFIX = "fx/issue-";
+
+/**
+ * D#599 PL-2b security model 2 and 4: binds an item pull request branch to the item's open pull request in THIS repository, on GitHub, now, and
+ * refuses the repository's default branch and any protected branch. Returns the pull request number to sign. Every refusal is a closed code and nothing is recorded.
+ * `expected` is the number the caller recorded for the item, when it has one: GitHub must say the same.
+ */
+async function bindItemPullRequest(
+  binding: ContinuationBindingPort | undefined,
+  repo: { id: string; owner: string; name: string },
+  branch: string,
+  expected: number | undefined,
+): Promise<number> {
+  if (!binding) throw new JobIssueError("continues_base_unavailable");
+  const unavailable = (): JobIssueError => new JobIssueError("continues_base_unavailable", { retryable: true });
+  let listed: Awaited<ReturnType<ContinuationBindingPort["pullRequestsByHead"]>>;
+  try {
+    listed = await binding.pullRequestsByHead({ repo, branch });
+  } catch {
+    // fx-swallow-ok: the cause can carry a name or a token; only the closed code survives
+    throw unavailable();
+  }
+  if (listed.status !== 200 || !Array.isArray(listed.pulls)) throw unavailable();
+  const pulls = listed.pulls;
+  if (pulls.length === 0) throw new JobIssueError("continues_pr_not_open");
+  // The head repository must be this repository (a fork's branch of the same name is not the item's branch).
+  const mine = pulls.filter((p) => p.headRepoId !== null && p.headRepoId === p.baseRepoId);
+  if (mine.length === 0) throw new JobIssueError("continues_pr_mismatch");
+  const open = mine.filter((p) => p.state === "open");
+  if (open.length === 0) throw new JobIssueError("continues_pr_not_open");
+  const pr = open[0]!;
+  if (open.length > 1 || pr.headRef !== branch || !Number.isSafeInteger(pr.number) || pr.number < 1 || (expected !== undefined && pr.number !== expected)) throw new JobIssueError("continues_pr_mismatch");
+
+  let protection: { status: number };
+  try {
+    const defaultBranch = await binding.defaultBranch({ repo });
+    if (defaultBranch === null) throw unavailable();
+    // A default branch is never a continuation's branch; checked before the protection read so a protected default is named for what it is.
+    if (defaultBranch === branch) throw new JobIssueError("continues_branch_protected");
+    protection = await binding.branchProtection({ repo, branch });
+  } catch (error) {
+    if (error instanceof JobIssueError) throw error;
+    // fx-swallow-ok: the cause can carry a name or a token; only the closed code survives
+    throw unavailable();
+  }
+  if (protection.status === 200) throw new JobIssueError("continues_branch_protected");
+  if (protection.status !== 404) throw unavailable();
+  return pr.number;
+}
 
 function taskKind(role: string, continues: boolean): Job["task"]["kind"] {
   if (role === "executor") return continues ? "fix" : "implement";
@@ -241,17 +331,31 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
 
       let continues: Job["continues"] = null;
       let continuationHead: { oid: string | null } | null = null;
+      let boundPullRequest: { prNumber: number; branch: string } | null = null;
       if (input.continues) {
         if (!deps.continuationBase) throw new JobIssueError("continues_base_unavailable");
         if (!input.continues.parentRunId) throw new JobIssueError("continues_without_parent");
-        if (!SESSION_ID_PATTERN.test(input.continues.sessionId)) throw new JobIssueError("continues_session_invalid");
+        const sessionId = input.continues.sessionId;
+        if (sessionId !== null && !SESSION_ID_PATTERN.test(sessionId)) throw new JobIssueError("continues_session_invalid");
         // A follow-up of a fix round carries the branch the lost round was on, unchanged; a fix round the pipeline started continues the branch
-        // recorded at `done` for the run it fixes. Never derived from the issue. Either way it must be a run branch, so a continuation can only
-        // ever push to a branch some runner run's lease named.
+        // recorded at `done` for the run it fixes. Never derived from the issue. Either way it is ONE of two shapes, never a third: a run branch
+        // (as always), or the item's own pull request branch `fx/issue-<n>` for the item's own issue number (D#599 PL-2b), bound below.
         const branch = input.continues.branch ?? context.parentBranch;
         if (branch === null) throw new JobIssueError("continues_without_branch");
-        if (!RUNNER_RUN_BRANCH.test(branch)) throw new JobIssueError("continues_branch_mismatch");
-        continues = { parent_run_id: input.continues.parentRunId, session_id: input.continues.sessionId, branch };
+        // A foreign session is never claimed on the item's pull request branch: with a session id that name is not a continuation branch at all.
+        const itemBranch = sessionId === null && ITEM_PR_BRANCH.test(branch);
+        if (!itemBranch && !RUNNER_RUN_BRANCH.test(branch)) throw new JobIssueError("continues_branch_mismatch");
+        if (itemBranch) {
+          // `n` must be this item's own issue number.
+          if (context.issueNumber === undefined || context.issueNumber === null || branch !== `${ITEM_BRANCH_PREFIX}${context.issueNumber}`) throw new JobIssueError("continues_pr_mismatch");
+          const repoRef = { id: run.repoId, owner: context.repo.owner, name: context.repo.name };
+          const prNumber = await bindItemPullRequest(deps.continuationBinding, repoRef, branch, input.continues.prNumber);
+          boundPullRequest = { prNumber, branch };
+          continues = { parent_run_id: input.continues.parentRunId, session_id: null, branch, pr_number: prNumber };
+        } else {
+          if (input.continues.prNumber !== undefined) throw new JobIssueError("continues_pr_mismatch");
+          continues = { parent_run_id: input.continues.parentRunId, session_id: sessionId, branch };
+        }
         // The branch head NOW, at this run's own dispatch: never the parent's recorded value (a lost parent may have pushed since).
         try {
           continuationHead = { oid: await deps.continuationBase.headOid({ repo: { id: run.repoId, owner: context.repo.owner, name: context.repo.name }, branch }) };
@@ -305,7 +409,16 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
       if (continuationHead) await recordRunnerDispatchBase(deps.pool, { accountId: run.accountId, runId: run.id, headOid: continuationHead.oid });
 
       // The definer writes once, to a pending runner run (either runner mode); `false` means nothing was written.
-      const recorded = await writeRunnerJob(deps.pool, { accountId: run.accountId, runId: run.id, job: signed as unknown as Record<string, unknown> });
+      // The job's lowest runner protocol and the binding event go in the same transaction as the job (D#599 PL-2b): a job in the cross-side shape (a null
+      // session id or a pull request number) is never offered to a runner whose parse predates it, and the event is the only thing that lets the branch be pushed.
+      const crossSide = continues !== null && (continues.session_id === null || continues.pr_number !== undefined);
+      const recorded = await writeRunnerJob(deps.pool, {
+        accountId: run.accountId,
+        runId: run.id,
+        job: signed as unknown as Record<string, unknown>,
+        minProtocolVersion: crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : null,
+        ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
+      });
       if (!recorded) throw new JobIssueError("job_not_recorded");
     },
   };
