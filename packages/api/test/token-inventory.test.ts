@@ -151,7 +151,7 @@ describe('token-inventory: write scopes open only the routes that declare them',
     const read = [
       'getAccount', 'listRuns', 'getRun', 'listWorkItems', 'getWorkItem', 'getStats', 'getWorkItemTimeline',
       'listWebhookEndpoints', 'getWebhookEndpoint', 'listWebhookDeliveries', 'listEvents', 'listRunEvents',
-      'getModelConnection', 'listRepos', 'getRepo', 'getRepoSettings', 'listRoles', 'getUsage', 'getBudgets',
+      'getModelConnection', 'listRepos', 'getRepo', 'getRepoSettings', 'getRepoPairing', 'listRoles', 'getUsage', 'getBudgets',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',
       'listComments', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency',
     ].map((id) => `${id}:read`);

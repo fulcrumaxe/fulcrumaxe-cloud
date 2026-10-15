@@ -986,6 +986,47 @@ export interface Operations {
       human_merge_only?: true;
     };
   };
+  getRepoPairing: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      enabled: boolean;
+      code_repo: string | null;
+      overlay_globs: Array<string>;
+      identifier_rules_path: string | null;
+      plan_data_rules_path: string | null;
+    };
+  };
+  putRepoPairing: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      code_repo: string;
+      overlay_globs: Array<string>;
+      identifier_rules_path?: string | null;
+      plan_data_rules_path?: string | null;
+    };
+    response: {
+      enabled: boolean;
+      code_repo: string | null;
+      overlay_globs: Array<string>;
+      identifier_rules_path: string | null;
+      plan_data_rules_path: string | null;
+    };
+  };
+  deleteRepoPairing: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: null;
+  };
   listRoles: {
     path: {
       id: string;
@@ -2717,6 +2758,39 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  getRepoPairing: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/pairing",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  putRepoPairing: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/pairing",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  deleteRepoPairing: {
+    method: "DELETE",
+    path: "/api/v1/repos/{id}/pairing",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   listRoles: {
     method: "GET",
