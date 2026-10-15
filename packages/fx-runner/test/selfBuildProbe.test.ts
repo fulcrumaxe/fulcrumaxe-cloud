@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,6 +170,125 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     expect(result(verified.stdout, "log_leaky_log")).toBe("fail");
     for (const value of values) expect(verified.stdout + verified.stderr).not.toContain(value);
     expect(sh(["plant"]).code).toBe(2);
+  });
+
+  it("unplant ignores a manifest directory that was never created", () => {
+    const { home, sh } = rig();
+    const before = readdirSync(home).sort();
+    expect(sh(["plant"]).code).toBe(0);
+    const neverMade = path.join(home, ".never-made", "deep");
+    writeFileSync(path.join(home, "state", "manifest"), `dir\t${neverMade}\n`, { flag: "a" });
+    const unplanted = sh(["unplant"]);
+    expect(unplanted.code).toBe(0);
+    expect(unplanted.stderr).not.toContain(`left ${neverMade}`);
+    expect(existsSync(neverMade)).toBe(false);
+    expect(existsSync(path.join(home, "state"))).toBe(false);
+    expect(readdirSync(home).sort()).toEqual(before);
+  });
+
+  it("unplant reports a directory it cannot remove", () => {
+    const { home, sh } = rig();
+    expect(sh(["plant"]).code).toBe(0);
+    const kube = path.join(home, ".kube");
+    writeFileSync(path.join(kube, "extra"), "stray\n");
+    const unplanted = sh(["unplant"]);
+    expect(unplanted.code).toBe(0);
+    expect(unplanted.stderr).toContain(`probe: left ${kube} (not empty)`);
+  });
+
+  it("a directory made just before a signal is still removed", () => {
+    const { home } = rig();
+    const bin = path.join(home, "bin");
+    mkdirSync(bin);
+    let realMkdir = "";
+    for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+      const candidate = path.join(dir, "mkdir");
+      if (existsSync(candidate)) { realMkdir = candidate; break; }
+    }
+    expect(realMkdir).not.toBe("");
+    writeFileSync(
+      path.join(bin, "mkdir"),
+      `#!/bin/sh\n"${realMkdir}" "$@"\nrc=$?\nfor a in "$@"; do\n  if [ "$a" = "-m" ]; then kill -TERM "$PPID"; break; fi\ndone\nexit "$rc"\n`,
+      { mode: 0o755 },
+    );
+    const r = spawnSync("bash", [SCRIPT, "plant"], { env: { ...envFor(home), PATH: `${bin}:${process.env.PATH ?? ""}` }, cwd: home, encoding: "utf8", timeout: 60_000 });
+    expect(r.status).not.toBe(0);
+    expect(existsSync(path.join(home, ".ssh"))).toBe(false);
+    expect(existsSync(path.join(home, "state"))).toBe(false);
+  });
+
+  /** A bin directory holding only the named tools (found on this PATH), plus any extra executable scripts: a stand-in for a hardened service unit's thin PATH. */
+  function thinPath(home: string, tools: string[], extra: Record<string, string> = {}): string {
+    const bin = path.join(home, "thin-bin");
+    mkdirSync(bin);
+    for (const tool of tools) {
+      const found = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+      if (found === "") throw new Error(`test host lacks ${tool}`);
+      symlinkSync(found, path.join(bin, tool));
+    }
+    for (const [name, body] of Object.entries(extra)) writeFileSync(path.join(bin, name), body, { mode: 0o755 });
+    return bin;
+  }
+  // What plant, run and unplant call, and no awk, curl or shasum: the self-hosted CI unit's PATH.
+  const TOOLS = ["bash", "sh", "mkdir", "rmdir", "rm", "od", "tr", "dirname", "id", "grep", "sed", "cut", "sort", "cat", "ls", "wc", "sleep", "uname", "kill", "mktemp", "head", "tail", "true", "false", "env", "date", "cp", "mv", "chmod", "tee"];
+  const present = (tool: string): boolean => spawnSync("sh", ["-c", `command -v ${tool}`]).status === 0;
+
+  it("plants and unplants with no awk on PATH, leaving the home as it was", () => {
+    const { home } = rig();
+    const before = readdirSync(home).sort();
+    const bin = thinPath(home, TOOLS.filter(present));
+    const env = { ...envFor(home), PATH: bin };
+    expect(spawnSync("bash", [SCRIPT, "plant"], { env, cwd: home, encoding: "utf8" }).status).toBe(0);
+    const unplanted = spawnSync("bash", [SCRIPT, "unplant"], { env, cwd: home, encoding: "utf8" });
+    expect([unplanted.status, unplanted.stderr]).toEqual([0, ""]);
+    expect(readdirSync(home).sort()).toEqual([...before, "thin-bin"].sort());
+  });
+
+  it("unplant says which tool is missing and exits non-zero rather than half cleaning", () => {
+    const { home } = rig();
+    const bin = thinPath(home, TOOLS.filter((tool) => present(tool) && tool !== "sort"));
+    const env = { ...envFor(home), PATH: bin };
+    const unplanted = spawnSync("bash", [SCRIPT, "unplant"], { env, cwd: home, encoding: "utf8" });
+    expect(unplanted.status).toBe(3);
+    expect(unplanted.stderr).toContain("probe: unplant cannot run, missing tool(s): sort");
+  });
+
+  it("the process-table scan only considers processes owned by this user", () => {
+    const source = readFileSync(SCRIPT, "utf8");
+    const fn = /^proc_is_ours\(\) \{.*\}$/m.exec(source)?.[0];
+    expect(fn).toBeDefined();
+    const check = (dir: string): number | null => spawnSync("bash", ["-c", `${fn}\nproc_is_ours "$1"`, "bash", dir]).status;
+    expect(check("/proc/self")).toBe(0); // our own process directory
+    if ((process.getuid?.() ?? 0) !== 0) expect(check("/proc/1")).toBe(1); // init is root's: refused for anyone else
+    // Order matters: the ownership test comes before the kill, inside the scan.
+    const scan = /^kill_decoys\(\) \{[\s\S]*?^\}/m.exec(source)?.[0] ?? "";
+    expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeGreaterThan(-1);
+    expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeLessThan(scan.indexOf("kill -KILL"));
+  });
+
+  it("unplant still ends the decoy and removes everything when pgrep and pkill see no process (ProtectProc=invisible)", () => {
+    const { home, sh } = rig();
+    const before = readdirSync(home).sort();
+    const blind = "#!/bin/sh\nexit 1\n"; // what pgrep and pkill answer when /proc hides this user's processes
+    const bin = thinPath(home, TOOLS.filter(present), { pgrep: blind, pkill: blind });
+    const env = { ...envFor(home), PATH: bin };
+    expect(sh(["plant"]).code).toBe(0);
+    // The decoy, named exactly as the probe names it.
+    const decoy = spawn("bash", ["-c", "exec -a 'postgres: fx-probe-sentinel' bash -c 'while :; do sleep 30; done'"], { stdio: "ignore", detached: true, env: { PATH: process.env.PATH } });
+    try {
+      spawnSync("sleep", ["0.5"]);
+      expect(spawnSync("bash", [SCRIPT, "run", "--no-egress", "--no-nix"], { env, cwd: home, encoding: "utf8", timeout: 60_000 }).stdout).toContain('"sentinel_started","item":8,"expect":"started","result":"inconclusive"');
+      const unplanted = spawnSync("bash", [SCRIPT, "unplant"], { env, cwd: home, encoding: "utf8" });
+      expect(unplanted.status).toBe(0);
+      spawnSync("sleep", ["0.5"]);
+      // Gone (or a zombie awaiting this test's wait): ended by the /proc scan, not by pgrep or pkill, which were blind.
+      let state = "";
+      try { state = readFileSync(`/proc/${decoy.pid!}/stat`, "utf8").replace(/^.*\) /, "")[0] ?? ""; } catch { /* no such process */ }
+      expect(["", "Z"]).toContain(state);
+      expect(readdirSync(home).sort()).toEqual([...before, "thin-bin"].sort());
+    } finally {
+      try { process.kill(-decoy.pid!, "SIGKILL"); } catch { /* already gone */ }
+    }
   });
 });
 
