@@ -304,21 +304,24 @@ function mountRunLimits(host) {
 
 // Wraps the Roles app's own content in a "Roles" panel and adds the "Run limits"
 // tab beside it. The Run limits view mounts (and its one GET goes out) the first
-// time its tab opens.
-export function addRunLimitsView(app) {
+// time its tab opens. `extras` are further views, each { id, label, mount(host)
+// -> { destroy } }, shown after Run limits and mounted the same way (D#7 DP10b:
+// the Autonomy view).
+export function addRunLimitsView(app, extras = []) {
   const panel = (id, ...kids) => h("div", { class: "roles-panel", id: "roles-panel-" + id, role: "tabpanel", "aria-labelledby": "roles-tab-" + id }, ...kids);
   const views = [
     { id: "roles", label: "Roles", panel: panel("roles", ...Array.from(app.childNodes)) },
-    { id: "limits", label: "Run limits", panel: panel("limits") },
+    { id: "limits", label: "Run limits", panel: panel("limits"), mount: mountRunLimits },
+    ...extras.map((x) => ({ id: x.id, label: x.label, panel: panel(x.id), mount: x.mount })),
   ];
-  let mounted = null;
+  const mounted = new Map();
   const pick = (v, focus) => {
     for (const o of views) {
       o.tab.setAttribute("aria-selected", String(o === v));
       o.tab.tabIndex = o === v ? 0 : -1;
       o.panel.hidden = o !== v;
     }
-    if (v.id === "limits" && !mounted) mounted = mountRunLimits(v.panel);
+    if (v.mount && !mounted.has(v.id)) mounted.set(v.id, v.mount(v.panel));
     if (focus) v.tab.focus();
   };
   views.forEach((v, i) => {
@@ -333,5 +336,5 @@ export function addRunLimitsView(app) {
   // dom-insert-ok: the loop above set a tab on every view, and each view's panel is built with panel()
   app.replaceChildren(h("div", { class: "roles-tabs", role: "tablist", "aria-label": "Roles views" }, views.map((v) => v.tab)), ...views.map((v) => v.panel));
   pick(views[0], false);
-  return { destroy: () => mounted && mounted.destroy() };
+  return { destroy: () => mounted.forEach((m) => m.destroy()) };
 }

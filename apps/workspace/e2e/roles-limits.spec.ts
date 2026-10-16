@@ -102,7 +102,7 @@ const online = (page: Page) => page.evaluate(() => window.dispatchEvent(new Even
 test.describe("D#37 WS-F4c: Roles, Run limits (mocked API)", () => {
   test("two tabs, arrow keys switch them; the view loads on first open with exactly one GET; rows show value and source", async ({ page }) => {
     const seen = await boot(page);
-    await expect(page.locator(`${WIN} [role="tablist"] [role="tab"]`)).toHaveText(["Roles", "Run limits"]);
+    await expect(page.locator(`${WIN} [role="tablist"] [role="tab"]`)).toHaveText(["Roles", "Run limits", "Autonomy"]);
     expect(seen.gets).toBe(0);
     await tid(page, "roles-tab-roles").focus();
     await page.keyboard.press("ArrowRight");

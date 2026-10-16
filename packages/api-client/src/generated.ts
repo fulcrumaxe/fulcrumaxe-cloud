@@ -1097,6 +1097,7 @@ export interface Operations {
       }>;
       dials: Array<{
         decision_type: string;
+        label: string;
         class: string;
         adjustable: boolean;
         disposition: "ask" | "announce" | "act";
@@ -1108,6 +1109,7 @@ export interface Operations {
       invariants: Array<{
         key: string;
         layer: string;
+        label: string;
       }>;
     };
   };
@@ -1151,6 +1153,7 @@ export interface Operations {
       }>;
       dials: Array<{
         decision_type: string;
+        label: string;
         class: string;
         adjustable: boolean;
         disposition: "ask" | "announce" | "act";
@@ -1162,6 +1165,7 @@ export interface Operations {
       invariants: Array<{
         key: string;
         layer: string;
+        label: string;
       }>;
       moved: Array<{
         decision_type: string;
@@ -1191,6 +1195,7 @@ export interface Operations {
       }>;
       dials: Array<{
         decision_type: string;
+        label: string;
         class: string;
         adjustable: boolean;
         disposition: "ask" | "announce" | "act";
@@ -1202,6 +1207,99 @@ export interface Operations {
       invariants: Array<{
         key: string;
         layer: string;
+        label: string;
+      }>;
+    };
+  };
+  getAskSettings: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      repo_id: string;
+      can_change: boolean;
+      preset_basis: string;
+      bounds: {
+        min_minutes: number;
+        max_minutes: number;
+        default_minutes: number;
+      };
+      notify_values: Array<string>;
+      notify_default: string;
+      rows: Array<{
+        decision_type: string;
+        label: string;
+        class: string | null;
+        allowed_outcomes: Array<string>;
+        account: ({
+          answer_window_minutes: number | null;
+          timeout_outcome: string | null;
+          notify: string | null;
+          version: number;
+        }) | (null);
+        repo: ({
+          answer_window_minutes: number | null;
+          timeout_outcome: string | null;
+          notify: string | null;
+          version: number;
+        }) | (null);
+        effective: ({
+          answer_window_minutes: number;
+          answer_window_text: string;
+          timeout_outcome: string;
+          notify: string;
+        }) | (null);
+      }>;
+    };
+  };
+  setAskSetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      scope: "account" | "repo";
+      decision_type: string;
+      answer_window_minutes: number | null;
+      timeout_outcome: ("stop_and_flag" | "proceed_recommended") | (null);
+      notify: ("email" | "none") | (null);
+    };
+    response: {
+      repo_id: string;
+      can_change: boolean;
+      preset_basis: string;
+      bounds: {
+        min_minutes: number;
+        max_minutes: number;
+        default_minutes: number;
+      };
+      notify_values: Array<string>;
+      notify_default: string;
+      rows: Array<{
+        decision_type: string;
+        label: string;
+        class: string | null;
+        allowed_outcomes: Array<string>;
+        account: ({
+          answer_window_minutes: number | null;
+          timeout_outcome: string | null;
+          notify: string | null;
+          version: number;
+        }) | (null);
+        repo: ({
+          answer_window_minutes: number | null;
+          timeout_outcome: string | null;
+          notify: string | null;
+          version: number;
+        }) | (null);
+        effective: ({
+          answer_window_minutes: number;
+          answer_window_text: string;
+          timeout_outcome: string;
+          notify: string;
+        }) | (null);
       }>;
     };
   };
@@ -2850,6 +2948,28 @@ export const operations = {
   setDecisionDial: {
     method: "POST",
     path: "/api/v1/repos/{id}/decision-settings/dial",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getAskSettings: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/ask-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setAskSetting: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/ask-settings",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

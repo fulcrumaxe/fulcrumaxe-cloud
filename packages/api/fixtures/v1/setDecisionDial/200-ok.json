@@ -1,0 +1,256 @@
+{
+  "repo_id": "33333333-3333-4333-8333-333333333333",
+  "can_change": true,
+  "catalogue_version": 4,
+  "active_preset": null,
+  "presets": [
+    {
+      "name": "cautious",
+      "label": "Cautious",
+      "customer_role": "you approve"
+    },
+    {
+      "name": "balanced",
+      "label": "Balanced",
+      "customer_role": "you oversee, and can reverse"
+    },
+    {
+      "name": "autonomous",
+      "label": "Autonomous",
+      "customer_role": "you observe"
+    }
+  ],
+  "dials": [
+    {
+      "decision_type": "dependency_patch_bump",
+      "label": "Patch-level dependency updates",
+      "class": "automated_with_monitoring",
+      "adjustable": false,
+      "disposition": "act",
+      "allowed_dispositions": [
+        "act"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "retry_transient_step_failure",
+      "label": "Retrying a step that failed for a temporary reason",
+      "class": "automated_with_monitoring",
+      "adjustable": false,
+      "disposition": "act",
+      "allowed_dispositions": [
+        "act"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "nonbreaking_refactor_approach",
+      "label": "How to restructure code without changing what it does",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
+      "decision_type": "test_strategy_choice",
+      "label": "How to test a change",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "act",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "override",
+      "preset": null,
+      "version": 2
+    },
+    {
+      "decision_type": "runner_run_on_member_plan",
+      "label": "Running work on a team member's own plan",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "start_work_small",
+      "label": "Starting a small piece of work",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
+      "decision_type": "start_work_bug",
+      "label": "Starting a bug fix",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
+      "decision_type": "start_work_doc",
+      "label": "Starting a documentation change",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
+      "decision_type": "launch_sub_item",
+      "label": "Starting one part of a larger piece of work",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "announce",
+      "allowed_dispositions": [
+        "act",
+        "announce",
+        "ask"
+      ],
+      "source": "preset",
+      "preset": "balanced",
+      "version": 1
+    },
+    {
+      "decision_type": "publish_deprecation_notice",
+      "label": "Publishing a deprecation notice",
+      "class": "human_over_the_loop",
+      "adjustable": true,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "publish_release_artifact",
+      "label": "Publishing a release",
+      "class": "human_in_the_loop",
+      "adjustable": false,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "external_paid_api_call",
+      "label": "Calling a paid outside service",
+      "class": "human_in_the_loop",
+      "adjustable": false,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "start_parent_item",
+      "label": "Starting a new feature, project or critical item",
+      "class": "human_in_the_loop",
+      "adjustable": false,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "spend_past_envelope",
+      "label": "Spending past an item's budget",
+      "class": "human_in_the_loop",
+      "adjustable": false,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    },
+    {
+      "decision_type": "start_after_reclassify",
+      "label": "Starting an item that was later judged larger",
+      "class": "human_in_the_loop",
+      "adjustable": false,
+      "disposition": "ask",
+      "allowed_dispositions": [
+        "ask"
+      ],
+      "source": "default",
+      "preset": null,
+      "version": null
+    }
+  ],
+  "invariants": [
+    {
+      "key": "cross_tenant_row_access",
+      "layer": "packages/db/migrations/0001_core.sql: FORCE ROW LEVEL SECURITY plus composite account-scoped foreign keys on every tenant table",
+      "label": "One account can never read another account's data"
+    },
+    {
+      "key": "role_permission_grant",
+      "layer": "packages/gh-policy/src/rolePermissions.ts: the static ROLE_PERMISSIONS table",
+      "label": "What each role is allowed to do is fixed in code"
+    },
+    {
+      "key": "merge_or_protection_change",
+      "layer": "packages/gh-policy/src/mergeProtection.ts: isMergeOrProtectionPath (H03 criterion 4)",
+      "label": "Merging, and changing branch protection, is always a person's call"
+    },
+    {
+      "key": "untrusted_work_creation",
+      "layer": "packages/trust/src/work-gate.ts: canCreateWork",
+      "label": "Work from an untrusted source never starts automatically"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ import { api } from "../_lib/api.js";
 import { onRefresh } from "../../core/cloud-live.js";
 import { getItem, setItem } from "../../core/storage-ns.js";
 import { addRunLimitsView } from "./roles-limits.js";
+import { mountAutonomy } from "./roles-autonomy.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -169,7 +170,8 @@ function mountApp(contentEl) {
   const app = h("div", { class: "roles-app" }, h("div", { class: "roles-head" }, h("h2", { class: "roles-title" }, "Roles"), picker), status, note, list);
   contentEl.replaceChildren(app);
   // C30: a second view, "Run limits", beside the per-repo roles.
-  const limits = addRunLimitsView(app);
+  // D#7 DP10b: a third view, "Autonomy", sharing this app's repo picker memory.
+  const limits = addRunLimitsView(app, [{ id: "autonomy", label: "Autonomy", mount: (host) => mountAutonomy(host, { loadRepos, repoKey: REPO_KEY }) }]);
 
   function render() {
     status.textContent = error;

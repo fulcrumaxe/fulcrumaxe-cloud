@@ -9,6 +9,7 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
+import { invariantLabel } from '../src/routes/decision-labels.js';
 import { seedAccountWithMember, seedUser } from './helpers/seed.js';
 
 interface Identity {
@@ -153,7 +154,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(dials.dependency_patch_bump).toMatchObject({ adjustable: false, disposition: 'act' });
     expect(dials.publish_release_artifact).toMatchObject({ adjustable: false, disposition: 'ask' });
     // The invariants are exactly the list DP5's inventory test reads, and none is a dial.
-    expect(s.invariants).toEqual(FIXED_INVARIANTS.map((i) => ({ key: i.key, layer: i.layer })));
+    expect(s.invariants).toEqual(FIXED_INVARIANTS.map((i) => ({ key: i.key, layer: i.layer, label: invariantLabel(i.key) })));
     for (const i of s.invariants) expect(dials[i.key]).toBeUndefined();
     expect((await versions(f.repoId))).toHaveLength(0);
   });

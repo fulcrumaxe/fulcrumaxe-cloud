@@ -99,3 +99,33 @@
   .rl-field .rl-label { grid-column: 1 / -1; }
 }
 @media (pointer: coarse) { .roles-tab, .rl-btn, .rl-input { min-height: 44px; } }
+
+/* D#7 DP10b: the Autonomy view. */
+.au-app { display: block; }
+.au-status { margin: 0 0 10px; }
+.au-status:empty { display: none; }
+.au-failed, .au-error { color: #ff6b6b; }
+.au-section { margin: 0 0 18px; padding-top: 4px; }
+.au-h { margin: 0 0 6px; font-size: 0.9rem; letter-spacing: 0.04em; }
+.au-line { margin: 0 0 8px; }
+.au-muted { color: var(--text-primary, #1aff80); opacity: 1; }
+.au-list { list-style: none; margin: 0 0 10px; padding: 0; }
+.au-item { padding: 6px 0; border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.au-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.au-name { font-weight: 600; flex: 1 1 22ch; overflow-wrap: anywhere; }
+.au-control { display: inline-flex; flex-wrap: wrap; align-items: end; gap: 6px 10px; }
+.au-field { display: inline-flex; flex-direction: column; gap: 2px; }
+.au-hint, .au-error { flex-basis: 100%; margin: 0; font-size: 0.8rem; }
+.au-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.au-preset {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; flex: 1 1 18ch; min-height: 32px; padding: 6px 10px; text-align: left; cursor: pointer; font: inherit;
+  color: var(--text-primary, #1aff80); background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0);
+}
+.au-preset[aria-pressed="true"] { border-color: var(--accent, #1aff80); border-width: 2px; padding: 5px 9px; }
+.au-preset-name { font-weight: 600; }
+.au-preset-role { font-size: 0.8rem; }
+.au-preview { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.au-actions { display: flex; gap: 8px; }
+.au-preset:focus-visible, .au-preview h4:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.au-body[aria-busy="true"] { opacity: 0.85; }
+@media (pointer: coarse) { .au-preset { min-height: 44px; } }
