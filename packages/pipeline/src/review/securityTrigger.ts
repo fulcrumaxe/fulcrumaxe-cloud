@@ -10,7 +10,9 @@
  *
  * Surfaces: auth / sessions / tokens, crypto, secrets and environment handling, dependency manifests and lockfiles, CI
  * workflows and build images, network / HTTP clients, SQL and migrations, shell and process execution, file permissions,
- * and sandbox / proxy code.
+ * sandbox / proxy code, the push of product code to the paired public repository (`code_plane_push`), the write-back of
+ * plan state to a customer repository (`plan_writeback`), and setup requests, where a person is asked for a setup step
+ * and the item is held until it is done (`setup_requests`).
  *
  * It errs toward running the review: a false positive costs one review run, a miss lets a risky change merge with one
  * reviewer less. Two inputs it cannot judge also fire it: a changed file whose patch GitHub left out (too large to
@@ -28,6 +30,9 @@ export const SECURITY_TRIGGER_CODES = [
   'process_exec',
   'file_permissions',
   'sandbox_proxy',
+  'code_plane_push',
+  'plan_writeback',
+  'setup_requests',
   'diff_unavailable',
   'files_truncated',
 ] as const;
@@ -62,6 +67,9 @@ const NETWORK_WORDS = WORDS('http', 'https', 'httpclient', 'fetch', 'axios', 'we
 const EXEC_WORDS = WORDS('exec', 'execa', 'spawn', 'subprocess', 'shell', 'shellout', 'cmd');
 const PERMISSION_WORDS = WORDS('chmod', 'chown', 'umask', 'chgrp');
 const SANDBOX_WORDS = WORDS('sandbox', 'sandboxes', 'jail', 'firewall', 'seccomp', 'apparmor', 'netpolicy', 'ghproxy');
+const PLANE_WORDS = WORDS('planepush', 'planepublish', 'planepairing', 'repopairing');
+const WRITEBACK_WORDS = WORDS('writeback', 'writebacks', 'planwriteback', 'planwritebacks');
+const SETUP_REQUEST_WORDS = WORDS('setuprequest', 'setuprequests', 'setuphold');
 const SQL_WORDS = WORDS('migration', 'migrations', 'sql', 'rls', 'postgres', 'pg');
 
 const DEPENDENCY_FILES = new Set([
@@ -103,6 +111,9 @@ const CONTENT_RULES: ReadonlyArray<{ code: SecurityTriggerCode; test: RegExp }> 
   { code: 'sql_migrations', test: /\bINSERT\s+INTO\b|\bUPDATE\s+\S+\s+SET\b|\bDELETE\s+FROM\b|\bCREATE\s+(?:TABLE|POLICY|FUNCTION|INDEX)\b|\bALTER\s+TABLE\b|\bDROP\s+TABLE\b|\bGRANT\s+\w|\bREVOKE\s+\w|\bSELECT\s.+\sFROM\s|\$queryRaw|\bsql\s*`|\.query\s*\(\s*[`"']/i },
   { code: 'file_permissions', test: /\b(?:chmod|chown|chgrp|umask|fchmod|setfacl)(?:Sync)?\b|\bmode\s*:\s*0o[0-7]{3,4}\b/ },
   { code: 'auth_sessions_tokens', test: /["']authorization["']|\bBearer\s|\bset-cookie\b|\bhttpOnly\b|\bsameSite\b|\bverify(?:Token|Jwt|Session)\b|\bsign(?:In|Out)\s*\(|\bcheckPermission\b|\bjwt\b/i },
+  { code: 'code_plane_push', test: /\bplane[_-]?push(?:es)?\b|\bplanePublish\b|\bplane_publish\b|\bcode_repo\b|\brepo_pairing\b|\bpairedRepo\b/i },
+  { code: 'plan_writeback', test: /plan[_-]?write[_-]?backs?|\bwrite[_-]?back\b/i },
+  { code: 'setup_requests', test: /\bsetup[_-]?(?:requests?|hold)\b|\b(?:create|mark|withdraw|list|get)SetupRequests?\b/i },
   { code: 'sandbox_proxy', test: /\bseccomp\b|\bapparmor\b|\bchroot\b|\bunshare\b|\bsetuid\b|\bsetgid\b|--privileged\b|\bnetworkPolicy\b|\bgh-proxy\b/i },
 ];
 
@@ -132,6 +143,9 @@ function codesForPath(path: string): Set<SecurityTriggerCode> {
   if (hasAny(words, PERMISSION_WORDS)) found.add('file_permissions');
   if (hasAny(words, SANDBOX_WORDS)) found.add('sandbox_proxy');
   if (hasAny(words, SQL_WORDS)) found.add('sql_migrations');
+  if (hasAny(words, PLANE_WORDS)) found.add('code_plane_push');
+  if (hasAny(words, WRITEBACK_WORDS)) found.add('plan_writeback');
+  if (hasAny(words, SETUP_REQUEST_WORDS)) found.add('setup_requests');
   return found;
 }
 

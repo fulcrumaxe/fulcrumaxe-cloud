@@ -8,6 +8,50 @@ const BASE: ReviewPromptInput = { role: "code-reviewer", owner: "acme", name: "w
 const MARKER = "<!-- AGENT_OUTPUT -->";
 const END = "<!-- /AGENT_OUTPUT -->";
 
+describe("D#598 P7a: the security reviewer prompt", () => {
+  const sec = (round?: number): string => buildReviewPrompt({ ...BASE, role: "security-reviewer", ...(round === undefined ? {} : { round }) });
+  const STEP_BACK = /Step back: check whether the design relies on a blocklist/;
+
+  it("asks for the threat model before any finding, in every round", () => {
+    for (const round of [undefined, 1, 2, 3, 4, 9]) {
+      const p = sec(round);
+      expect(p, String(round)).toMatch(/Before you list any finding, write the threat model/);
+      expect(p.indexOf("write the threat model")).toBeLessThan(p.indexOf("Put every problem in `findings`"));
+    }
+  });
+  it("rounds 1 and 2 (and no round given) have no step-back", () => {
+    for (const round of [undefined, 1, 2]) {
+      expect(sec(round), String(round)).not.toMatch(STEP_BACK);
+      expect(sec(round)).not.toMatch(/allowlist/);
+    }
+  });
+  it("round 3 and later carry the allowlist / fail-closed step-back, naming the round", () => {
+    for (const round of [3, 4, 7]) {
+      const p = sec(round);
+      expect(p, String(round)).toMatch(STEP_BACK);
+      expect(p).toContain(`review round ${round}`);
+      expect(p).toMatch(/allowlist/);
+      expect(p).toMatch(/fails closed/);
+    }
+  });
+  it("the step-back is for the security reviewer only; no other role gets it or the threat-model ask", () => {
+    for (const role of ["code-reviewer", "acceptance-tester", "debater"] as const) {
+      const p = buildReviewPrompt({ ...BASE, role, round: 5 });
+      expect(p).not.toMatch(STEP_BACK);
+      expect(p).not.toMatch(/write the threat model/);
+    }
+  });
+  it("has no switch by repo: the same round gives the same text for any owner and name", () => {
+    const a = buildReviewPrompt({ ...BASE, role: "security-reviewer", round: 3, owner: "acme", name: "widgets" });
+    const b = buildReviewPrompt({ ...BASE, role: "security-reviewer", round: 3, owner: "other-co", name: "app" });
+    expect(a.replaceAll("acme/widgets", "X").replaceAll("other-co/app", "X")).toBe(b.replaceAll("acme/widgets", "X").replaceAll("other-co/app", "X"));
+    expect(b).toMatch(STEP_BACK);
+  });
+  it.each([0, -1, 1.5, Number.NaN])("a round of %s is refused", (round) => {
+    expect(() => sec(round)).toThrow(ReviewPromptInputError);
+  });
+});
+
 describe("buildReviewPrompt", () => {
   it.each(["code-reviewer", "acceptance-tester", "security-reviewer", "debater"] as const)("%s: names the exact commit, carries the Spec and ends with exactly one envelope block", (role) => {
     const p = buildReviewPrompt({ ...BASE, role });
