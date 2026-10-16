@@ -20,6 +20,38 @@ const webPkg = (): Pkg => JSON.parse(fs.readFileSync(path.join(WEB_DIR, "package
 
 let scratch = "";
 
+/**
+ * Why pnpm must never install here: the scratch copy's node_modules entries are symlinks into the REAL tree, and the
+ * real `node_modules/.pnpm-workspace-state-v1.json` records the real tree's absolute paths. pnpm 11 sees the scratch
+ * path as a changed workspace and runs an implicit `pnpm install` before the script, which writes through those
+ * symlinks and repoints the real `node_modules/vitest` link into the (later deleted) scratch dir. So every pnpm
+ * command below runs with the pre-run dependency check off (no install is attempted), and the "real tree untouched"
+ * test below proves nothing was rewritten.
+ */
+// "warn", not "false": pnpm reads this env var as a string, and only "warn" (or "error") skips the install branch.
+const NO_IMPLICIT_INSTALL = "pnpm_config_verify_deps_before_run=warn";
+
+/** Every `<dir>/node_modules/vitest` link of the real tree, as `path -> readlink target` (or the lstat kind if not a link). */
+function snapshotVitestLinks(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const base of [".", "apps", "packages", "sites"]) {
+    const parent = path.join(REPO_ROOT, base);
+    const names = base === "." ? ["."] : fs.existsSync(parent) ? fs.readdirSync(parent) : [];
+    for (const name of names) {
+      const link = path.join(parent, name, "node_modules", "vitest");
+      let st: fs.Stats;
+      try {
+        st = fs.lstatSync(link);
+      } catch {
+        continue;
+      }
+      out[path.relative(REPO_ROOT, link)] = st.isSymbolicLink() ? fs.readlinkSync(link) : `<not a symlink: mode ${st.mode}>`;
+    }
+  }
+  return out;
+}
+const linksBefore: Record<string, string> = {};
+
 /** Copies every tracked file (as it is on disk now) and links each node_modules, leaving the generated file absent. */
 function makeScratch(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d500-scratch-"));
@@ -57,7 +89,7 @@ function makeScratch(): string {
 
 function run(cmd: string, args: string[]): { code: number | null; out: string } {
   // `env` drops the Vercel plugin's hint variable (it breaks the build scripts) without enumerating process.env.
-  const res = spawnSync("env", ["-u", "VERCEL_PLUGIN_BOOTSTRAP_HINTS", "CI=1", cmd, ...args], {
+  const res = spawnSync("env", ["-u", "VERCEL_PLUGIN_BOOTSTRAP_HINTS", "CI=1", NO_IMPLICIT_INSTALL, cmd, ...args], {
     cwd: scratch,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -69,6 +101,7 @@ const generatedInScratch = (): string => path.join(scratch, GENERATED);
 
 describe("generated workspace index (D#500)", () => {
   beforeAll(() => {
+    Object.assign(linksBefore, snapshotVitestLinks());
     scratch = makeScratch();
   }, 120_000);
   afterAll(() => {
@@ -120,4 +153,11 @@ describe("generated workspace index (D#500)", () => {
     expect(fs.existsSync(generatedInScratch())).toBe(true);
     expect(fs.readFileSync(generatedInScratch(), "utf8")).toMatch(/<base href=\\"\/s\/[0-9a-f]+\/\\"/);
   }, 600_000);
+
+  it("never rewrote the real tree's node_modules/vitest links, nor ran an install", () => {
+    const apps = path.join("apps", "web", "node_modules", "vitest");
+    expect(linksBefore[apps], "apps/web vitest link exists in the real tree").toMatch(/node_modules\/\.pnpm\/vitest@/);
+    expect(snapshotVitestLinks()).toStrictEqual(linksBefore);
+    for (const target of Object.values(linksBefore)) expect(target).not.toContain("d500-scratch-");
+  });
 });
