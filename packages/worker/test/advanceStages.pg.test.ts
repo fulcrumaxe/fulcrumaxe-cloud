@@ -270,6 +270,34 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(rows.rows.every((r) => r.kind === "build_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
   });
 
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a start a spending limit denied (%s) leaves a build_waiting fact with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await item(a);
+    const seen: unknown[] = [];
+    const t = build({ build: (async (_p: unknown, _a: unknown, _w: unknown, _id: unknown, _ports: unknown, options: unknown) => { seen.push(options); return { status: "refused", reason: pause }; }) as never });
+    const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
+    const approval = randomUUID();
+    expect(await t.module.advanceBuild(who, approval, undefined, 3)).toEqual({ status: "refused", reason: pause });
+    const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
+    expect(rows.rows).toEqual([{ kind: "build_waiting", code: pause }]);
+    expect(seen[0]).toEqual({ spendAttempt: 3 });
+    // The first ask carries no attempt; a bad one is refused before any work.
+    await t.module.advanceBuild(who, approval);
+    expect(seen[1]).toEqual({});
+    for (const bad of [-1, 1.5, 1001]) expect(await t.module.advanceBuild(who, approval, undefined, bad)).toEqual({ status: "refused", reason: "invalid_input" });
+    expect(seen).toHaveLength(2);
+  });
+
+  it("S5-k1: account_not_active keeps its existing refusal: a build_refused fact, no pause", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await item(a);
+    const t = build({ build: (async () => ({ status: "refused", reason: "start_account_not_active" })) as never });
+    const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
+    await t.module.advanceBuild(who, randomUUID());
+    const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
+    expect(rows.rows).toEqual([{ kind: "build_refused", code: "start_account_not_active" }]);
+  });
+
   it("advanceBuild passes the approval to the pipeline; advanceBuildFailed passes a fixed code and refuses anything else", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);

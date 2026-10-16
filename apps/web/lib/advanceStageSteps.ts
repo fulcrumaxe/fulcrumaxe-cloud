@@ -59,9 +59,10 @@ export async function specBody(worker: AdvanceWorker | null, who: StepWho, attem
 }
 
 /** Starts the executor for an item at spec_ready. The approval (the action) names the run, so a replay finds it and a fresh approval after a refusal asks again. `pinnedVersion` is the Spec version the person approved. */
-export async function buildBody(worker: AdvanceWorker | null, who: StepWho, actionId: string, pinnedVersion?: number | null): Promise<StepOutcome> {
+export async function buildBody(worker: AdvanceWorker | null, who: StepWho, actionId: string, pinnedVersion?: number | null, spendAttempt?: number): Promise<StepOutcome> {
   if (!worker) return refused("worker_unavailable");
-  return outcomeOf(await worker.advanceBuild(who, actionId, pinnedVersion ?? undefined));
+  // The first ask carries no attempt (the call is exactly what it was before S5-k1); only a later ask after a spend denial names one.
+  return outcomeOf(spendAttempt === undefined ? await worker.advanceBuild(who, actionId, pinnedVersion ?? undefined) : await worker.advanceBuild(who, actionId, pinnedVersion ?? undefined, spendAttempt));
 }
 
 /** Stops a live build run (the wait for it ran out): the existing cancel path, as the approver. Safe on a finished run. */
