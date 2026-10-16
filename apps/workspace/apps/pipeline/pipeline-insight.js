@@ -11,6 +11,8 @@
 // The file has two halves: the pure model (no DOM, no network) and, below the divider, the panel that draws it. They
 // share one file because the Pipeline app has a per-app boot-file ceiling (build/budget.mjs).
 import { clockText, h, timeNode } from "../_lib/dom.js";
+import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { sayLive, stageWords } from "./pipeline-actions.js";
 
 
 /** Agent roles by the phase they belong to. A role not listed is labelled "Run". */
@@ -515,5 +517,595 @@ export function createInsightPanel(deps) {
     },
     /** For tests: the current view-state. */
     getState: () => state,
+  };
+}
+
+// --- Plan tab (D#483 S3-L2b; folded in here for the boot-file budget) ---
+// D#483 S3-L2b: the Pipeline app's Plan tab. A repository's imported plan: the Import plan button, the line for the latest
+// import, the milestone table (each row opens to its tasks), what the import asked GitHub, "Approved in fulcrumaxe", and the
+// undo, Remove imported plan.
+//
+// Rules this file keeps, each with a test in test/pipeline-plan.test.mjs or e2e/pipeline-plan.spec.ts:
+//  - Every state has its own sentence: never imported, queued, importing, stopped, succeeded (and at which level when it is
+//    a fallback), cut short, failed (one sentence for each of the fourteen error codes), repository detached, empty.
+//  - What a person reads never comes from a server message. The only server text drawn is `error_detail`, which the
+//    importer writes itself (the first problem found in the roadmap file), and only for the two codes that name one.
+//  - The numbers on screen come from the API (the import's counts, the milestone table), never from this text.
+//  - A failed import leaves the previous plan on screen with its import time; the next start is allowed at once.
+//  - No text node is ever "null" or "undefined": every value goes through str() or a presence check before it is drawn.
+//  - Text only, built with h().
+
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+/** Replaces the children of `el`, leaving out the absent ones: replaceChildren(null) would draw the word "null". */
+// dom-insert-ok: the filter drops every absent child before the insert
+const fill = (el, ...kids) => el.replaceChildren(...kids.filter((k) => k != null && k !== false));
+const str = (v) => (typeof v === "string" ? v : "");
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+/** How each import level is worded. Every value the API can answer has an entry; an unknown one reads as "the repository". */
+export const LEVEL_WORDS = {
+  roadmap_file: "the roadmap file",
+  spec_tables: "the Spec task tables in your Discussions",
+  issues_discussions: "your open issues and Discussions",
+};
+export const levelWords = (level) => (typeof level === "string" && has(LEVEL_WORDS, level) ? LEVEL_WORDS[level] : "the repository");
+
+/** Why a plan was read at a level below the roadmap file, in words; null for the roadmap file itself. */
+export function fallbackSentence(level, detail) {
+  const skipped = str(detail) ? " The roadmap file was skipped because: " + str(detail).slice(0, 300) + (/[.!?]$/.test(str(detail).trim()) ? "" : ".") : "";
+  if (level === "spec_tables") return "No usable roadmap file was found, so the plan was read from the Spec task tables in your Discussions." + skipped;
+  if (level === "issues_discussions")
+    return "No usable roadmap file or Spec task tables were found, so the plan is your open issues and Discussions. Each one is a proposal in the Inbox, and there are no milestones at this level." + skipped;
+  return null;
+}
+
+/** The sentence for each of the fourteen error codes. `detail` is the importer's own first problem, used by the two codes that name one. */
+export const FAILURE_CODES = [
+  "repo_not_connected",
+  "app_permission_missing",
+  "discussions_disabled",
+  "plan_file_inconsistent",
+  "plan_file_too_large",
+  "token_not_read_only",
+  "github_unavailable",
+  "rate_limited_by_github",
+  "plan_file_missing",
+  "plan_file_shape",
+  "interrupted",
+  "internal_error",
+  "request_budget_exhausted",
+  "plan_source_too_large",
+];
+const FAILURES = {
+  repo_not_connected: () => "This repository isn't connected any more, so nothing was imported. Install the GitHub App on it again, then import.",
+  app_permission_missing: () =>
+    "The GitHub App doesn't have a permission the import needs (read access to Discussions). Open the App's settings on GitHub, accept the new permissions on this installation, then import again. Nothing was changed.",
+  discussions_disabled: () => "Discussions are turned off for this repository, so its Spec tables can't be read. Turn them on in the repository's settings on GitHub, or add a roadmap file, then import again. Nothing was changed.",
+  plan_file_inconsistent: (d) => "The roadmap file contradicts itself, so nothing was changed." + (str(d) ? " " + str(d).slice(0, 300) : "") + " Fix the file on GitHub, then import again.",
+  plan_file_too_large: () => "The roadmap file is larger than one import can read, so nothing was changed. Trim or split it on GitHub, then import again.",
+  token_not_read_only: () => "GitHub gave the import a token that could write, so it stopped before reading anything. Nothing was changed. Check the permissions of the GitHub App.",
+  github_unavailable: () => "GitHub didn't answer, so nothing was changed. Try again in a few minutes.",
+  rate_limited_by_github: () => "GitHub is limiting requests for this installation, so nothing was changed. Try again in a few minutes.",
+  plan_file_missing: () => "The roadmap file couldn't be found, so nothing was changed.",
+  plan_file_shape: (d) => "roadmap.json didn't match the expected shape" + (str(d) ? ": " + str(d).slice(0, 300) : ".") + (str(d) && !/[.!?]$/.test(str(d).trim()) ? "." : "") + " Nothing was changed.",
+  interrupted: () => "The last import stopped before it finished, so nothing was changed. Import again.",
+  internal_error: () => "Something went wrong on our side during the import, so nothing was changed. Try again in a moment.",
+  request_budget_exhausted: () => "Reading your repo took more requests than one import is allowed, so nothing was changed.",
+  plan_source_too_large: () =>
+    "Your repo has more planning Discussions or Correction comments than one import can read, so nothing was changed. Hiding spam comments on GitHub brings the count back down.",
+};
+const FAILURE_GENERIC = "The last import failed, so nothing was changed. Try again in a moment.";
+export const failureSentence = (code, detail) => (typeof code === "string" && has(FAILURES, code) ? FAILURES[code](detail) : FAILURE_GENERIC);
+
+/** The sentences for an import start or a plan removal that was refused or failed. */
+export const IMPORT_REFUSALS = {
+  import_running: "An import is already running for this repository. This page updates when it finishes.",
+  repo_not_connected: "This repository isn't connected any more, so nothing was imported. Install the GitHub App on it again.",
+  insufficient_role: "Only an owner or an admin can import a plan.",
+  session_required: "Sign in again to do this.",
+  plan_import_unavailable: "Importing a plan isn't available on this server yet. Nothing was changed.",
+  not_found: "This repository isn't in your account any more.",
+  offline: "Couldn't reach the server, so nothing was changed. Check your connection and try again.",
+  timeout: "The server took too long to answer. Check the page before you try again.",
+  server_error: "Something went wrong on our side. Check the page before you try again.",
+};
+export function importRefusal(e) {
+  if (isRateLimited(e)) return "Too many imports for this repository in the last hour. " + retryWords(waitSeconds(e));
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (has(IMPORT_REFUSALS, code)) return IMPORT_REFUSALS[code];
+  if (e && e.kind === "server_error") return IMPORT_REFUSALS.server_error;
+  return "That didn't work. Nothing was changed.";
+}
+export const REMOVE_REFUSALS = {
+  ...IMPORT_REFUSALS,
+  import_running: "An import is running, so the plan can't be removed yet. Try again when it has finished.",
+};
+export function removeRefusal(e) {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (has(REMOVE_REFUSALS, code)) return REMOVE_REFUSALS[code];
+  if (e && e.kind === "server_error") return REMOVE_REFUSALS.server_error;
+  return "That didn't work. Nothing was removed.";
+}
+
+export const NEVER_SENTENCE = "Nothing has been imported for this repository yet. Import its plan to see its milestones and tasks.";
+export const QUEUED_SENTENCE = "The import is queued. This page updates when it starts.";
+export const RUNNING_SENTENCE = "Importing the plan from GitHub. This page updates when it finishes.";
+export const STALE_SENTENCE = "The last import stopped without finishing, so nothing was changed. Import again to start over.";
+export const TRUNCATED_SENTENCE = "The import stopped at a size limit, so some tasks or items may be missing.";
+export const DETACHED_SENTENCE = "This repository isn't connected any more. Its plan and proposals stay readable here, but importing is turned off.";
+export const EMPTY_SENTENCE = "The import found no tasks and no open items to propose.";
+export const ISSUES_LEVEL_EMPTY = "This repository has no task plan, so there are no milestones to show. Any open issues and Discussions it had are in the Inbox as proposals.";
+/** An import that is still queued or running after this long is treated as dead: the server closes it as interrupted on the next start. */
+export const STALE_MS = 10 * 60 * 1000;
+export const POLL_MS = 3000;
+
+export const TASK_STATUS_WORDS = { done: "Done", partial: "Partly done", open: "In progress", not_started: "Not started", pending_spec: "Waiting for a Spec" };
+export const taskStatusWords = (s) => (typeof s === "string" && has(TASK_STATUS_WORDS, s) ? TASK_STATUS_WORDS[s] : "");
+
+export function formatWhen(iso) {
+  const d = new Date(str(iso));
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/** True when an import row is still going: queued or running and not older than STALE_MS. */
+export function importIsLive(imp, now = Date.now()) {
+  if (!imp || (imp.state !== "queued" && imp.state !== "running")) return false;
+  const t = Date.parse(str(imp.started_at));
+  return !(Number.isFinite(t) && now - t > STALE_MS);
+}
+const importIsStale = (imp, now) => !!imp && (imp.state === "queued" || imp.state === "running") && !importIsLive(imp, now);
+
+const when = (iso) => {
+  const w = formatWhen(iso);
+  return w ? ", " + w : "";
+};
+/** "Imported from the roadmap file .autonomous-team/roadmap.json, Oct 15, 2:02 PM: 520 tasks, 242 done, 278 remaining." */
+export function succeededLine(imp) {
+  const c = imp.counts && typeof imp.counts === "object" ? imp.counts : {};
+  const where = imp.level === "roadmap_file" && str(imp.source_path) ? "the roadmap file " + imp.source_path : levelWords(imp.level);
+  const numbers = isNum(c.tasks) && isNum(c.done) && isNum(c.remaining) ? ": " + c.tasks + " tasks, " + c.done + " done, " + c.remaining + " remaining" : "";
+  return "Imported from " + where + when(imp.finished_at) + numbers + ".";
+}
+
+/**
+ * The sentences for the latest import, in the order they are shown. `from` is the newest import that succeeded (the one the
+ * rows on screen came from). A failed latest import keeps the previous plan on screen and says so.
+ */
+export function importSentences(latest, from, now = Date.now()) {
+  if (!latest) return [NEVER_SENTENCE];
+  if (latest.state === "queued" && importIsLive(latest, now)) return [QUEUED_SENTENCE];
+  if (latest.state === "running" && importIsLive(latest, now)) return [RUNNING_SENTENCE];
+  const out = [];
+  if (importIsStale(latest, now)) out.push(STALE_SENTENCE);
+  else if (latest.state === "failed") out.push(failureSentence(latest.error_code, latest.error_detail));
+  else if (latest.state === "succeeded") {
+    out.push(succeededLine(latest));
+    const why = fallbackSentence(latest.level, latest.error_detail);
+    if (why) out.push(why);
+    if (latest.truncated === true) out.push(TRUNCATED_SENTENCE);
+    return out;
+  }
+  if (from && from.id !== latest.id) out.push("Your previous plan, imported" + (formatWhen(from.finished_at) ? " " + formatWhen(from.finished_at) : "") + ", is still shown.");
+  else if (!from) out.push("There is no earlier plan, so nothing is shown below.");
+  return out;
+}
+
+/**
+ * `getRepo()` answers { id, name, connected } for the picked repository, or null. `onChange` is told when the approved list
+ * changes. A plan is read with GET /repos/{id}/plan; the approved proposals with GET /proposals?state=approved.
+ */
+export function createPlan({ call = api, getRepo, setTimer = setTimeout, clearTimer = clearTimeout, now = () => Date.now() }) {
+  const view = h("div", { class: "pl-plan-view" });
+  const live = h("p", { class: "pl-sr", role: "status", "aria-live": "polite", "data-testid": "pl-plan-live" });
+  const root = h("section", { class: "pl-plan", "aria-labelledby": "pl-plan-h", "data-testid": "pl-plan" }, view, live);
+  let plan = null; // the GET /plan answer
+  let approved = null; // [] of proposals, or null while unread
+  let approvedFailed = false;
+  let status = "idle"; // idle | loading | ready | error
+  let errorSentence = "";
+  let note = ""; // the outcome of the last click
+  let importing = false;
+  let removing = false;
+  let confirming = false;
+  let showEvidence = false;
+  let limited = 0;
+  const open = new Map(); // milestone key -> { status: loading|ready|error, tasks, next, more }
+  let poll = null;
+  let ac = null;
+  let seq = 0;
+  let destroyed = false;
+  let loadedFor = null;
+  // True from stop() (the tab was left) until show() (it was opened again): nothing is read and no poll is armed meanwhile.
+  let stopped = false;
+  let lastStatus = null; // the import sentences last painted, so a change is announced once
+
+  const gate = createRetryGate({
+    onChange: (remaining) => {
+      limited = remaining;
+      if (remaining === 0 && note.startsWith("Too many imports")) note = "";
+      paint();
+    },
+  });
+
+  const repoId = () => {
+    const r = getRepo();
+    return r ? r.id : null;
+  };
+  const stopPoll = () => {
+    if (poll !== null) clearTimer(poll);
+    poll = null;
+  };
+  // Leaving the tab: stop the timer, drop the request that is out, and keep any load that finishes later from arming it again.
+  const stop = () => {
+    stopped = true;
+    stopPoll();
+    if (ac) ac.abort();
+    ac = null;
+    seq++;
+  };
+  // Opening the tab again: reads the plan and, while an import is live, polls.
+  const show = () => {
+    stopped = false;
+    lastStatus = null;
+    return load();
+  };
+  const announce = (text) => {
+    sayLive(live, text);
+  };
+
+  async function load({ quiet = false } = {}) {
+    stopPoll();
+    if (stopped) return;
+    const repo = getRepo();
+    const mine = ++seq;
+    if (ac) ac.abort();
+    ac = null;
+    if (!repo) {
+      plan = approved = null;
+      status = "ready";
+      loadedFor = null;
+      paint();
+      return;
+    }
+    if (loadedFor !== repo.id) {
+      plan = approved = null;
+      loadedFor = repo.id;
+      lastStatus = null;
+      note = "";
+      open.clear();
+      showEvidence = false;
+      confirming = false;
+    }
+    ac = new AbortController();
+    const signal = ac.signal;
+    if (!quiet || !plan) {
+      status = "loading";
+      paint();
+    }
+    try {
+      const p = await call("GET", "/api/v1/repos/" + encodeURIComponent(repo.id) + "/plan", undefined, signal);
+      if (mine !== seq || destroyed) return;
+      plan = p && typeof p === "object" && Array.isArray(p.milestones) ? p : null;
+      if (!plan) throw new Error("malformed plan");
+      status = "ready";
+      errorSentence = "";
+      if (!quiet) open.clear();
+    } catch (e) {
+      if ((e && e.name === "AbortError") || mine !== seq || destroyed) return;
+      status = "error";
+      errorSentence = e && e.code === "not_found" ? IMPORT_REFUSALS.not_found : "The plan couldn't be loaded.";
+      paint();
+      return;
+    }
+    paint();
+    await loadApproved(repo.id, signal, mine);
+    if (mine !== seq || destroyed) return;
+    paint();
+    const latest = plan && plan.latest_import;
+    if (!stopped && importIsLive(latest, now())) poll = setTimer(() => load({ quiet: true }), POLL_MS);
+  }
+
+  async function loadApproved(id, signal, mine) {
+    const rows = [];
+    let cursor = null;
+    try {
+      for (let page = 0; page < 20; page++) {
+        const body = await call("GET", "/api/v1/proposals?repo_id=" + encodeURIComponent(id) + "&state=approved" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""), undefined, signal);
+        if (mine !== seq || destroyed) return;
+        for (const p of body && Array.isArray(body.proposals) ? body.proposals : []) if (p && typeof p.id === "string" && str(p.title)) rows.push(p);
+        cursor = body && typeof body.next_cursor === "string" && body.next_cursor !== "" ? body.next_cursor : null;
+        if (!cursor) break;
+      }
+      approved = rows.sort((a, b) => (isNum(a.roadmap_position) ? a.roadmap_position : 1e9) - (isNum(b.roadmap_position) ? b.roadmap_position : 1e9));
+      approvedFailed = false;
+    } catch (e) {
+      if ((e && e.name === "AbortError") || mine !== seq || destroyed) return;
+      approvedFailed = true;
+      approved = approved || [];
+    }
+  }
+
+  async function startImport() {
+    const id = repoId();
+    if (!id || importing) return;
+    importing = true;
+    note = "Starting the import…";
+    announce(note);
+    paint();
+    try {
+      await call("POST", "/api/v1/repos/" + encodeURIComponent(id) + "/plan-imports", undefined);
+      note = "";
+      importing = false;
+      await load({ quiet: true });
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        note = "";
+      } else {
+        note = importRefusal(e);
+        if (isRateLimited(e)) gate.start(waitSeconds(e));
+        announce(note);
+        if (e && e.code === "import_running") {
+          importing = false;
+          await load({ quiet: true });
+          return;
+        }
+      }
+    }
+    importing = false;
+    paint();
+  }
+
+  async function removePlan() {
+    const id = repoId();
+    if (!id || removing) return;
+    removing = true;
+    confirming = false;
+    note = "Removing the imported plan…";
+    announce(note);
+    paint();
+    try {
+      const res = await call("DELETE", "/api/v1/repos/" + encodeURIComponent(id) + "/plan", undefined);
+      const r = res && res.removed && typeof res.removed === "object" ? res.removed : {};
+      const parts = [];
+      if (isNum(r.tasks_removed)) parts.push(r.tasks_removed + (r.tasks_removed === 1 ? " task" : " tasks"));
+      if (isNum(r.proposals_removed)) parts.push(r.proposals_removed + (r.proposals_removed === 1 ? " undecided proposal" : " undecided proposals"));
+      note = "The imported plan was removed" + (parts.length ? " (" + parts.join(" and ") + ")" : "") + ". Approved and rejected proposals were kept. You can import it again at any time.";
+      announce(note);
+      removing = false;
+      await load();
+      return;
+    } catch (e) {
+      note = e && e.name === "AbortError" ? "" : removeRefusal(e);
+      announce(note);
+    }
+    removing = false;
+    paint();
+  }
+
+  async function expand(m) {
+    const have = open.get(m.key);
+    if (have) {
+      open.delete(m.key);
+      paint();
+      return;
+    }
+    open.set(m.key, { status: "loading", tasks: [], next: null, more: false });
+    paint();
+    await readTasks(m.key, null);
+  }
+
+  async function readTasks(key, cursor) {
+    const id = repoId();
+    if (!id) return;
+    const mine = seq;
+    const entry = open.get(key);
+    if (!entry) return;
+    try {
+      const body = await call("GET", "/api/v1/repos/" + encodeURIComponent(id) + "/plan?milestone=" + encodeURIComponent(key) + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""), undefined, ac ? ac.signal : undefined);
+      if (mine !== seq || destroyed || open.get(key) !== entry) return;
+      const rows = body && Array.isArray(body.tasks) ? body.tasks.filter((t) => t && str(t.task_key) && str(t.title)) : [];
+      entry.tasks = cursor ? entry.tasks.concat(rows) : rows;
+      entry.next = body && typeof body.next_cursor === "string" && body.next_cursor !== "" ? body.next_cursor : null;
+      entry.status = "ready";
+    } catch (e) {
+      if ((e && e.name === "AbortError") || mine !== seq || destroyed || open.get(key) !== entry) return;
+      entry.status = "error";
+    }
+    paint();
+  }
+
+  // ---- drawing ----
+
+  function evidence(imp) {
+    if (!imp || !showEvidence) return null;
+    const reqs = Array.isArray(imp.github_requests) ? imp.github_requests.filter((r) => r && str(r.method) && str(r.path)) : [];
+    const perms = imp.token_permissions && typeof imp.token_permissions === "object" ? imp.token_permissions : {};
+    return h(
+      "div",
+      { class: "pl-plan-evidence", id: "pl-plan-evidence", "data-testid": "pl-plan-evidence" },
+      h("h3", {}, "What the import asked GitHub (" + reqs.length + (reqs.length === 1 ? " request)" : " requests)")),
+      reqs.length
+        ? h("ul", {}, reqs.map((r) => h("li", { class: "pl-plan-req", "data-method": r.method }, r.method + " " + r.path + (isNum(r.status) ? " → " + r.status : ""))))
+        : h("p", { class: "pl-plan-line" }, "It made no requests."),
+      h("h3", {}, "Token permissions GitHub reported"),
+      Object.keys(perms).length
+        ? h("ul", {}, Object.keys(perms).sort().map((k) => h("li", { class: "pl-plan-perm", "data-level": str(perms[k]) }, k + ": " + str(perms[k]))))
+        : h("p", { class: "pl-plan-line" }, "GitHub reported none.")
+    );
+  }
+
+  function taskList(m, entry) {
+    if (entry.status === "loading") return h("p", { class: "pl-plan-line" }, "Loading the tasks…");
+    if (entry.status === "error")
+      return h("div", {}, h("p", { role: "alert" }, "The tasks couldn't be loaded."), h("button", { type: "button", class: "pl-btn", onClick: () => ((entry.status = "loading"), paint(), readTasks(m.key, null)) }, "Try again"));
+    if (entry.tasks.length === 0) return h("p", { class: "pl-plan-line" }, "This milestone has no tasks.");
+    return h(
+      "div",
+      {},
+      h(
+        "ul",
+        { class: "pl-plan-tasks", "aria-label": "Tasks in " + (str(m.title) || m.key) },
+        entry.tasks.map((t) => {
+          const words = taskStatusWords(t.status);
+          const planned = isNum(t.planned_prs) && t.planned_prs > 0 && Array.isArray(t.merged_prs) ? " · " + t.merged_prs.length + " of " + t.planned_prs + " pull requests merged" : "";
+          return h("li", { class: "pl-plan-task", "data-testid": "pl-plan-task", "data-status": str(t.status) }, h("span", { class: "pl-plan-task-title" }, t.title), h("span", { class: "pl-plan-task-meta" }, t.task_key + (words ? " · " + words : "") + planned));
+        })
+      ),
+      entry.next ? h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-more", onClick: () => readTasks(m.key, entry.next) }, "Show more tasks") : null
+    );
+  }
+
+  const detailId = (key) => "pl-plan-detail-" + String(key).replace(/[^A-Za-z0-9_-]/g, "_");
+
+  function table() {
+    if (!plan || plan.milestones.length === 0) return null;
+    const rows = [];
+    for (const m of plan.milestones) {
+      if (!m || !str(m.key) || !isNum(m.tasks) || !isNum(m.done) || !isNum(m.remaining)) continue;
+      const entry = open.get(m.key);
+      const label = str(m.title) || m.key;
+      rows.push(
+        h(
+          "tr",
+          { "data-testid": "pl-plan-milestone", "data-key": m.key },
+          h(
+            "th",
+            { scope: "row" },
+            h(
+              "button",
+              { type: "button", class: "pl-plan-toggle", "aria-expanded": String(!!entry), "aria-controls": detailId(m.key), "data-focus": "ms:" + m.key, onClick: () => expand(m) },
+              h("span", { "aria-hidden": "true" }, entry ? "▾ " : "▸ "),
+              label
+            )
+          ),
+          h("td", {}, String(m.tasks)),
+          h("td", {}, String(m.done)),
+          h("td", {}, String(m.remaining))
+        )
+      );
+      if (entry) rows.push(h("tr", { class: "pl-plan-detail", id: detailId(m.key) }, h("td", { colspan: "4" }, taskList(m, entry))));
+    }
+    const t = plan.totals && typeof plan.totals === "object" ? plan.totals : null;
+    return h(
+      "table",
+      { class: "pl-plan-table", "data-testid": "pl-plan-table" },
+      h("caption", { class: "pl-sr" }, "Milestones of the imported plan"),
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Milestone"), h("th", { scope: "col" }, "Tasks"), h("th", { scope: "col" }, "Done"), h("th", { scope: "col" }, "Remaining"))),
+      h("tbody", {}, rows),
+      t && isNum(t.tasks) && isNum(t.done) && isNum(t.remaining)
+        ? h("tfoot", {}, h("tr", {}, h("th", { scope: "row" }, "Total"), h("td", {}, String(t.tasks)), h("td", {}, String(t.done)), h("td", {}, String(t.remaining))))
+        : null
+    );
+  }
+
+  function roadmap() {
+    if (approved === null) return null;
+    return h(
+      "div",
+      { class: "pl-plan-roadmap", "data-testid": "pl-plan-roadmap" },
+      h("h3", {}, "Approved in fulcrumaxe"),
+      approvedFailed ? h("p", { role: "alert" }, "The approved list couldn't be loaded.") : null,
+      approved.length === 0 && !approvedFailed
+        ? h("p", { class: "pl-plan-line", "data-testid": "pl-plan-roadmap-empty" }, "Nothing has been approved yet. Approve a proposal in the Inbox to put it here.")
+        : h(
+            "ol",
+            { class: "pl-plan-approved", "aria-label": "Approved in fulcrumaxe" },
+            approved.map((p) => {
+              const stage = stageWords(p.work_item_stage);
+              const ms = str(p.milestone_title) || str(p.milestone_key);
+              return h("li", { "data-testid": "pl-plan-approved", "data-id": p.id }, h("span", { class: "pl-plan-task-title" }, p.title), h("span", { class: "pl-plan-task-meta" }, [stage ? "Stage: " + stage : "", ms].filter(Boolean).join(" · ")));
+            })
+          )
+    );
+  }
+
+  function emptyState() {
+    if (!plan || plan.milestones.length > 0) return null;
+    const from = plan.imported_from;
+    if (!from) return null;
+    return h("p", { class: "pl-plan-line", "data-testid": "pl-plan-empty" }, from.level === "issues_discussions" ? ISSUES_LEVEL_EMPTY : EMPTY_SENTENCE);
+  }
+
+  function paint() {
+    if (destroyed) return;
+    const active = view.contains(document.activeElement) ? document.activeElement : null;
+    const key = active && active.getAttribute ? active.getAttribute("data-focus") : null;
+    const repo = getRepo();
+    const head = h("h2", { id: "pl-plan-h", class: "pl-panel-title", tabindex: "-1", "data-focus": "heading" }, repo ? "Plan for " + repo.name : "Plan");
+    if (!repo) {
+      fill(view, head, h("p", { class: "pl-plan-line", "data-testid": "pl-plan-empty" }, "Pick a repository to see its plan."));
+      return;
+    }
+    if (status === "loading" && !plan) {
+      fill(view, head, h("p", { class: "pl-plan-line", "data-testid": "pl-plan-loading" }, "Loading the plan…"));
+      return;
+    }
+    if (status === "error" && !plan) {
+      fill(view,
+        head,
+        h("div", { "data-testid": "pl-plan-error" }, h("p", { role: "alert" }, errorSentence || "The plan couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": "retry", onClick: () => load() }, "Try again"))
+      );
+      return;
+    }
+    const latest = plan ? plan.latest_import : null;
+    const liveNow = importIsLive(latest, now());
+    const connected = repo.connected;
+    const sentences = importSentences(latest, plan ? plan.imported_from : null, now());
+    const canRemove = !!latest || (plan && plan.milestones.length > 0);
+    const busy = importing || liveNow || !connected || limited > 0;
+    // The import status changes by polling and the block is rebuilt on every paint, so a change is said once in the live region.
+    const statusText = sentences.join(" ");
+    if (lastStatus !== null && statusText !== lastStatus) announce(statusText);
+    lastStatus = statusText;
+    fill(view,
+      head,
+      !connected ? h("p", { class: "pl-plan-line", "data-testid": "pl-plan-detached" }, DETACHED_SENTENCE) : null,
+      h(
+        "div",
+        { class: "pl-plan-head" },
+        h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-import", "data-focus": "import", "aria-disabled": busy ? "true" : "false", onClick: () => !busy && startImport() }, "Import plan"),
+        latest ? h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-evidence-toggle", "data-focus": "evidence", "aria-expanded": String(showEvidence), "aria-controls": "pl-plan-evidence", onClick: () => ((showEvidence = !showEvidence), paint()) }, showEvidence ? "Hide what it asked GitHub" : "Show what it asked GitHub") : null,
+        canRemove && !confirming ? h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-remove", "data-focus": "remove", "aria-disabled": removing || liveNow ? "true" : "false", onClick: () => !(removing || liveNow) && ((confirming = true), paint()) }, "Remove imported plan") : null
+      ),
+      confirming
+        ? h(
+            "div",
+            { class: "pl-plan-confirm", role: "group", "aria-label": "Remove the imported plan?", "data-testid": "pl-plan-confirm" },
+            h("p", {}, "Remove the imported plan for " + repo.name + "? Its milestones and tasks go, and so do the proposals nobody has decided on. Approved and rejected proposals stay, and no work item is touched. Importing again brings the plan back."),
+            h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-remove-yes", "data-focus": "remove-yes", "aria-disabled": removing ? "true" : "false", onClick: () => !removing && removePlan() }, "Yes, remove the plan"),
+            h("button", { type: "button", class: "pl-btn", "data-testid": "pl-plan-remove-no", "data-focus": "remove-no", onClick: () => ((confirming = false), paint()) }, "Keep it")
+          )
+        : null,
+      h("div", { class: "pl-plan-status", "data-testid": "pl-plan-status" }, sentences.map((s) => h("p", { class: "pl-plan-line" }, s))),
+      note ? h("p", { class: "pl-plan-sentence", "data-testid": "pl-plan-note" }, note) : null,
+      status === "error" ? h("p", { role: "alert" }, errorSentence || "The plan couldn't be loaded.") : null,
+      evidence(latest),
+      emptyState(),
+      table(),
+      roadmap()
+    );
+    if (key) {
+      const again = [...view.querySelectorAll("[data-focus]")].find((n) => n.getAttribute("data-focus") === key);
+      const fallback = confirming ? "remove-no" : key === "remove-yes" || key === "remove-no" ? "remove" : null;
+      // The button is gone (the plan was removed, so is its button): the safe next stop is the one after it, else the heading.
+      const target = again || (fallback ? [...view.querySelectorAll("[data-focus]")].find((n) => n.getAttribute("data-focus") === fallback) : null) || view.querySelector("#pl-plan-h");
+      if (target) target.focus();
+    }
+  }
+
+  paint();
+  return {
+    el: root,
+    load: show,
+    show,
+    stop,
+    destroy() {
+      destroyed = true;
+      stopPoll();
+      if (ac) ac.abort();
+      gate.cancel();
+      view.replaceChildren();
+    },
   };
 }

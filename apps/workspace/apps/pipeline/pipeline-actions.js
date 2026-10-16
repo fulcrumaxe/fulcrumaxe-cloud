@@ -12,8 +12,9 @@
 //    from a server code or message.
 //  - No new live subscription: the app hands run.status_changed and refresh
 //    to live() from the subscriptions the board already holds.
-import { h } from "../_lib/dom.js";
-import { api } from "../_lib/api.js";
+import { h, timeNode } from "../_lib/dom.js";
+import { api, createRetryGate, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
+import { STAGE_LABELS } from "./pipeline-storage.js";
 
 export const LIVE_STATUSES = ["pending", "running", "paused"];
 export const RETRYABLE_STATUSES = ["failed", "timed_out", "killed_spend", "refused_spend", "cancelled"];
@@ -605,6 +606,467 @@ export function approvalParts(run, approvals) {
     );
   }
   return out;
+}
+
+// --- Proposal inbox (D#483 S3-L2b; folded in here for the boot-file budget) ---
+// D#483 S3-L2b: the Pipeline app's Inbox tab. The proposals of one repository, filtered by state, with the buttons of S3 Spec
+// section 1 (Approve, Reject, Move back to inbox, Withdraw approval, Open in Pipeline).
+//
+// Rules this file keeps, each with a test in test/pipeline-inbox.test.mjs or e2e/pipeline-inbox.spec.ts:
+//  - What a person reads for each outcome comes from the sentence tables below, never from a server message or code.
+//  - Every button shows a sentence while it is sending and after a refusal. A refusal that means the list is out of date
+//    (a 409, a 404) re-reads the list, and the sentence stays where the row was.
+//  - Approve carries an Idempotency-Key. The key is kept across a try whose outcome is unknown (offline, timeout, 5xx) so
+//    that the next click replays the same decision, and dropped as soon as the server has answered.
+//  - A 429 disables every decision button and counts down from Retry-After (createRetryGate); nothing the server wrote is shown.
+//  - No text node is ever "null" or "undefined": every value goes through str() or a presence check before it is drawn.
+//  - Text only, built with h().
+
+/** The five filters. "Your own loop" shows loop-owned proposals of every state; the others show product-owned ones only. */
+export const FILTERS = [
+  { key: "new", label: "New", query: "state=new&owner=product", empty: "Nothing is waiting for a decision. Proposals appear here after you import the repository's plan on the Plan tab." },
+  { key: "approved", label: "Approved", query: "state=approved", empty: "Nothing has been approved yet." },
+  { key: "rejected", label: "Rejected", query: "state=rejected", empty: "Nothing has been rejected." },
+  { key: "withdrawn", label: "Closed at source", query: "state=withdrawn", empty: "Nothing has been closed or finished at its source since the last import." },
+  { key: "own_loop", label: "Your own loop", query: "owner=internal_loop", empty: "None of this repository's items belong to your own development loop." },
+];
+
+/** The sentence a person reads after a refusal or a failed call, by the code the server (or the network) answered with. */
+export const REFUSALS = {
+  not_new: "This proposal isn't waiting for a decision any more, so nothing was changed. The list has been refreshed.",
+  not_rejected: "This proposal isn't rejected any more, so nothing was changed. The list has been refreshed.",
+  not_approved: "This proposal isn't approved any more, so nothing was changed. The list has been refreshed.",
+  work_started: "Work has already started on this item, so the approval can't be withdrawn. Cancel the run from its card on the board instead.",
+  owned_by_internal_loop: "Your own development loop handles this. fulcrumaxe only shows it, so nothing was changed.",
+  repo_not_connected: "This repository isn't connected any more, so nothing was changed. Install the GitHub App on it again to approve its proposals.",
+  work_item_wrong_repo: "The work item for this proposal belongs to another repository, so nothing was changed.",
+  work_item_wrong_stage: "The work item for this proposal has already moved past Triaged, so nothing was changed.",
+  insufficient_role: "Only an owner or an admin can decide proposals.",
+  session_required: "Sign in again to do this.",
+  run_actions_unavailable: "Starting work isn't available right now, so nothing was changed. Try again later.",
+  not_found: "This proposal isn't there any more, so nothing was changed. The list has been refreshed.",
+  idempotency_key_reused: "That request was already used. Reload the list and try again.",
+  idempotency_in_progress: "The last try is still being handled. Wait a moment, then try again.",
+  offline: "Couldn't reach the server, so nothing was changed. Check your connection and try again.",
+  timeout: "The server took too long to answer. Check the list before you try again.",
+  server_error: "Something went wrong on our side. Check the list before you try again.",
+};
+const INBOX_GENERIC = "That didn't work. Nothing was changed.";
+/** Marks a row's sentence as "rate limited": it is drawn from the live countdown, not from a stored string. */
+const RATE = Symbol("rate");
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+/** The sentence for a failed call: a 429 counts down, a known code has its own sentence, anything else is generic. */
+export function refusalSentence(e) {
+  if (isRateLimited(e)) return "You're changing things too fast. " + retryWords(waitSeconds(e));
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (has(REFUSALS, code)) return REFUSALS[code];
+  if (e && e.kind === "server_error") return REFUSALS.server_error;
+  return INBOX_GENERIC;
+}
+
+/** True when the failure leaves the outcome unknown (the call may have been processed), so a retry must replay its key. */
+export const outcomeUnknown = (e) => !!e && (e.status === 0 || e.status >= 500);
+
+/** What approve answered, as one sentence: `started`, and why not when it did not. */
+export const NOT_STARTED = {
+  no_write_install: "Approved. It waits at Triaged because the repository has no write-access GitHub App installed, so nothing was started.",
+  not_issue_backed: "Approved onto the roadmap. Work on it starts once the pipeline can take a Discussion or a task as its input, so nothing was started yet.",
+  owned_by_internal_loop: "Approved, but your own development loop owns this item, so fulcrumaxe doesn't start it.",
+};
+export function approvedSentence(res) {
+  if (res && res.started === true) return "Approved and started. The agents are reading it now, and its card moves on the board when they are done.";
+  const reason = res && typeof res.not_started_reason === "string" ? res.not_started_reason : "";
+  return has(NOT_STARTED, reason) ? NOT_STARTED[reason] : "Approved. It waits at Triaged, so nothing was started.";
+}
+
+export const INBOX_SENDING = {
+  approve: "Approving…",
+  reject: "Rejecting…",
+  restore: "Moving it back to the inbox…",
+  "withdraw-approval": "Withdrawing the approval…",
+};
+export const INBOX_DONE = {
+  reject: "Rejected. It is under Rejected, where you can move it back to the inbox.",
+  restore: "Moved back to the inbox.",
+  "withdraw-approval": "Approval withdrawn. Its work item was closed and the proposal is back in New.",
+};
+export const DETACHED_SENTENCE = "This repository isn't connected any more, so it can't be approved. Its proposals stay readable.";
+export const LOOP_SENTENCE = "Your own development loop handles this. fulcrumaxe only shows it.";
+export const SOURCE_GONE_SENTENCE = "Closed or finished at its source, so it left the inbox. If it reopens, the next import brings it back.";
+
+/** Replaces the children of `el`, leaving out the absent ones: replaceChildren(null) would draw the word "null". */
+// dom-insert-ok: the filter drops every absent child before the insert
+const fill = (el, ...kids) => el.replaceChildren(...kids.filter((k) => k != null && k !== false));
+const str = (v) => (typeof v === "string" ? v : "");
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+/** A row is drawn only when it has what the row needs; a malformed one is left out rather than drawn with holes. */
+export function validProposal(p) {
+  return !!p && typeof p === "object" && typeof p.id === "string" && p.id !== "" && typeof p.title === "string" && p.title !== "" &&
+    ["new", "approved", "rejected", "withdrawn"].includes(p.state) && Array.isArray(p.sources);
+}
+
+/** "Issue #12", "Discussion #483", "Task D#2 · H14a", "Preview", in that order, for the sources a proposal has. */
+export function badgesFor(p) {
+  const out = [];
+  if (isNum(p.gh_number) && p.sources.includes("github_issue")) out.push("Issue #" + p.gh_number);
+  if (isNum(p.discussion_number)) out.push("Discussion #" + p.discussion_number);
+  if (str(p.task_key)) out.push("Task " + p.task_key.replace(":", " · "));
+  if (p.sources.includes("preview")) out.push("Preview");
+  return out;
+}
+
+/** Category hint, estimate and milestone title, only the ones present. */
+export function detailsFor(p) {
+  const out = [];
+  if (str(p.category_hint)) out.push(p.category_hint);
+  if (isNum(p.estimate_usd)) out.push("Estimate $" + p.estimate_usd.toFixed(2));
+  const milestone = str(p.milestone_title) || str(p.milestone_key);
+  if (milestone) out.push(milestone);
+  return out;
+}
+
+/** The live stage of an approved row's work item, by its label (never the raw stage key). */
+export const stageWords = (stage) => (typeof stage === "string" && has(STAGE_LABELS, stage) ? STAGE_LABELS[stage] : "");
+
+/**
+ * Says `text` in a polite live region. A screen reader announces a change, so the region is emptied first and the text set
+ * on the next frame: the same sentence twice (a second identical refusal) is then announced twice.
+ */
+export function sayLive(el, text) {
+  el.textContent = "";
+  if (el._sayFrame != null) (typeof cancelAnimationFrame === "function" ? cancelAnimationFrame : clearTimeout)(el._sayFrame);
+  el._sayFrame = null;
+  if (!text) return;
+  const set = () => {
+    el._sayFrame = null;
+    el.textContent = text;
+  };
+  el._sayFrame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(set) : setTimeout(set, 0);
+}
+
+const newKey = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : null);
+
+/**
+ * `getRepo()` answers { id, name, connected } for the picked repository (name is owner/name), or null when none is picked.
+ * `onOpenWorkItem(id)` is the app's way to show a work item on the board.
+ */
+export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) {
+  const view = h("div", { class: "pl-inbox-view" });
+  const live = h("p", { class: "pl-sr", role: "status", "aria-live": "polite", "data-testid": "pl-inbox-live" });
+  const root = h("section", { class: "pl-inbox", "aria-labelledby": "pl-inbox-h", "data-testid": "pl-inbox" }, view, live);
+  let filter = "new";
+  let rows = [];
+  let cursor = null;
+  let status = "idle"; // idle | loading | ready | error
+  let moreBusy = false;
+  let moreFailed = false;
+  let note = ""; // a sentence for the whole list: the outcome of the last decision
+  let limited = 0; // seconds left of a 429
+  const rowNote = new Map(); // proposal id -> the sentence under its buttons
+  const notes = new Map(); // proposal id -> the reject note being typed
+  const keys = new Map(); // proposal id -> the Idempotency-Key of an approve whose outcome is unknown
+  const sending = new Set();
+  let ac = null;
+  let seq = 0;
+  let destroyed = false;
+  let loadedFor = null; // the repo id the rows belong to
+
+  const gate = createRetryGate({
+    onChange: (remaining) => {
+      limited = remaining;
+      if (remaining === 0) {
+        for (const [id, s] of rowNote) if (s === RATE) rowNote.delete(id);
+      }
+      if (!destroyed) paint();
+    },
+  });
+
+  const query = () => FILTERS.find((f) => f.key === filter).query;
+
+  function announce(text) {
+    sayLive(live, text);
+  }
+
+  async function load({ keepNotes = false } = {}) {
+    const repo = getRepo();
+    const mine = ++seq;
+    if (ac) ac.abort();
+    ac = null;
+    // A "Show more" that was in flight belongs to the list being replaced: its answer is dropped, so it cannot clear these.
+    moreBusy = false;
+    moreFailed = false;
+    if (!repo) {
+      rows = [];
+      cursor = null;
+      status = "ready";
+      loadedFor = null;
+      paint();
+      return;
+    }
+    if (loadedFor !== repo.id) {
+      rows = [];
+      cursor = null;
+      loadedFor = repo.id;
+      note = "";
+      rowNote.clear();
+      notes.clear();
+      keys.clear();
+    }
+    if (!keepNotes) note = "";
+    ac = new AbortController();
+    status = "loading";
+    moreFailed = false;
+    paint();
+    try {
+      const body = await call("GET", "/api/v1/proposals?repo_id=" + encodeURIComponent(repo.id) + "&" + query(), undefined, ac.signal);
+      if (mine !== seq || destroyed) return;
+      rows = body && Array.isArray(body.proposals) ? body.proposals.filter(validProposal) : [];
+      cursor = body && typeof body.next_cursor === "string" && body.next_cursor !== "" ? body.next_cursor : null;
+      status = "ready";
+    } catch (e) {
+      if ((e && e.name === "AbortError") || mine !== seq || destroyed) return;
+      status = "error";
+    }
+    paint();
+  }
+
+  async function loadMore() {
+    const repo = getRepo();
+    if (!repo || !cursor || moreBusy) return;
+    moreBusy = true;
+    moreFailed = false;
+    paint();
+    const mine = seq;
+    try {
+      const body = await call("GET", "/api/v1/proposals?repo_id=" + encodeURIComponent(repo.id) + "&" + query() + "&cursor=" + encodeURIComponent(cursor), undefined, ac ? ac.signal : undefined);
+      if (mine !== seq || destroyed) return;
+      const seen = new Set(rows.map((r) => r.id));
+      for (const p of body && Array.isArray(body.proposals) ? body.proposals : []) if (validProposal(p) && !seen.has(p.id)) rows.push(p);
+      cursor = body && typeof body.next_cursor === "string" && body.next_cursor !== "" ? body.next_cursor : null;
+    } catch (e) {
+      if ((e && e.name === "AbortError") || mine !== seq || destroyed) return;
+      moreFailed = true;
+    }
+    moreBusy = false;
+    paint();
+  }
+
+  async function act(p, path) {
+    if (sending.has(p.id) || limited > 0) return;
+    sending.add(p.id);
+    rowNote.set(p.id, INBOX_SENDING[path]);
+    announce(INBOX_SENDING[path]);
+    paint();
+    const opts = {};
+    if (path === "approve") {
+      const k = keys.get(p.id) || newKey();
+      if (k) {
+        keys.set(p.id, k);
+        opts.idempotencyKey = k;
+      }
+    }
+    let body;
+    if (path === "reject") {
+      const text = (notes.get(p.id) || "").trim();
+      body = { note: text === "" ? null : text };
+    }
+    try {
+      const res = await call("POST", "/api/v1/proposals/" + encodeURIComponent(p.id) + "/" + path, body, undefined, path === "approve" ? opts : undefined);
+      keys.delete(p.id);
+      notes.delete(p.id);
+      rowNote.delete(p.id);
+      note = path === "approve" ? approvedSentence(res) : INBOX_DONE[path];
+      announce(note);
+      sending.delete(p.id);
+      await load({ keepNotes: true });
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        sending.delete(p.id);
+        rowNote.delete(p.id);
+        paint();
+        return;
+      }
+      if (!outcomeUnknown(e)) keys.delete(p.id);
+      const sentence = refusalSentence(e);
+      sending.delete(p.id);
+      rowNote.set(p.id, isRateLimited(e) ? RATE : sentence);
+      if (isRateLimited(e)) gate.start(waitSeconds(e));
+      announce(sentence);
+      if (e && (e.status === 409 || e.status === 404)) {
+        await load({ keepNotes: true });
+        // The row may be gone after the re-read (it moved to another filter): the sentence then speaks for the list.
+        if (!rows.some((r) => r.id === p.id) && rowNote.get(p.id) === sentence) {
+          rowNote.delete(p.id);
+          note = sentence;
+        }
+      }
+    }
+    sending.delete(p.id);
+    paint();
+  }
+
+  function button(label, p, path, extra) {
+    const repo = getRepo();
+    const blocked = sending.has(p.id) || limited > 0 || (path === "approve" && !!repo && !repo.connected);
+    // aria-disabled, not disabled: a disabled button drops keyboard focus while the request is out. Clicks are ignored instead.
+    const describe = path === "approve" || path === "reject" ? { "aria-describedby": "pl-inbox-title-" + p.id } : {};
+    return h("button", { type: "button", class: "pl-btn", "data-testid": "pl-inbox-" + path, "data-focus": p.id + ":" + path, "aria-disabled": blocked ? "true" : "false", ...describe, onClick: () => !blocked && act(p, path), ...extra }, label);
+  }
+
+  function actions(p) {
+    const repo = getRepo();
+    if (p.owner_process === "internal_loop") return [h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-loop" }, LOOP_SENTENCE)];
+    if (p.state === "new") {
+      const id = "pl-note-" + p.id;
+      const input = h("input", {
+        type: "text",
+        id,
+        class: "pl-inbox-note",
+        maxLength: 500,
+        autocomplete: "off",
+        placeholder: "Reason (optional)",
+        value: notes.get(p.id) || "",
+        "data-focus": p.id + ":note",
+        "data-testid": "pl-inbox-note",
+        onInput: (e) => notes.set(p.id, e.target.value),
+      });
+      return [
+        button("Approve", p, "approve"),
+        repo && !repo.connected ? h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-detached" }, DETACHED_SENTENCE) : null,
+        h("label", { class: "pl-inbox-notelabel", for: id }, h("span", { class: "pl-sr" }, "Reason for rejecting " + p.title + " (optional)"), input),
+        button("Reject", p, "reject"),
+      ];
+    }
+    if (p.state === "rejected") return [button("Move back to inbox", p, "restore")];
+    if (p.state === "approved") {
+      return [
+        p.work_item_stage === "triaged" ? button("Withdraw approval", p, "withdraw-approval") : null,
+        typeof p.work_item_id === "string" && p.work_item_id !== ""
+          ? h("button", { type: "button", class: "pl-btn", "data-testid": "pl-inbox-open", "data-focus": p.id + ":open", onClick: () => onOpenWorkItem(p.work_item_id) }, "Open in Pipeline")
+          : null,
+      ];
+    }
+    return [h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-gone" }, SOURCE_GONE_SENTENCE)];
+  }
+
+  function stamps(p) {
+    const out = [];
+    if (p.state === "approved") {
+      const stage = stageWords(p.work_item_stage);
+      out.push(h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-approved" }, (isNum(p.roadmap_position) ? "On the roadmap at position " + p.roadmap_position : "On the roadmap") + (stage ? ". Stage: " + stage : "") + "."));
+    }
+    if (p.state === "rejected") {
+      out.push(h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-rejected" }, "Rejected", str(p.decided_at) ? [" ", timeNode(p.decided_at, true)] : null, str(p.reject_note) ? ". Note: " + p.reject_note : "."));
+    } else if (p.state === "approved" && str(p.decided_at)) {
+      out.push(h("p", { class: "pl-inbox-line" }, "Approved ", timeNode(p.decided_at, true), "."));
+    }
+    return out;
+  }
+
+  function rowEl(p) {
+    const details = detailsFor(p);
+    const badges = badgesFor(p);
+    return h(
+      "li",
+      { class: "pl-inbox-row", "data-testid": "pl-inbox-row", "data-id": p.id, "data-state": p.state },
+      h("h3", { class: "pl-inbox-title", id: "pl-inbox-title-" + p.id }, p.title),
+      badges.length ? h("p", { class: "pl-inbox-badges", "data-testid": "pl-inbox-badges" }, badges.join(" · ")) : null,
+      details.length ? h("p", { class: "pl-inbox-details", "data-testid": "pl-inbox-details" }, details.join(" · ")) : null,
+      stamps(p),
+      h("div", { class: "pl-inbox-actions" }, actions(p)),
+      rowNote.has(p.id) ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-sentence" }, rowNote.get(p.id) === RATE ? "You're changing things too fast. " + retryWords(limited) : rowNote.get(p.id)) : null
+    );
+  }
+
+  function body() {
+    const repo = getRepo();
+    if (!repo) return h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-empty" }, "Pick a repository to see its proposals.");
+    if (status === "error")
+      return h("div", { "data-testid": "pl-inbox-error" }, h("p", { role: "alert" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": "retry", onClick: () => load() }, "Try again"));
+    if (status === "loading" && rows.length === 0) return h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-loading" }, "Loading proposals…");
+    if (rows.length === 0) return h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-empty" }, FILTERS.find((f) => f.key === filter).empty);
+    return h(
+      "div",
+      {},
+      h("ul", { class: "pl-inbox-list", "aria-label": FILTERS.find((f) => f.key === filter).label }, rows.map(rowEl)),
+      cursor
+        ? h(
+            "div",
+            { class: "pl-inbox-more" },
+            h("button", { type: "button", class: "pl-btn", "data-focus": "more", "data-testid": "pl-inbox-more", "aria-disabled": moreBusy ? "true" : "false", onClick: () => !moreBusy && loadMore() }, moreBusy ? "Loading…" : "Show more"),
+            moreFailed ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-more-failed" }, "The next proposals couldn't be loaded. Try again.") : null
+          )
+        : null
+    );
+  }
+
+  function paint() {
+    if (destroyed) return;
+    // Repainting replaces every node, so the focused control is found again by its key afterwards.
+    const active = view.contains(document.activeElement) ? document.activeElement : null;
+    const key = active && active.getAttribute ? active.getAttribute("data-focus") : null;
+    const range = key && active && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+    // The rows before this paint, in order, and the row the focus was in: if that row is gone afterwards, the focus moves on.
+    const before = [...view.querySelectorAll("[data-testid='pl-inbox-row']")].map((n) => n.getAttribute("data-id"));
+    const rowOfFocus = active && active.closest ? active.closest("[data-testid='pl-inbox-row']") : null;
+    const focusRow = rowOfFocus ? rowOfFocus.getAttribute("data-id") : null;
+    const repo = getRepo();
+    const filters = h(
+      "div",
+      { class: "pl-inbox-filters", role: "group", "aria-label": "Show proposals that are" },
+      FILTERS.map((f) =>
+        h("button", { type: "button", class: "pl-filter" + (f.key === filter ? " pl-filter-on" : ""), "aria-pressed": String(f.key === filter), "data-testid": "pl-filter-" + f.key, "data-focus": "filter:" + f.key, onClick: () => select(f.key) }, f.label)
+      )
+    );
+    fill(view,
+      h("h2", { id: "pl-inbox-h", class: "pl-panel-title", tabindex: "-1", "data-focus": "heading" }, repo ? "Inbox for " + repo.name : "Inbox"),
+      filters,
+      note ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-note-line" }, note) : null,
+      body()
+    );
+    if (key) {
+      const again = [...view.querySelectorAll("[data-focus]")].find((n) => n.getAttribute("data-focus") === key);
+      if (again && !again.disabled) {
+        again.focus();
+        if (range && typeof again.setSelectionRange === "function") again.setSelectionRange(range[0], range[1]);
+      } else if (!again && focusRow !== null) {
+        // The row left the list (decided, or moved to another filter): the next row's first action, else the list heading.
+        const present = new Map([...view.querySelectorAll("[data-testid='pl-inbox-row']")].map((n) => [n.getAttribute("data-id"), n]));
+        let target = null;
+        for (const id of before.slice(before.indexOf(focusRow) + 1)) {
+          const row = present.get(id);
+          target = row ? row.querySelector("button[data-focus]") : null;
+          if (target) break;
+        }
+        if (!target) target = view.querySelector("#pl-inbox-h");
+        if (target) target.focus();
+      }
+    }
+  }
+
+  function select(key) {
+    if (key === filter) return;
+    filter = key;
+    rows = [];
+    cursor = null;
+    note = "";
+    rowNote.clear();
+    load();
+  }
+
+  paint();
+  return {
+    el: root,
+    load: () => load(),
+    destroy() {
+      destroyed = true;
+      if (ac) ac.abort();
+      gate.cancel();
+      view.replaceChildren();
+    },
+  };
 }
 
 // --- Approve and start (folded in from pipeline-approve.js to keep the app within the boot-file budget) ---
