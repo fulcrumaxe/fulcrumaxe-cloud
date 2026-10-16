@@ -3,7 +3,7 @@ import { z } from "zod";
 /** G1: a field name that looks like a credential channel. `auth_present` alone is exempt. */
 export const CREDENTIAL_NAME = /token|secret|credential|password|cookie|api_?key|auth(?!_present)/i;
 /** The only names allowed to match. Each names a public key, a key id, a boolean or a mode, never a secret. */
-export const G1_ALLOWLIST = ["public_key_jwk", "keyid", "model_auth_present", "credential_mode"] as const;
+export const G1_ALLOWLIST = ["public_key_jwk", "keyid", "model_auth_present", "credential_mode", "token", "token_revoked"] as const;
 
 /** Every field name in a schema, at any depth, as a dotted path. */
 export function fieldPaths(schema: z.ZodTypeAny, prefix = ""): string[] {

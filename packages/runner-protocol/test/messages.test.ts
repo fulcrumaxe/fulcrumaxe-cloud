@@ -14,6 +14,8 @@ const VALID: Record<RunnerMessageName, unknown> = {
   claim: {},
   heartbeat: { run_id: UUID, lease_generation: 3 },
   git_ticket: { run_id: UUID, lease_generation: 3 },
+  plane_push_token: { run_id: UUID, lease_generation: 3 },
+  plane_push_report: { run_id: UUID, lease_generation: 3, phase: "scanning" },
   events: { run_id: UUID, lease_generation: 3, events: [EVENT] },
   done: { run_id: UUID, lease_generation: 3, agentOutput: { verdict: "pass" } },
   register: { code: `fxrr_${"A1".repeat(16)}`, public_key_jwk: JWK },
@@ -22,8 +24,8 @@ const VALID: Record<RunnerMessageName, unknown> = {
 };
 
 describe("the runner-to-cloud messages", () => {
-  it("are exactly hello, claim, heartbeat, git_ticket, events, done, register, rotate and revoke", () => {
-    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "register", "revoke", "rotate"]);
+  it("are exactly hello, claim, heartbeat, git_ticket, plane_push_token, plane_push_report, events, done, register, rotate and revoke", () => {
+    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
   });
 
   it("accept a valid message of each kind", () => {
@@ -60,7 +62,7 @@ describe("G1: no credential channel", () => {
   });
 
   it("the allowlist is exactly public_key_jwk, keyid, model_auth_present and credential_mode", () => {
-    expect([...G1_ALLOWLIST].sort()).toEqual(["credential_mode", "keyid", "model_auth_present", "public_key_jwk"]);
+    expect([...G1_ALLOWLIST].sort()).toEqual(["credential_mode", "keyid", "model_auth_present", "public_key_jwk", "token", "token_revoked"]);
   });
 
   it("the walk does find a credential-looking field", () => {
@@ -203,7 +205,7 @@ describe("LocalOnlyEvent", () => {
 
   it("has no message that starts, attaches to or types into a session: the cloud cannot drive a runner's agent or its tmux", () => {
     const names = Object.keys(RUNNER_MESSAGES);
-    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "register", "revoke", "rotate"]);
+    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
     expect(names.filter((n) => /attach|session|tmux|terminal|input|keys|takeover|take_over|start|exec|command/i.test(n))).toEqual([]);
     // And no message has a field that could carry something to type or run.
     const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => Object.keys((schema as unknown as { shape?: Record<string, unknown> }).shape ?? {}));

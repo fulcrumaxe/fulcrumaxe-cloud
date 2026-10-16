@@ -201,6 +201,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "probe_failed_other",
   // Cloud-verified runner git ticket (D#6 R5a-2b): the ticket route refused a run that is not cloud-verified.
   "not_cloud_verified",
+  // D#598 P1f-2: the public-push token and report routes (and the report check's own refusal code).
+  "not_paired",
+  "already_issued",
+  "attempts_exhausted",
+  "report_mismatch",
   // GitHub proxy, runner path (D#6 R5a-2c): why a request that carried a git ticket was refused. The ticket itself, the lease, the policy and the
   // upstream each have their own code; none is ever a claim, a header or body text.
   "runner_path_not_configured",

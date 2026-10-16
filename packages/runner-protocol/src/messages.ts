@@ -323,6 +323,50 @@ export const GitTicketMessage = z.object({ run_id: uuid, lease_generation: lease
 /** The signed route a runner asks for a git ticket on. The signature covers the cloud origin plus this constant path. */
 export const GIT_TICKET_PATH = "/api/runner/git-ticket";
 
+/**
+ * D#598 P1f-2: an executor run on a repo paired with a public code repo asks the cloud for the ONE restricted token its run-end hook may push with.
+ * The run and generation are checked against the lease; the repo, the branch and the base come from the cloud's own rows, so nothing else travels.
+ */
+export const PlanePushTokenMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+
+/** The signed route a runner asks for its one-use public push token on. */
+export const PLANE_PUSH_TOKEN_PATH = "/api/runner/plane-push-token";
+
+/** The phases a run-end hook reports, in the order they happen. */
+export const PLANE_PUSH_PHASES = ["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change"] as const;
+export const PlanePushPhase = z.enum(PLANE_PUSH_PHASES);
+export type PlanePushPhase = z.infer<typeof PlanePushPhase>;
+
+const fixedText = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/);
+const gitSha = z.string().regex(/^([0-9a-f]{40}|[0-9a-f]{64})$/);
+
+/** One thing a refusal names: its kind, the place (a path and line, never a value) and the rule key. No field here can hold matched text. */
+export const PlanePushRefusal = z.object({ kind: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), place: fixedText(300), rule_key: fixedText(200) }).strict();
+export const MAX_PLANE_PUSH_REFUSALS = 100;
+
+/**
+ * D#598 P1f-2: what the hook did, as a HINT. The cloud reads GitHub itself before it records a pushed branch or a pull request. There is no field
+ * that can carry file content, a diff, a matched value or a token (test/planePush.test.ts walks the schema).
+ */
+export const PlanePushReportMessage = z
+  .object({
+    run_id: uuid,
+    lease_generation: leaseGeneration,
+    phase: PlanePushPhase,
+    code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(),
+    refusals: z.array(PlanePushRefusal).max(MAX_PLANE_PUSH_REFUSALS).optional(),
+    branch: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,330}$/).optional(),
+    head_sha: gitSha.optional(),
+    tip_sha: gitSha.optional(),
+    pr_number: safeInt.min(1).max(2_147_483_647).optional(),
+    token_revoked: z.boolean().optional(),
+  })
+  .strict();
+export type PlanePushReportMessage = z.infer<typeof PlanePushReportMessage>;
+
+/** The signed route a runner reports a phase of its public push on. */
+export const PLANE_PUSH_REPORT_PATH = "/api/runner/plane-push-report";
+
 export const EventsMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration, events: z.array(LocalOnlyEvent).min(1).max(MAX_EVENTS_PER_BATCH) }).strict();
 
 /** The deepest nesting `agentOutput` may have. Real envelopes are a few levels deep. */
@@ -433,6 +477,8 @@ export const RUNNER_MESSAGES = {
   claim: ClaimMessage,
   heartbeat: HeartbeatMessage,
   git_ticket: GitTicketMessage,
+  plane_push_token: PlanePushTokenMessage,
+  plane_push_report: PlanePushReportMessage,
   events: EventsMessage,
   done: DoneMessage,
   register: RegisterMessage,

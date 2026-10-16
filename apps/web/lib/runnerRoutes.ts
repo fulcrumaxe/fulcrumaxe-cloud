@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import type { Pool } from "pg";
 import { NextResponse } from "next/server";
 import { MAX_BODY_BYTES, RunnerHttpError, errorResponse, toResponse } from "@fx/runner-cloud";
-import type { FailRunnerLeases, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
+import type { FailRunnerLeases, PlanePushHostedPort, RunnerCloudDeps, RunnerLeaseOps, RunnerHttpRequest, RunnerHttpResponse, RunPullRequestPort, SessionPrincipal } from "@fx/runner-cloud";
 import { PgRateLimitStore, type RateLimitStore } from "@fx/api/src/ratelimit/store.js";
 import { bucketKeyForAnonIp, clientIpFromRequest } from "@fx/api/src/ratelimit/limits.js";
 import { defaultAuthDeps } from "../app/api/auth/_lib/deps";
@@ -10,6 +10,7 @@ import { runnerLimitsFor } from "@fx/worker";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
+import { createLivePlanePushPort } from "./github/planePushHosted";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
 /**
@@ -34,10 +35,16 @@ const leases: RunnerLeaseOps = {
   completeHandoffOnDone: async (input) => (await requireWorker()).completeHandoffOnDone(input),
   gitTicketContext: async (input) => (await requireWorker()).gitTicketContext(input),
   signGitTicket: async (input) => (await requireWorker()).signGitTicket(input),
+  planePushGrant: async (input) => (await requireWorker()).planePushGrant(input),
+  planePushSettleGrant: async (input) => (await requireWorker()).planePushSettleGrant(input),
+  planePushReportContext: async (input) => (await requireWorker()).planePushReportContext(input),
+  planePushRecordReport: async (input) => (await requireWorker()).planePushRecordReport(input),
 };
 
 /** The live GitHub side of an executor's `done` (D#6 R2b-3f). Built once; it opens a client per call, so nothing is read from the environment until a `done` needs one. */
 let pullRequests: RunPullRequestPort | undefined;
+/** D#598 P1f-2: the GitHub side of the public-push routes. Built on first use; a missing App answers the routes' fixed `not_configured`. */
+let planePush: PlanePushHostedPort | undefined;
 
 async function requireWorker() {
   const worker = await getWorker();
@@ -62,7 +69,7 @@ function accountJobLimit(plan: string): { jobs: number; hosted: boolean } {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()) };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

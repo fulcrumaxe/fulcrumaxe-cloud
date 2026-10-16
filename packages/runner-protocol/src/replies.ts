@@ -127,12 +127,34 @@ export const GitTicketReply = z
   .strict();
 export type GitTicketReply = z.infer<typeof GitTicketReply>;
 
+/**
+ * 200 from plane-push-token (D#598 P1f-2): the ONE restricted token this run's hook may push to the paired public repo with, minted for this
+ * request alone and never stored by the cloud. The repo, the branch and the base are the cloud's own rows. The `token` field is the one
+ * credential a cloud reply carries; the G1 walk allows it here and a test keeps any runner-to-cloud message from having one.
+ */
+export const PlanePushTokenReply = z
+  .object({
+    token: z.string().min(20).max(512).regex(/^[A-Za-z0-9_.-]+$/),
+    expires_at: utcTimestamp,
+    code_repo: z.string().max(140).regex(/^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/),
+    branch: z.string().max(80).regex(/^fx\/p-[0-9a-f-]{36}$/),
+    base: z.literal("main"),
+  })
+  .strict();
+export type PlanePushTokenReply = z.infer<typeof PlanePushTokenReply>;
+
+/** 200 from plane-push-report: the report was understood. What the cloud recorded is read from the item, never from this reply. */
+export const PlanePushReportReply = z.object({ recorded: z.literal(true) }).strict();
+export type PlanePushReportReply = z.infer<typeof PlanePushReportReply>;
+
 /** The complete set of runner-route replies. A test pins these keys. */
 export const RUNNER_REPLIES = {
   claim: ClaimReply,
   claim_rate_limited: ClaimRateLimitedReply,
   heartbeat: HeartbeatReply,
   git_ticket: GitTicketReply,
+  plane_push_token: PlanePushTokenReply,
+  plane_push_report: PlanePushReportReply,
   events: EventsReply,
   stop: StopReply,
   seq_not_increasing: SeqNotIncreasingReply,
