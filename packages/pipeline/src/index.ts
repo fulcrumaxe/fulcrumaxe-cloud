@@ -25,3 +25,4 @@ export * from "./prompt/assemblePrompt.js";
 export * from "./prompt/memorySlotSetting.js";
 export * from "./prompt/repoMap.js";
 export * from "./prompt/memoryRecall.js";
+export * as mergeQueue from "./mergeQueue/index.js";
