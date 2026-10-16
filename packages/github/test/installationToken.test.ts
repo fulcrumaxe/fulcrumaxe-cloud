@@ -306,7 +306,7 @@ describe("installation-wide token (WideScope)", () => {
 
 describe("no purpose ever requests repository administration (D#2 RC-1a, C64 section 3)", () => {
   // A Record keyed by MintPurpose: a new purpose fails typecheck until it is listed here.
-  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team" };
+  const KIND: Record<MintPurpose, string> = { run: "team", preview_read: "team_readonly", sitekit_read: "sitekit", merge_gate: "team", plan_read: "team_readonly", runner_git: "team", plane_push: "team", plane_publish_read: "team" };
   const scopes = [
     { repositories: ["r"] as [string], permissions: { metadata: "write", contents: "write", issues: "write", pull_requests: "write", discussions: "write" } as const },
     { installationWide: true as const, permissions: { metadata: "read" } as const },
@@ -316,9 +316,14 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
     for (const scope of scopes) {
       // runner_git takes only metadata and contents, so both generic scopes here are refused outright: runnerProxyDecision.test.ts covers it.
       if (purpose === "runner_git") continue;
-      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read and plane_push tests
+      if ((purpose === "merge_gate" || purpose === "plan_read" || purpose === "plane_push" || purpose === "plane_publish_read") && "installationWide" in scope) continue; // refused outright: see the merge_gate, plan_read, plane_push and plane_publish_read tests
       // A plan_read mint is refused unless GitHub's answer says the token is read-only, so the answer says so.
-      const answer: { permissions: Record<string, string>; repositories?: string[] } = purpose === "plane_push" ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] } : { permissions: { metadata: "read" } };
+      const answer: { permissions: Record<string, string>; repositories?: string[] } =
+        purpose === "plane_push"
+          ? { permissions: { metadata: "read", contents: "write", pull_requests: "write" }, repositories: ["r"] }
+          : purpose === "plane_publish_read"
+            ? { permissions: { metadata: "read", contents: "read" }, repositories: ["r"] }
+            : { permissions: { metadata: "read" } };
       const requester = vi.fn(async () => ({ token: "ghs_x", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
       await getInstallationToken({
         installationId: 1, appKind: KIND[purpose], purpose, role: "any", scope, appCredentials: creds(privateKeyPem), requester, cache: new InstallationTokenCache(),
@@ -329,6 +334,9 @@ describe("no purpose ever requests repository administration (D#2 RC-1a, C64 sec
       if (purpose === "plane_push") {
         // D#598 P1c: whatever the caller asked for, exactly contents and pull_requests, both write.
         expect(granted).toEqual({ contents: "write", pull_requests: "write" });
+      } else if (purpose === "plane_publish_read") {
+        // D#598 P1f-4b: whatever the caller asked for, exactly the contents read of the one repository.
+        expect(granted).toEqual({ metadata: "read", contents: "read" });
       } else if (purpose === "merge_gate") {
         // D#483 P3: the one purpose that reads branch protection; read-only, and nothing else outside its own list.
         for (const k of keys) expect(Object.keys(MERGE_GATE_PERMISSIONS)).toContain(k);
@@ -569,5 +577,62 @@ describe("plane_push (D#598 P1c): one paired public repo, contents and pull_requ
     ).rejects.toMatchObject({ reason: "purpose_not_allowed" });
     expect(appCredentials).not.toHaveBeenCalled();
     expect(requester).not.toHaveBeenCalled();
+  });
+});
+
+describe("plane_publish_read (D#598 P1f-4b)", () => {
+  const good = { permissions: { metadata: "read", contents: "read" }, repositories: ["widgets"] };
+  const mint = (answer: Record<string, unknown>, over: Partial<Parameters<typeof getInstallationToken>[0]> = {}) => {
+    const requester = vi.fn(async () => ({ token: "ghs_publishread", expiresAt: new Date(Date.now() + 3600_000).toISOString(), ...answer }));
+    const cache = new InstallationTokenCache();
+    const run = () =>
+      getInstallationToken({
+        installationId: 7, appKind: "team", purpose: "plane_publish_read", role: "plane_publish",
+        scope: { repositories: ["widgets"], permissions: { contents: "read", metadata: "read" } },
+        appCredentials: creds(privateKeyPem), requester, cache, ...over,
+      });
+    return { run, requester, cache };
+  };
+
+  it("requests exactly metadata and contents, both read, for the one repository, and overrides a wider scope", async () => {
+    const m = mint(good, { scope: { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write", issues: "write" } } });
+    await expect(m.run()).resolves.toBe("ghs_publishread");
+    expect(m.requester).toHaveBeenCalledWith(expect.objectContaining({ repositories: ["widgets"], permissions: { metadata: "read", contents: "read" } }));
+  });
+
+  it("is minted anew on every call and never enters the cache, with or without fresh", async () => {
+    const m = mint(good);
+    await m.run();
+    await m.run();
+    await mint(good, { fresh: true }).run();
+    expect(m.requester).toHaveBeenCalledTimes(2);
+    expect(m.cache.get(7, "team", "plane_publish", { repositories: ["widgets"], permissions: { metadata: "read", contents: "read" } }, Date.now(), "plane_publish_read:")).toBeUndefined();
+  });
+
+  it("is noted as a live token until it is forgotten (the memory intake scan)", async () => {
+    await mint(good).run();
+    expect(liveInstallationTokens()).toContain("ghs_publishread");
+  });
+
+  it.each([
+    ["no permissions reported", { repositories: ["widgets"] }],
+    ["no repository list reported", { permissions: good.permissions }],
+    ["a write on contents", { ...good, permissions: { metadata: "read", contents: "write" } }],
+    ["an extra read permission", { ...good, permissions: { ...good.permissions, issues: "read" } }],
+    ["no contents", { ...good, permissions: { metadata: "read" } }],
+    ["a second repository", { ...good, repositories: ["widgets", "other"] }],
+    ["another repository", { ...good, repositories: ["other"] }],
+    ["an empty repository list", { ...good, repositories: [] }],
+  ])("refuses the token when GitHub's answer shows %s", async (_label, answer) => {
+    await expect(mint(answer as Record<string, unknown>).run()).rejects.toMatchObject({ reason: "token_scope_mismatch" });
+  });
+
+  it("refuses an installation-wide scope and a sitekit or unknown App before any credential is read", async () => {
+    const appCredentials = vi.fn(creds(privateKeyPem));
+    const wide = { installationWide: true, permissions: { metadata: "read" } } as unknown as Parameters<typeof getInstallationToken>[0]["scope"];
+    await expect(mint(good, { scope: wide, appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
+    await expect(mint(good, { appKind: "sitekit", appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
+    await expect(mint(good, { appKind: null, appCredentials }).run()).rejects.toThrow("purpose_not_allowed");
+    expect(appCredentials).not.toHaveBeenCalled();
   });
 });

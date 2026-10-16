@@ -65,12 +65,13 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
     const createRunnerGitResolver = vi.fn(() => "runner-resolver" as unknown);
     const createRunnerCloneBudget = vi.fn(() => "budget" as unknown);
     const createRunnerBoundBranchResolver = vi.fn(() => "bound-resolver" as unknown);
+    const createPublishTargetResolver = vi.fn(() => "publish-resolver" as unknown);
     const createPool = vi.fn(() => "pool" as unknown);
     const ghProxyHandler = vi.fn(async () => new Response(null));
     const defaultGhProxyHandlerDeps = vi.fn(() => ({}) as Record<string, unknown>);
 
     vi.doMock("@fx/runner", () => ({ loadGithubForwardConfig }));
-    vi.doMock("@fx/github", () => ({ createRunResolver, createRunnerGitResolver, createRunnerCloneBudget, createRunnerBoundBranchResolver }));
+    vi.doMock("@fx/github", () => ({ createRunResolver, createRunnerGitResolver, createRunnerCloneBudget, createRunnerBoundBranchResolver, createPublishTargetResolver }));
     vi.doMock("@fx/db/src/pool", () => ({ createPool }));
     vi.doMock("./handler", () => ({ defaultGhProxyHandlerDeps, ghProxyHandler }));
 
@@ -88,6 +89,10 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
     expect(createRunnerBoundBranchResolver).toHaveBeenCalledTimes(1);
     expect(createRunnerBoundBranchResolver).toHaveBeenCalledWith("pool");
     expect(createRunResolver).toHaveBeenCalledWith("pool");
+    // D#598 P1f-4b: the publish target lookup is built once, on the same narrow pool, and set on the deps the handler is given.
+    expect(createPublishTargetResolver).toHaveBeenCalledTimes(1);
+    expect(createPublishTargetResolver).toHaveBeenCalledWith("pool");
+    expect(ghProxyHandler).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resolvePublishTarget: "publish-resolver" }));
     expect(defaultGhProxyHandlerDeps).toHaveBeenCalledTimes(1);
     expect(ghProxyHandler).toHaveBeenCalledTimes(2);
   });
