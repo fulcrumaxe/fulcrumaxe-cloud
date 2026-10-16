@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
-import { CATALOGUE, type DecisionClass } from '@fx/decisions';
+import { CATALOGUE, type CatalogueEntry, type DecisionClass, type PresetName } from '@fx/decisions';
+import { resolveAskPolicyForWorkItem } from './decisionAskSettings.js';
 import { RECEIPT_FENCE_END, RECEIPT_FENCE_START, type ReceiptQuotedInput } from './receiptWriter.js';
 import { withTenant } from './withTenant.js';
 
@@ -13,8 +14,10 @@ import { withTenant } from './withTenant.js';
  * the stated class, class 1 is never asked, option and proposed ids fit the
  * definer's id shape, the rationale is non-empty (the definer accepts an
  * empty one), untrusted quoted inputs are fenced `storedBody` text, and a
- * timeout may only proceed on the recommended option for the two class-2
- * refactor/test entries. Everything else that times out stops and flags.
+ * timeout may only proceed on the recommended option where the catalogue
+ * entry's `timeoutOutcomes` allows it. Everything else that times out stops
+ * and flags. With no explicit `policy`, the tuple is resolved from the
+ * customer's ask settings and the preset (DP12a-1, resolveAskPolicy).
  */
 
 export interface AskOption {
@@ -29,11 +32,8 @@ export interface AskPolicy {
   onTimeout: AskTimeoutOutcome;
 }
 
-/** Interim default until DP12a-1 adds per-account timeout outcomes. */
+/** The policy of a caller that passes an explicit one; the settings-resolved tuple replaces it when `policy` is omitted. */
 export const DEFAULT_ASK_POLICY: AskPolicy = Object.freeze({ answerWindowMinutes: 1440, onTimeout: 'stop_and_flag' });
-
-/** Class-2 entries that are internal and reversible before build: the only ones that may proceed on timeout. */
-const PROCEEDABLE: readonly string[] = ['nonbreaking_refactor_approach', 'test_strategy_choice'];
 
 export interface RaiseAskInput {
   class: DecisionClass;
@@ -46,6 +46,8 @@ export interface RaiseAskInput {
   /** One entry per quoted input; the ask records each entry's trust class. */
   quotedInputs: readonly ReceiptQuotedInput[];
   policy?: AskPolicy;
+  /** The active preset, used when `policy` is omitted. Defaults to the most cautious one. */
+  preset?: PresetName;
 }
 
 export type AskErrorCode =
@@ -89,7 +91,19 @@ function isFenced(body: unknown): boolean {
   return !inner.includes(RECEIPT_FENCE_START) && !inner.includes(RECEIPT_FENCE_END);
 }
 
-function validate(input: RaiseAskInput): { trust: string[]; policy: AskPolicy } {
+function checkPolicy(policy: AskPolicy, entry: CatalogueEntry): void {
+  if (!Number.isInteger(policy.answerWindowMinutes) || policy.answerWindowMinutes < 15 || policy.answerWindowMinutes > 20160) {
+    throw new AskRaiseError('ask_window_out_of_range');
+  }
+  if (policy.onTimeout !== 'stop_and_flag' && policy.onTimeout !== 'proceed_recommended') {
+    throw new AskRaiseError('ask_timeout_outcome_invalid');
+  }
+  if (policy.onTimeout === 'proceed_recommended' && !entry.timeoutOutcomes.includes('proceed_recommended')) {
+    throw new AskRaiseError('ask_proceed_not_allowed');
+  }
+}
+
+function validate(input: RaiseAskInput): { trust: string[]; entry: CatalogueEntry } {
   if (!CLASSES.includes(input.class)) throw new AskRaiseError('ask_invalid_class');
   if (input.class === 'automated_with_monitoring') throw new AskRaiseError('ask_class1_never_asks');
   if (!isText(input.decisionType)) throw new AskRaiseError('ask_missing_decision_type');
@@ -126,22 +140,20 @@ function validate(input: RaiseAskInput): { trust: string[]; policy: AskPolicy } 
     if (q.trust === 'untrusted' && !isFenced(q.storedBody)) throw new AskRaiseError('ask_untrusted_input_not_stored_body');
   }
 
-  const policy = input.policy ?? DEFAULT_ASK_POLICY;
-  if (!Number.isInteger(policy.answerWindowMinutes) || policy.answerWindowMinutes < 15 || policy.answerWindowMinutes > 20160) {
-    throw new AskRaiseError('ask_window_out_of_range');
-  }
-  if (policy.onTimeout !== 'stop_and_flag' && policy.onTimeout !== 'proceed_recommended') {
-    throw new AskRaiseError('ask_timeout_outcome_invalid');
-  }
-  if (policy.onTimeout === 'proceed_recommended' && !PROCEEDABLE.includes(input.decisionType)) {
-    throw new AskRaiseError('ask_proceed_not_allowed');
-  }
-  return { trust: (quoted as ReceiptQuotedInput[]).map((q) => q.trust), policy };
+  return { trust: (quoted as ReceiptQuotedInput[]).map((q) => q.trust), entry };
+}
+
+/** The tuple the customer's settings and preset resolve to, in this function's `onTimeout` naming. */
+async function fromSettings(client: PoolClient, input: RaiseAskInput, entry: CatalogueEntry): Promise<AskPolicy> {
+  const p = await resolveAskPolicyForWorkItem(client, { decisionType: entry.id, workItemId: input.workItemId, preset: input.preset ?? 'cautious' });
+  return { answerWindowMinutes: p.answerWindowMinutes, onTimeout: p.timeoutOutcome };
 }
 
 /** Raises a pending ask through decision_ask_raise(); returns the ask id. */
 export async function raiseAsk(client: PoolClient, input: RaiseAskInput): Promise<string> {
-  const { trust, policy } = validate(input);
+  const { trust, entry } = validate(input);
+  const policy = input.policy ?? await fromSettings(client, input, entry);
+  checkPolicy(policy, entry);
   const { rows } = await client.query<{ id: string }>(
     `SELECT decision_ask_raise($1::text, $2::text, $3::uuid, $4::uuid, $5::jsonb, $6::text,
                                $7::text, $8::jsonb, $9::integer, $10::text) AS id`,

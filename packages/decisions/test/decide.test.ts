@@ -30,6 +30,7 @@ function entryOf(
     reversal: { availability: "reversible_before_build" },
     customerProximity: "internal_only",
     dataSensitivity: "none",
+    timeoutOutcomes: cls === "automated_with_monitoring" ? [] : ["stop_and_flag"],
   };
 }
 
@@ -135,6 +136,7 @@ describe("criterion 4 (clamp): a disallowed proposal degrades toward the more co
       reversal: { availability: "reversible_before_build" },
       customerProximity: "internal_only",
       dataSensitivity: "none",
+      timeoutOutcomes: ["stop_and_flag"],
     };
     // Cautious proposes "ask", which is not allowed, and neither "announce"
     // nor "ask" are in allowedDispositions -- decide() falls back to

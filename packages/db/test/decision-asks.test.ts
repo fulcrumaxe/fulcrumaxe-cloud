@@ -38,10 +38,14 @@ const valid = (over: Partial<RaiseAskInput> = {}): RaiseAskInput => ({
   ...over,
 });
 
+/** Answers the two settings reads a policy-less raise makes (no settings, no repo) and records only the raise itself in `calls`. */
 const stubClient = () => {
   const calls: unknown[][] = [];
   const client = {
     query: async (...args: unknown[]) => {
+      const sql = String(args[0]);
+      if (sql.includes('FROM work_items')) return { rows: [{ repo_id: null }] };
+      if (sql.includes('FROM decision_ask_settings')) return { rows: [] };
       calls.push(args);
       return { rows: [{ id: 'ask-1' }] };
     },
@@ -95,11 +99,11 @@ describe('raiseAsk validation (no query is sent)', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('the interim default is a 24 hour window that stops and flags', () => {
+  it('the explicit-policy default is a 24 hour window that stops and flags', () => {
     expect(DEFAULT_ASK_POLICY).toEqual({ answerWindowMinutes: 1440, onTimeout: 'stop_and_flag' });
   });
 
-  it('sends the default policy, only trust classes (not bodies), and a null run', async () => {
+  it('sends the settings-resolved default (24 hours, stop and flag), only trust classes (not bodies), and a null run', async () => {
     const { client, calls } = stubClient();
     const id = await raiseAsk(client, valid({
       workItemId: '11111111-1111-4111-8111-111111111111',

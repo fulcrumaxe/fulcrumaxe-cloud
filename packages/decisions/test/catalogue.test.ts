@@ -15,6 +15,7 @@ const EXPECTED_ENTRY_KEYS = [
   "reversal",
   "customerProximity",
   "dataSensitivity",
+  "timeoutOutcomes",
 ].sort();
 
 const VALID_CLASSES: readonly DecisionClass[] = [
@@ -52,7 +53,7 @@ describe("criterion 1: catalogue entry shape, frozen v1 list", () => {
   });
 
   for (const entry of CATALOGUE) {
-    it(`${entry.id}: has exactly the shape {id, class, defaultDisposition, allowedDispositions, reversal, customerProximity, dataSensitivity}`, () => {
+    it(`${entry.id}: has exactly the shape {id, class, defaultDisposition, allowedDispositions, reversal, customerProximity, dataSensitivity, timeoutOutcomes}`, () => {
       expect(Object.keys(entry).sort()).toEqual(EXPECTED_ENTRY_KEYS);
     });
 
@@ -85,5 +86,49 @@ describe("getCatalogueEntry", () => {
 
   it("returns undefined for a type absent from the catalogue", () => {
     expect(getCatalogueEntry("not_a_real_decision_type")).toBeUndefined();
+  });
+});
+
+describe("DP12a-1: timeoutOutcomes (DP-C5 R2)", () => {
+  const outcomes = (id: string) => getCatalogueEntry(id)?.timeoutOutcomes;
+
+  it("the three irreversible or outward-facing entries allow only stop_and_flag", () => {
+    for (const id of ["publish_release_artifact", "external_paid_api_call", "publish_deprecation_notice"]) {
+      expect(outcomes(id)).toEqual(["stop_and_flag"]);
+    }
+  });
+
+  it("the two internal, reversible-before-build refactor/test entries allow both outcomes", () => {
+    for (const id of ["nonbreaking_refactor_approach", "test_strategy_choice"]) {
+      expect(outcomes(id)).toEqual(["stop_and_flag", "proceed_recommended"]);
+    }
+  });
+
+  it("a runner run on a member's plan never goes ahead on silence", () => {
+    expect(outcomes("runner_run_on_member_plan")).toEqual(["stop_and_flag"]);
+  });
+
+  it("the seven starting-work entries are stop_and_flag only (R-7-DP12a1-4: starting work is never started by a timeout)", () => {
+    for (const id of ["start_work_small", "start_work_bug", "start_work_doc", "launch_sub_item", "start_parent_item", "spend_past_envelope", "start_after_reclassify"]) {
+      expect(outcomes(id), id).toEqual(["stop_and_flag"]);
+    }
+  });
+
+  it("exactly the two refactor/test entries allow proceed_recommended", () => {
+    const ids = CATALOGUE.filter((e) => e.timeoutOutcomes.includes("proceed_recommended")).map((e) => e.id);
+    expect(ids.sort()).toEqual(["nonbreaking_refactor_approach", "test_strategy_choice"]);
+  });
+
+  it("class 1 is never asked, so it lists none; every asked entry can always stop and flag", () => {
+    for (const e of CATALOGUE) {
+      if (e.class === "automated_with_monitoring") expect(e.timeoutOutcomes).toEqual([]);
+      else expect(e.timeoutOutcomes).toContain("stop_and_flag");
+    }
+  });
+
+  it("every class 3 entry is stop_and_flag only unless this list is changed on purpose", () => {
+    const class3 = CATALOGUE.filter((e) => e.class === "human_in_the_loop");
+    expect(class3.length).toBeGreaterThan(0);
+    for (const e of class3) expect(e.timeoutOutcomes).toEqual(["stop_and_flag"]);
   });
 });
