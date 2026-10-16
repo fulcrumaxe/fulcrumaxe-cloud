@@ -51,9 +51,10 @@ describe("POST /api/runner/plane-push-token", () => {
     expect((await planePushTokenHandler(post(new Blob([Buffer.alloc(MAX_BODY_BYTES + 10)])))).status).toBe(413);
   });
 
-  it("the runner deps hand the worker's four methods and the GitHub access to the route", () => {
+  it("the runner deps hand the worker's methods and the GitHub access to the route", () => {
     const deps = runnerDeps();
-    for (const method of ["planePushGrant", "planePushSettleGrant", "planePushReportContext", "planePushRecordReport"] as const) expect(typeof deps.leases![method]).toBe("function");
+    for (const method of ["planePushGrant", "planePushPairing", "planePushSettleGrant", "planePushReportContext", "planePushRecordReport"] as const) expect(typeof deps.leases![method]).toBe("function");
+    expect(typeof deps.planePushIdentity).toBe("function");
     expect(typeof deps.planePush!.mintToken).toBe("function");
     expect(typeof deps.planePush!.verifyPushed).toBe("function");
     expect(typeof deps.planePush!.verifyPullRequest).toBe("function");

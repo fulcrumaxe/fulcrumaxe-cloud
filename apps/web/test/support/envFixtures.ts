@@ -36,6 +36,10 @@ export function validValue(validation: Validation): string {
       return pem;
     case "runner-signer-id":
       return "job-signer-1";
+    case "plane-identity-name":
+      return "Fulcrumaxe Bot";
+    case "plane-identity-email":
+      return "bot@example.com";
     case "slug":
       return "fx-app";
     case "hostname":

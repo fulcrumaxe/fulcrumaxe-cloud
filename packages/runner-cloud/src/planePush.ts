@@ -1,6 +1,10 @@
+import { buildPlanePushText } from "@fx/core/src/repos/planePushText.js";
 import {
+  PLANE_PUSH_PAIRING_PATH,
   PLANE_PUSH_REPORT_PATH,
   PLANE_PUSH_TOKEN_PATH,
+  PlanePushPairingMessage,
+  PlanePushPairingReply,
   PlanePushReportMessage,
   PlanePushReportReply,
   PlanePushTokenMessage,
@@ -23,6 +27,15 @@ import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
  *                                       own token before it records anything: the branch head, the head's single parent, that parent in public
  *                                       `main`'s history, and for a pull request its head ref, repository, base and address. A mismatch records
  *                                       `refused` with `report_mismatch` and stores nothing from the report.
+ *
+ *   POST /api/runner/plane-push-pairing  (P1f-2b) the repository's pairing as it is NOW, only while its digest equals the one stamped at build start.
+ *                                       Read-only: it mints nothing, writes nothing, asks GitHub nothing and has no use-once rule, because the hook
+ *                                       calls it twice by design (load, then re-check after its scan). The token reply cannot do that job: a use-once
+ *                                       reply read twice is the same bytes, so the second compare would be vacuous.
+ *
+ * The token reply also carries the pull request title and body (built by `buildPlanePushText` from our work item row and the run id, never from
+ * anything an agent wrote) and the platform commit identity (a hosted setting, checked BEFORE the grant so a missing setting spends no attempt).
+ * A report that says something exists on GitHub echoes the pairing digest; the cloud compares it with its stamp and never uses the value.
  *
  * This file imports no git code and runs no process: it cannot clone, fetch or push. A test follows the import graph to keep it so.
  *
@@ -72,7 +85,19 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
   const message = parseMessage(PlanePushTokenMessage, parseJsonBody(req));
   const ops = requirePlanePushOps(deps);
   const port = requirePlanePush(deps);
-  const lease = { accountId: runner.accountId, runnerId: runner.runnerId, runId: message.run_id, leaseGeneration: message.lease_generation };
+  // The platform identity is a hosted setting. A missing or malformed one answers before any grant, so a misconfiguration does not burn one of the
+  // three push attempts and GitHub is not asked for a token nobody can use.
+  const identity = deps.planePushIdentity?.() ?? null;
+  if (!identity) throw new RunnerHttpError(503, "not_configured", "the platform identity for public pushes is not configured");
+  // The schema accepts an uppercase uuid and the database matches it either way, so the id is lowercased once, here, and used everywhere below
+  // (the text builder wants the canonical form). A run id the builder refuses is a plain 400 now, before a grant, an attempt or a mint exists.
+  const runId = message.run_id.toLowerCase();
+  try {
+    buildPlanePushText({ itemTitle: "", runId });
+  } catch {
+    throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
+  }
+  const lease = { accountId: runner.accountId, runnerId: runner.runnerId, runId, leaseGeneration: message.lease_generation };
 
   const grant = await asRunner(() => ops.planePushGrant(lease));
   switch (grant.kind) {
@@ -88,6 +113,16 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
       throw new RunnerHttpError(409, "attempts_exhausted", "this change has used all its push attempts");
     case "granted":
       break;
+  }
+
+  // The text needs the item title, which the grant reads, so it is built right after the grant and before anything is minted: nothing past this line
+  // can fail on the text, and a failure here finishes the attempt without a token ever existing.
+  let pr: ReturnType<typeof buildPlanePushText>;
+  try {
+    pr = buildPlanePushText({ itemTitle: grant.itemTitle, runId });
+  } catch (error) {
+    await asRunner(() => ops.planePushSettleGrant({ ...lease, attemptId: grant.attemptId, issued: false, code: "text_failed" }));
+    throw error;
   }
 
   let minted: { token: string; expiresAt: Date };
@@ -109,12 +144,46 @@ export async function planePushTokenRun(deps: RunnerCloudDeps, req: RunnerHttpRe
     if (!settled) throw new RunnerHttpError(500, "internal", "internal error");
     return {
       status: 200,
-      body: PlanePushTokenReply.parse({ token: minted.token, expires_at: minted.expiresAt.toISOString(), code_repo: grant.codeRepo, branch: grant.branch, base: "main" }),
+      body: PlanePushTokenReply.parse({ token: minted.token, expires_at: minted.expiresAt.toISOString(), code_repo: grant.codeRepo, branch: grant.branch, base: "main", pr, identity: { name: identity.name, email: identity.email } }),
       headers: NO_STORE,
     };
   } catch (error) {
     await port.revokeToken(minted.token);
     throw error;
+  }
+}
+
+/**
+ * POST /api/runner/plane-push-pairing. Same order as the token route (signature with a single-use nonce, the strict message, the lease fence
+ * without extending the lease, then our own rows), but nothing here is granted or recorded.
+ */
+export async function planePushPairingRun(deps: RunnerCloudDeps, req: RunnerHttpRequest): Promise<RunnerHttpResponse> {
+  const runner = await verifyRunnerRequest(deps, PLANE_PUSH_PAIRING_PATH, req, { replay: "once" });
+  const message = parseMessage(PlanePushPairingMessage, parseJsonBody(req));
+  const leases = requireLeases(deps);
+  if (!leases.planePushPairing) throw new RunnerHttpError(503, "not_configured", "the runner API has no worker configured");
+  const lease = { accountId: runner.accountId, runnerId: runner.runnerId, runId: message.run_id, leaseGeneration: message.lease_generation };
+  const found = await asRunner(() => leases.planePushPairing!(lease));
+  switch (found.kind) {
+    case "fenced":
+      return stopReply(found.reason);
+    case "not_paired":
+      throw new RunnerHttpError(403, "not_paired", "this run has no public repository to push to");
+    case "pairing_changed":
+      // No pairing in the body: the answer must not hand a hook a pairing the build did not start with.
+      throw new RunnerHttpError(409, "pairing_changed", "the repository's pairing changed after the build started");
+    case "pairing":
+      return {
+        status: 200,
+        body: PlanePushPairingReply.parse({
+          code_repo: found.codeRepo,
+          overlay_globs: found.overlayGlobs,
+          identifier_rules_path: found.identifierRulesPath,
+          plan_data_rules_path: found.planDataRulesPath,
+          pairing_digest: found.pairingDigest,
+        }),
+        headers: NO_STORE,
+      };
   }
 }
 
@@ -141,7 +210,7 @@ const bad = (): never => {
  * The report is a hint. For a phase that says something exists on GitHub, GitHub is asked (with the hosted side's own token) and the answer
  * decides; the runner's `branch` is compared with the record's and never used.
  */
-async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort): Promise<Decision> {
+async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; branch: string; pairingDigest: string }, attempt: { tokenIssued: boolean; finished: boolean; outcome: string | null } | null, port: PlanePushHostedPort): Promise<Decision> {
   switch (m.phase) {
     case "building":
       // The build start already stamped `building`; a report must never move a later state back to it.
@@ -163,6 +232,8 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       // Bounded work per attempt: once it has finished, or this phase was already verified, a report costs nothing (no mint, no GitHub read). A push is
       // therefore verified at most twice per attempt: once as `pushed`, once as the report that ends it.
       if (attempt?.finished || (m.phase === "pushed" && attempt?.outcome === "pushed")) return NOOP;
+      // The hook echoes the digest of the pairing it scanned against. It must equal the one stamped at build start; the value is never used, only compared.
+      if (m.pairing_digest !== plane.pairingDigest) return MISMATCH;
       // The reads below know 40-character shas only. Another length is a fixed refusal now, not a 503 on every retry.
       if (m.head_sha.length !== 40 || m.tip_sha.length !== 40) return { outcome: { state: "refused", code: "bad_input" }, terminal: true, label: "bad_input" };
       // A push needs the token this run was granted; a report of one without a grant cannot be true. The branch is the record's, whatever the runner says.

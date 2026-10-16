@@ -27,6 +27,7 @@ runner/claim/route.ts
 runner/git-ticket/route.ts
 runner/heartbeat/route.ts
 runner/hello/route.ts
+runner/plane-push-pairing/route.ts
 runner/plane-push-report/route.ts
 runner/plane-push-token/route.ts
 runner/register/route.ts

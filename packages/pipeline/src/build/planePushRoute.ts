@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoPairing } from "@fx/core/src/repos/pairing.js";
+import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME } from "@fx/core/src/repos/planePushIdentity.js";
+import { PLANE_TITLE_LINE } from "@fx/core/src/repos/planePushText.js";
 
 /** The pairing as the route needs it: defined once, with the data that owns it, in packages/core/src/repos/pairing.ts. */
 export type { RepoPairing };
@@ -124,9 +126,9 @@ export type PlaneRouteResult =
 
 const OBJECT_ID = /^[0-9a-f]{40}$/;
 const ZERO_ID = "0".repeat(40);
-const GIT_SAFE_LINE = /^[^\u0000-\u001f\u007f]{1,256}$/;
-const IDENTITY = /^[A-Za-z0-9 ._-]{1,100}$/;
-const EMAIL = /^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,100}$/;
+const GIT_SAFE_LINE = PLANE_TITLE_LINE;
+const IDENTITY = PLANE_IDENTITY_NAME;
+const EMAIL = PLANE_IDENTITY_EMAIL;
 const MAX_BODY = 60_000;
 const LS_BATCH = 100;
 

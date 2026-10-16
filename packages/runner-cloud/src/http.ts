@@ -90,6 +90,12 @@ export interface RunnerCloudDeps {
   pullRequests?: RunPullRequestPort | null;
   /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */
   planePush?: PlanePushHostedPort | null;
+  /**
+   * D#598 P1f-2b: the platform's commit identity for a public push, read from the hosted settings on each call (apps/web supplies it from
+   * `readPlanePushIdentity(process.env)`). Null, or absent, while a setting is missing or malformed: the token route then answers 503 `not_configured`
+   * BEFORE it writes an attempt row or mints a token.
+   */
+  planePushIdentity?: (() => { name: string; email: string } | null) | null;
   /** Where `done` writes its one-line JSON diagnostics for a pull request failure (default: `console.warn`). Tests inject a collector. */
   log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */
@@ -181,7 +187,14 @@ export interface RunnerLeaseOps {
     | { kind: "pairing_changed" }
     | { kind: "already_issued" }
     | { kind: "attempts_exhausted" }
-    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string }
+    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string; itemTitle: string }
+  >;
+  /** D#598 P1f-2b: the repository's live pairing, only while its digest equals the build-start stamp. Read-only; the hook calls it twice. */
+  planePushPairing?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    | { kind: "fenced"; reason: StopReason }
+    | { kind: "not_paired" }
+    | { kind: "pairing_changed" }
+    | { kind: "pairing"; codeRepo: string; overlayGlobs: string[]; identifierRulesPath: string | null; planDataRulesPath: string | null; pairingDigest: string }
   >;
   planePushSettleGrant?(
     input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; attemptId: string } & ({ issued: true } | { issued: false; code: string }),
@@ -189,7 +202,7 @@ export interface RunnerLeaseOps {
   planePushReportContext?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     | { kind: "fenced"; reason: StopReason }
     | { kind: "not_paired" }
-    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null }
+    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string; pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null }
   >;
   planePushRecordReport?(input: {
     accountId: string;

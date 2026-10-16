@@ -21,6 +21,7 @@
  */
 import { z } from "zod";
 import { SignedJobSchema } from "./job.js";
+import { pairingDigest } from "./pairingDigest.js";
 
 /** A lease lasts 90 seconds from the claim and from each heartbeat or accepted event batch. */
 export const RUNNER_LEASE_SECONDS = 90;
@@ -127,6 +128,31 @@ export const GitTicketReply = z
   .strict();
 export type GitTicketReply = z.infer<typeof GitTicketReply>;
 
+const CODE_REPO = z
+  .string()
+  .max(140)
+  .regex(/^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/)
+  .refine((v) => ![".", ".."].includes(v.split("/")[1]!), "code_repo is not a repository name");
+
+/**
+ * The public pull request text (D#598 P1f-2b), built by the cloud from its own rows (the core `planePushText` module). One plain line of at most 100
+ * characters for the title and a short fixed body: nothing here is chosen by an agent.
+ */
+const PlanePushText = z
+  .object({
+    title: z.string().min(1).max(100).regex(/^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/),
+    body: z.string().min(1).max(2000).regex(/^[^\u0000]+$/),
+  })
+  .strict();
+
+/** The platform's own commit identity (D#598 P1f-2b), from the cloud's settings. The patterns are the ones the run-end route applies. */
+const PlanePushIdentity = z
+  .object({
+    name: z.string().regex(/^[A-Za-z0-9 ._-]{1,100}$/),
+    email: z.string().regex(/^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,100}$/),
+  })
+  .strict();
+
 /**
  * 200 from plane-push-token (D#598 P1f-2): the ONE restricted token this run's hook may push to the paired public repo with, minted for this
  * request alone and never stored by the cloud. The repo, the branch and the base are the cloud's own rows. The `token` field is the one
@@ -136,12 +162,42 @@ export const PlanePushTokenReply = z
   .object({
     token: z.string().min(20).max(512).regex(/^[A-Za-z0-9_.-]+$/),
     expires_at: utcTimestamp,
-    code_repo: z.string().max(140).regex(/^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/),
+    code_repo: CODE_REPO,
     branch: z.string().max(80).regex(/^fx\/p-[0-9a-f-]{36}$/),
     base: z.literal("main"),
+    pr: PlanePushText,
+    identity: PlanePushIdentity,
   })
   .strict();
 export type PlanePushTokenReply = z.infer<typeof PlanePushTokenReply>;
+
+/**
+ * 200 from plane-push-pairing (D#598 P1f-2b): the repository's pairing as it is now, answered only while its digest still equals the one stamped
+ * when the build started. The reply is checked on parse: the digest is recomputed from the other fields and a reply that disagrees with its own
+ * `pairing_digest` is refused. That catches truncation, a reordered list and a hosted bug; it is not authentication (the reply is trusted
+ * because it came over TLS from the cloud origin the runner is registered with).
+ */
+const pairingPath = z
+  .string()
+  .regex(/^[A-Za-z0-9._/*?{},@+=~-]{1,200}$/)
+  .refine((p) => !p.startsWith("/") && !p.includes("//") && !/(^|\/)\.\.(\/|$)/.test(p), "not a relative path inside the repository");
+const rulesPath = pairingPath.refine((p) => !/[*?{},]/.test(p), "a rule file is one plain path");
+export const MAX_PLANE_PUSH_GLOBS = 100;
+
+export const PlanePushPairingReply = z
+  .object({
+    code_repo: CODE_REPO,
+    overlay_globs: z.array(pairingPath).min(1).max(MAX_PLANE_PUSH_GLOBS).refine((g) => new Set(g).size === g.length, "a glob is listed twice"),
+    identifier_rules_path: rulesPath.nullable(),
+    plan_data_rules_path: rulesPath.nullable(),
+    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict()
+  .refine(
+    (r) => pairingDigest({ codeRepo: r.code_repo, overlayGlobs: r.overlay_globs, identifierRulesPath: r.identifier_rules_path, planDataRulesPath: r.plan_data_rules_path }) === r.pairing_digest,
+    { message: "the pairing does not match its digest" },
+  );
+export type PlanePushPairingReply = z.infer<typeof PlanePushPairingReply>;
 
 /** 200 from plane-push-report: the report was understood. What the cloud recorded is read from the item, never from this reply. */
 export const PlanePushReportReply = z.object({ recorded: z.literal(true) }).strict();
@@ -154,6 +210,7 @@ export const RUNNER_REPLIES = {
   heartbeat: HeartbeatReply,
   git_ticket: GitTicketReply,
   plane_push_token: PlanePushTokenReply,
+  plane_push_pairing: PlanePushPairingReply,
   plane_push_report: PlanePushReportReply,
   events: EventsReply,
   stop: StopReply,

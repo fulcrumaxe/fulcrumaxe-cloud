@@ -123,6 +123,11 @@ export function validateValue(validation: Validation, value: string): string | n
     case "runner-signer-id":
       // The pattern the worker's job signer enforces on the key id.
       return /^[A-Za-z0-9._-]{1,64}$/.test(value.trim()) ? null : "not_a_runner_signer_id";
+    case "plane-identity-name":
+      // The pattern packages/core `PLANE_IDENTITY_NAME` enforces (a test keeps the two equal). Not trimmed: the reader treats padding as malformed.
+      return /^[A-Za-z0-9 ._-]{1,100}$/.test(value) && value.trim() === value ? null : "not_a_plane_identity_name";
+    case "plane-identity-email":
+      return /^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,100}$/.test(value) ? null : "not_a_plane_identity_email";
     case "slug":
       return /^[a-z0-9-]{1,64}$/.test(value) ? null : "not_a_slug";
     case "hostname":

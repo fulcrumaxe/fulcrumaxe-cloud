@@ -44,9 +44,9 @@ function closure(start: string[]): Map<string, string> {
 }
 
 describe("the public-push routes never run git or a process (import graph)", () => {
-  it("finds both routes and the handlers module", () => {
+  it("finds the three routes and the handlers module", () => {
     const files = entries().map((f) => path.relative(repoRoot, f));
-    expect(files).toEqual(expect.arrayContaining(["apps/web/app/api/runner/plane-push-report/handler.ts", "apps/web/app/api/runner/plane-push-report/route.ts", "apps/web/app/api/runner/plane-push-token/handler.ts", "apps/web/app/api/runner/plane-push-token/route.ts", "packages/runner-cloud/src/planePush.ts"]));
+    expect(files).toEqual(expect.arrayContaining(["apps/web/app/api/runner/plane-push-pairing/handler.ts", "apps/web/app/api/runner/plane-push-pairing/route.ts", "apps/web/app/api/runner/plane-push-report/handler.ts", "apps/web/app/api/runner/plane-push-report/route.ts", "apps/web/app/api/runner/plane-push-token/handler.ts", "apps/web/app/api/runner/plane-push-token/route.ts", "packages/runner-cloud/src/planePush.ts"]));
   });
 
   it("no entry file, and nothing it reaches inside the package, names the git builder, the transport, the push route, a child process or the pipeline", () => {
