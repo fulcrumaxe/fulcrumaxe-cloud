@@ -22,7 +22,7 @@ const FORWARD_ENV = { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: 
 const ports: WorkerPorts = {
   decryptTenantKey: async () => "fake-key",
   modelConnection: { get: async () => { throw new Error("not used"); } },
-  connectionStatus: { markBroken: async () => {} },
+  connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} },
   hooks: { resume: async () => {} },
 };
 

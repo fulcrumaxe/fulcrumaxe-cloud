@@ -5,6 +5,7 @@ import { createPool } from '@fx/db/src/pool.js';
 import { buildAad, connect, seal } from '@fx/model-connection';
 import { fakeKekSource } from '../../model-connection/test/helpers/fakeKek.js';
 import { seedAccountWithMember } from '../../model-connection/test/helpers/seed.js';
+import { CREDITS_EXHAUSTED_ANSWERS, NOT_CREDITS_ANSWERS } from '../../model-connection/test/helpers/creditsAnswers.js';
 import { completeJson, ModelCallError, type ModelCallCtx } from '../src/index.js';
 import { anthropicReply, FakeProvider, gatewayReply } from './helpers/fakeProvider.js';
 
@@ -173,5 +174,25 @@ describe('completeJson (fake provider only)', () => {
     fake.reply({}, 500);
     await expect(completeJson(t.ctx, params)).rejects.toMatchObject({ code: 'http_error', status: 500 });
     expect(await status(t.accountId)).not.toBe('broken');
+  });
+
+  // D#483 S5-k2: the out-of-credit answers on the one-call path. One fixture per provider shape, the same ones the classifier and runner tests use.
+  const row = async (id: string) => (await admin.query(`SELECT status, last_error_code FROM model_connections WHERE account_id = $1`, [id])).rows[0];
+  it.each(CREDITS_EXHAUSTED_ANSWERS)('S5-k2: $name gives credits_exhausted, records the connection for credits, and is not a bad key or a plain http_error', async (answer) => {
+    const t = await tenant(`vck_credits_${answer.provider}_0123456789`);
+    fake.reply(answer.body, answer.status);
+    await expect(completeJson(t.ctx, params)).rejects.toMatchObject({ code: 'credits_exhausted', status: answer.status });
+    expect(await row(t.accountId)).toEqual({ status: 'broken', last_error_code: 'credits_exhausted' });
+    // Not the key failure: the account is not stopped.
+    const acct = (await admin.query(`SELECT key_broken_at FROM accounts WHERE id = $1`, [t.accountId])).rows[0];
+    expect(acct.key_broken_at).toBeNull();
+    expect(fake.seen).toHaveLength(1);
+  });
+
+  it.each(NOT_CREDITS_ANSWERS)('S5-k2: $name does not mark the connection for credits', async (answer) => {
+    const t = await tenant(`vck_notcredits_${answer.provider}_${answer.status}_0123456789`);
+    fake.reply(answer.body, answer.status);
+    await expect(completeJson(t.ctx, params)).rejects.toThrow();
+    expect((await row(t.accountId)).last_error_code).not.toBe('credits_exhausted');
   });
 });

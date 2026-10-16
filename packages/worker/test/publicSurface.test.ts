@@ -26,7 +26,7 @@ const OPTIONS = {
   ports: {
     decryptTenantKey: async () => "k",
     modelConnection: { get: async () => { throw new Error("unused"); } },
-    connectionStatus: { markBroken: async () => {} },
+    connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} },
     hooks: { resume: async () => {} },
   },
 };

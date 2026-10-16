@@ -52,6 +52,7 @@ No figure is compiled into this package. Every rate, budget, cap and limit above
 - `meter.ts`: `MeterModelParams`, `MeterResult`, `meter(params)`, `MeterComputeParams`, `meterCompute(params)`
 - `reserve.ts`: `ReserveParams`, `monthToDateUsd(client, accountId, budget, now?)`, `workItemCommittedUsd(client, accountId, workItemId)`, `ReserveTransactionContractError`, `reserveWith(client, params)`, `reserve(pool, params)`
 - `envelope.ts`, `envelopeWrite.ts` (D#483 S5-d): the spend envelope of an approval. `itemEnvelopeId`, `currentEnvelope`, `envelopeSpentUsd`, `envelopeRunUsd`, `envelopeAdmits` (the one check, used by `reserve()` under a per-envelope lock and by `checkHeadroom`), `recordEnvelopeCharge`, `remainingAccountBudgetUsd`, `writeEnvelopeVersion` (refuses `over_account_budget`). An item with an envelope is held to it in place of the Feature/Small cap and denied `envelope_exceeded`.
+- `creditsExhausted(client, accountId)` (reserve.ts, D#483 S5-k2): true while the account's model connection is broken for out-of-credit. `reserve()` and `checkHeadroom()` both deny a run that has a model estimate with `model_credits_exhausted` (after the account status check, before the caps); a compute-only run is not held, and a preview keeps its `model_connection_not_ok`.
 - `settle.ts`: `LedgerSource`, `SettleEntry`, `SettleParams`, `SettleResult`, `settleWith(client, params)`, `settle(pool, params)`, `ReleaseParams`, `releaseWith(client, params)`, `release(pool, params)`
 - `pg.ts`: `createPool(connectionString)`, `withTenant(pool, accountId, fn)`
 

@@ -13,6 +13,8 @@ import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
  *   work_item_cap_exceeded   -> item_cap_reached            this item's own spending cap
  *   per_spawn_cap_exceeded   -> run_limit_below_estimate    the per-run limit is below what this step needs
  *   envelope_exceeded        -> envelope_reached            the spend envelope the person set for this approval (D#483 S5-d)
+ *   model_credits_exhausted  -> model_credits_exhausted     the customer's own model credits ran out (D#483 S5-k2): the provider said so on a run, the
+ *                                                           connection is recorded broken for credits, and a reconcile pass re-validates it
  *
  * `account_not_active` is not a pause: it keeps its existing refusal (the account cannot run anything, and a poll would not change that).
  *
@@ -32,6 +34,7 @@ export const RESERVATION_DENIAL_PAUSES = Object.freeze({
   work_item_cap_exceeded: "item_cap_reached",
   per_spawn_cap_exceeded: "run_limit_below_estimate",
   envelope_exceeded: "envelope_reached",
+  model_credits_exhausted: "model_credits_exhausted",
 } as const);
 
 export type ReservationDenial = keyof typeof RESERVATION_DENIAL_PAUSES;
@@ -54,6 +57,7 @@ export const RESERVATION_PAUSE_SENTENCES: Readonly<Record<ReservationPause, stri
   item_cap_reached: "This item reached its spending cap. Raise it in Roles > Limits.",
   run_limit_below_estimate: "This step needs more than the per-run limit in Roles > Limits.",
   envelope_reached: "Paused: this item reached its spending limit. Raise the limit to continue, or stop the item.",
+  model_credits_exhausted: "Your model credits ran out. Top up, and work resumes on its own.",
 });
 
 /** The envelope pause with the person's own figure in it. Fixed text and a number; a non-finite or negative amount falls back to the figureless sentence. */

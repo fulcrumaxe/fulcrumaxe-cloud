@@ -147,7 +147,7 @@ const BUILD_SLOT_WAIT_MS = 4 * 3_600_000;
  * The item stays where it is and the workflow asks again every five minutes, up to four hours. Each ask is a new attempt (its own run key), because a denied start leaves a
  * keyed `refused_spend` run that a replay of the same key would find again; five minutes keeps those rows to 48 in the wait.
  */
-const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached"];
+const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"];
 const BUILD_SPEND_POLL_MS = 300_000;
 const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;
 /** C44-7: the fixed reason when a second fix on one head also changed nothing. */

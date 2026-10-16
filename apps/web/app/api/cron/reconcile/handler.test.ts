@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { effectiveSandboxReapMode, RECONCILE_JOBS, type JobContext, type SandboxReapDbSetting, type SandboxReapSweepInput, type SandboxReapWorker, type TickDeps, type TickSummary } from "@fx/reconcile";
 import { reportError } from "@fx/telemetry";
-import { defaultReconcileDeps, modelKeyHealthJobFromEnv, readSandboxReapDbMode, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
+import { defaultReconcileDeps, modelCreditsRevalidateJobFromEnv, modelKeyHealthJobFromEnv, readSandboxReapDbMode, reconcileHandler, stripeSubscriptionsJobFromEnv, type ReconcileHandlerDeps } from "./handler";
 import { maxDuration } from "./route";
 import { getWorker } from "../../../../lib/worker";
 
@@ -78,6 +78,7 @@ describe("GET /api/cron/reconcile: the tick", () => {
       "github_repos",
       "stripe_subscriptions",
       "model_key_health",
+      "model_credits_revalidate",
     ]);
   });
 
@@ -184,6 +185,56 @@ describe("the model-key health job's environment", () => {
       expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: true });
       expect(query).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("the model-credits re-validation job's environment (D#483 S5-k2)", () => {
+  const ctx = (query: ReturnType<typeof vi.fn>): JobContext =>
+    ({ pool: { query } as never, cursor: null, signal: new AbortController().signal, calls: { limit: 50, used: 0, take: () => true }, msLeft: () => 60_000, checkpoint: () => undefined });
+  const withEnv = async (env: Record<string, string | undefined>, fn: () => Promise<void>) => {
+    const saved = Object.fromEntries(Object.keys(env).map((name) => [name, process.env[name]]));
+    const set = (name: string, value: string | undefined) => (value === undefined ? delete process.env[name] : (process.env[name] = value));
+    for (const [name, value] of Object.entries(env)) set(name, value);
+    try {
+      await fn();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) set(name, value);
+    }
+  };
+
+  it.each([
+    ["no app database URL", { DATABASE_URL_APP_USER: undefined, FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: "A".repeat(43) + "=" }],
+    ["no key-encryption key", { DATABASE_URL_APP_USER: "postgres://app_user@127.0.0.1:1/none", FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: undefined }],
+  ])("records not_configured and reads nothing with %s", async (_label, env) => {
+    await withEnv(env, async () => {
+      const query = vi.fn();
+      const job = modelCreditsRevalidateJobFromEnv({ query } as never, () => undefined);
+      expect(job.name).toBe("model_credits_revalidate");
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: false, code: "not_configured" });
+      expect(query).not.toHaveBeenCalled();
+    });
+  });
+
+  it("when configured it lists only the connections broken for credits (and opens no pool when there are none)", async () => {
+    await withEnv({ DATABASE_URL_APP_USER: "postgres://app_user@127.0.0.1:1/none", FX_KEK_CURRENT_VERSION: undefined, FX_KEK_V1: "A".repeat(43) + "=" }, async () => {
+      const query = vi.fn(async () => ({ rows: [] }));
+      const job = modelCreditsRevalidateJobFromEnv({ query } as never, () => undefined);
+      expect(await job.run(ctx(query))).toEqual({ cursor: null, wrapped: true });
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(String((query.mock.calls[0] as unknown[])[0])).toContain("last_error_code = 'credits_exhausted'");
+    });
+  });
+
+  it("the tick runs it after the key health job", async () => {
+    let jobs: readonly { name: string }[] = [];
+    const runTickFn = vi.fn(async (deps: TickDeps) => {
+      jobs = deps.jobs;
+      return { enabled: true, results: [] } as unknown as TickSummary;
+    });
+    await reconcileHandler(requestWithAuth(`Bearer ${SECRET}`), fakeDeps(), runTickFn);
+    const names = jobs.map((j) => j.name);
+    expect(names.indexOf("model_credits_revalidate")).toBeGreaterThan(names.indexOf("model_key_health"));
+    expect(names.indexOf("model_key_health")).toBeGreaterThanOrEqual(0);
   });
 });
 

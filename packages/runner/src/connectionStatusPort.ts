@@ -32,6 +32,10 @@ export interface ConnectionStatusPort {
    * the caller only ever controls which run failed, never which account
    * gets written. */
   markBroken(runId: string, code: BrokenConnectionCode): Promise<void>;
+  /** D#483 S5-k2: records the connection of the account that owns `runId` as broken for out-of-credit (`credits_exhausted`). Same run-id rule as
+   * `markBroken`: the caller only chooses which run saw the answer, never which account is written. It does not stop the account: the items that would
+   * spend pause, and a reconcile pass re-validates the connection. */
+  markCreditsExhausted(runId: string): Promise<void>;
 }
 
 export interface RecordedMarkBrokenCall {
@@ -45,12 +49,18 @@ export interface RecordedMarkBrokenCall {
  * double until H21 ships a real implementation. */
 export function createTestConnectionStatusPort(): ConnectionStatusPort & {
   readonly calls: readonly RecordedMarkBrokenCall[];
+  readonly creditsCalls: readonly string[];
 } {
   const calls: RecordedMarkBrokenCall[] = [];
+  const creditsCalls: string[] = [];
   return {
     calls,
+    creditsCalls,
     async markBroken(runId, code) {
       calls.push({ runId, code });
+    },
+    async markCreditsExhausted(runId) {
+      creditsCalls.push(runId);
     },
   };
 }

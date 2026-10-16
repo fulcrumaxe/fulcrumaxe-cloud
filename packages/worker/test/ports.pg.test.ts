@@ -163,3 +163,35 @@ describe("[pg] connectionStatus.markBroken(runId)", () => {
     expect(rows[0].status).toBe("ok");
   });
 });
+
+describe("[pg] connectionStatus.markCreditsExhausted(runId) (D#483 S5-k2)", () => {
+  const state = async (t: Tenant) => {
+    const { rows } = await admin.query(
+      `SELECT m.status, m.last_error_code, (a.key_broken_at IS NOT NULL) AS stopped
+         FROM model_connections m JOIN accounts a ON a.id = m.account_id WHERE m.id = $1`,
+      [t.connectionId],
+    );
+    return rows[0];
+  };
+
+  it("records only the run's own account, derived server-side from agent_runs, and does not stop the account", async () => {
+    const a = await seedTenant();
+    const b = await seedTenant();
+    await createConnectionStatusPort(opsPool).markCreditsExhausted(a.runId);
+    expect(await state(a)).toEqual({ status: "broken", last_error_code: "credits_exhausted", stopped: false });
+    expect(await state(b)).toEqual({ status: "ok", last_error_code: null, stopped: false });
+  });
+
+  it("a run id that does not exist changes nothing", async () => {
+    const c = await seedTenant();
+    await expect(createConnectionStatusPort(opsPool).markCreditsExhausted(randomUUID())).rejects.toThrow();
+    expect((await state(c)).status).toBe("ok");
+  });
+
+  it("a connection already broken for a rejected key keeps its own code", async () => {
+    const c = await seedTenant();
+    await createConnectionStatusPort(opsPool).markBroken(c.runId, 401);
+    await createConnectionStatusPort(opsPool).markCreditsExhausted(c.runId);
+    expect(await state(c)).toEqual({ status: "broken", last_error_code: "401", stopped: true });
+  });
+});

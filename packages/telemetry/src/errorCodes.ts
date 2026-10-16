@@ -96,6 +96,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // DenyError reasons (packages/api/src/errors.ts DENY_REASONS), thrown through a variable, so the scan cannot see them.
   "account_not_active",
   "model_connection_not_ok",
+  "model_credits_exhausted",
   "per_spawn_cap_exceeded",
   "work_item_cap_exceeded",
   "envelope_exceeded",

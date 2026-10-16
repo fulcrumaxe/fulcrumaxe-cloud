@@ -35,6 +35,19 @@ export interface ReserveParams {
   now?: Date;
 }
 
+/**
+ * D#483 S5-k2: true while the account's model connection is recorded `broken` for out-of-credit (`last_error_code = 'credits_exhausted'`).
+ * Read-only; `reserve()` and `checkHeadroom()` both call it, so the two stay on one answer. A connection broken for any other reason (a rejected
+ * key) is not this: that one already stops the account through `accounts.key_broken_at`.
+ */
+export async function creditsExhausted(client: PoolClient, accountId: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM model_connections WHERE account_id = $1 AND status = 'broken' AND last_error_code = 'credits_exhausted' LIMIT 1`,
+    [accountId],
+  );
+  return rows.length > 0;
+}
+
 /** Exported for settle.ts and for tests that want to assert the running
  * total directly, without re-deriving the query. */
 export async function monthToDateUsd(
@@ -284,6 +297,12 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
     if (conn.rows.length === 0) {
       return { decision: 'deny', reason: 'model_connection_not_ok' };
     }
+  }
+  // D#483 S5-k2: the customer's own model credits ran out (a provider answered out-of-credit and the connection was recorded `broken` with
+  // `credits_exhausted`). A run that would draw on that key is not started; the reconcile job re-validates the connection and the denial lifts
+  // when it reads `ok`. A run with no model estimate (compute only, or a runner-brokered run) does not use the key and is not held.
+  if (purpose !== 'preview' && estimateModelUsd > 0 && (await creditsExhausted(client, params.accountId))) {
+    return { decision: 'deny', reason: 'model_credits_exhausted' };
   }
 
   // 2. per-spawn cap -- a plain estimate comparison, no aggregate needed.

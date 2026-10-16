@@ -84,6 +84,7 @@ export class AmbiguousCredentialsError extends ApiError {
 export const DENY_REASONS = [
   "account_not_active",
   "model_connection_not_ok",
+  "model_credits_exhausted",
   "per_spawn_cap_exceeded",
   "work_item_cap_exceeded",
   "envelope_exceeded",

@@ -295,7 +295,7 @@ describe("retry_run performer [pg]", { timeout: 60_000 }, () => {
     const worker = await buildWorker({
       env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" },
       vercel: { teamId: "t", projectId: "p", getToken: async () => "tok" },
-      ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {} }, hooks: { resume: async () => {} }, authorCheck: provider },
+      ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} }, hooks: { resume: async () => {} }, authorCheck: provider },
       lookup: async () => [{ address: "140.82.112.3", family: 4 }],
       sdk: { create: async (params) => (created.push(params), sandbox(params.name)), get: async (params) => sandbox(params.name) },
       createPools: async () => ({ runnerPool: writerPool, platformOpsPool: writerPool, receiptPool: writerPool, close: async () => {} }),

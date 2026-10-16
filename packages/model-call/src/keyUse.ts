@@ -2,7 +2,7 @@ import { withOpenedKey, type KeyAccessCtx } from '@fx/model-connection/keyAccess
 import { matchesShape, redactText, SK_ANT_OAT_PATTERN_SOURCE } from '@fx/runtime/src/redact.js';
 import { requestFor, type RequestParams } from './hosts.js';
 
-export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error';
+export type ModelCallErrorCode = 'forbidden' | 'subscription_credential' | 'key_rejected' | 'timeout' | 'fetch_failed' | 'http_error' | 'credits_exhausted';
 
 /** Every message is fixed text or redacted provider text -- never the key, never a raw fetch/undici error. */
 export class ModelCallError extends Error {

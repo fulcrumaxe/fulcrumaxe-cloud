@@ -1028,6 +1028,12 @@ export class SandboxTarget implements ExecutionTarget {
       }
       await pauseQueuedRuns(this.deps.pool, run.accountId, run.id);
     }
+    // D#483 S5-k2: the customer's model credits ran out. Record the connection (not the account) and stop there: no other run is cancelled or paused
+    // (a paused run would wait for a person, and credits come back on their own), and a run already in flight is never stopped by this. An operator run
+    // draws on OUR subscription, not the customer's credits, so it records nothing.
+    if (write.updated && report.failureReason === "model_credits_exhausted" && !operatorRun) {
+      await this.deps.connectionStatus.markCreditsExhausted(run.id);
+    }
     // An operator run has no tenant connection to mark broken and no tenant queue to pause: a rejected
     // operator token is ours to rotate (see the owner notes in docs/ops/staging.md), and the run's row
     // above carries the `operator_token_rejected` flag so the failure reads as ours, not the customer's.
@@ -2007,6 +2013,10 @@ function buildAbortTerminalReport(
   }
   if (reason.kind === "implausible") {
     return { status: "failed", failureReason: "sandbox_error", usd, ...common, metering: metering() };
+  }
+  // D#483 S5-k2: an out-of-credit answer is its own reason, never the generic key failure.
+  if (reason.code === "credits_exhausted") {
+    return { status: "failed", failureReason: "model_credits_exhausted", modelFailureCode: reason.code, usd, ...common, metering: metering() };
   }
   return { status: "failed", failureReason: "model_key_broken", modelFailureCode: reason.code, usd, ...common, metering: metering() };
 }

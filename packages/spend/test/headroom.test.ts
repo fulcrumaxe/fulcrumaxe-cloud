@@ -58,6 +58,14 @@ describe('checkHeadroom: the read-only twin of reserve()', () => {
     await admin.query('UPDATE work_items SET envelope_id = $1 WHERE id = $2', [envelopeId, workItemId]);
   };
 
+  const seedConnection = async (accountId: string, status: 'ok' | 'broken', code: string | null): Promise<void> => {
+    await admin.query(
+      `INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status, last_error_code)
+       VALUES ($1, 'ai_gateway', $2, $3, $4, 1, $5, $6, $7)`,
+      [accountId, Buffer.from('ciphertext'), Buffer.from('nonce'), Buffer.from('wrapped'), `fp-${randomUUID()}`, status, code],
+    );
+  };
+
   const fgCap = foregroundBudgetUsd('starter');
   const base: Params = { plan: 'starter', estimateModelUsd: 10, monthlyModelBudgetUsd: 600, perSpawnCapUsd: 40 };
 
@@ -144,6 +152,36 @@ describe('checkHeadroom: the read-only twin of reserve()', () => {
         await seedRun(admin, a, r);
         await spendUsd(a, r, fgCap - 5, 'foreground_compute');
       },
+    },
+    {
+      name: 'model_credits_exhausted (D#483 S5-k2: the connection is broken for out-of-credit)',
+      expected: { decision: 'deny', reason: 'model_credits_exhausted' },
+      params: base,
+      setup: async (a) => seedConnection(a, 'broken', 'credits_exhausted'),
+    },
+    {
+      name: 'admit: connection broken for credits but the run draws no model estimate (compute only)',
+      expected: { decision: 'admit' },
+      params: { ...base, estimateModelUsd: 0, trigger: 'foreground', estimateComputeUsd: 1 },
+      setup: async (a) => seedConnection(a, 'broken', 'credits_exhausted'),
+    },
+    {
+      name: 'admit: the credits connection reads ok again (the pause lifts with no person action)',
+      expected: { decision: 'admit' },
+      params: base,
+      setup: async (a) => seedConnection(a, 'ok', null),
+    },
+    {
+      name: 'admit: a connection broken for a rejected key is not the credits pause (the account stop owns that)',
+      expected: { decision: 'admit' },
+      params: base,
+      setup: async (a) => seedConnection(a, 'broken', '401'),
+    },
+    {
+      name: 'model_connection_not_ok still wins for a preview even when broken for credits',
+      expected: { decision: 'deny', reason: 'model_connection_not_ok' },
+      params: { ...base, purpose: 'preview' },
+      setup: async (a) => seedConnection(a, 'broken', 'credits_exhausted'),
     },
     { name: 'account_not_active (paused)', expected: { decision: 'deny', reason: 'account_not_active' }, status: 'paused', params: base },
     { name: 'admit: past_due inside the seven day grace', expected: { decision: 'admit' }, status: 'past_due', params: base },
