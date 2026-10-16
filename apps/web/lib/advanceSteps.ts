@@ -84,10 +84,14 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec });
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
   if (fromProposal !== null) {
+    // The proposal's own title and summary, read from the database in the item's tenant transaction: no GitHub call, no label rule. The text is third-party
+    // (it can come from an outside author's issue), so it goes to every prompt through `sanitize` like an issue body does; the approval made the item
+    // internal, not the text trusted. The body is built by `proposalIntakeBody` and nowhere else, for the triage and for the short Spec alike.
+    const intake = proposalIntakeBody({ summary: fromProposal.summary });
+    // The root of a small, bug or doc item (S4-e4): the short Spec reads the same proposal text the triage did, as it reads NOW (an edited proposal is what a re-approval wants).
+    if (verdict.action === "light_spec") return { ok: true, mode: "light", category: item.kind ?? "", title: fromProposal.title, body: intake };
     if (verdict.action !== "triage") return { ok: false, reason: "no_issue_link" };
-    // The proposal's own title and summary, read from the database: no GitHub call, no label rule. The text is third-party (it can come from an outside
-    // author's issue), so it goes to every prompt through `sanitize` like an issue body does; the approval made the item internal, not the text trusted.
-    return { ok: true, mode: "triage", repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: null, proposalId: fromProposal.id, login: PROPOSAL_TRIAGE_LOGIN, title: fromProposal.title, body: proposalIntakeBody({ summary: fromProposal.summary }), decided: null, because: null, hints: [] };
+    return { ok: true, mode: "triage", repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: null, proposalId: fromProposal.id, login: PROPOSAL_TRIAGE_LOGIN, title: fromProposal.title, body: intake, decided: null, because: null, hints: [] };
   }
   const ghNumber = item.ghNumber as number;
   // The build: the Spec is in the database, so no issue is read.
