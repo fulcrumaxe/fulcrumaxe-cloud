@@ -12,16 +12,17 @@ import { mapRefusal, ProposalRefusedError, readProposal, proposalTenant, UUID_RE
  *   2. in ONE transaction: create the work item exactly as the issue webhook creates one (internal, at triaged, with the
  *      repo and, when issue-backed, the issue number) and call approve_proposal, which takes the next roadmap position;
  *      a refusal anywhere rolls the work item back, so a refused approve leaves nothing behind;
- *   3. after the commit, file the stage driver's `advance_work_item` for the new work item, but only when the proposal is
- *      issue-backed, the repo has an active write-App (`team`) install, and the proposal is product-owned. Otherwise the
- *      work item waits at Triaged and the answer says why (`not_issue_backed`, `no_write_install`).
+ *   3. after the commit, file the stage driver's `advance_work_item` for the new work item, when the repo has an active
+ *      write-App (`team`) install and the proposal is product-owned. Every kind of proposal starts (D#483 S4-e): an
+ *      issue-backed one is read from its issue, any other from the proposal's own title and summary. Otherwise the work
+ *      item waits at Triaged and the answer says why (`no_write_install`).
  *
  * The start is separate from the approval on purpose: the run-action request has its own transaction and signal. If it
  * fails, the approval stands and the work item waits at Triaged; approving the same proposal again (a repeat) finds it
  * approved, still at triaged with no run, and files the start again. A start is never filed twice: the request is deduped
  * by the run-action definer (one live request per kind and target, and the idempotency key).
  */
-export type NotStartedReason = 'no_write_install' | 'not_issue_backed' | 'owned_by_internal_loop';
+export type NotStartedReason = 'no_write_install' | 'owned_by_internal_loop';
 
 export interface ApproveResult {
   proposal: ProposalRow;
@@ -51,10 +52,9 @@ interface ProposalFacts {
   work_item_id: string | null;
 }
 
-/** Why a start would not be filed, or null when it would. The three conditions of Spec section 1, in the order it lists them. */
+/** Why a start would not be filed, or null when it would. The conditions of Spec section 1 that remain after S4-e. */
 async function notStartedReason(c: PoolClient, p: ProposalFacts): Promise<NotStartedReason | null> {
   if (p.owner_process !== 'product') return 'owned_by_internal_loop';
-  if (p.gh_number == null) return 'not_issue_backed';
   const { rows } = await c.query<{ ok: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM repos r JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
                      WHERE r.id = $1::uuid AND i.app_kind = 'team') AS ok`,

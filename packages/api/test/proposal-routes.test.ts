@@ -293,17 +293,17 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       expect(signal.sent).toEqual([]);
     });
 
-    it('not issue-backed (a task or a Discussion): approved onto the roadmap at Triaged with no issue number, reason not_issue_backed, no request filed', async () => {
+    it('S4e-1/S4e-3: not issue-backed (a task or a Discussion): approved at Triaged with no issue number, and the start IS filed (no "starts once S4 lands" reason remains)', async () => {
       const who = await person('owner');
       const repo = await repoFor(who, 'team');
       const task = await proposalFor(who, repo, { dedupe_key: 'plan:D#1:A', sources: ['plan_task'], gh_number: null, title: 'A task' });
       const discussion = await proposalFor(who, repo, { dedupe_key: 'gh:discussion:5', sources: ['github_discussion'], gh_number: null, discussion_number: 5, title: 'A Discussion' });
       for (const id of [task, discussion]) {
         const out = await body<ApproveBody>(await approve(who, id));
-        expect(out).toMatchObject({ started: false, not_started_reason: 'not_issue_backed', proposal: { state: 'approved' } });
+        expect(out).toMatchObject({ started: true, not_started_reason: null, proposal: { state: 'approved' } });
         expect((await admin.query('SELECT gh_number, stage FROM work_items WHERE id = $1', [out.work_item_id])).rows[0]).toEqual({ gh_number: null, stage: 'triaged' });
       }
-      expect((await state(who)).run_action_requests).toBe(0);
+      expect((await state(who)).run_action_requests).toBe(2);
     });
 
     it('with no worker registered an approval that would start is 503 and writes nothing; one that would not start still works', async () => {

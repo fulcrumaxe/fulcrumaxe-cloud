@@ -188,6 +188,61 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     expect(t.started).toEqual([]);
   });
 
+  // D#483 S4-e: an item approved from a proposal that has no issue (a Discussion, a task, a docs/code/interview source).
+  it("S4-e: a product-owned proposal's item with no issue number starts; with no proposal behind it the same item is still no_issue_link", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const backed = await world(a, { number: false });
+    const bare = await world(a, { number: false });
+    await admin.query(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, discussion_number, title, summary, provenance, owner_process, state, work_item_id, roadmap_position, decided_at)
+       VALUES ($1, $2, 'gh:discussion:41', '{github_discussion}', 41, 'From a Discussion', 'the summary', 'external', 'product', 'approved', $3, 1, now())`,
+      [a.accountId, a.repoId, backed],
+    );
+    const t = build();
+    expect((await t.module.performAdvanceWorkItem(await action(a, backed))).result).toBe("done");
+    expect(t.started).toHaveLength(1);
+    expect(t.started[0]).toMatchObject({ workItemId: backed });
+    expect(await t.module.performAdvanceWorkItem(await action(a, bare))).toEqual({ result: "refused", errorCode: "no_issue_link" });
+    expect(t.started).toHaveLength(1);
+  });
+
+  it("S4e-2: a proposal owned by the internal loop is still refused owned_by_internal_loop, number or not", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await world(a, { number: false });
+    await admin.query(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process, state, work_item_id)
+       VALUES ($1, $2, 'plan:S4E-loop', '{plan_task}', 't', 'internal', 'internal_loop', 'new', $3)`,
+      [a.accountId, a.repoId, w],
+    );
+    const t = build();
+    expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({ result: "refused", errorCode: "owned_by_internal_loop" });
+    expect(t.started).toEqual([]);
+  });
+
+  it("S4-e: advanceLoadItem carries the proposal's id, title and summary for an item it backs, and null for one it does not", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const backed = await world(a, { number: false });
+    const bare = await world(a);
+    await admin.query(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, summary, provenance, owner_process, state, work_item_id, roadmap_position, decided_at)
+       VALUES ($1, $2, 'plan:S4E-load', '{plan_task}', 'A task', 'what it says', 'internal', 'product', 'approved', $3, 1, now())`,
+      [a.accountId, a.repoId, backed],
+    );
+    const t = build();
+    expect((await t.module.advanceLoadItem(a.accountId, backed))?.proposal).toMatchObject({ title: "A task", summary: "what it says" });
+    expect((await t.module.advanceLoadItem(a.accountId, bare))?.proposal).toBeNull();
+  });
+
+  it("S4-e: advanceTriage accepts a null number for the proposal-backed item and refuses a number that does not match the item", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await world(a, { number: false });
+    const t = build();
+    const input = { workItemId: w, title: "T", body: "B", category: "feature", sourceEventId: "proposal:x", repoId: a.repoId, login: "fx-proposal-approval", number: null };
+    expect((await t.module.advanceTriage(a.accountId, input)).status).toBe("triaged");
+    expect(t.triaged).toHaveLength(1);
+    expect(await t.module.advanceTriage(a.accountId, { ...input, number: 5 })).toEqual({ status: "refused", reason: "item_changed" });
+  });
+
   it("a role lowered to member between the request and the perform is refused principal_not_authorised", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await world(a);

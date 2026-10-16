@@ -1,7 +1,10 @@
 import type { AdvanceFacade, AdvancePrSource, AdvanceRunOutcome, AdvanceRunStart, AdvanceTriageResult } from "@fx/worker";
 import type { IssueReader } from "@fx/github";
 import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
-import { buildClassifyRunPrompt, decideFromLabels } from "@fx/pipeline";
+import { buildClassifyRunPrompt, decideFromLabels, proposalIntakeBody } from "@fx/pipeline";
+
+/** The login the triage event carries for an item approved from a proposal. The item is internal because a person approved it; this is a fixed label, not a GitHub account. */
+export const PROPOSAL_TRIAGE_LOGIN = "fx-proposal-approval";
 
 /**
  * D#483 P1: the bodies of the stage driver's durable steps (apps/web/workflows/workItemAdvance.ts holds the
@@ -45,7 +48,10 @@ export type LoadedAdvance =
       repoId: string;
       owner: string;
       name: string;
-      number: number;
+      /** The issue's number; null for an item approved from a proposal with no issue (S4-e). */
+      number: number | null;
+      /** Set for that item: the proposal whose title and summary are the input (never a GitHub read). */
+      proposalId?: string;
       login: string;
       title: string;
       body: string;
@@ -69,23 +75,33 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
   const item = await worker.advanceLoadItem(accountId, workItemId);
   if (!item) return { ok: false, reason: "not_found" };
   if (item.provenance !== "internal") return { ok: false, reason: "external_requires_human" };
-  if (!item.repoId || !item.ghOwner || !item.ghName || item.ghNumber === null) return { ok: false, reason: "no_issue_link" };
+  if (!item.repoId || !item.ghOwner || !item.ghName) return { ok: false, reason: "no_issue_link" };
+  // S4-e: an item with no issue number is loaded only when a proposal backs it, and only for the triage; every later mode still needs the number.
+  const fromProposal = item.ghNumber === null && item.proposal ? item.proposal : null;
+  if (item.ghNumber === null && fromProposal === null) return { ok: false, reason: "no_issue_link" };
   // The one table (@fx/core work-items/advance.ts), the same one the route and the worker's perform ask, says whether this
   // stage and state can be advanced and by what. A later stage adds a mode here and a branch in the workflow.
   const verdict = advanceActionFor({ stage: item.stage, discussion_id: item.hasDiscussion ? "d" : null, kind: item.kind, has_spec: item.hasSpec });
   if (!verdict.ok) return { ok: false, reason: "not_advanceable" };
+  if (fromProposal !== null) {
+    if (verdict.action !== "triage") return { ok: false, reason: "no_issue_link" };
+    // The proposal's own title and summary, read from the database: no GitHub call, no label rule. The text is third-party (it can come from an outside
+    // author's issue), so it goes to every prompt through `sanitize` like an issue body does; the approval made the item internal, not the text trusted.
+    return { ok: true, mode: "triage", repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: null, proposalId: fromProposal.id, login: PROPOSAL_TRIAGE_LOGIN, title: fromProposal.title, body: proposalIntakeBody({ summary: fromProposal.summary }), decided: null, because: null, hints: [] };
+  }
+  const ghNumber = item.ghNumber as number;
   // The build: the Spec is in the database, so no issue is read.
-  if (verdict.action === "build") return { ok: true, mode: "build", number: item.ghNumber, specVersion: item.specVersion };
-  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: item.ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode };
+  if (verdict.action === "build") return { ok: true, mode: "build", number: ghNumber, specVersion: item.specVersion };
+  if (verdict.action === "rebuild") return { ok: true, mode: "rebuild", number: ghNumber, specVersion: item.specVersion, repoId: item.repoId, owner: item.ghOwner, name: item.ghName, executionMode: item.executionMode, recordedPr: item.recordedPr, prExecutionMode: item.prExecutionMode };
   // The panel and the Spec again, for the pipeline's own root item: no issue read either.
   if (verdict.action === "spec") return { ok: true, mode: "spec" };
   if (verdict.action === "check_build") return { ok: true, mode: "check_build", specVersion: item.specVersion, executorRunId: item.executorRunId };
-  if (verdict.action === "review") return { ok: true, mode: "review", number: item.ghNumber, specVersion: item.specVersion };
+  if (verdict.action === "review") return { ok: true, mode: "review", number: ghNumber, specVersion: item.specVersion };
   if (!reader) return { ok: false, reason: "reader_unavailable" };
   const light = verdict.action === "light_spec";
   let issue;
   try {
-    issue = await reader({ repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: item.ghNumber });
+    issue = await reader({ repoId: item.repoId, owner: item.ghOwner, name: item.ghName, number: ghNumber });
   } catch {
     // fx-swallow-ok: fixed code only is logged and returned; the reader's message can carry a repository name, and a login must never reach a log
     console.warn(JSON.stringify({ event: "advance.issue_read_failed", work_item_id: workItemId }));
@@ -102,7 +118,7 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
     repoId: item.repoId,
     owner: item.ghOwner,
     name: item.ghName,
-    number: item.ghNumber,
+    number: ghNumber,
     login: issue.login,
     title: issue.title,
     body: issue.body,
@@ -168,7 +184,7 @@ export async function triageBody(worker: AdvanceWorker | null, accountId: string
     title: loaded.title,
     body: loaded.body,
     category: input.category,
-    sourceEventId: `gh-issue:${loaded.repoId}:${loaded.number}`,
+    sourceEventId: loaded.proposalId !== undefined ? `proposal:${loaded.proposalId}` : `gh-issue:${loaded.repoId}:${loaded.number}`,
     repoId: loaded.repoId,
     login: loaded.login,
     number: loaded.number,

@@ -137,8 +137,8 @@ export interface AdvanceTriageInput {
   repoId: string;
   /** The issue author's login. */
   login: string;
-  /** The issue's number on GitHub. */
-  number: number;
+  /** The issue's number on GitHub; null for an item that came from an approved proposal with no issue (D#483 S4-e). */
+  number: number | null;
 }
 
 /** What triage answers, as plain data. `status` is the pipeline's own word ("triaged", "unclassified", "refused", ...). */
@@ -370,6 +370,11 @@ export interface AdvanceItem extends AdvancePrSource {
   specVersion: number | null;
   /** The item's newest executor run (any status), or null. A build that ended with no pull request is recorded against it. */
   executorRunId: string | null;
+  /**
+   * D#483 S4-e: the proposal this item was approved from, when there is one (title and summary only; third-party text, to be fenced by the
+   * prompt that reads it). Absent or null for an item with no proposal.
+   */
+  proposal?: { id: string; title: string; summary: string | null } | null;
 }
 
 interface PrincipalRow {
@@ -516,7 +521,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
     if (item.provenance !== "internal") return refused("external_requires_human");
     if (item.repo_id === null) return refused("no_repo");
-    if (item.gh_number === null) return refused("no_issue_link");
+    // S4-e: an item approved from a proposal with no issue (a Discussion, a task, a docs/code/interview source) has no number; the proposal is its input.
+    if (item.gh_number === null && read.proposalOwner === null) return refused("no_issue_link");
     const verdict = advanceActionFor(item);
     if (!verdict.ok) return refused("not_advanceable");
     // A Re-spec is for the two stages a build starts from, and only while the newest Spec has no readable list (the same table and parser the route and the card ask).
@@ -656,14 +662,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function loadItemRow(accountId: string, workItemId: string): Promise<Omit<AdvanceItem, keyof AdvancePrSource> | null> {
     return withTenant(runnerPool, accountId, async (client) => {
-      const r = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null }>(
+      const r = await client.query<{ stage: string; provenance: string; repo_id: string | null; gh_number: string | null; discussion_id: string | null; gh_owner: string | null; gh_name: string | null; kind: string | null; has_spec: boolean; spec_version: number | null; executor_run_id: string | null; p_id: string | null; p_title: string | null; p_summary: string | null }>(
         `SELECT w.stage, w.provenance, w.repo_id, w.gh_number, w.discussion_id, r.gh_owner, r.gh_name, d.kind,
                 (SELECT ar.id FROM agent_runs ar WHERE ar.account_id = w.account_id AND ar.work_item_id = w.id AND ar.role = 'executor' ORDER BY ar.created_at DESC, ar.id DESC LIMIT 1) AS executor_run_id,
+                pr.id AS p_id, pr.title AS p_title, pr.summary AS p_summary,
                 EXISTS (SELECT 1 FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS has_spec,
                 (SELECT max(s.version) FROM spec_versions s WHERE s.account_id = w.account_id AND s.work_item_id = w.id AND s.erased_at IS NULL) AS spec_version
            FROM work_items w
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
+           LEFT JOIN proposals pr ON pr.account_id = w.account_id AND pr.work_item_id = w.id
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
       );
@@ -681,6 +689,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             hasSpec: row.has_spec,
             specVersion: row.spec_version === null ? null : Number(row.spec_version),
             executorRunId: row.executor_run_id,
+            proposal: row.p_id === null ? null : { id: row.p_id, title: row.p_title ?? "", summary: row.p_summary },
           }
         : null;
     });

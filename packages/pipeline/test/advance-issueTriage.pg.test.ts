@@ -68,6 +68,22 @@ describe("triageIssueItem [pg]", () => {
     expect((await item(w.workItemId)).stage).toBe("closed");
   });
 
+  it("S4-e: a proposal-backed item (no issue number) gets a root with the repo and NO number, whose discussion body is the proposal text; the approved row is retired; a replay creates nothing more", async () => {
+    const w = await world();
+    await h.admin.query("UPDATE work_items SET gh_number = NULL WHERE id = $1", [w.workItemId]);
+    const input = w.input({ number: null, sourceEventId: `proposal:${randomUUID()}`, body: "SUMMARY:\nfrom a Discussion" });
+    const out = await triageIssueItem(h.runWriterPool, w.accountId, input);
+    expect(out).toMatchObject({ status: "triaged", category: "feature", stage: "discussing" });
+    const root = out.workItemId!;
+    expect(await item(root)).toMatchObject({ stage: "discussing", repo_id: w.repoId, gh_number: null });
+    const body = await h.admin.query(`SELECT r.body FROM discussion_revisions r JOIN work_items wi ON wi.discussion_id = r.discussion_id WHERE wi.id = $1 ORDER BY r.rev DESC LIMIT 1`, [root]);
+    expect(body.rows[0].body).toBe("SUMMARY:\nfrom a Discussion");
+    expect((await item(w.workItemId)).stage).toBe("closed");
+    const items = await count(w.accountId, "work_items");
+    expect((await triageIssueItem(h.runWriterPool, w.accountId, input)).workItemId).toBe(root);
+    expect(await count(w.accountId, "work_items")).toBe(items);
+  });
+
   it("a replay (same source event) creates nothing new and is safe after the link is done", async () => {
     const w = await world();
     const first = await triageIssueItem(h.runWriterPool, w.accountId, w.input());
