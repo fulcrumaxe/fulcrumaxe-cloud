@@ -23,8 +23,9 @@ import {
 } from "./pipeline-storage.js";
 import { createOperatorPanel, createRunsPanel } from "./pipeline-actions.js";
 import { api } from "../_lib/api.js";
-import { createInsightPanel } from "./pipeline-insight.js";
-import { approveView, canApprove, createApprove } from "./pipeline-actions.js";
+import { createInsightPanel, createPlan } from "./pipeline-insight.js";
+import { approveView, canApprove, createApprove, createInbox } from "./pipeline-actions.js";
+import { getAllPages } from "./pipeline-storage.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -395,6 +396,152 @@ function mountApp(contentEl, launchArg) {
   };
 }
 
+// D#483 S3-L2b: Board (today's view), Inbox and Plan. The repository picker (owner/name, never ids) serves Inbox and Plan and is
+// hidden on the Board, which keeps its own all-repositories view. The tabs follow the ARIA tabs pattern: one tab stop, and the
+// arrow keys, Home and End move between them.
+const TABS = [
+  { key: "board", label: "Board" },
+  { key: "inbox", label: "Inbox" },
+  { key: "plan", label: "Plan" },
+];
+
+function mountTabs(contentEl, launchArg) {
+  let tab = "board";
+  let repoId = null;
+  let repos = [];
+  let reposNote = "";
+  let reposAsked = false;
+  let closed = false;
+  const boardHost = h("div", { class: "pl-tab-panel", id: "pl-panel-board", role: "tabpanel", "aria-labelledby": "pl-tab-board", "data-tab": "board" });
+  const picker = h("select", { class: "pl-repo-picker", id: "pl-repo-picker", "data-testid": "pl-repo-picker" });
+  const pickerRow = h("div", { class: "pl-repo-row", "data-testid": "pl-repo-row" }, h("label", { for: "pl-repo-picker" }, "Repository"), picker);
+  // The sentence under the picker when the repositories could not be read, or there are none: announced, with a way to ask again.
+  const reposBox = h("div", { class: "pl-repo-status", "data-testid": "pl-repo-status" });
+  reposBox.hidden = true;
+  const repoOf = () => {
+    const r = repos.find((x) => x.id === repoId);
+    return r ? { id: r.id, name: r.full_name, connected: r.install_state !== "not_installed" } : null;
+  };
+  const goBoard = (id) => {
+    show("board");
+    board.select(id);
+  };
+  const inbox = createInbox({ call: api, getRepo: repoOf, onOpenWorkItem: goBoard });
+  const plan = createPlan({ call: api, getRepo: repoOf });
+  const views = {
+    inbox: { host: h("div", { class: "pl-tab-panel", id: "pl-panel-inbox", role: "tabpanel", "aria-labelledby": "pl-tab-inbox", "data-tab": "inbox" }, inbox.el), ctl: inbox },
+    plan: { host: h("div", { class: "pl-tab-panel", id: "pl-panel-plan", role: "tabpanel", "aria-labelledby": "pl-tab-plan", "data-tab": "plan" }, plan.el), ctl: plan },
+  };
+  const bar = h("div", { class: "pl-tabs", role: "tablist", "aria-label": "Pipeline views", "data-testid": "pl-tabs" });
+  const buttons = new Map();
+  for (const t of TABS) {
+    buttons.set(t.key, h("button", { type: "button", role: "tab", id: "pl-tab-" + t.key, class: "pl-tab", "aria-controls": "pl-panel-" + t.key, "data-testid": "pl-tab-" + t.key, onClick: () => show(t.key) }, t.label));
+  }
+  // dom-insert-ok: every key of TABS was set in the loop above
+  bar.replaceChildren(...TABS.map((t) => buttons.get(t.key)));
+  bar.addEventListener("keydown", (e) => {
+    const at = TABS.findIndex((t) => t.key === tab);
+    const to = e.key === "ArrowRight" ? (at + 1) % TABS.length : e.key === "ArrowLeft" ? (at + TABS.length - 1) % TABS.length : e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    show(TABS[to].key);
+    buttons.get(TABS[to].key).focus();
+  });
+
+  function paintBar() {
+    for (const t of TABS) {
+      const b = buttons.get(t.key);
+      const on = t.key === tab;
+      b.className = "pl-tab" + (on ? " pl-tab-on" : "");
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+    }
+    boardHost.hidden = tab !== "board";
+    views.inbox.host.hidden = tab !== "inbox";
+    views.plan.host.hidden = tab !== "plan";
+    pickerRow.hidden = tab === "board";
+    reposBox.hidden = tab === "board" || reposBox.childNodes.length === 0;
+  }
+  // Reloads the view that is showing; a view that is not showing is read when it is next opened.
+  function refresh() {
+    if (tab !== "board") views[tab].ctl.load();
+  }
+  function show(key) {
+    tab = key;
+    paintBar();
+    if (key !== "plan") plan.stop();
+    if (key !== "board") loadRepos();
+    refresh();
+  }
+  function paintPicker() {
+    picker.replaceChildren(
+      h("option", { value: "" }, repos.length ? "Choose a repository" : reposNote || "Loading repositories…"),
+      ...repos.map((r) => h("option", { value: r.id, selected: r.id === repoId }, r.full_name))
+    );
+    picker.disabled = repos.length === 0;
+    paintReposBox();
+  }
+  function paintReposBox() {
+    const failed = reposNote === "The repositories couldn't be loaded";
+    const empty = repos.length === 0 && reposNote !== "" && !failed;
+    if (!failed && !empty) {
+      reposBox.replaceChildren();
+    } else {
+      reposBox.replaceChildren(
+        h("p", { class: "pl-inbox-line", role: failed ? "alert" : "status", "data-testid": "pl-repo-status-text" }, reposNote + "."),
+        h("button", { type: "button", class: "pl-btn", "data-testid": "pl-repo-again", onClick: askReposAgain }, "Try again")
+      );
+    }
+    reposBox.hidden = tab === "board" || reposBox.childNodes.length === 0;
+  }
+  function askReposAgain() {
+    reposAsked = false;
+    reposNote = "";
+    paintPicker();
+    loadRepos();
+  }
+  picker.addEventListener("change", () => {
+    repoId = picker.value || null;
+    refresh();
+  });
+  // The repositories are read the first time a view that needs them is opened (the Board reads its own).
+  function loadRepos() {
+    if (reposAsked) return;
+    reposAsked = true;
+    getAllPages("/api/v1/repos", api).then(
+      (rows) => {
+        if (closed) return;
+        repos = rows.filter((r) => r && typeof r.id === "string" && typeof r.full_name === "string" && r.full_name !== "");
+        reposNote = repos.length ? "" : "No repositories are connected yet";
+        // One repository leaves nothing to choose.
+        if (repos.length === 1 && repoId === null) repoId = repos[0].id;
+        paintPicker();
+        refresh();
+      },
+      () => {
+        reposAsked = false;
+        reposNote = "The repositories couldn't be loaded";
+        paintPicker();
+      }
+    );
+  }
+  paintPicker();
+
+  contentEl.replaceChildren(h("div", { class: "pl-shell" }, bar, pickerRow, reposBox, boardHost, views.inbox.host, views.plan.host));
+  paintBar();
+  const board = mountApp(boardHost, launchArg);
+  return {
+    select: goBoard,
+    destroy() {
+      closed = true;
+      board.destroy();
+      inbox.destroy();
+      plan.destroy();
+      contentEl.replaceChildren();
+    },
+  };
+}
+
 FULC.register({
   id: "pipeline",
   title: "Pipeline",
@@ -402,7 +549,7 @@ FULC.register({
   defaultSize: { w: 980, h: 600 },
   onOpen({ contentEl, launchArg }) {
     teardown();
-    current = mountApp(contentEl, launchArg);
+    current = mountTabs(contentEl, launchArg);
   },
   // Opened again from another app while it is already open: go to that work item.
   onLaunch({ launchArg }) {

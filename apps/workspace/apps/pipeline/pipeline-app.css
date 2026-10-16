@@ -164,3 +164,49 @@
 
 /* D#6 R2b-4b: a run waiting for a person to approve it, and the line for one approved automatically */
 .pl-run-approval, .pl-run-approval-note { flex: 1 1 100%; color: var(--text-muted, rgba(26, 255, 128, 0.7)); }
+
+/* D#483 S3-L2b: tabs, repository picker, Inbox and Plan. */
+.pl-shell { display: flex; flex-direction: column; box-sizing: border-box; height: 100%; min-height: 0; background: var(--bg-base, #000); color: var(--text-primary, #1aff80); font-family: var(--font-mono, monospace); font-size: 0.85rem; line-height: 1.45; }
+.pl-tabs { display: flex; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+.pl-tab, .pl-filter, .pl-btn, .pl-plan-toggle { min-height: 44px; padding: 4px 12px; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); color: inherit; font: inherit; cursor: pointer; }
+.pl-tab { border-bottom-color: transparent; }
+.pl-tab-on, .pl-filter-on { border-color: var(--accent, #1aff80); font-weight: 600; }
+.pl-btn { border-color: var(--accent, #1aff80); }
+.pl-btn:disabled, .pl-btn[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.pl-tab:focus-visible, .pl-filter:focus-visible, .pl-btn:focus-visible, .pl-plan-toggle:focus-visible, .pl-inbox-note:focus-visible, .pl-repo-picker:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.pl-repo-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; }
+.pl-repo-status { padding: 0 10px 8px; }
+.pl-repo-row[hidden], .pl-repo-status[hidden] { display: none; }
+/* Form fields use the accent border: the dim --border is under 3:1 on the dark base (WCAG 1.4.11). min-width: 0 lets a long owner/name shrink at 320px. */
+.pl-repo-picker { box-sizing: border-box; min-height: 44px; min-width: 0; max-width: 100%; flex: 1 1 12em; background: var(--bg-base, #000); color: inherit; border: 1px solid var(--accent, #1aff80); font: inherit; }
+.pl-tab-panel { flex: 1; min-height: 0; overflow: auto; }
+.pl-tab-panel[data-tab="board"] { position: relative; }
+.pl-repo-row[hidden], .pl-tab-panel[hidden] { display: none; }
+.pl-inbox, .pl-plan { padding: 8px 14px 14px; }
+.pl-panel-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; overflow-wrap: anywhere; }
+.pl-inbox-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.pl-inbox-list, .pl-plan-tasks, .pl-plan-approved { list-style: none; margin: 0; padding: 0; }
+.pl-plan-approved { list-style: decimal inside; }
+.pl-inbox-row { box-sizing: border-box; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); padding: 8px 10px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.pl-inbox-title { margin: 0 0 4px; font-size: 0.9rem; }
+.pl-inbox-badges, .pl-inbox-details, .pl-inbox-line { margin: 2px 0; }
+.pl-inbox-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
+.pl-inbox-notelabel { display: inline-flex; }
+.pl-inbox-note { box-sizing: border-box; min-height: 44px; min-width: 12em; max-width: 100%; padding: 4px 8px; background: var(--bg-base, #000); color: inherit; border: 1px solid var(--accent, #1aff80); font: inherit; }
+.pl-inbox-sentence, .pl-plan-sentence { margin: 6px 0; overflow-wrap: anywhere; }
+.pl-inbox-more { margin-top: 6px; }
+.pl-plan-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.pl-plan-line { margin: 4px 0; overflow-wrap: anywhere; }
+.pl-plan-confirm { margin: 8px 0; padding: 8px 10px; border: 1px solid rgba(210, 120, 60, 0.8); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pl-plan-confirm p { flex: 1 1 100%; margin: 0; }
+.pl-plan-table { border-collapse: collapse; margin: 10px 0; max-width: 100%; }
+.pl-plan-table th, .pl-plan-table td { border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); padding: 3px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.pl-plan-toggle { min-height: 44px; border-color: transparent; text-align: left; font-weight: 600; }
+.pl-plan-tasks li, .pl-plan-approved li { margin: 4px 0; }
+.pl-plan-task-title { display: block; }
+.pl-plan-task-meta { display: block; }
+.pl-plan-evidence ul { margin: 4px 0 10px; padding-left: 1.2em; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .pl-tabs { padding-left: 6px; padding-right: 6px; }
+  .pl-inbox, .pl-plan { padding-left: 8px; padding-right: 8px; }
+}
