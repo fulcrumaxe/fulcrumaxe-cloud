@@ -7,8 +7,10 @@ import {
   RESERVATION_DENIAL_PAUSES,
   RESERVATION_PAUSE_REASONS,
   RESERVATION_PAUSE_SENTENCES,
+  RESERVATION_ORPHAN_AFTER_SECONDS,
   RESERVATION_PAUSE_WINDOW_SECONDS,
   RESERVATION_POLL_SECONDS,
+  RESERVATION_SWEEP_SECONDS,
   isReservationPause,
   pauseForDenial,
 } from "../src/advance/reservationPauses.js";
@@ -72,10 +74,21 @@ describe("the lists and numbers the workflow and the worker repeat", () => {
     expect(listIn(read("../../worker/src/advance.ts"))).toEqual([...RESERVATION_PAUSE_REASONS]);
   });
 
-  it("the workflow asks again every RESERVATION_POLL_SECONDS, and a pause counts for three asks", () => {
+  it("the workflow asks again every RESERVATION_POLL_SECONDS", () => {
     const m = /BUILD_SPEND_POLL_MS = ([0-9_]+);/.exec(read("../../../apps/web/workflows/workItemAdvance.ts"));
     expect(Number(m![1]!.replaceAll("_", "")) / 1000).toBe(RESERVATION_POLL_SECONDS);
-    expect(RESERVATION_PAUSE_WINDOW_SECONDS).toBe(3 * RESERVATION_POLL_SECONDS);
+  });
+
+  it("D#483 S5-k1b: the sweep runs every 15 minutes, a pause counts for three passes (45 minutes), and a fact two asks old has no live workflow behind it", () => {
+    const cfg = JSON.parse(read("../../../apps/web/vercel.json")) as { crons: Array<{ path: string; schedule: string }> };
+    expect(cfg.crons.filter((c) => c.path === "/api/cron/stage-resume-sweep")).toEqual([{ path: "/api/cron/stage-resume-sweep", schedule: "*/15 * * * *" }]);
+    expect(RESERVATION_SWEEP_SECONDS).toBe(15 * 60);
+    expect(RESERVATION_PAUSE_WINDOW_SECONDS).toBe(45 * 60);
+    expect(RESERVATION_ORPHAN_AFTER_SECONDS).toBe(2 * RESERVATION_POLL_SECONDS);
+    // The worker repeats the two numbers (it cannot import this package).
+    const w = read("../../worker/src/stageResume.ts");
+    expect(Number(/STAGE_RESUME_PASS_SECONDS = (\d+)/.exec(w)![1])).toBe(RESERVATION_SWEEP_SECONDS);
+    expect(Number(/STAGE_RESUME_ORPHAN_AFTER_SECONDS = (\d+)/.exec(w)![1])).toBe(RESERVATION_ORPHAN_AFTER_SECONDS);
   });
 
   it("the pause code fits what a driver fact accepts", () => {

@@ -5,7 +5,8 @@ import { advanceActionFor, type AdvanceAction } from "@fx/core/src/work-items/ad
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
-import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
+import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
+import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
@@ -87,6 +88,11 @@ export interface AdvanceStartArgs {
    * Spec and publishes the next version, then stops: the person presses Build again. Absent on every other start, and on a workflow started before it existed.
    */
   respec?: boolean;
+  /**
+   * D#483 S5-k1b: the first attempt number the build's asks use. Absent (0) on every start a person's approval makes. The parked-stage sweep sets it to one
+   * more than the highest attempt among the approval's earlier build runs, so a restart never replays the `refused_spend` run an earlier ask left.
+   */
+  startAttempt?: number;
 }
 
 /**
@@ -990,13 +996,15 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   /** The refusals that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the lists equal). */
   const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+  /** How long after a limit pause is first seen the sweep first looks: a workflow's own wait is four hours, so the sweep's first look is just after it (apps/web BUILD_SPEND_WAIT_MS). */
+  const STAGE_RESUME_FIRST_LOOK_MS = 4 * 3_600_000;
   /** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (packages/pipeline reservationPauses.ts RESERVATION_PAUSE_REASONS; a test holds the lists equal). */
   const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"];
 
   async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };
     if (!UUID_RE.test(approvalId) || (expectedVersion !== undefined && !(Number.isSafeInteger(expectedVersion) && expectedVersion > 0))) return { status: "refused", reason: "invalid_input" };
-    if (spendAttempt !== undefined && !(Number.isSafeInteger(spendAttempt) && spendAttempt >= 0 && spendAttempt <= 1000)) return { status: "refused", reason: "invalid_input" };
+    if (spendAttempt !== undefined && !(Number.isSafeInteger(spendAttempt) && spendAttempt >= 0 && spendAttempt <= MAX_WAITING_ATTEMPT)) return { status: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return bad;
     const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), { ...(expectedVersion !== undefined ? { expectedVersion } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) });
@@ -1007,8 +1015,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     // D#483 S5-c1: nor is a start that found no build slot: the item waits (the workflow asks again) and the wait is derived from the counts when read.
     // D#483 S5-k1: nor is a start a spending limit denied: the same fact names the pause, and the pause is derived from the latest one when read.
     if (out.status === "refused" && out.reason !== undefined && out.reason !== null && (BUILD_SLOT_WAIT_REASONS.includes(out.reason) || RESERVATION_PAUSE_REASONS.includes(out.reason))) {
-      // Each poll of a wait leaves one fact (deduped per minute): the slot module counts an item as waiting only while its latest one is fresh.
-      await writeEvent(who, { kind: "build_waiting", dedupeKey: `wait:${approvalId}:${Math.floor(Date.now() / 60_000)}`, code: out.reason });
+      // Each ask of a wait leaves one fact (deduped per minute): the slot module counts an item as waiting only while its latest one is fresh.
+      // D#483 S5-k1b: it is the generalised `stage_waiting` fact (stage `build`); the readers take the latest of it and the older `build_waiting`, and nothing writes the older kind now.
+      await writeEvent(who, { kind: "stage_waiting", stage: "build", attempt: spendAttempt ?? 0, dedupeKey: `wait:${approvalId}:${Math.floor(Date.now() / 60_000)}`, code: out.reason });
+      // A limit pause may outlast the workflow that is asking (it parks after four hours): tell the sweep there is work to look at.
+      if (RESERVATION_PAUSE_REASONS.includes(out.reason)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
     } else if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
       await writeEvent(who, { kind: "build_refused", dedupeKey: `build:${approvalId}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(out.reason ?? "") ? out.reason : "refused" });
     }

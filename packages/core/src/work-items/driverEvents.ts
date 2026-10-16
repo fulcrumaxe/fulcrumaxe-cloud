@@ -13,6 +13,10 @@ import type { PoolClient } from 'pg';
  * What each kind means, and the code / reasons it carries:
  *   build_refused         the build could not start. code: the refusal reason (no_model, spend_refused, ...).
  *   build_waiting         one poll of a build that is waiting: for a slot (S5-c1) or for a spending limit (S5-k1: account_budget_reached, compute_cap_reached, item_cap_reached, run_limit_below_estimate). code: the wait reason. The latest one's age says whether the item is still waiting.
+ *   stage_waiting        D#483 S5-k1b: one ask of a start that is waiting, at any stage (`stage`: see WAITING_STAGES). code: the wait reason (a spend pause, or a
+ *                         build slot reason); attempt: the attempt number of the ask. Replaces `build_waiting` for every new write; the readers take the latest of both
+ *                         kinds, and a `build_waiting` row reads as the build stage. The latest one's age says whether the item is still waiting, and the parked-stage
+ *                         sweep refreshes it while a limit still denies the start.
  *   review_started        reviewers were started on a head. reasons: the roles (code_reviewer, acceptance_tester, ...).
  *   security_review_required  a security review is required for this head. reasons: why (item_critical, a trigger code, reviewer_flag).
  *   review_verdicts       the verdicts of one review round. reasons: `<role>_<verdict>` per role (code_reviewer_pass).
@@ -36,6 +40,7 @@ import type { PoolClient } from 'pg';
 export const DRIVER_EVENT_KINDS = [
   'build_refused',
   'build_waiting',
+  'stage_waiting',
   'review_started',
   'security_review_required',
   'review_verdicts',
@@ -54,6 +59,11 @@ export const DRIVER_EVENT_KINDS = [
 ] as const;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 
+/** D#483 S5-k1b: the starts that can wait on a limit (migration 0845's check lists the same seven; a test holds the two equal). */
+export const WAITING_STAGES = ['build', 'classify', 'spec', 'respec', 'review', 'fix_round', 'panel'] as const;
+export type WaitingStage = (typeof WAITING_STAGES)[number];
+export const MAX_WAITING_ATTEMPT = 100_000;
+
 const CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const MAX_REASONS = 20;
@@ -69,6 +79,10 @@ export interface DriverEventInput {
   prNumber?: number | null;
   round?: number | null;
   runId?: string | null;
+  /** `stage_waiting` only: which start is waiting. */
+  stage?: WaitingStage | null;
+  /** `stage_waiting` only: the attempt number of the ask. */
+  attempt?: number | null;
 }
 
 /** A code made safe for the store: lower-cased, anything outside [a-z0-9_] to `_`, leading digit prefixed. For turning a hyphenated role or verdict into a code. */
@@ -87,6 +101,13 @@ export function assertDriverEvent(e: DriverEventInput): void {
   if (e.headSha != null && !SHA_RE.test(e.headSha)) throw new Error('driver event: head is not a commit id');
   if (e.prNumber != null && !(Number.isSafeInteger(e.prNumber) && e.prNumber > 0 && e.prNumber < 2_000_000_000)) throw new Error('driver event: bad PR number');
   if (e.round != null && !(Number.isInteger(e.round) && e.round >= 0 && e.round <= 20)) throw new Error('driver event: bad round');
+  if (e.kind === 'stage_waiting') {
+    if (e.stage == null || !(WAITING_STAGES as readonly string[]).includes(e.stage)) throw new Error('driver event: a stage_waiting fact names its stage');
+    if (e.code == null) throw new Error('driver event: a stage_waiting fact names its wait reason');
+  } else if (e.stage != null || e.attempt != null) {
+    throw new Error('driver event: only a stage_waiting fact carries a stage or an attempt');
+  }
+  if (e.attempt != null && !(Number.isInteger(e.attempt) && e.attempt >= 0 && e.attempt <= MAX_WAITING_ATTEMPT)) throw new Error('driver event: bad attempt');
 }
 
 /**
@@ -96,10 +117,10 @@ export function assertDriverEvent(e: DriverEventInput): void {
 export async function recordDriverEvent(client: PoolClient, accountId: string, e: DriverEventInput): Promise<{ recorded: boolean }> {
   assertDriverEvent(e);
   const r = await client.query(
-    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key)
-     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10)
+    `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, reasons, head_sha, pr_number, round, run_id, dedupe_key, stage, attempt)
+     VALUES ($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (account_id, work_item_id, kind, dedupe_key) DO NOTHING`,
-    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey],
+    [accountId, e.workItemId, e.kind, e.code ?? null, [...(e.reasons ?? [])], e.headSha ?? null, e.prNumber ?? null, e.round ?? null, e.runId ?? null, e.dedupeKey, e.stage ?? null, e.attempt ?? null],
   );
   return { recorded: r.rowCount === 1 };
 }

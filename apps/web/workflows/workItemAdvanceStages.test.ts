@@ -301,13 +301,34 @@ describe("the build for an item at Spec ready", () => {
     expect(events()).not.toContain("advance.failed");
   });
 
-  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a limit that never clears (%s) is given up on after four hours with its name, and the item stays approvable", async (pause) => {
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5k-4: a limit that never clears (%s) is waited out for four hours and then the workflow PARKS: build_paused with its name, no failed record, the item stays approvable", async (pause) => {
     const w = setup({ item: AT_SPEC, build: { status: "refused", reason: pause } });
-    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: `build_refused:${pause}` });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `build_paused:${pause}` });
     expect(world.sleeps).toBe(48);
     expect(w.advanceBuild).toHaveBeenCalledTimes(49);
     expect(w.advanceBuildFailed).not.toHaveBeenCalled();
     expect(w.advanceRunOutcome).not.toHaveBeenCalled();
+    // A pause, not a failure: the log says paused and never failed, so nothing reads it as the build having gone wrong.
+    expect(events()).toContain("advance.paused");
+    expect(events()).not.toContain("advance.failed");
+    expect(logs.find((l) => l.event === "advance.paused")).toMatchObject({ at: "build_start", reason: pause, attempt: 48 });
+  });
+
+  it("S5k1b: a restart by the sweep begins at the attempt it names (never the unsuffixed key) and keeps counting from there", async () => {
+    const w = setup({ item: AT_SPEC, buildSequence: [{ status: "refused", reason: "account_budget_reached" }], stages: ["pr_opened"] });
+    expect(await workItemAdvanceWorkflow({ ...ARGS, startAttempt: 4 })).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild.mock.calls.map((c) => (c as unknown[])[3])).toEqual([4, 5]);
+  });
+
+  it("S5k1b: a restart that is denied again parks again at the end of its own four hours, counting on from where it began", async () => {
+    const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "compute_cap_reached" } });
+    expect(await workItemAdvanceWorkflow({ ...ARGS, startAttempt: 10 })).toEqual({ status: "paused", detail: "build_paused:compute_cap_reached" });
+    expect((w.advanceBuild.mock.calls.at(-1) as unknown[] | undefined)?.[3]).toBe(58);
+  });
+
+  it("S5k1b: any refusal that is not a pause still ends as it did, even for a restart", async () => {
+    setup({ item: AT_SPEC, build: { status: "refused", reason: "spec_changed" } });
+    expect(await workItemAdvanceWorkflow({ ...ARGS, startAttempt: 2 })).toEqual({ status: "failed", detail: "build_refused:spec_changed" });
   });
 
   it("S5-k1: account_not_active is not a pause: it ends at once with its existing refusal", async () => {

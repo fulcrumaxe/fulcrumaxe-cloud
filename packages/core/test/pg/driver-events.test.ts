@@ -7,7 +7,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '../../src/tenancy/withTenant.js';
-import { DRIVER_EVENT_KINDS, assertDriverEvent, listDriverEvents, recordDriverEvent, toCode } from '../../src/work-items/driverEvents.js';
+import { DRIVER_EVENT_KINDS, WAITING_STAGES, assertDriverEvent, listDriverEvents, recordDriverEvent, toCode } from '../../src/work-items/driverEvents.js';
 
 /** D#483 P3: the driver's recorded decisions, against a real Postgres. */
 describe('work item driver events', () => {
@@ -62,6 +62,39 @@ describe('work item driver events', () => {
     expect(() => assertDriverEvent({ ...base, dedupeKey: '' })).toThrow();
     expect(() => assertDriverEvent({ ...base, kind: 'nope' as 'stopped' })).toThrow();
     expect(() => assertDriverEvent({ ...base, code: 'ok_code', reasons: ['a', 'b_c'], headSha: 'c'.repeat(40), prNumber: 1, round: 2 })).not.toThrow();
+  });
+
+  it('D#483 S5-k1b: a stage_waiting fact names its stage and wait reason; no other kind carries a stage or an attempt; the attempt is bounded', () => {
+    const w = { workItemId: refs.workItemId, kind: 'stage_waiting' as const, dedupeKey: 'k', code: 'item_cap_reached', stage: 'build' as const, attempt: 3 };
+    expect(() => assertDriverEvent(w)).not.toThrow();
+    for (const stage of WAITING_STAGES) expect(() => assertDriverEvent({ ...w, stage })).not.toThrow();
+    expect(() => assertDriverEvent({ ...w, stage: undefined })).toThrow();
+    expect(() => assertDriverEvent({ ...w, stage: 'nope' as 'build' })).toThrow();
+    expect(() => assertDriverEvent({ ...w, code: undefined })).toThrow();
+    expect(() => assertDriverEvent({ ...w, attempt: -1 })).toThrow();
+    expect(() => assertDriverEvent({ ...w, attempt: 100_001 })).toThrow();
+    expect(() => assertDriverEvent({ ...w, attempt: 1.5 })).toThrow();
+    expect(() => assertDriverEvent({ ...w, kind: 'stopped' })).toThrow();
+    expect(() => assertDriverEvent({ workItemId: refs.workItemId, kind: 'stopped', dedupeKey: 'k', attempt: 1 })).toThrow();
+  });
+
+  it('D#483 S5-k1b: the stages in code are exactly the stages the table accepts', () => {
+    const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../../db/migrations');
+    const file = readdirSync(dir).find((f) => f.startsWith('0845_'))!;
+    const m = /work_item_driver_events_stage_check CHECK \(stage IN \(([^)]*)\)\)/.exec(readFileSync(path.join(dir, file), 'utf8'))!;
+    expect([...m[1]!.matchAll(/'([a-z_]+)'/g)].map((x) => x[1])).toEqual([...WAITING_STAGES]);
+  });
+
+  it('D#483 S5-k1b: a stage_waiting fact is recorded with its stage and attempt, and a repeat of its key writes nothing', async () => {
+    const out = await withTenant(appUserPool, refs.accountId, async (c) => {
+      const a = await recordDriverEvent(c, refs.accountId, { workItemId: refs.workItemId, kind: 'stage_waiting', stage: 'panel', attempt: 2, code: 'compute_cap_reached', dedupeKey: 'sw1' });
+      const again = await recordDriverEvent(c, refs.accountId, { workItemId: refs.workItemId, kind: 'stage_waiting', stage: 'panel', attempt: 2, code: 'compute_cap_reached', dedupeKey: 'sw1' });
+      const row = await c.query("SELECT stage, attempt, code FROM work_item_driver_events WHERE work_item_id = $1 AND kind = 'stage_waiting'", [refs.workItemId]);
+      return { a, again, row: row.rows };
+    });
+    expect(out.a.recorded).toBe(true);
+    expect(out.again.recorded).toBe(false);
+    expect(out.row).toEqual([{ stage: 'panel', attempt: 2, code: 'compute_cap_reached' }]);
   });
 
   it('toCode turns a role or verdict word into a plain code', () => {
