@@ -1104,6 +1104,8 @@ approveSay("Started. An agent is building this now, and the card moves when it o
 approveSay("Started. The agents are discussing this again, and a Spec follows when they are done.", "started_spec");
 approveSay("Started. The pipeline is checking whether the build opened a pull request, and the card moves when it knows.", "started_check");
 approveSay("Started. Reviewers are checking the pull request now, and the card moves when they are done.", "started_review");
+// D#483: the build was accepted but has no build slot yet. The card's own banner says why and what holds the slot.
+approveSay("Approved, but the build has not started: it is waiting for a build slot. The reason is on this card, and the build starts by itself when a slot is free.", "waiting_for_slot");
 approveSay("The agents are already working on this one.", "already_running");
 approveSay("This item can't be started from here any more. It has already moved on, or it has no GitHub issue behind it.", "not_approvable", "not_found");
 approveSay("This item isn't linked to a repository, so nothing can be started.", "no_repo");
@@ -1192,23 +1194,31 @@ export const FOLLOW_POLLS = 8;
 export const FOLLOW_GAP_MS = 700;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The error code the worker refused an accepted request with, or null (done, or still going after the reads). A failed read is not a refusal. */
-export async function followAccepted(call, sleep, accepted) {
+/**
+ * What the worker answered for an accepted request: `refusal` is the error code it refused with (or null: done, or still going after the reads; a failed read is
+ * not a refusal), and `waiting` is true when it finished the request with the build waiting for a build slot (outcome `advance: "waiting"`), which is not "started".
+ */
+export async function followAcceptedOutcome(call, sleep, accepted) {
   const id = accepted && typeof accepted.action_id === "string" ? accepted.action_id : null;
-  if (id === null) return null;
+  if (id === null) return { refusal: null, waiting: false };
   for (let i = 0; i < FOLLOW_POLLS; i += 1) {
     let a;
     try {
       a = await call("GET", actionPath(id), undefined);
     } catch (e) {
       if (e && e.name === "AbortError") throw e;
-      return null;
+      return { refusal: null, waiting: false };
     }
-    if (a && (a.state === "refused" || a.state === "failed")) return typeof a.error_code === "string" && a.error_code !== "" ? a.error_code : "refused";
-    if (a && a.state === "done") return null;
+    if (a && (a.state === "refused" || a.state === "failed")) return { refusal: typeof a.error_code === "string" && a.error_code !== "" ? a.error_code : "refused", waiting: false };
+    if (a && a.state === "done") return { refusal: null, waiting: !!a.outcome && a.outcome.advance === "waiting" };
     await sleep(FOLLOW_GAP_MS);
   }
-  return null;
+  return { refusal: null, waiting: false };
+}
+
+/** The error code the worker refused an accepted request with, or null (done, or still going after the reads). A failed read is not a refusal. */
+export async function followAccepted(call, sleep, accepted) {
+  return (await followAcceptedOutcome(call, sleep, accepted)).refusal;
 }
 
 /** The logic (no DOM): one state per open card, `phase` idle | sending | started | error. */
@@ -1219,7 +1229,7 @@ export function createApprove({ call = api, onChange = () => {}, sleep = pause }
     onChange();
   };
 
-  const follow = (accepted) => followAccepted(call, sleep, accepted);
+  const follow = (accepted) => followAcceptedOutcome(call, sleep, accepted);
 
   return {
     get state() {
@@ -1236,10 +1246,10 @@ export function createApprove({ call = api, onChange = () => {}, sleep = pause }
       try {
         // No body: the third argument is undefined, so the request carries no JSON at all.
         const accepted = await call("POST", approvePath(item.id), undefined);
-        const refusal = await follow(accepted);
+        const { refusal, waiting } = await follow(accepted);
         if (st.itemId === item.id) {
           if (refusal !== null) set({ itemId: item.id, phase: "error", text: approveSentenceFor(refusal) });
-          else set({ itemId: item.id, phase: "started", text: startedFor(item) });
+          else set({ itemId: item.id, phase: "started", text: waiting ? APPROVE_SENTENCES.waiting_for_slot : startedFor(item) });
         }
       } catch (e) {
         if (e && e.name === "AbortError") return;
@@ -1354,10 +1364,10 @@ export function createOperator({ call = api, onChange = () => {}, onDone = () =>
       // No body: the third argument is undefined, so the request carries no JSON at all.
       const accepted = await call("POST", OPERATOR_PATHS[action](item.id), undefined);
       // Close answers at once (no agent is involved); every other action is a run action that is followed.
-      const refusal = action in CONFIRMED ? null : await followAccepted(call, sleep, accepted);
+      const { refusal, waiting } = action in CONFIRMED ? { refusal: null, waiting: false } : await followAcceptedOutcome(call, sleep, accepted);
       if (st.itemId !== item.id) return;
       if (refusal !== null) return set({ itemId: item.id, phase: "error", action, text: approveSentenceFor(refusal), confirm: keepDialog });
-      set({ itemId: item.id, phase: "started", action, text: OPERATOR_STARTED[action], confirm: false });
+      set({ itemId: item.id, phase: "started", action, text: waiting ? APPROVE_SENTENCES.waiting_for_slot : OPERATOR_STARTED[action], confirm: false });
       onDone(item.id, action);
     } catch (e) {
       if (e && e.name === "AbortError") return;

@@ -154,6 +154,19 @@ describe("the Ready to merge banner reads the real state", () => {
   });
 });
 
+describe("D#483: a build waiting for a slot", () => {
+  const WAITING = { notice: { kind: "build_slot_wait", reason: "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that." } };
+  it("the banner is the server's whole sentence, with no words of the card's own", () => {
+    expect(noticeBanner(WAITING)).toEqual({ kind: "build_slot_wait", title: "", lead: "", tail: "", reason: WAITING.notice.reason });
+  });
+  it("the timeline row says waiting, with the reason in words, never 'the pipeline started'", () => {
+    const row = stepView({ kind: "advance_work_item", state: "done", code: null, result: "waiting", reasons: ["one_build_per_repo_until_d598"], at: "t" });
+    expect(row.text).toContain("the build is waiting for a build slot");
+    expect(row.text).not.toContain("the pipeline started");
+    expect(row.reasons).toEqual(["this repository builds one item at a time"]);
+  });
+});
+
 describe("the notice banner", () => {
   it("not_feasible and needs_human are read from the response; nothing else draws", () => {
     expect(noticeBanner(NOT_FEASIBLE)).toMatchObject({ kind: "not_feasible", title: "Stopped before building. ", reason: NOT_FEASIBLE.notice.reason });

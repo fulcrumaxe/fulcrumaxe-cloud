@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPool } from '@fx/db/src/pool.js';
@@ -214,6 +214,122 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
         [refs.accountId, unmergedItemId],
       );
       expect(unmergedRows.map((r: { to_stage: string }) => r.to_stage)).toEqual(['closed_unmerged']);
+    });
+
+    describe('D#483 P1: a pull request a runner run opened moves its item on close or merge, whatever the body says', () => {
+      let runnerId: string;
+      let otherRepoId: string;
+
+      beforeAll(async () => {
+        const user = randomUUID();
+        await admin.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [user, `${user}@example.test`]);
+        runnerId = randomUUID();
+        await admin.query(
+          `INSERT INTO runners (id, account_id, registered_by, public_key_jwk, jkt, credential_mode) VALUES ($1, $2, $3, $4::jsonb, $5, 'subscription')`,
+          [runnerId, refs.accountId, user, JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: randomBytes(32).toString('base64url') }), randomBytes(32).toString('base64url')],
+        );
+        otherRepoId = randomUUID();
+        await admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product) VALUES ($1, $2, $3, $4, 'team')`, [otherRepoId, refs.accountId, refs.installationId, 9777]);
+      });
+
+      /** A finished runner executor run of the item whose `done` recorded this pull request (the event runnerDone's status move writes). */
+      async function recordRunnerPr(workItemId: string, prNumber: number, opts: { to?: string; runtime?: string; viaRunnerDone?: boolean } = {}): Promise<void> {
+        const runId = randomUUID();
+        const runtime = opts.runtime ?? 'runner';
+        await admin.query(
+          runtime === 'runner'
+            ? `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, runner_id, lease_generation, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded', 'runner_verified', $4, 1, $5)`
+            : `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, sandbox_name, dispatch_repo_id) VALUES ($1, $2, $3, 'executor', 'production', 'succeeded', $4, $5)`,
+          [runId, refs.accountId, workItemId, runtime === 'runner' ? runnerId : `sb-${runId}`, refs.repoId],
+        );
+        await admin.query(`INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.status_changed', $3::jsonb)`, [
+          refs.accountId,
+          runId,
+          JSON.stringify({ from: 'running', to: opts.to ?? 'succeeded', prNumber, branch: `fx/${runId.slice(0, 8)}-g1`, ...(opts.viaRunnerDone === false ? {} : { viaRunnerDone: true }) }),
+        ]);
+      }
+
+      /** What staging sent: the platform's own App as the author (no association), and a fixed body with no closing keyword. */
+      function botPr(fixture: string, prNumber: number, over: Partial<GithubPullRequestPayload['pull_request']> = {}): GithubPullRequestPayload {
+        const payload = loadFixture<GithubPullRequestPayload>(fixture);
+        payload.pull_request = {
+          ...payload.pull_request,
+          number: prNumber,
+          body: 'Opened by fulcrumaxe for run 11111111-1111-1111-1111-111111111111 on work item 22222222-2222-2222-2222-222222222222. The agent ran on your own machine.',
+          user: { login: 'fulcrumaxe-staging[bot]' },
+          author_association: 'NONE',
+          ...over,
+        };
+        return payload;
+      }
+      const stageOf = async (id: string): Promise<string> => (await admin.query<{ stage: string }>('SELECT stage FROM work_items WHERE id = $1', [id])).rows[0]!.stage;
+
+      it('closed unmerged: the item leaves pr_opened and frees its build slot', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6501, stage: 'pr_opened' });
+        await recordRunnerPr(id, 6801);
+        const result = await apply(mapMappedFor(botPr('pull_request.closed.unmerged.json', 6801)));
+        expect(result).toMatchObject({ applied: 'transitioned', workItemId: id, recorded: true });
+        expect(await stageOf(id)).toBe('closed_unmerged');
+      });
+
+      it('merged: the item moves to merged', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6502, stage: 'pr_opened' });
+        await recordRunnerPr(id, 6802);
+        const result = await apply(mapMappedFor(botPr('pull_request.closed.merged.json', 6802, { merged: true, merged_at: '2026-10-16T19:11:37Z' })));
+        expect(result).toMatchObject({ applied: 'transitioned', workItemId: id });
+        expect(await stageOf(id)).toBe('merged');
+      });
+
+      it('a foreign pull request, body-less, whose number no run recorded does not move anything', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6503, stage: 'pr_opened' });
+        await recordRunnerPr(id, 6803);
+        const result = await apply(mapMappedFor(botPr('pull_request.closed.unmerged.json', 6899, { user: { login: 'stranger' }, author_association: 'NONE' })));
+        expect(result.applied).toBe('skipped');
+        expect(await stageOf(id)).toBe('pr_opened');
+      });
+
+      it('a fork pull request from an untrusted author is refused even when its number was recorded', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6504, stage: 'pr_opened' });
+        await recordRunnerPr(id, 6804);
+        const fork = botPr('pull_request.closed.unmerged.json', 6804, { user: { login: 'stranger' } });
+        fork.pull_request.head = { ...fork.pull_request.head, repo: { id: 123456 } };
+        const result = await apply(mapMappedFor(fork));
+        expect(result.applied).toBe('skipped');
+        expect(await stageOf(id)).toBe('pr_opened');
+      });
+
+      it('a number recorded for another repository, by a run that failed, by a sandbox run, or by something other than the cloud\'s done does not count', async () => {
+        const other = await seedWorkItem(admin, refs.accountId, otherRepoId, { ghNumber: 6505, stage: 'pr_opened' });
+        const failed = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6506, stage: 'pr_opened' });
+        const sandbox = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6507, stage: 'pr_opened' });
+        const notDone = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6508, stage: 'pr_opened' });
+        // Same number 6805 in all four places; none is a runner `done` that succeeded in THIS repository.
+        await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, sandbox_name, dispatch_repo_id) VALUES (gen_random_uuid(), $1, $2, 'executor', 'production', 'succeeded', $3, $4)`, [refs.accountId, other, `sb-${randomUUID()}`, otherRepoId]);
+        await recordRunnerPr(failed, 6805, { to: 'failed' });
+        await recordRunnerPr(sandbox, 6805, { runtime: 'production' });
+        await recordRunnerPr(notDone, 6805, { viaRunnerDone: false });
+        await recordRunnerPr(other, 6805);
+        const result = await apply(mapMappedFor(botPr('pull_request.closed.unmerged.json', 6805)));
+        expect(result.applied).toBe('skipped');
+        for (const id of [other, failed, sandbox, notDone]) expect(await stageOf(id)).toBe('pr_opened');
+      });
+
+      it('an open of a runner pull request still waits for the body link (only a close or merge uses the run record)', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6509, stage: 'in_progress' });
+        await recordRunnerPr(id, 6806);
+        const result = await apply(mapMappedFor(botPr('pull_request.opened.json', 6806)));
+        expect(result.applied).toBe('skipped');
+        expect(await stageOf(id)).toBe('in_progress');
+      });
+
+      it('a body that closes another issue does not outrank the run record', async () => {
+        const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6510, stage: 'pr_opened' });
+        const decoy = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6511, stage: 'pr_opened' });
+        await recordRunnerPr(id, 6807);
+        const result = await apply(mapMappedFor(botPr('pull_request.closed.unmerged.json', 6807, { body: 'Closes #6511' })));
+        expect(result).toMatchObject({ applied: 'transitioned', workItemId: id });
+        expect(await stageOf(decoy)).toBe('pr_opened');
+      });
     });
 
     it('an unlinked PR (no Closes/Fixes/Resolves match, or no matching work item) is a safe no-op -- never throws, never writes', async () => {

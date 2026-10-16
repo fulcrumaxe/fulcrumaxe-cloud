@@ -542,6 +542,54 @@ async function findLinkedWorkItem(
 }
 
 /**
+ * D#483 P1: the work item whose runner run opened this pull request, or null.
+ *
+ * The cloud opens a runner run's pull request itself, with fixed text and no "Closes #N" line, and records the number it opened on the run's own
+ * verdict event (`viaRunnerDone`, `prNumber`, written in the transaction that finishes the run). That record is the platform's own binding of the
+ * number to the item, so a close or merge of such a pull request moves its item whatever the body says. It is the ONLY binding read here: the number
+ * must be one a succeeded runner executor run of an item in THIS repository recorded, so a pull request from anyone else (a number no run recorded)
+ * finds nothing and stays a no-op. Nothing the pull request itself says, its author, its body or its branch, takes part. When more than one item
+ * carries the number the open one wins, then the newest, as findLinkedWorkItem does.
+ */
+async function findRunnerOpenedPrItem(client: PoolClient, accountId: string, repoId: string, prNumber: number): Promise<string | null> {
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT w.id
+       FROM work_items w
+       JOIN agent_runs r ON r.account_id = w.account_id AND r.work_item_id = w.id AND r.runtime = 'runner' AND r.role = 'executor'
+       JOIN run_events e ON e.account_id = r.account_id AND e.run_id = r.id AND e.kind = 'run.status_changed'
+                        AND e.payload->>'viaRunnerDone' = 'true' AND e.payload->>'to' = 'succeeded' AND e.payload->>'prNumber' = $3::text
+      WHERE w.account_id = $1 AND w.repo_id = $2
+      ORDER BY (w.stage = 'closed') ASC, w.created_at DESC, w.id DESC LIMIT 1`,
+    [accountId, repoId, String(prNumber)],
+  );
+  return rows[0]?.id ?? null;
+}
+
+const unlinkedReason = (linkedIssueNumber: number | null): string =>
+  linkedIssueNumber == null
+    ? 'pull_request: no Closes/Fixes/Resolves #N reference in body, and no run recorded this pull request'
+    : `pull_request: no work item linked to issue #${linkedIssueNumber}`;
+
+/** The item a pull request event acts on: the one a runner run recorded this pull request for, else the one its body closes. Null when neither names one. */
+async function findPullRequestItem(
+  client: PoolClient,
+  accountId: string,
+  repoId: string,
+  prNumber: number,
+  linkedIssueNumber: number | null,
+): Promise<string | null> {
+  const recorded = await findRunnerOpenedPrItem(client, accountId, repoId, prNumber);
+  if (recorded) return recorded;
+  return findBodyLinkedItem(client, accountId, repoId, linkedIssueNumber);
+}
+
+/** The item a pull request body closes ("Closes #N"), or null when it names none. */
+async function findBodyLinkedItem(client: PoolClient, accountId: string, repoId: string, linkedIssueNumber: number | null): Promise<string | null> {
+  return linkedIssueNumber == null ? null : findLinkedWorkItem(client, accountId, repoId, linkedIssueNumber);
+}
+
+/**
  * D#2 H13a body criterion 2 (INSERT), C18 (recordStage), C7 and C25 item
  * 2 (hook points), all in one place -- the orchestration a verified
  * webhook's transaction runs, given the pure decision mapEvent produced.
@@ -574,13 +622,10 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       if (mapped.isFork && mapped.trust !== 'trusted') {
         return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no stage transition' };
       }
-      if (mapped.linkedIssueNumber == null) {
-        return { applied: 'skipped', reason: 'pull_request: no Closes/Fixes/Resolves #N reference in body' };
-      }
-      const workItemId = await findLinkedWorkItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
-      if (!workItemId) {
-        return { applied: 'skipped', reason: `pull_request: no work item linked to issue #${mapped.linkedIssueNumber}` };
-      }
+      // D#483 P1: a close or merge also finds the item a runner run opened this pull request for (its body carries no "Closes #N"). An open or a push never does: those keep the body link.
+      const closing = mapped.toStage === 'merged' || mapped.toStage === 'closed_unmerged';
+      const workItemId = closing ? await findPullRequestItem(client, ctx.accountId, ctx.repoId, mapped.prNumber, mapped.linkedIssueNumber) : await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
 
       let result;
       try {
@@ -630,13 +675,8 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       if (mapped.isFork && mapped.trust !== 'trusted') {
         return { applied: 'skipped', reason: 'pull_request: fork or untrusted head repo, no push recorded' };
       }
-      if (mapped.linkedIssueNumber == null) {
-        return { applied: 'skipped', reason: 'pull_request: no Closes/Fixes/Resolves #N reference in body' };
-      }
-      const workItemId = await findLinkedWorkItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
-      if (!workItemId) {
-        return { applied: 'skipped', reason: `pull_request: no work item linked to issue #${mapped.linkedIssueNumber}` };
-      }
+      const workItemId = await findBodyLinkedItem(client, ctx.accountId, ctx.repoId, mapped.linkedIssueNumber);
+      if (!workItemId) return { applied: 'skipped', reason: unlinkedReason(mapped.linkedIssueNumber) };
       // One row per delivery (GitHub keeps the delivery id on a redelivery, so that stays a no-op). Keyed on the delivery, not the head: a push back
       // to a head seen before (A, B, A) is a new push and restarts the quiet period.
       const { recorded } = await recordDriverEvent(client, ctx.accountId, { workItemId, kind: 'pr_head_pushed', dedupeKey: `push:${ctx.deliveryId}`, code: 'synchronize', headSha: mapped.headSha, prNumber: mapped.prNumber });

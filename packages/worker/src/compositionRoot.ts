@@ -138,7 +138,7 @@ export interface CreateWorkerOptions {
   /** pipeline's buildPreviewPrompt (this package cannot import @fx/pipeline). Absent, no preview can start: `previewReady()` stays false. */
   previewPrompt?: (repo: { owner: string; name: string }) => string;
   /** D#483 P1: the stage driver's injected pieces (apps/web owns the workflow and the pipeline). Absent, `advance_work_item` is refused `advance_unavailable`. */
-  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "review" | "lightSpec" | "respec" | "amendSpec">;
+  advance?: Pick<AdvanceModuleDeps, "startAdvance" | "triage" | "panel" | "spec" | "build" | "buildFailed" | "buildWaitReason" | "review" | "lightSpec" | "respec" | "amendSpec">;
 }
 
 /**
@@ -306,7 +306,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const advanceStarter = options.ports.follow ? createRunStarter({ pool: pools.runnerPool, registry, follow: options.ports.follow, queued: "accept" }) : null;
     const preview = createPreviewModule(pools.runnerPool, { seats: previewSeatSourceOf(resolveRunSeat), starter: previewStarter, promptFor: options.previewPrompt ?? null, isOperatorAccount: (accountId) => operatorMode(env, accountId).active });
     const retry = createRetryModule(pools.runnerPool, registry, { seats: options.retrySeats ?? retrySeatSourceOf(resolveRunSeat), authorCheck });
-    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, respec: options.advance?.respec ?? null, amendSpec: options.advance?.amendSpec ?? null, registry, isOperatorAccount: (accountId) => operatorMode(env, accountId).active, raiseEnvelopeAsk: createEnvelopeAsk(pools.receiptPool) });
+    const advance = createAdvanceModule(pools.runnerPool, { starter: advanceStarter, resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null, triage: options.advance?.triage ?? null, panel: options.advance?.panel ?? null, spec: options.advance?.spec ?? null, build: options.advance?.build ?? null, buildFailed: options.advance?.buildFailed ?? null, buildWaitReason: options.advance?.buildWaitReason ?? null, review: options.advance?.review ?? null, lightSpec: options.advance?.lightSpec ?? null, respec: options.advance?.respec ?? null, amendSpec: options.advance?.amendSpec ?? null, registry, isOperatorAccount: (accountId) => operatorMode(env, accountId).active, raiseEnvelopeAsk: createEnvelopeAsk(pools.receiptPool) });
     // D#483 S5-k1b: the parked-stage sweep restarts a stage whose workflow gave up waiting for a spending limit, once the limit allows it.
     const stageResume = createStageResume(pools.runnerPool, { resolveRunSeat, startAdvance: options.advance?.startAdvance ?? null });
     // D#6 R2b-3 (C21 section 4): the run after a lost lease or a usage limit is dispatched through the runner target; a second loss fails the work item through the stage driver.

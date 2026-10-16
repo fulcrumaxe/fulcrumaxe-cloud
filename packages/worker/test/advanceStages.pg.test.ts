@@ -140,6 +140,37 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(started).toHaveLength(1);
   });
 
+  // D#483: an approved build that has no slot yet is not "started".
+  describe("a build that must wait for a build slot", () => {
+    const waitingFacts = async (a: SeedRefs, w: string) =>
+      (await admin.query("SELECT kind, stage, code FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'stage_waiting'", [a.accountId, w])).rows;
+
+    it("settles done 'waiting' with the reason, records the wait as a fact of the item, and still starts the workflow (it asks again until a slot is free)", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const started: unknown[] = [];
+      const asked: string[] = [];
+      const t = build({ startAdvance: async (args) => void started.push(args), buildWaitReason: async (_pool, _account, id) => (asked.push(id), "one_build_per_repo_until_d598") });
+      expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({
+        result: "done",
+        outcome: { work_item_id: w, advance: "waiting", reason: "one_build_per_repo_until_d598", reasons: ["one_build_per_repo_until_d598"] },
+      });
+      expect(asked).toEqual([w]);
+      expect(started).toHaveLength(1);
+      expect(await waitingFacts(a, w)).toEqual([{ kind: "stage_waiting", stage: "build", code: "one_build_per_repo_until_d598" }]);
+    });
+
+    it("a free slot, a check that fails and a code the driver does not know all settle 'started' and record no wait", async () => {
+      for (const ask of [async () => null, async () => { throw new Error("db down"); }, async () => "made_up_reason"]) {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a);
+        const t = build({ buildWaitReason: ask });
+        expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({ result: "done", outcome: { work_item_id: w, advance: "started" } });
+        expect(await waitingFacts(a, w)).toEqual([]);
+      }
+    });
+  });
+
   it.each([
     ["a project (its Spec is a plan)", { kind: "project" }],
     ["a question", { kind: "question" }],

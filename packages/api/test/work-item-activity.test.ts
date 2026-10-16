@@ -24,7 +24,7 @@ interface Activity {
   runs: Array<{ id: string; role: string; status: string; usd: number | null; created_at: string; summary: string | null; lines: Array<{ at: string; text: string }> }>;
   runs_truncated: boolean;
   steps: Array<{ kind: string; state: string; code: string | null; result: string | null; reasons: string[]; at: string; finished_at: string | null }>;
-  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed'; reason: string } | null;
+  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait'; reason: string } | null;
   actions: string[];
   close_on_github: boolean;
 }
@@ -192,6 +192,51 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'The pipeline stopped and needs a person.' });
       await seedRun(accountId, itemId, { role: 'executor', status: 'timed_out', createdAt: '2026-10-03T10:00:00Z' });
       expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'needs_human', reason: 'The executor run timed out without a pull request.' });
+    });
+
+    it('build_slot_wait (D#483): a fresh slot-wait fact at spec_ready says so, and for the repository names the item that holds the slot; stale, halted or another stage says nothing', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId, repoId } = await seedItem(accountId, { stage: 'spec_ready' });
+      const wait = (code: string, key: string, stage: string | null = 'build', agoSeconds = 0) =>
+        admin.query(
+          `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key, created_at) VALUES ($1, $2, 'stage_waiting', $3, 0, $4, $5, now() - make_interval(secs => $6::int))`,
+          [accountId, itemId, stage, code, key, agoSeconds],
+        );
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+
+      // The holder: another item of the repository at pr_opened (issue 65), as in the staging case.
+      await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance, stage, gh_number) VALUES ($1, $2, $3, 'feature', 'internal', 'pr_opened', 65)`, [randomUUID(), accountId, repoId]);
+      await wait('one_build_per_repo_until_d598', 'w1');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({
+        kind: 'build_slot_wait',
+        reason: "Waiting for a build slot. Issue #65 is holding this repository's only build slot, and keeps it until its pull request is merged or closed. This build starts by itself after that.",
+      });
+
+      await wait('waiting_for_build_slot_account', 'w2');
+      expect((await noticeOf(accountId, userId, itemId))!.reason).toMatch(/Your account is already building as many items at once as its limit allows/);
+
+      // A wait for another stage, a spend pause and a stale fact are not a slot wait (a second item, so the facts above do not count).
+      const other = (await seedItem(accountId, { stage: 'spec_ready' })).itemId;
+      const otherWait = async (code: string, key: string, stage: string, agoSeconds = 0) => {
+        await admin.query(
+          `INSERT INTO work_item_driver_events (account_id, work_item_id, kind, stage, attempt, code, dedupe_key, created_at) VALUES ($1, $2, 'stage_waiting', $3, 0, $4, $5, now())`,
+          [accountId, other, stage, code, key],
+        );
+        // created_at is the database's clock whatever an INSERT says (a trigger), so age the row afterwards.
+        if (agoSeconds > 0) await admin.query(`UPDATE work_item_driver_events SET created_at = now() - make_interval(secs => $2::int) WHERE work_item_id = $1 AND dedupe_key = $3`, [other, agoSeconds, key]);
+      };
+      await otherWait('one_build_per_repo_until_d598', 'o1', 'review');
+      expect(await noticeOf(accountId, userId, other)).toBeNull();
+      await otherWait('account_budget_reached', 'o2', 'build');
+      expect(await noticeOf(accountId, userId, other)).toBeNull();
+      await otherWait('one_build_per_repo_until_d598', 'o3', 'build', 600);
+      expect(await noticeOf(accountId, userId, other)).toBeNull();
+
+      // Fresh again, then halted: a halted item is not waiting.
+      await wait('one_build_per_repo_until_d598', 'w6');
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('build_slot_wait');
+      await admin.query('UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1', [itemId, randomUUID()]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 
     it('check_failed: at in_progress, the newest recorded stop of Check the build gives a fixed sentence; any other code, or a later stage, gives none', async () => {
