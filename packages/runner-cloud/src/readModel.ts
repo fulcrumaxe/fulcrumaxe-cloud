@@ -18,7 +18,7 @@ import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps }
 export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
-export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /** A runner that has made no request for `RUNNER_ONLINE_SECONDS` (120) is `offline` (criterion 13; D#605 FL-3: one figure for every online test). */
@@ -400,6 +400,10 @@ export interface RawRun {
   runner_slot_free: boolean;
   /** The cause a covering live runner gave for its low limit (paused before memory, cpu, disk, ceiling), or null when none gave one. Only read when no runner has a free slot. */
   slot_limited_by: string | null;
+  /** D#599 PL-2b-2: the lowest runner protocol that may claim this run (`agent_runs.min_protocol_version`), or null when any runner may. */
+  min_protocol_version?: number | null;
+  /** D#599 PL-2b-2: the highest protocol version among the live runners that cover the run's repo (the ones `runner_online` counts), or null when there are none or none stored one. */
+  runner_max_protocol?: number | null;
   /** D#6 C42-3: runner runs the whole account has `running` now, and how many of those are heavy: the counts the claim measures the account's caps against. Absent in a hand-built row, which reads as no cap held. */
   account_running_total?: number | string;
   account_running_heavy?: number | string;
@@ -416,7 +420,10 @@ export interface AccountRunnerCaps {
  * the filter's own parameters start at `$4`.
  */
 const WAIT_FACTS = (filter: string, tail: string): string => `
-  SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after,
+  SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after, a.min_protocol_version,
+         -- D#599 PL-2b-2: the newest protocol any live, covering runner has said (at hello). A job that needs a higher one waits for an update; derived here, never stamped.
+         (SELECT max(r.protocol_version) FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
+             AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_max_protocol,
          (SELECT e.payload ->> 'failureReason' FROM run_events e WHERE e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload ->> 'to' = 'timed_out' ORDER BY e.seq DESC LIMIT 1) AS own_reason,
          -- The follow-up step test (C22 section 5): the parent counts only when it is a failed runner run whose last move to
          -- failed recorded one of the two follow-up reasons. Any other parent says nothing about why this run waits.
@@ -486,6 +493,9 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
   if (row.parent_reason === "runner_lost") return "runner_lost_retrying";
   if (row.approved_by === null && !row.runnable_without_approval && row.needs_approval_possible) return "waiting_for_approval";
   if (!row.runner_online) return "waiting_for_runner";
+  // D#599 PL-2b-2: a job in the cross-side shape is never offered to a runner whose stored protocol is below the job's minimum (the claim definer's gate). When every live
+  // covering runner is below it, no free slot or cap changes anything: the run waits for an update. Re-derived on each read, so an updated runner's hello clears it.
+  if (row.min_protocol_version != null && (row.runner_max_protocol ?? 0) < Number(row.min_protocol_version)) return "waiting_for_runner_update";
   // The claim checks the account's caps before the runner's own slots, so a held account is told first: a free slot on the runner does not help.
   if (heldByAccountCap(row, caps)) return "waiting_for_account_cap";
   if (!row.runner_slot_free) return "waiting_for_runner_slot";
@@ -532,14 +542,15 @@ export async function getRunWaitReason(deps: ReadDeps, accountId: string, runId:
  * D#6 C43-2b: the wait reason with its cause. For `waiting_for_runner_slot` the cause is the one the covering runners gave on their last
  * claim (`limited_by`); with none given it is null and the screen says only that the run waits for a slot. Every other reason has no cause.
  */
-export async function getRunWait(deps: ReadDeps, accountId: string, runId: string): Promise<{ reason: RunWaitReason | null; limited_by: LimitedBy | null }> {
+export async function getRunWait(deps: ReadDeps, accountId: string, runId: string): Promise<{ reason: RunWaitReason | null; limited_by: LimitedBy | null; min_protocol?: number }> {
   const now = (deps.now ?? (() => new Date()))();
   const row = await withTenant(deps.appUserPool, accountId, async (client) => {
     const { rows } = await client.query<RawRun>(WAIT_FACTS("a.id = $4", ""), [accountId, now, RUNNER_ONLINE_SECONDS, runId]);
     return rows[0];
   });
   const reason = row ? waitReasonOf(row, now, capsOf(deps, accountId)) : null;
-  return { reason, limited_by: reason === "waiting_for_runner_slot" ? limitedByOf(row!.slot_limited_by) : null };
+  const minProtocol = reason === "waiting_for_runner_update" && row!.min_protocol_version != null ? Number(row!.min_protocol_version) : null;
+  return { reason, limited_by: reason === "waiting_for_runner_slot" ? limitedByOf(row!.slot_limited_by) : null, ...(minProtocol === null ? {} : { min_protocol: minProtocol }) };
 }
 
 /** The pending, unapproved runner runs of the account, newest first, with their facts. Run on a client already inside the caller's tenant. */

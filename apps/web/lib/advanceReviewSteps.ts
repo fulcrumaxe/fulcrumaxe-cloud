@@ -5,13 +5,16 @@ import {
   ReviewPromptInputError,
   assembleFixPrompt,
   assembleReviewPrompt,
+  compareHeads,
   findPullRequestForItem,
+  findRecordedPullRequest,
   isLocalGitHubHttp,
   listChangedFiles,
   listChangedFilesLocal,
   promptRuntimeOf,
   readVerdict,
   reviewPlanFor,
+  roundIsCrossSide,
   securityTriggers,
   type AssembledPrompt,
   type FixFinding,
@@ -98,7 +101,12 @@ export async function findPrBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "re
     const lookupMode = ctx.prExecutionMode ?? ctx.executionMode;
     // D#6 R3c: a runner_local repo is read through the local-only fence (paths only, never a patch).
     const http = await openForRepo(open, lookupMode, "read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
-    const found = await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: lookupMode, recordedPr: ctx.recordedPr });
+    // D#599 PL-2b-2: on the sandbox side a recorded pair is the pull request a cross-side sandbox round was bound to (it carried on from a pull request the runner
+    // opened). The lookup follows that pair, by number and branch, not the side of the newest executor run and not `fx/issue-<n>`. A sandbox build records none.
+    const found =
+      promptRuntimeOf(lookupMode) === "sandbox" && ctx.recordedPr !== null && ctx.recordedPr.bound === true
+        ? await findRecordedPullRequest(http, { owner: ctx.owner, name: ctx.name }, ctx.recordedPr, { local: false })
+        : await findPullRequestForItem(http, { owner: ctx.owner, name: ctx.name, issue: ctx.issue, executionMode: lookupMode, recordedPr: ctx.recordedPr });
     if (!found.ok) return { ok: false, reason: found.reason };
     const files =
       lookupMode === "runner_local"
@@ -313,13 +321,15 @@ export async function startFixBody(
     const v = readVerdict(o.status, o.envelope);
     findings.push({ role: f.role, verdict: v.verdict, findings: v.findings, summary: v.summary });
   }
+  // D#599 PL-2b-2: the round is on the other side of the one that opened the pull request (the pull request lookup follows the newest executor run's side).
+  const crossSide = roundIsCrossSide(ctx.prExecutionMode, ctx.executionMode);
   let assembled: AssembledPrompt;
   // The same round with the Spec body: what a fresh session needs (a lost snapshot starts one), and what the worker sends instead when the session's pinned Spec is not the one held.
   let withBody: AssembledPrompt | null = null;
   let heldSpec: { version: number; sha256: string } | null = null;
   try {
     const runtime = promptRuntimeOf(ctx.executionMode);
-    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime };
+    const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
     if (runtime === "sandbox" && spec.sha256 !== undefined) {
@@ -345,8 +355,36 @@ export async function startFixBody(
     reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
     failingRunId: first.runId,
     expectedExecutionMode: ctx.executionMode,
+    // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
+    ...(crossSide ? { pr: { number: pr.number, branch: pr.branch } } : {}),
   });
   return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: started.reason };
+}
+
+export interface DescentOut {
+  /** `not_needed`: not a cross-side sandbox round. `descends`: the new head is ahead of (or is) the head the round was dispatched on. `rewritten`: it is not. `unavailable`: GitHub could not say. */
+  state: "not_needed" | "descends" | "rewritten" | "unavailable";
+}
+
+/**
+ * D#599 PL-2b-2 (security model 5): after a cross-side SANDBOX round moved the pull request's head, GitHub must say the new head descends from the head the round
+ * started on (compare status `ahead`). Anything else (`behind`, `diverged`) means the branch was rewritten under the round: it ends `failed branch_rewritten` and
+ * nothing is reviewed. Not asked for a runner round (its push is fast-forward by construction and a runner_local repository's fence has no compare call).
+ */
+export async function fixDescentBody(open: OpenHttp | null, ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "executionMode" | "prExecutionMode">, base: string, head: string): Promise<DescentOut> {
+  // Only a sandbox round on the other side of the one that opened the pull request is checked here.
+  if (!roundIsCrossSide(ctx.prExecutionMode, ctx.executionMode) || promptRuntimeOf(ctx.executionMode) !== "sandbox") return { state: "not_needed" };
+  if (!open) return { state: "unavailable" };
+  try {
+    const http = await openForRepo(open, ctx.executionMode, "read", { repoId: ctx.repoId, owner: ctx.owner, name: ctx.name });
+    const out = await compareHeads(http, { owner: ctx.owner, name: ctx.name, base, head });
+    if (!out.ok) return { state: "unavailable" };
+    return { state: out.status === "ahead" || out.status === "identical" ? "descends" : "rewritten" };
+  } catch {
+    // fx-swallow-ok: a fixed state is returned and the driver stops with it; the error text can name a repository
+    console.warn(JSON.stringify({ event: "advance.fix_compare_failed", repo_id: ctx.repoId }));
+    return { state: "unavailable" };
+  }
 }
 
 export interface GateOut {

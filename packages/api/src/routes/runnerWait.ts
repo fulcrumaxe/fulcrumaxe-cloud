@@ -23,6 +23,6 @@ function accountRunnerCaps(): { total: number; heavy: number } {
  */
 export async function readRunWait(pool: Pool, accountId: string, run: { id: string; runtime?: string; status: string }): Promise<RunWait | null> {
   if (run.runtime !== "runner" || run.status !== "pending") return null;
-  const { reason, limited_by } = await getRunWait({ appUserPool: pool, accountRunnerCaps }, accountId, run.id);
-  return reason === null ? null : { reason, limited_by, text: waitText(reason, limited_by) };
+  const { reason, limited_by, min_protocol } = await getRunWait({ appUserPool: pool, accountRunnerCaps }, accountId, run.id);
+  return reason === null ? null : { reason, limited_by, text: waitText(reason, limited_by, min_protocol ?? null) };
 }

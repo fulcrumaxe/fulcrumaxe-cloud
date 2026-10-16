@@ -83,7 +83,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const w = await world();
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull()] });
-      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } });
+      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
 
       const stored = await row(run.id);
       const job = verifyJob(stored.job_signed, { "job-key-1": publicKey }, { now: NOW });
@@ -95,6 +95,16 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       expect(binding.calls).toEqual([`list ${OWNER}:${ITEM_BRANCH}`, "default_branch", `protection ${ITEM_BRANCH}`]);
       // The branch head is read at this run's own dispatch, as for every continuation.
       expect(await eventsOf(run.id, RUNNER_DISPATCH_BASE_KIND)).toEqual([{ head_oid: "a".repeat(40) }]);
+    });
+
+    it("refuses a continuation that names no pull request number, before GitHub is asked and with nothing recorded (R-599-PL2b-1-c)", async () => {
+      const w = await world();
+      const { parent, run } = await pair(w);
+      const binding = createFakeContinuationBinding({ pulls: [openPull()] });
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } }))).toBe("continues_pr_mismatch");
+      expect(binding.calls).toEqual([]);
+      expect((await row(run.id)).job_signed).toBeNull();
+      expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
     });
 
     it("signs the number only when it is the one the caller recorded for the item", async () => {
@@ -115,7 +125,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const binding = createFakeContinuationBinding({
         pulls: [openPull({ number: 30, state: "closed" }), openPull({ number: 35, headRepoId: 9999 }), openPull({ number: 41 })],
       });
-      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } });
+      await issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
       expect((await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND))[0]).toEqual({ pr_number: 41, branch: ITEM_BRANCH });
     });
   });
@@ -143,7 +153,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const w = await world();
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding(state);
-      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } }))).toBe(code);
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } }))).toBe(code);
       expect((await row(run.id)).job_signed).toBeNull();
       expect((await row(run.id)).min_protocol_version).toBeNull();
       expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
@@ -154,7 +164,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const w = await world();
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull({ headRef: "fx/issue-13", number: 50 })] });
-      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: "fx/issue-13" } }))).toBe("continues_pr_mismatch");
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: "fx/issue-13", prNumber: 41 } }))).toBe("continues_pr_mismatch");
       expect(binding.calls).toEqual([]);
       expect((await row(run.id)).job_signed).toBeNull();
       expect(await eventsOf(run.id, RUNNER_CONTINUES_BOUND_KIND)).toEqual([]);
@@ -164,7 +174,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const w = await world(null);
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull()] });
-      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } }))).toBe("continues_pr_mismatch");
+      expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } }))).toBe("continues_pr_mismatch");
       expect(binding.calls).toEqual([]);
     });
 
@@ -173,7 +183,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const { parent, run } = await pair(w);
       const binding = createFakeContinuationBinding({ pulls: [openPull()] });
       expect(await codeOf(issuerWith(binding).issue({ run, continues: { parentRunId: parent.id, sessionId: "sess_01", branch: ITEM_BRANCH } }))).toBe("continues_branch_mismatch");
-      expect(await codeOf(issuerWith(null).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } }))).toBe("continues_base_unavailable");
+      expect(await codeOf(issuerWith(null).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } }))).toBe("continues_base_unavailable");
       expect(binding.calls).toEqual([]);
       expect((await row(run.id)).job_signed).toBeNull();
     });
@@ -219,7 +229,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
     it("refuses any later change of it, by any role, and leaves no value behind in the session", async () => {
       const w = await world();
       const { parent, run } = await pair(w);
-      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } });
+      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
       await expect(db.admin.query("UPDATE agent_runs SET min_protocol_version = 1 WHERE id = $1", [run.id])).rejects.toMatchObject({ code: "23514" });
       await expect(db.admin.query("UPDATE agent_runs SET min_protocol_version = NULL WHERE id = $1", [run.id])).rejects.toMatchObject({ code: "23514" });
       await expect(db.admin.query("UPDATE agent_runs SET min_protocol_version = 0 WHERE id = $1", [parent.id])).rejects.toThrow();
@@ -233,7 +243,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
       const w = await world();
       const { parent, run } = await pair(w);
       const issuer = issuerWith(createFakeContinuationBinding({ pulls: [openPull()] }));
-      await issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } });
+      await issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
       expect(await codeOf(issuer.issue({ run }))).toBe("job_not_recorded");
       expect((await row(run.id)).min_protocol_version).toBe(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
     });
@@ -253,7 +263,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
 
     async function boundRun(w: World) {
       const { parent, run } = await pair(w);
-      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH } });
+      await issuerWith(createFakeContinuationBinding({ pulls: [openPull()] })).issue({ run, continues: { parentRunId: parent.id, sessionId: null, branch: ITEM_BRANCH, prNumber: 41 } });
       return run;
     }
 

@@ -37,7 +37,7 @@ export class VerifiedTarget implements ExecutionTarget {
   cancel(run: ExecutionRun): Promise<CancelResult> {
     return this.forRole(run.role).cancel(run);
   }
-  resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
+  resume(run: ExecutionRun, sessionId: string | null): Promise<DispatchResult> {
     return this.forRole(run.role).resume(run, sessionId);
   }
   finalize(run: ExecutionRun, report: TerminalReport): Promise<CancelResult> {

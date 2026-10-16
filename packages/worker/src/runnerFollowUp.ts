@@ -116,7 +116,8 @@ export interface FollowUpPortsDeps {
  *
  * A parent whose job continued an earlier run (a fix round, `continues` set) has a child that continues it too: the child is
  * resumed with the parent's session id and the parent's own signed branch, which the issuer carries unchanged after checking that it is a
- * run branch, so the lost round's pushes stay on one branch (C22 section 2, C25 section 1.2). A parent that was a fresh `implement` run has a
+ * run branch, so the lost round's pushes stay on one branch (C22 section 2, C25 section 1.2). A parent with no session (a cross-side round, D#599 PL-2b) has a child that
+ * continues the same branch with no session and, for the item's pull request branch, is bound again by the issuer. A parent that was a fresh `implement` run has a
  * fresh child. If GitHub cannot be reached to read that branch's head, the child stays pending and the sweeper tries again.
  *
  * Dispatching a child that already has its job does nothing, and a dispatch that fails while the job has meanwhile been written
@@ -160,12 +161,14 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
           spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" },
           // The branch the lost round was on, carried unchanged (the issuer checks it is a run branch).
           ...(job.continues ? { continuesBranch: job.continues.branch } : {}),
+          // D#599 PL-2b-2: the lost round was on the item's pull request branch; the issuer binds the pull request again, now, and signs the number only if GitHub agrees.
+          ...(job.continues?.pr_number === undefined ? {} : { continuesPrNumber: job.continues.pr_number }),
         };
         const target = resolveExecutionTarget(isRunnerMode(child.execution_mode) ? child.execution_mode : "runner_local", deps.registry);
         if (job.continues) {
-          // D#599 PL-2b-1: a parent that claimed no session (a cross-side round) has no session to resume, and its child would need the same
-          // pull request binding again. That follow-up is not built yet, so it fails closed (the child ends `internal_error`) instead of resuming nothing.
-          if (job.continues.session_id === null) throw new JobIssueError("continues_session_invalid");
+          // D#599 PL-2b-2: a parent that claimed no session (a cross-side round) has none to resume, so its child continues the same branch with no
+          // session either. The issuer re-runs the whole binding for it (the pull request is open and this repository's, the branch is neither the default
+          // nor protected) before anything is signed: a pull request that changed since the lost round refuses the child with the issuer's closed code.
           await target.resume(run, job.continues.session_id);
         } else await target.dispatch(run);
       } catch (error) {

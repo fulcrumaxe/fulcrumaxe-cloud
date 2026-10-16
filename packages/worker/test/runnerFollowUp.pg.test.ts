@@ -14,6 +14,7 @@ import { createRunnerLeaseSweeper, RUNNER_LEASE_SWEEP_BATCH, type RunnerLeaseSwe
 import { createFollowUpPorts, requestFollowUp, type FollowUpPorts, type FollowUpPortsDeps } from "../src/runnerFollowUp.js";
 import { createAdvanceModule, FOLLOW_UP_CHAIN_MAX_RUNS } from "../src/advance.js";
 import { createFakeRunnerLimits } from "../../runner/test/helpers/runnerTargetFakes.js";
+import { createFakeContinuationBinding } from "../../runner/test/helpers/fakeContinuationBinding.js";
 
 /**
  * [pg] D#6 R2b-3 (C21 section 4): the run that follows a lost lease or a usage limit, against the real definer
@@ -968,13 +969,14 @@ describe("runner follow-up runs [pg]", () => {
     const built = (registry: ExecutionTargetRegistry, buildFailed: FollowUpPortsDeps["buildFailed"] = async () => ({ status: "recorded", stage: "needs_human" })) => createFollowUpPorts({ pool: writerPool, registry, buildFailed });
 
     /** The real chain: `RunnerTarget` over the real job issuer, signer and `agent_run_set_runner_job`; only the repo and issue lookup is a stand-in. */
-    function realRegistry(headOid: () => Promise<string | null> = async () => "a".repeat(40)) {
+    function realRegistry(headOid: () => Promise<string | null> = async () => "a".repeat(40), continuationBinding?: ReturnType<typeof createFakeContinuationBinding>) {
       const issuer = createJobIssuer({
         pool: writerPool,
         signer: createJobSigner({ keyId: "k1", privateKey: key }),
         visibility: { visibility: async () => "private" },
         continuationBase: { headOid },
-        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, parentBranch: null }) },
+        ...(continuationBinding ? { continuationBinding } : {}),
+        context: { load: async () => ({ repo: { owner: "acme", name: "app" }, spec: null, parentBranch: null, issueNumber: 12 }) },
         now: () => new Date(clock),
       });
       const target = new RunnerTarget({ limits: createFakeRunnerLimits(30), pool: writerPool, issuer, visibility: { visibility: async () => "private" } });
@@ -1016,11 +1018,54 @@ describe("runner follow-up runs [pg]", () => {
       expect(issued.continues).toBeNull();
     });
 
-    it("a follow-up of a round that claimed no session (D#599 PL-2b-1) is failed internal_error, with no job: there is no session to resume and no follow-up is built for it yet", async () => {
-      const { childId } = await childOf({ ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: null, branch: FIX_BRANCH } });
-      await expect(built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_session_invalid/);
-      const row = (await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0];
-      expect(row).toEqual({ status: "failed", job_signed: null });
+    // D#599 PL-2b-2: a round that claimed no session (a cross-side round) has a follow-up that continues the same branch with no session either.
+    const NO_SESSION_RUN_BRANCH: Partial<Job> = { ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: null, branch: FIX_BRANCH } };
+    const ITEM_PARENT: Partial<Job> = { ...FIX_PARENT, continues: { parent_run_id: randomUUID(), session_id: null, branch: "fx/issue-12", pr_number: 41 } };
+    const openPull = { number: 41, state: "open" as const, headRepoId: 7001, baseRepoId: 7001, headRef: "fx/issue-12", headOwner: "acme" };
+    const boundOf = async (runId: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'runner.continues_bound'", [runId])).rows.map((r) => r.payload);
+
+    it("a follow-up of a no-session round on a run branch is a no-session continuation of the same branch, gated to runners that can read it (D#599 PL-2b-2)", async () => {
+      const { parent, childId } = await childOf(NO_SESSION_RUN_BRANCH);
+      await built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      expect((await jobOf(childId)).continues).toEqual({ parent_run_id: parent, session_id: null, branch: FIX_BRANCH });
+      expect((await admin.query("SELECT min_protocol_version FROM agent_runs WHERE id = $1", [childId])).rows[0].min_protocol_version).toBe(3);
+    });
+
+    it("a follow-up of a round on the item's pull request branch is bound again by the issuer: same branch, same number, one binding event of its own", async () => {
+      const { parent, childId } = await childOf(ITEM_PARENT);
+      const binding = createFakeContinuationBinding({ pulls: [openPull] });
+      await built(realRegistry(undefined, binding).registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      expect((await jobOf(childId)).continues).toEqual({ parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 41 });
+      expect(await boundOf(childId)).toEqual([{ pr_number: 41, branch: "fx/issue-12" }]);
+      expect(binding.calls).toEqual(["list acme:fx/issue-12", "default_branch", "protection fx/issue-12"]);
+    });
+
+    it("a pull request that changed since the lost round refuses the child with the issuer's closed code: failed, no job, no binding event", async () => {
+      for (const [name, binding, code] of [
+        ["closed", createFakeContinuationBinding({ pulls: [{ ...openPull, state: "closed" }] }), /continues_pr_not_open/],
+        ["a fork's branch", createFakeContinuationBinding({ pulls: [{ ...openPull, headRepoId: 9999 }] }), /continues_pr_mismatch/],
+        ["another number", createFakeContinuationBinding({ pulls: [{ ...openPull, number: 42 }] }), /continues_pr_mismatch/],
+        ["protected", createFakeContinuationBinding({ pulls: [openPull], protection: { "fx/issue-12": 200 } }), /continues_branch_protected/],
+      ] as const) {
+        const { childId } = await childOf(ITEM_PARENT);
+        await expect(built(realRegistry(undefined, binding).registry).dispatchChild({ accountId: A.accountId, runId: childId }), name).rejects.toThrow(code);
+        expect((await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0], name).toEqual({ status: "failed", job_signed: null });
+        expect(await boundOf(childId), name).toEqual([]);
+      }
+    });
+
+    it("GitHub unreachable while the pull request is bound leaves the child PENDING for the sweeper's retry, and the retry then binds it", async () => {
+      const { childId } = await childOf(ITEM_PARENT);
+      const down = createFakeContinuationBinding({ pulls: [openPull], listStatus: 502 });
+      await expect(built(realRegistry(undefined, down).registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_base_unavailable/);
+      expect((await admin.query("SELECT status, job_signed FROM agent_runs WHERE id = $1", [childId])).rows[0]).toEqual({ status: "pending", job_signed: null });
+      await built(realRegistry(undefined, createFakeContinuationBinding({ pulls: [openPull] })).registry).dispatchChild({ accountId: A.accountId, runId: childId });
+      expect(await boundOf(childId)).toHaveLength(1);
+    });
+
+    it("without a binding port wired, the item branch child fails closed", async () => {
+      const { childId } = await childOf(ITEM_PARENT);
+      await expect(built(realRegistry().registry).dispatchChild({ accountId: A.accountId, runId: childId })).rejects.toThrow(/continues_base_unavailable/);
     });
 
     it("GitHub unreachable while the follow-up's branch head is read leaves the child PENDING with no job, for the sweeper's retry; the retry then issues it (C22 section 3)", async () => {

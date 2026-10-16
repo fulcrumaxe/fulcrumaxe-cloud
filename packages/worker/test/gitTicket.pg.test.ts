@@ -90,7 +90,7 @@ describe("git ticket: claim -> ticket -> verify [pg]", () => {
   }
 
   /** A pending runner run with a real signed job; claimed; then (optionally) moved to the cloud-verified mode as 0765's runs will be. */
-  async function claimedRun(o: { mode?: "runner_local" | "runner_verified"; role?: string; continues?: { branch: string } } = {}): Promise<{ id: string; generation: number }> {
+  async function claimedRun(o: { mode?: "runner_local" | "runner_verified"; role?: string; continues?: { branch: string; itemPr?: number } } = {}): Promise<{ id: string; generation: number }> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -103,7 +103,7 @@ describe("git ticket: claim -> ticket -> verify [pg]", () => {
       task: { kind: "implement", prompt: "p", prompt_sha256: sha256Text("p") },
       role_card: { text: "c", sha256: sha256Text("c") },
       role_tools_sha256: "a".repeat(64),
-      continues: o.continues ? { parent_run_id: randomUUID(), session_id: "sess-1", branch: o.continues.branch } : null,
+      continues: o.continues ? (o.continues.itemPr === undefined ? { parent_run_id: randomUUID(), session_id: "sess-1", branch: o.continues.branch } : { parent_run_id: randomUUID(), session_id: null, branch: o.continues.branch, pr_number: o.continues.itemPr }) : null,
       branch_prefix: "fx/",
       model_hint: null,
       issued_at: new Date(T0 - 1000).toISOString(),
@@ -157,6 +157,53 @@ describe("git ticket: claim -> ticket -> verify [pg]", () => {
       const res = await ask({ run_id: id, lease_generation: generation });
       expect(res.status).toBe(200);
       expect((await verifyRunnerGitTicket(GitTicketReply.parse(res.body).ticket, verifyDeps())).ref).toBe(`fx/${earlier}-g3`);
+    });
+
+    // D#599 PL-2b-2 (security model 3): the item's pull request branch is signed only when the run's bound event, its signed job and the item's issue
+    // number all agree. The worker reads that agreement from the real rows; the route refuses anything else with 403 ticket_branch_unbound.
+    describe("the item's pull request branch", () => {
+      const bind = (runId: string, payload: Record<string, unknown>) =>
+        admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, (SELECT COALESCE(max(seq), 0) + 1 FROM run_events WHERE run_id = $2), 'runner.continues_bound', $3::jsonb)", [A.accountId, runId, JSON.stringify(payload)]);
+      const itemRun = async (issue: number | null = 12) => {
+        await admin.query("UPDATE work_items SET gh_number = $2 WHERE id = $1", [A.workItemId, issue]);
+        return claimedRun({ mode: "runner_verified", continues: { branch: "fx/issue-12", itemPr: 41 } });
+      };
+
+      it("is signed, and verified by the proxy's verifier, when the bound event, the job and the item's issue number agree", async () => {
+        const { id, generation } = await itemRun();
+        await bind(id, { pr_number: 41, branch: "fx/issue-12" });
+        const res = await ask({ run_id: id, lease_generation: generation });
+        expect(res.status).toBe(200);
+        const verified = await verifyRunnerGitTicket(GitTicketReply.parse(res.body).ticket, verifyDeps());
+        expect(verified.ref).toBe("fx/issue-12");
+        expect(GIT_TICKET_REF_PATTERN.test(verified.ref)).toBe(true);
+      });
+
+      it("is 403 ticket_branch_unbound, with nothing signed, when there is no bound event", async () => {
+        const { id, generation } = await itemRun();
+        const res = await ask({ run_id: id, lease_generation: generation });
+        expect(res.status).toBe(403);
+        expect(res.body).toMatchObject({ error: { code: "ticket_branch_unbound" } });
+        expect(JSON.stringify(res.body)).not.toMatch(/eyJ/);
+      });
+
+      it.each([
+        ["another branch than the job's", 12, { pr_number: 41, branch: "fx/issue-8" }],
+        ["another pull request number than the job's", 12, { pr_number: 42, branch: "fx/issue-12" }],
+        ["an item whose own issue number is another one", 13, { pr_number: 41, branch: "fx/issue-12" }],
+      ] as const)("is 403 ticket_branch_unbound when the event names %s", async (_name, issue, payload) => {
+        const { id, generation } = await itemRun(issue);
+        await bind(id, payload);
+        const res = await ask({ run_id: id, lease_generation: generation });
+        expect(res.status).toBe(403);
+        expect(res.body).toMatchObject({ error: { code: "ticket_branch_unbound" } });
+      });
+
+      it("a run branch continuation needs no bound event and is signed as before", async () => {
+        const earlier = randomUUID();
+        const { id, generation } = await claimedRun({ mode: "runner_verified", continues: { branch: `fx/${earlier}-g3` } });
+        expect((await ask({ run_id: id, lease_generation: generation })).status).toBe(200);
+      });
     });
 
     it("does not extend the lease: asking for a ticket is not a sign of life", async () => {

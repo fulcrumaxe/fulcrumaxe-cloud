@@ -7,8 +7,9 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
-import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
+import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import type { ContextSection } from "@fx/runner";
@@ -270,6 +271,12 @@ export interface AdvanceFixRequest {
   held?: { version: number; sha256: string };
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
+  /**
+   * D#599 PL-2b-2: the pull request the round fixes, as the pipeline's own GitHub lookup just found it (number and head branch). Used only when the round's
+   * side is not the side that opened the pull request: the round then works on that branch (a runner round as a continuation with no session, a sandbox
+   * round bound to the pull request). It is checked against the item's recorded pull request or the issuer's own GitHub reads; never trusted on its own.
+   */
+  pr?: { number: number; branch: string };
 }
 
 export interface AdvanceRunRequest {
@@ -338,7 +345,12 @@ export interface AdvancePrSource {
    * Optional: absent, the lookup follows `executionMode`.
    */
   prExecutionMode?: string | undefined;
-  recordedPr: { number: number; branch: string } | null;
+  /**
+   * The pull request the newest executor run's side recorded. On a runner side, what its `done` recorded. D#599 PL-2b-2: on a SANDBOX side it is set only
+   * with `bound: true`, the pull request a cross-side sandbox round was bound to (it carried on from a pull request the runner opened); a sandbox build
+   * records none, and a sandbox lookup ignores a pair without the flag.
+   */
+  recordedPr: { number: number; branch: string; bound?: true } | null;
 }
 
 /** What the workflow reads about the item before it starts: plain data, or null when the item is gone. */
@@ -602,6 +614,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
    * The item's effective mode (D#599 PL-2: its placement, else the repository's), the side its newest executor run was on, and, when that side is a
    * runner, the pull request that run recorded. Read in the item's tenant.
    */
+  async function boundSandboxPullRequest(client: Parameters<typeof readSandboxBoundPullRequest>[0], accountId: string, workItemId: string): Promise<{ number: number; branch: string; bound: true } | null> {
+    const pr = await readSandboxBoundPullRequest(client, { accountId, workItemId });
+    return pr === null ? null : { ...pr, bound: true };
+  }
+
   async function pullRequestSource(accountId: string, workItemId: string): Promise<AdvancePrSource> {
     return withTenant(runnerPool, accountId, async (client) => {
       const r = await client.query<{ execution_mode: string | null; newest_mode: string | null }>(
@@ -612,7 +629,13 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       );
       const executionMode = r.rows[0]?.execution_mode ?? "sandbox";
       const prExecutionMode = r.rows[0]?.newest_mode ?? executionMode;
-      return { executionMode, prExecutionMode, recordedPr: isRunnerMode(prExecutionMode) ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : null };
+      const runnerSide = isRunnerMode(prExecutionMode);
+      return {
+        executionMode,
+        prExecutionMode,
+        // D#599 PL-2b-2: on the sandbox side this is the pull request a cross-side sandbox round was bound to (null for a build, found by `fx/issue-<n>`).
+        recordedPr: runnerSide ? await readRecordedRunnerPullRequest(client, { accountId, workItemId }) : await boundSandboxPullRequest(client, accountId, workItemId),
+      };
     });
   }
 
@@ -1071,7 +1094,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (req.fallbackPrompt === undefined || (typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
       (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
       (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
-      (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode));
+      (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode)) &&
+      (req.pr === undefined || (Number.isSafeInteger(req.pr.number) && req.pr.number >= 1 && req.pr.number <= 2_147_483_647 && (RUNNER_RUN_BRANCH.test(req.pr.branch) || ITEM_PR_BRANCH.test(req.pr.branch))));
     if (!sane) return { ok: false, reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
@@ -1182,6 +1206,31 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           return r.rows[0];
         });
         if (!coords?.gh_owner || !coords.gh_name) return refuse("no_repo");
+        // D#599 PL-2b-2: the round carries on from the pull request the other side opened. A runner round continues its branch with no session (the issuer
+        // reads GitHub and binds the pull request); a sandbox round is bound to the pull request the item recorded, in its own create transaction.
+        let continues: { branch: string; prNumber?: number } | undefined;
+        let inCreateTransaction: StartAgentRunInput["inCreateTransaction"];
+        if (req.pr !== undefined) {
+          const bound = req.pr;
+          if (isRunnerMode(effective)) {
+            if (ITEM_PR_BRANCH.test(bound.branch)) continues = { branch: bound.branch, prNumber: bound.number };
+            else if (RUNNER_RUN_BRANCH.test(bound.branch)) {
+              // Defence in depth: a run branch is trusted only as the pair the item itself recorded (a runner's done, or a sandbox round bound to it).
+              const known = await withTenant(runnerPool, who.accountId, async (client) => ({
+                recorded: await readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
+                bound: await readSandboxBoundPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }),
+              }));
+              const matches = (p: { number: number; branch: string } | null) => p !== null && p.number === bound.number && p.branch === bound.branch;
+              if (!matches(known.recorded) && !matches(known.bound)) return refuse("pr_unbound");
+              continues = { branch: bound.branch };
+            }
+            else return refuse("pr_branch_unsupported");
+          } else {
+            const recorded = await withTenant(runnerPool, who.accountId, (client) => readRecordedRunnerPullRequest(client, { accountId: who.accountId, workItemId: who.workItemId }));
+            if (recorded === null || recorded.number !== bound.number || recorded.branch !== bound.branch) return refuse("pr_unbound");
+            inCreateTransaction = (client, runId) => recordSandboxContinuesBound(client, { accountId: who.accountId, runId, prNumber: bound.number, branch: bound.branch });
+          }
+        }
         const fresh = await deps.starter.start({
           ...seat.seat,
           accountId: who.accountId,
@@ -1195,6 +1244,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
           ...(freshSections ? { contextSections: freshSections } : {}),
+          ...(continues ? { continues, parentRunId: parent } : {}),
+          ...(inCreateTransaction ? { inCreateTransaction } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
           workdir: PREVIEW_WORKDIR,
           cloneRepo: { owner: coords.gh_owner, name: coords.gh_name },
@@ -1237,6 +1288,10 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         const won = await claimedRun();
         if (won) return started(won);
       }
+      // D#599 PL-2b-2: the issuer refused the continuation with a closed code (the pull request is closed or not the item's, the branch is protected,
+      // GitHub could not be read). The code is fixed text and is the answer; the run it left is already failed.
+      const issuerRefusal = err instanceof DispatchFailedError ? err.originalError : err;
+      if (issuerRefusal instanceof JobIssueError && issuerRefusal.code.startsWith("continues_")) return refuse(issuerRefusal.code);
       // A reaper claim on the sandbox is transient: the step throws and is retried (the run is keyed, so a replay is safe).
       if (err instanceof SandboxReapingError) throw err;
       if (err instanceof DuplicateExecutorRunError) return refuse("already_running");

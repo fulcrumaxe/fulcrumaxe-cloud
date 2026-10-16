@@ -175,6 +175,8 @@ export const WAIT_LINES = {
   waiting_for_account_cap: "Waiting: your account's runner job limit is reached",
   waiting_for_runner_slot: "Waiting for a free slot on your runner",
   waiting_for_approval: "Waiting for approval before it runs on a Claude plan",
+  // D#599 PL-2b-2: `waitText` adds "(version V or later)" when the job's minimum is known; this is the line without it.
+  waiting_for_runner_update: "Waiting for a runner update to continue this pull request",
   runner_lost_retrying: "Your runner lost contact. A new attempt is waiting to start",
   timed_out_waiting: COPY.timedOut,
   paused_usage_limit: "Paused: Claude usage limit reached. It starts again when the limit resets",
@@ -191,7 +193,8 @@ export const SLOT_CAUSE_LINES = {
 } as const;
 
 /** The one sentence for a wait. An unknown reason or cause falls back to the plainest line, never to a code. */
-export function waitText(reason: string, limitedBy: string | null): string {
+export function waitText(reason: string, limitedBy: string | null, minProtocol: number | null = null): string {
+  if (reason === "waiting_for_runner_update" && minProtocol !== null && Number.isSafeInteger(minProtocol) && minProtocol >= 1) return `Waiting for a runner update (version ${minProtocol} or later) to continue this pull request`;
   if (reason === "waiting_for_runner_slot" && limitedBy !== null && Object.hasOwn(SLOT_CAUSE_LINES, limitedBy)) return SLOT_CAUSE_LINES[limitedBy as keyof typeof SLOT_CAUSE_LINES];
   return Object.hasOwn(WAIT_LINES, reason) ? WAIT_LINES[reason as keyof typeof WAIT_LINES] : WAIT_LINES.waiting_for_runner;
 }

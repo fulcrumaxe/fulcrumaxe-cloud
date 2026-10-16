@@ -114,6 +114,21 @@ export async function findPullRequestForItem(http: GitHubHttp, repo: { owner: st
   return findOpenPullRequest(http, repo);
 }
 
+export type CompareResult = { ok: true; status: "ahead" | "behind" | "diverged" | "identical" } | { ok: false; reason: "github_unavailable" | "malformed" };
+
+/**
+ * D#599 PL-2b-2 (security model 5): how `head` stands against `base` on GitHub (the compare API's `status`). A cross-side sandbox round pushes without `--force`, so the
+ * pull request's new head must descend from the head the round was dispatched on (`ahead`; `identical` is a round that pushed nothing). `behind` and `diverged` mean the
+ * branch was rewritten or moved under the round. Both commits are checked as plain hex before they go into a path.
+ */
+export async function compareHeads(http: GitHubHttp, repo: { owner: string; name: string; base: string; head: string }): Promise<CompareResult> {
+  if (!SHA_PATTERN.test(repo.base) || !SHA_PATTERN.test(repo.head)) return { ok: false, reason: "malformed" };
+  const res = await http.request({ method: "GET", path: `${repoPath(repo.owner, repo.name)}/compare/${repo.base}...${repo.head}`, query: { per_page: 1 } });
+  if (res.status !== 200) return { ok: false, reason: "github_unavailable" };
+  const status = isObj(res.body) ? res.body.status : undefined;
+  return status === "ahead" || status === "behind" || status === "diverged" || status === "identical" ? { ok: true, status } : { ok: false, reason: "malformed" };
+}
+
 const FILES_PER_PAGE = 100;
 /** GitHub lists at most 3000 files of a pull request. */
 const FILES_MAX_PAGES = 30;

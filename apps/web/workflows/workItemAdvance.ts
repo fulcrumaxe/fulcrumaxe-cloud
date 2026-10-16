@@ -11,6 +11,7 @@ import {
   cancelBody,
   eventBody,
   findPrBody,
+  fixDescentBody,
   mergeGateBody,
   prFoundBody,
   recordRoundBody,
@@ -20,6 +21,7 @@ import {
   reviewerOutcomeBody,
   startFixBody,
   startReviewerBody,
+  type DescentOut,
   type FixOut,
   type GateOut,
   type PrLookup,
@@ -311,6 +313,11 @@ export async function advanceStartFixStep(
 ): Promise<FixOut> {
   "use step";
   return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry);
+}
+
+export async function advanceFixDescentStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "executionMode" | "prExecutionMode">, base: string, head: string): Promise<DescentOut> {
+  "use step";
+  return fixDescentBody(openInstallationHttp, ctx, base, head);
 }
 
 export async function advanceMergeGateStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, prNumber: number): Promise<GateOut> {
@@ -1040,6 +1047,14 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       await advanceLogStep("advance.fix_no_change", { work_item_id: workItemId, run_id: fix.runId, run_status: fixed.status, head: pr.headSha.slice(0, 12), roles: failing.map((f) => f.role).join(",") });
       again = { head: pr.headSha, roles: failing.map((f) => f.role), passes: verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId })).concat(carried), n: rereview + 1 };
       continue;
+    }
+    // D#599 PL-2b-2 (security model 5): a cross-side sandbox round pushes without --force; GitHub must say its new head descends from the head it started on.
+    // A rewritten branch ends the round `failed branch_rewritten` and nothing is reviewed. A runner round's push is fast-forward by construction.
+    const descent = await advanceFixDescentStep(ctx, pr.headSha, after.headSha);
+    if (descent.state !== "descends" && descent.state !== "not_needed") {
+      const code = descent.state === "rewritten" ? "branch_rewritten" : "compare_unavailable";
+      await advanceEventStep(accountId, userId, workItemId, { kind: "fix_round_failed", dedupeKey: `fixfail:${pr.headSha}:${actionId}`, code, headSha: pr.headSha, runId: fix.runId });
+      return { status: "fix_failed", detail: code };
     }
     // The fix changed the head. A run that FAILED yet moved the head is not a "no change": it stays a failed fix, as before.
     if (fixed.status !== "succeeded") {

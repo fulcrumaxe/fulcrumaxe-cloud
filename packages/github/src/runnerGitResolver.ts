@@ -58,6 +58,26 @@ export type RunnerGitResolution = RunnerGitGrant | { verdict: RunnerGitDenial };
 
 export type RunnerGitResolver = (request: RunnerGitRequest) => Promise<RunnerGitResolution | null>;
 
+/**
+ * D#599 PL-2b-2: which item pull request branch (`fx/issue-<n>`) this run is bound to right now, or null. Asked only for a ticket whose `ref` is such a
+ * branch, on the same narrow login (migration 0828). The database applies the three-way agreement (the run's `runner.continues_bound` event, its signed job's
+ * `continues`, and the item's own issue number); the proxy honours the ticket only if the answer is exactly the ticket's `ref`. An error answers null.
+ */
+export type RunnerBoundBranchResolver = (request: { accountId: string; runId: string }) => Promise<string | null>;
+
+export function createRunnerBoundBranchResolver(ghProxyPool: Pool): RunnerBoundBranchResolver {
+  return async function resolveRunnerBoundBranch(request): Promise<string | null> {
+    try {
+      const { rows } = await ghProxyPool.query<{ branch: string | null }>("SELECT public.resolve_runner_bound_branch($1, $2) AS branch", [request.accountId, request.runId]);
+      const branch = rows.length === 1 ? rows[0]!.branch : null;
+      return typeof branch === "string" ? branch : null;
+    } catch (err) {
+      reportError(err, { stage: "github.runner_bound_branch_resolve" });
+      return null;
+    }
+  };
+}
+
 interface ResolverRow {
   verdict: string;
   role: string | null;

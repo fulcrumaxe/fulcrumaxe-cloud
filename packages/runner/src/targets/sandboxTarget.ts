@@ -645,7 +645,9 @@ export class SandboxTarget implements ExecutionTarget {
    * whatever the caller (`resumeAgentRun.ts`) already built, PR diff
    * included; this package has no GitHub access to seed one itself.
    */
-  async resume(run: ExecutionRun, sessionId: string): Promise<{ hookToken: string }> {
+  async resume(run: ExecutionRun, sessionId: string | null): Promise<{ hookToken: string }> {
+    // D#599 PL-2b-2: a null session (a round that claims none) belongs to the runner target only; a sandbox round starts fresh instead.
+    if (sessionId === null) throw new Error("sandbox target: a resume needs a session id");
     assertMeterableModel(run.model);
     assertSelectableBackend(run.backend);
     const bk = this.bookkeeping(run.id);

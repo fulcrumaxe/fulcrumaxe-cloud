@@ -618,6 +618,38 @@ export async function readRecordedRunnerBranch(client: PoolClient, p: { accountI
 }
 
 /**
+ * D#599 PL-2b-2 (security model 2, sandbox half): records, on a SANDBOX run that continues a pull request another side opened, which pull request and
+ * branch it works on. The cloud writes it in the run's own create transaction (`inCreateTransaction`), after the worker checked the pair against the
+ * item's recorded pull request; nothing a sandbox sends can write it. A runner run's event is written by the job issuer and checked three ways
+ * (`readBoundItemBranch`); this one has no signed job, so `readSandboxBoundPullRequest` reads it only for a sandbox run.
+ */
+export async function recordSandboxContinuesBound(client: PoolClient, p: { accountId: string; runId: string; prNumber: number; branch: string }): Promise<void> {
+  if (!(Number.isSafeInteger(p.prNumber) && p.prNumber >= 1 && p.prNumber <= 2_147_483_647 && (RUNNER_RUN_BRANCH.test(p.branch) || ITEM_PR_BRANCH.test(p.branch)))) throw new TypeError("recordSandboxContinuesBound: needs a pull request number and a run or item branch");
+  await insertRunEvent(client, p.accountId, p.runId, RUNNER_CONTINUES_BOUND_KIND, { pr_number: p.prNumber, branch: p.branch, side: "sandbox" });
+}
+
+/**
+ * The pull request a sandbox round of the item was bound to, when the item's newest executor run is on the sandbox side: the newest sandbox executor
+ * run newer than the last runner executor run that has a `runner.continues_bound` event. Null otherwise (a runner run's own record is read by
+ * `readRecordedRunnerPullRequest`). The review and the merge look the pull request up by this pair, not by the side of the newest run. `client` must be under the run's tenant.
+ */
+export async function readSandboxBoundPullRequest(client: PoolClient, p: { accountId: string; workItemId: string }): Promise<{ number: number; branch: string } | null> {
+  const { rows } = await client.query<{ branch: string | null; pr: string | null }>(
+    `SELECT e.payload->>'branch' AS branch, e.payload->>'pr_number' AS pr
+       FROM run_events e JOIN agent_runs a ON a.account_id = e.account_id AND a.id = e.run_id
+      WHERE e.account_id = $1 AND a.work_item_id = $2 AND a.role = 'executor' AND a.runtime <> 'runner' AND a.job_signed IS NULL
+        AND e.kind = '${RUNNER_CONTINUES_BOUND_KIND}' AND e.payload->>'side' = 'sandbox'
+        AND a.created_at >= COALESCE((SELECT max(r.created_at) FROM agent_runs r WHERE r.account_id = a.account_id AND r.work_item_id = a.work_item_id AND r.role = 'executor' AND r.runtime = 'runner'), '-infinity'::timestamptz)
+      ORDER BY a.created_at DESC, a.id DESC, e.seq DESC LIMIT 1`,
+    [p.accountId, p.workItemId],
+  );
+  const row = rows[0];
+  if (!row || typeof row.branch !== "string" || !(RUNNER_RUN_BRANCH.test(row.branch) || ITEM_PR_BRANCH.test(row.branch)) || typeof row.pr !== "string" || !/^[1-9][0-9]{0,9}$/.test(row.pr)) return null;
+  const number = Number(row.pr);
+  return Number.isSafeInteger(number) ? { number, branch: row.branch } : null;
+}
+
+/**
  * The pull request the newest executor run of a work item recorded at `done`, with the run branch recorded next to it (C25 section 1.2):
  * the way the pipeline finds a runner run's pull request, never from the issue's number. Only a run whose `done` verdict was `succeeded`
  * counts: a pull request closed for `scope_violation` (or any other failed verdict) is never the review target, even if it is reopened.

@@ -149,7 +149,7 @@ export interface RunnerLeaseOps {
    */
   gitTicketContext(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
     | { kind: "fenced"; reason: StopReason }
-    | { kind: "context"; role: string; runtime: string; executionMode: string; repo: { id: string; owner: string; name: string } | null; job: Job | null }
+    | { kind: "context"; role: string; runtime: string; executionMode: string; repo: { id: string; owner: string; name: string } | null; job: Job | null; boundBranch?: string | null }
   >;
   /** `git-ticket`, second half: the signed ticket, or null while the signing key or the forward host is not configured (the route then answers 503). */
   signGitTicket(input: { issuer: string; runnerId: string; accountId: string; runId: string; leaseGeneration: number; repo: { id: string; owner: string; name: string }; ref: string }): Promise<{ ticket: string; expiresAt: Date; proxyOrigin: string } | null>;

@@ -32,14 +32,16 @@ interface Wait {
 }
 interface Ctx {
   /** A runner of the account, covering the repo. `online` is a poll just now. A declared capacity may name the cause that limits it. */
-  runner(o: { credential: 'api_key' | 'subscription'; online: boolean; cap?: { light: number; heavy: number; limitedBy?: string } }): Promise<string>;
+  runner(o: { credential: 'api_key' | 'subscription'; online: boolean; protocol?: number; cap?: { light: number; heavy: number; limitedBy?: string } }): Promise<string>;
   /** A runner run of the account. Pass `item` to make it the case's run. */
-  run(o: { role: string; status: string; runnerId?: string; starter: boolean; item?: number; parent?: string; claimableAfterHours?: number }): Promise<string>;
+  run(o: { role: string; status: string; runnerId?: string; starter: boolean; item?: number; parent?: string; claimableAfterHours?: number; minProtocol?: number }): Promise<string>;
   parentFailed(reason: string): Promise<string>;
 }
 interface Case {
   name: string;
   want: { reason: string; limited_by: string | null } | null;
+  /** The sentence, when it is not the protocol's plain line for the reason (the update wait names a version). */
+  wantText?: string;
   setup(c: Ctx): Promise<void>;
 }
 
@@ -87,6 +89,16 @@ const CASES: Case[] = [
       const r = await c.runner({ credential: 'api_key', online: true, cap: { light: 1, heavy: 1, limitedBy: 'usage_limit' } });
       await c.run({ role: 'code-reviewer', status: 'running', runnerId: r, starter: true });
       await c.run({ role: 'code-reviewer', status: 'pending', starter: true, item: 1 });
+    },
+  },
+  // D#599 PL-2b-2: the only live covering runner is below the job's minimum protocol, so the run waits for an update (last in the list, so the other cases keep their pinned fixtures).
+  {
+    name: 'wait-runner-update',
+    want: { reason: 'waiting_for_runner_update', limited_by: null },
+    wantText: 'Waiting for a runner update (version 4 or later) to continue this pull request',
+    setup: async (c) => {
+      await c.runner({ credential: 'api_key', online: true, protocol: 3, cap: { light: 8, heavy: 4 } });
+      await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, minProtocol: 4 });
     },
   },
 ];
@@ -141,7 +153,7 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
     const ctx: Ctx = {
       async runner(o) {
         const id = await insertRunner(admin, me.accountId, me.userId, { credentialMode: o.credential });
-        await admin.query(`UPDATE runners SET last_seen_at = ${o.online ? 'now()' : "now() - interval '1 day'"}, protocol_version = 3, allowed_repo_ids = $2::uuid[] WHERE id = $1`, [id, [repoId]]);
+        await admin.query(`UPDATE runners SET last_seen_at = ${o.online ? 'now()' : "now() - interval '1 day'"}, protocol_version = ${o.protocol ?? 3}, allowed_repo_ids = $2::uuid[] WHERE id = $1`, [id, [repoId]]);
         if (o.cap) await admin.query(`INSERT INTO runner_capacity (runner_id, account_id, declared, light_limit, heavy_limit, limited_by) VALUES ($1, $2, true, $3, $4, $5)`, [id, me.accountId, o.cap.light, o.cap.heavy, o.cap.limitedBy ?? null]);
         return id;
       },
@@ -149,9 +161,9 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
         const id = o.item === undefined ? randomUUID() : runId;
         const running = o.status === 'running';
         await admin.query(
-          `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status, initiated_by, approved_by, runner_id, lease_generation, lease_expires_at, dispatch_repo_id, parent_run_id, claimable_after, created_at)
-           VALUES ($1, $2, $3, $4, 'runner', 'runner_local', $5, $6, $6, $7, $8, ${running ? "now() + interval '60 seconds'" : 'NULL'}, $9, $10, ${o.claimableAfterHours === undefined ? 'NULL' : `now() + interval '${o.claimableAfterHours} hours'`}, $11)`,
-          [id, me.accountId, o.item === undefined ? null : itemId, o.role, o.status, o.starter ? me.userId : null, o.runnerId ?? null, running ? 1 : 0, repoId, o.parent ?? null, new Date(T0)],
+          `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, execution_mode, status, initiated_by, approved_by, runner_id, lease_generation, lease_expires_at, dispatch_repo_id, parent_run_id, claimable_after, created_at, min_protocol_version)
+           VALUES ($1, $2, $3, $4, 'runner', 'runner_local', $5, $6, $6, $7, $8, ${running ? "now() + interval '60 seconds'" : 'NULL'}, $9, $10, ${o.claimableAfterHours === undefined ? 'NULL' : `now() + interval '${o.claimableAfterHours} hours'`}, $11, $12)`,
+          [id, me.accountId, o.item === undefined ? null : itemId, o.role, o.status, o.starter ? me.userId : null, o.runnerId ?? null, running ? 1 : 0, repoId, o.parent ?? null, new Date(T0), o.minProtocol ?? null],
         );
         return id;
       },
@@ -186,7 +198,7 @@ describe('the wait of a queued runner run through getWorkItemActivity and getRun
       // The two screens read the same wait, and its sentence is the protocol's own.
       expect(activity.runs[0]!.wait).toEqual(insight.wait);
       if (c.want === null) expect(insight.wait).toBeNull();
-      else expect(insight.wait).toEqual({ ...c.want, text: waitText(c.want.reason, c.want.limited_by) });
+      else expect(insight.wait).toEqual({ ...c.want, text: c.wantText ?? waitText(c.want.reason, c.want.limited_by) });
       expect(JSON.stringify(insight.wait)).not.toMatch(/undefined|NaN/);
     });
   });

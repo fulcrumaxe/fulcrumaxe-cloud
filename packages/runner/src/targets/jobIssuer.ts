@@ -195,9 +195,17 @@ export interface BoundPullRequestView {
   state: "open" | "closed";
   /** `head.repo.id`; null when the head repository is gone (a deleted fork). */
   headRepoId: number | null;
-  /** `base.repo.id`. */
+  /** The id of THIS repository: the live adapter reports OUR stored GitHub repository id here, never what GitHub says about the base. The head must equal it. */
   baseRepoId: number | null;
   headRef: string;
+}
+
+/** The repository a binding read is about. `local` is true for a `runner_local` run, whose reads go through the local-only fence (the run's own mode, never the repository's). */
+export interface BindingRepo {
+  id: string;
+  owner: string;
+  name: string;
+  local: boolean;
 }
 
 /**
@@ -207,11 +215,11 @@ export interface BoundPullRequestView {
  */
 export interface ContinuationBindingPort {
   /** Pull requests whose head is `branch` in this repository's owner (state `all`), as listed. A non-200 answer is a `status` and no list. */
-  pullRequestsByHead(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<{ status: number; pulls?: readonly BoundPullRequestView[] }>;
+  pullRequestsByHead(input: { repo: BindingRepo; branch: string }): Promise<{ status: number; pulls?: readonly BoundPullRequestView[] }>;
   /** The repository's `default_branch`; null when it could not be read. */
-  defaultBranch(input: { repo: { id: string; owner: string; name: string } }): Promise<string | null>;
+  defaultBranch(input: { repo: BindingRepo }): Promise<string | null>;
   /** The HTTP status of the branch's protection read: 200 means protected, 404 means not. Any other status is "could not tell". */
-  branchProtection(input: { repo: { id: string; owner: string; name: string }; branch: string }): Promise<{ status: number }>;
+  branchProtection(input: { repo: BindingRepo; branch: string }): Promise<{ status: number }>;
 }
 
 export interface JobIssuerDeps {
@@ -248,12 +256,14 @@ const ITEM_BRANCH_PREFIX = "fx/issue-";
  * refuses the repository's default branch and any protected branch. Returns the pull request number to sign. Every refusal is a closed code and nothing is recorded.
  * `expected` is the number the caller recorded for the item, when it has one: GitHub must say the same.
  */
-async function bindItemPullRequest(
+export async function bindItemPullRequest(
   binding: ContinuationBindingPort | undefined,
-  repo: { id: string; owner: string; name: string },
+  repo: BindingRepo,
   branch: string,
   expected: number | undefined,
 ): Promise<number> {
+  // The caller always names the pull request number it recorded (D#599 R-599-PL2b-1-c): a continuation with none is refused, not guessed from GitHub.
+  if (expected === undefined) throw new JobIssueError("continues_pr_mismatch");
   if (!binding) throw new JobIssueError("continues_base_unavailable");
   const unavailable = (): JobIssueError => new JobIssueError("continues_base_unavailable", { retryable: true });
   let listed: Awaited<ReturnType<ContinuationBindingPort["pullRequestsByHead"]>>;
@@ -272,7 +282,7 @@ async function bindItemPullRequest(
   const open = mine.filter((p) => p.state === "open");
   if (open.length === 0) throw new JobIssueError("continues_pr_not_open");
   const pr = open[0]!;
-  if (open.length > 1 || pr.headRef !== branch || !Number.isSafeInteger(pr.number) || pr.number < 1 || (expected !== undefined && pr.number !== expected)) throw new JobIssueError("continues_pr_mismatch");
+  if (open.length > 1 || pr.headRef !== branch || !Number.isSafeInteger(pr.number) || pr.number < 1 || pr.number !== expected) throw new JobIssueError("continues_pr_mismatch");
 
   let protection: { status: number };
   try {
@@ -348,7 +358,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         if (itemBranch) {
           // `n` must be this item's own issue number.
           if (context.issueNumber === undefined || context.issueNumber === null || branch !== `${ITEM_BRANCH_PREFIX}${context.issueNumber}`) throw new JobIssueError("continues_pr_mismatch");
-          const repoRef = { id: run.repoId, owner: context.repo.owner, name: context.repo.name };
+          const repoRef: BindingRepo = { id: run.repoId, owner: context.repo.owner, name: context.repo.name, local: input.jobMode !== "verified" };
           const prNumber = await bindItemPullRequest(deps.continuationBinding, repoRef, branch, input.continues.prNumber);
           boundPullRequest = { prNumber, branch };
           continues = { parent_run_id: input.continues.parentRunId, session_id: null, branch, pr_number: prNumber };

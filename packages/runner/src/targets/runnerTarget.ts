@@ -215,14 +215,25 @@ export class RunnerTarget implements ExecutionTarget {
 
   async dispatch(run: ExecutionRun): Promise<DispatchResult> {
     assertRunnerBackend(run.backend);
-    await this.deps.issuer.issue({ run, ...this.modeInput });
+    // D#599 PL-2b-2: a round that carries on from a pull request the other side opened is a continuation with no session of its own to resume.
+    if (run.continuesFresh === true && run.continuesBranch !== undefined) {
+      await this.deps.issuer.issue({
+        run,
+        ...this.modeInput,
+        continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
+      });
+    } else await this.deps.issuer.issue({ run, ...this.modeInput });
     this.markQueued();
     return { queued: true };
   }
 
-  async resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult> {
+  async resume(run: ExecutionRun, sessionId: string | null): Promise<DispatchResult> {
     assertRunnerBackend(run.backend);
-    await this.deps.issuer.issue({ run, ...this.modeInput, continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }) } });
+    await this.deps.issuer.issue({
+      run,
+      ...this.modeInput,
+      continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
+    });
     this.markQueued();
     return { queued: true };
   }

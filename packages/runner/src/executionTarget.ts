@@ -257,6 +257,16 @@ export interface ExecutionRun {
    * to the job issuer, which refuses the run unless the branch it derives for the work item is exactly this one. Absent for every other run.
    */
   continuesBranch?: string;
+  /**
+   * D#599 PL-2b-2: the pull request number of an item pull request branch (`fx/issue-<n>`) that `continuesBranch` names. Set with it by a cross-side start
+   * (`StartAgentRunInput.continues`); the runner job issuer reads GitHub and signs the number only if GitHub agrees. Never set for a run branch.
+   */
+  continuesPrNumber?: number;
+  /**
+   * D#599 PL-2b-2: set on a run that starts a round on a branch another side opened (not a follow-up): `RunnerTarget.dispatch` then issues a continuation
+   * with no session (a foreign session is never claimed). A follow-up of a lost round sets `continuesBranch` alone and goes through `resume`.
+   */
+  continuesFresh?: boolean;
   workdir?: string;
   /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
   contextSections?: readonly ContextSection[];
@@ -326,7 +336,7 @@ export interface ExecutionTarget {
    * seeding the fresh fallback's prompt with the PR diff is the CALLER's
    * job too -- `run.prompt` is whatever the caller already built.
    */
-  resume(run: ExecutionRun, sessionId: string): Promise<DispatchResult>;
+  resume(run: ExecutionRun, sessionId: string | null): Promise<DispatchResult>;
   /**
    * D#2 H09b2 (C10's revised criteria 2-4, H09.5/H09.7/H09.8): called once
    * a dispatched run's hook has resumed (or the caller decided the run's

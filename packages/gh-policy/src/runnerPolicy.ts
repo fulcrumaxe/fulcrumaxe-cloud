@@ -1,3 +1,4 @@
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { isCanonicalPath } from "./canonicalPath.js";
 import { ALLOWED_METHODS } from "./decide.js";
 import { parseTarget } from "./pathTarget.js";
@@ -22,8 +23,14 @@ import type { Decision, InstallationTarget, ParsedRefUpdates, Product, TokenScop
 /** The roles whose commits are pushed. Any other role may read only. */
 export const RUNNER_PUSHING_ROLES: ReadonlySet<string> = new Set(["executor", "docs-writer"]);
 
-/** The ticket's `ref` claim: the one branch a run may push. */
-export const RUNNER_TICKET_REF_RE = /^fx\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]*$/;
+const RUN_BRANCH_SOURCE = "fx\\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]*";
+const ITEM_BRANCH_SOURCE = ITEM_PR_BRANCH.source.replace(/^\^/, "").replace(/\$$/, "");
+
+/**
+ * The ticket's `ref` claim: the one branch a run may push. A run branch, or (D#599 PL-2b) the item's own pull request branch `fx/issue-<n>`,
+ * taken from the one shared `ITEM_PR_BRANCH` constant so no copy can drift.
+ */
+export const RUNNER_TICKET_REF_RE = new RegExp(`^(?:${RUN_BRANCH_SOURCE}|${ITEM_BRANCH_SOURCE})$`);
 
 // No `workflows`, `pull_requests`, `issues`, `checks` or `statuses`: GitHub itself
 // refuses a push that touches .github/workflows/** with a token that lacks `workflows`.
