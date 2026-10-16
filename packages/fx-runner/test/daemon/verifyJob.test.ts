@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { sha256Text } from "@fulcrumaxe/runner-protocol";
 import { verifyJob } from "../../src/daemon/verifyJob.js";
@@ -81,9 +82,43 @@ describe("a fix round's branch must have the shape of a run branch (C25 section 
       expect(check(signRaw(jobFor({ continues: continuesOn(branch) }))).ok, branch).toBe(false);
     }
   });
-  it("the item's pull request branch with a null session is read by the schema (D#599 PL-2b-1) and still refused here until the runner learns it (PL-2b-3)", () => {
-    const cross = { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: null, branch: "fx/issue-12", pr_number: 41 };
-    expect(check(signRaw(jobFor({ continues: cross })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+  describe("the item's pull request branch (D#599 PL-2b-3)", () => {
+    const parent = "33333333-3333-4333-8333-333333333333";
+    const cross = { parent_run_id: parent, session_id: null, branch: "fx/issue-12", pr_number: 41 };
+    it("a null session, the item branch and its pull request number are accepted, and the parsed job is returned", () => {
+      const signed = signRaw(jobFor({ continues: cross }));
+      expect(check(signed)).toEqual({ ok: true, job: expect.objectContaining({ continues: cross }) });
+    });
+    it("the item branch with a non-null session, without a pull request number, or with a different branch is continues_branch_invalid, signature good", () => {
+      expect(check(signRaw(jobFor({ continues: { ...cross, session_id: "s1" } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      const withoutPr: Record<string, unknown> = { ...cross };
+      delete withoutPr["pr_number"];
+      expect(check(signRaw({ ...jobFor(), continues: withoutPr }))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      expect(check(signRaw(jobFor({ continues: { ...cross, branch: "main" } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      expect(check(signRaw(jobFor({ continues: { ...cross, branch: "main", pr_number: undefined } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+    });
+    it("each other near-miss name is refused too, with or without a pull request number", () => {
+      for (const branch of ["fx/issue-0", "fx/issue-012", "fx/issue-12/x", "fx/issues-12", "refs/heads/fx/issue-12", "fx/docs/x", "fx/issue-12\n"]) {
+        expect(check(signRaw(jobFor({ continues: { ...cross, branch } }))), branch).toEqual({ ok: false, reason: "continues_branch_invalid" });
+        expect(check(signRaw(jobFor({ continues: { ...cross, branch, pr_number: undefined } }))), `${branch} (no pr)`).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      }
+    });
+    it("a forged signature on a valid item-branch job is job_signature_invalid: the shape check is not a substitute for the signature", () => {
+      const job = jobFor({ continues: cross });
+      const forger = generateKeyPairSync("ed25519").privateKey;
+      expect(check(signRaw(job, forger))).toEqual({ ok: false, reason: "job_signature_invalid" });
+      expect(check(signRaw(job)).ok).toBe(true);
+    });
+    it("a run branch with a pull request number is refused", () => {
+      const run = "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1";
+      expect(check(signRaw(jobFor({ continues: { parent_run_id: parent, session_id: "s1", branch: run, pr_number: 41 } })))).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      expect(check(signRaw(jobFor({ continues: { parent_run_id: parent, session_id: null, branch: run } }))).ok).toBe(true);
+    });
+    it("is read before the signature: an unsigned job with a bad branch still gets the closed reason, and a job on a non-executor role keeps continues_wrong_role", () => {
+      const job = jobFor({ continues: { ...cross, branch: "main" } });
+      expect(check({ job })).toEqual({ ok: false, reason: "continues_branch_invalid" });
+      expect(check(signRaw(jobFor({ role: "code-reviewer", role_tools_sha256: roleToolsDigest("code-reviewer"), continues: cross })))).toEqual({ ok: false, reason: "continues_wrong_role" });
+    });
   });
   it("a name with .. fails the job schema, so it is refused before the shape check is reached", () => {
     expect(check(signRaw(jobFor({ continues: continuesOn(`fx/${U}-g1/../../main`) }))).ok).toBe(false);

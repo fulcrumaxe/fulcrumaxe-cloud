@@ -9,9 +9,10 @@
  *  - a review role's job names the commit to review (`review.head_sha`), and no other role's job carries one (D#6 R4d-4, C33 section 1.1);
  *  - a job's sandbox allowances (D#6 R7b) must clear the protocol's floor, checked here by the runner itself even though the cloud signed them and
  *    checked them too: a job that crosses it is refused as `sandbox_allowance_forbidden`, before any process or directory exists;
- *  - a `continues.branch` must have the shape of a run branch (`fx/<uuid>-g<n>`, C25 section 1.3), checked again here before anything is made.
+ *  - a `continues.branch` must have the shape of a run branch (`fx/<uuid>-g<n>`, C25 section 1.3) or of the item's pull request branch (`fx/issue-<n>`,
+ *    D#599 PL-2b), checked again here before anything is made. The item branch needs a `pr_number` and a null `session_id`; a run branch has no `pr_number`.
  */
-import { isReviewJobRole, JobSignatureError, verifyJob as verifyJobSignature, type Job, type JobKeyring } from "@fulcrumaxe/runner-protocol";
+import { isReviewJobRole, ITEM_PR_BRANCH, JobSignatureError, verifyJob as verifyJobSignature, type Job, type JobKeyring } from "@fulcrumaxe/runner-protocol";
 import { allowanceRefusal } from "../sandbox/allowances.js";
 import { jobHashRefusals, type HashRefusal } from "../job/verifyHashes.js";
 import { CONTINUES_BRANCH } from "./push.js";
@@ -23,10 +24,22 @@ export type VerifiedJob = { ok: true; job: Job } | { ok: false; reason: JobRefus
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** The two shapes the runner accepts, checked here independently of the schema: a run branch alone, or an item branch with its pull request number and no session. */
+function continuesShapeValid(continues: Record<string, unknown>): boolean {
+  if (typeof continues.branch !== "string") return false;
+  if (CONTINUES_BRANCH.test(continues.branch)) return continues.pr_number === undefined;
+  if (ITEM_PR_BRANCH.test(continues.branch)) return continues.pr_number !== undefined && continues.session_id === null;
+  return false;
+}
+
 /** Checks a signed job taken from a claim reply. `keyring` holds the pinned public keys by `key_id`. */
 export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date): VerifiedJob {
   const repo = isObject(signed) && isObject(signed["job"]) ? signed["job"]["repo"] : undefined;
   if (isObject(repo) && repo["private"] !== true) return { ok: false, reason: "repo_not_private" };
+  // The continuation's shape is read from the raw object first, like the privacy flag: a branch that is neither shape, or an item branch without its
+  // pull request number or with a session, gets its own closed reason even though the job schema would also refuse it (as a malformed job).
+  const rawContinues = isObject(signed) && isObject(signed["job"]) ? signed["job"]["continues"] : undefined;
+  if (isObject(rawContinues) && !continuesShapeValid(rawContinues)) return { ok: false, reason: "continues_branch_invalid" };
   let job: Job;
   try {
     job = verifyJobSignature(signed, keyring, { now });
@@ -37,7 +50,7 @@ export function verifyJob(signed: unknown, keyring: JobKeyring, now: Date): Veri
   const refusals = jobHashRefusals(job);
   if (refusals.length > 0) return { ok: false, reason: refusals[0]! };
   if (job.continues !== null && job.role !== "executor") return { ok: false, reason: "continues_wrong_role" };
-  if (job.continues !== null && !CONTINUES_BRANCH.test(job.continues.branch)) return { ok: false, reason: "continues_branch_invalid" };
+  if (job.continues !== null && !continuesShapeValid(job.continues)) return { ok: false, reason: "continues_branch_invalid" };
   if (isReviewJobRole(job.role) && job.review === undefined) return { ok: false, reason: "review_sha_missing" };
   if (!isReviewJobRole(job.role) && job.review !== undefined) return { ok: false, reason: "review_wrong_role" };
   if (job.sandbox_allowances !== undefined && allowanceRefusal({ entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s }) !== null) return { ok: false, reason: "sandbox_allowance_forbidden" };
