@@ -1,7 +1,7 @@
 import type { AdvanceFacade, AdvancePrSource, AdvanceRunOutcome, AdvanceRunStart, AdvanceTriageResult } from "@fx/worker";
 import type { IssueReader } from "@fx/github";
 import { advanceActionFor } from "@fx/core/src/work-items/advance.js";
-import { buildClassifyRunPrompt, decideFromLabels, proposalIntakeBody } from "@fx/pipeline";
+import { buildClassifyRunPrompt, decideFromLabels, pauseOnDenial, proposalIntakeBody, siteStep } from "@fx/pipeline";
 
 /** The login the triage event carries for an item approved from a proposal. The item is internal because a person approved it; this is a fixed label, not a GitHub account. */
 export const PROPOSAL_TRIAGE_LOGIN = "fx-proposal-approval";
@@ -133,16 +133,19 @@ export async function loadBody(worker: AdvanceWorker | null, reader: IssueReader
 }
 
 /** The classify run on the PM card. The key names the approval (the action), so a replayed step finds its run and a fresh approval after a failure starts a new one. */
-export async function startClassifyBody(worker: AdvanceWorker | null, accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
+export async function startClassifyBody(worker: AdvanceWorker | null, accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded, attempt = 0): Promise<AdvanceRunStart> {
   if (!worker) return { ok: false, reason: "worker_unavailable" };
-  return worker.advanceStartRun({
-    accountId,
-    workItemId,
-    haltEpoch,
-    step: `classify:${actionId}`,
-    role: "project-manager",
-    prompt: buildClassifyRunPrompt({ owner: loaded.owner, name: loaded.name, number: loaded.number, title: loaded.title, body: loaded.body, labels: loaded.hints }),
-  });
+  // D#483 S5-k1c: a start a spending limit denied is a named pause, and each later ask is a new attempt (its own key: a replay of the denied key finds its `refused_spend` run).
+  return pauseOnDenial(
+    await worker.advanceStartRun({
+      accountId,
+      workItemId,
+      haltEpoch,
+      step: siteStep("classify", actionId, attempt),
+      role: "project-manager",
+      prompt: buildClassifyRunPrompt({ owner: loaded.owner, name: loaded.name, number: loaded.number, title: loaded.title, body: loaded.body, labels: loaded.hints }),
+    }),
+  );
 }
 
 /**

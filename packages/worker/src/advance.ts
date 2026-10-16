@@ -169,7 +169,7 @@ export interface AdvanceModuleDeps {
   triage: ((pool: Pool, accountId: string, input: AdvanceTriageInput) => Promise<AdvanceTriageResult>) | null;
   /** D#483 P2, injected from apps/web the same way: the pipeline's panel, Spec and build, run with the runner pool and the run ports above. */
   panel?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts) => Promise<AdvanceStepResult>) | null;
-  spec?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts, options: { attempt?: string }) => Promise<AdvanceStepResult>) | null;
+  spec?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts, options: { attempt?: string; spendAttempt?: number }) => Promise<AdvanceStepResult>) | null;
   build?: ((pool: Pool, accountId: string, workItemId: string, approvalId: string, ports: AdvanceStepPorts, options: { expectedVersion?: number; spendAttempt?: number }) => Promise<AdvanceStepResult>) | null;
   /** D#6 R4d-5b, injected from apps/web the same way: the pipeline's `publishRespec`, the next Spec version (the same text plus the file list) from the project manager's result. */
   respec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown, expectedVersion: number) => Promise<{ status: string; reason?: string; version?: number }>) | null;
@@ -433,7 +433,7 @@ export interface AdvanceFacade {
    * D#483 P2: the pipeline's Spec step (re-enters the panel, runs the PM, publishes the Spec). `attempt` (the approval's id)
    * names this attempt's PM run, so an approval after a PM run that failed starts a fresh one (P3).
    */
-  advanceSpec(who: AdvanceStepWho, attempt?: string): Promise<AdvanceStepResult>;
+  advanceSpec(who: AdvanceStepWho, attempt?: string, spendAttempt?: number): Promise<AdvanceStepResult>;
   /**
    * D#483 P2: starts the executor for an item at `spec_ready` and records `spec_ready -> in_progress`. `approvalId` names the
    * approval (the run action). P3: `expectedVersion` is the Spec version the person approved; a newer one refuses `spec_changed`.
@@ -976,12 +976,14 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
-  async function advanceSpec(who: AdvanceStepWho, attempt?: string): Promise<AdvanceStepResult> {
+  async function advanceSpec(who: AdvanceStepWho, attempt?: string, spendAttempt?: number): Promise<AdvanceStepResult> {
     if (!deps.spec) return { status: "refused", reason: "spec_unavailable" };
     if (attempt !== undefined && !UUID_RE.test(attempt)) return { status: "refused", reason: "invalid_input" };
+    // D#483 S5-k1c: the number of the ask when an earlier ask of the PM's start was denied by a spending limit (absent for the first ask).
+    if (spendAttempt !== undefined && !(Number.isSafeInteger(spendAttempt) && spendAttempt >= 0 && spendAttempt <= MAX_WAITING_ATTEMPT)) return { status: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return bad;
-    const out = await deps.spec(runnerPool, who.accountId, who.workItemId, portsFor(who), attempt !== undefined ? { attempt } : {});
+    const out = await deps.spec(runnerPool, who.accountId, who.workItemId, portsFor(who), { ...(attempt !== undefined ? { attempt } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) });
     console.info(JSON.stringify({ event: "advance.spec", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, stage: out.stage ?? null, version: out.version ?? null }));
     return out;
   }
@@ -1461,7 +1463,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function advanceRecordEvent(who: AdvanceStepWho, event: Omit<DriverEventInput, "workItemId">): Promise<{ recorded: boolean }> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId)) return { recorded: false };
-    return writeEvent(who, event);
+    const out = await writeEvent(who, event);
+    // D#483 S5-k1c: a start before the build that a limit denied leaves its waiting fact through here. Like the build's, a limit pause may outlast the workflow
+    // that is asking (it parks after four hours), so the sweep is told there is work to look at.
+    if (out.recorded && event.kind === "stage_waiting" && event.code != null && RESERVATION_PAUSE_REASONS.includes(event.code)) void markWorkPending("stage-resume-sweep", { since: Date.now() + STAGE_RESUME_FIRST_LOOK_MS });
+    return out;
   }
 
   async function advanceCancel(who: AdvanceStepWho, runId: string): Promise<void> {

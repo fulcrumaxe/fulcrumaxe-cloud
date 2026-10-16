@@ -4,6 +4,8 @@ import { PanelYieldError } from "../plan/panel.js";
 import { PanelSeatAbortedError, PanelSeatFailedError } from "../plan/sandboxPanelRunner.js";
 import type { WaitClock } from "../plan/waitBudget.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
+import { pauseForDenial } from "./reservationPauses.js";
+import { SpecWriterPausedError } from "./stageStarts.js";
 
 /**
  * D#483 P2: the panel's `PanelRunner` and the Spec step's `SpecWriter`, over real agent runs started through the
@@ -123,10 +125,15 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     }
   }
 
-  async function runKeyed(step: string, role: string, prompt: string, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult> {
+  async function runKeyed(step: string, role: string, prompt: string, signal: AbortSignal, clock?: WaitClock, spendPauses = false): Promise<PanelSeatResult> {
     if (signal.aborted) throw new PanelSeatAbortedError(); // before start: nothing exists to stop
     const started = await ports.startRun({ step, role, prompt, clone: true });
-    if (!started.ok) throw new PanelSeatFailedError(`refused:${started.reason}`);
+    if (!started.ok) {
+      // D#483 S5-k1c: the Spec PM's start denied by a spending limit is a named pause, not a failed run. (A panel seat's denial is still absorbed as a seat failure: that is S5-k1e.)
+      const pause = spendPauses ? pauseForDenial(started.reason) : null;
+      if (pause !== null) throw new SpecWriterPausedError(pause);
+      throw new PanelSeatFailedError(`refused:${started.reason}`);
+    }
     return follow(started.runId, signal, clock);
   }
 
@@ -135,7 +142,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
       runSeat: (request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock) => runKeyed(request.idempotencyKey, request.role, request.prompt, signal, clock),
     },
     writer: {
-      writeSpec: (request: SpecWriteRequest, signal: AbortSignal, clock?: WaitClock) => runKeyed(request.idempotencyKey, "project-manager", request.prompt, signal, clock),
+      writeSpec: (request: SpecWriteRequest, signal: AbortSignal, clock?: WaitClock) => runKeyed(request.idempotencyKey, "project-manager", request.prompt, signal, clock, true),
     },
   };
 }

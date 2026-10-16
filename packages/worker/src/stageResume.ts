@@ -18,8 +18,10 @@ import type { AdvanceStartArgs } from "./advance.js";
  *
  * What one pass does with each listed item, in order, stopping at the first no:
  *   1. the stage's entry in the registry (apps/web hands the registry in; a stage with no entry is never listed here);
- *   2. the approval that started the stage is still the latest done `advance_work_item` request, its person is still an owner or admin, no newer request
- *      is waiting, no run of the item is live, and no Spec version was written after the approval (a changed Spec ends the parking: what is built is what was approved);
+ *   2. the approval that started the stage (the entry says its kind, and whether it may sit on the card this one replaced) is still the latest done request of that
+ *      kind, its person is still an owner or admin, no newer request is waiting, no run of the item is live, and (for a stage that builds on a Spec) no Spec version was
+ *      written after the approval (a changed Spec ends the parking: what runs is what was approved). Every earlier run of the stage must have ended `refused_spend`: a
+ *      run that really started means the stage was allowed once, and what it came to is the workflow's own outcome, not something to start again every pass;
  *   3. the read-only headroom check, for the very reservation the restart will ask for (the seat the stage's role resolves to, and `checkHeadroom` of @fx/spend).
  *      A start that would still be denied by a limit writes NO run row: it refreshes the waiting fact (so the card keeps naming the limit for as long as it
  *      lasts) and nothing else. A denial that is not a pause (`account_not_active`) changes nothing;
@@ -35,7 +37,14 @@ export interface ParkedStageEntryInput {
   itemStages: readonly string[];
   pauses: readonly string[];
   role: string;
-  runKeyLike(workItemId: string, actionId: string): string;
+  /** The approval the restart runs under: its kind, and whether one on the card this one replaced counts (the pipeline's card for an issue replaces the webhook's). */
+  approval: { kind: "advance_work_item" | "respec_work_item"; from: "self" | "origin" };
+  /** The stage builds on a published Spec: the item needs one, and one written after the approval ends the parking. */
+  needsSpec: boolean;
+  /** The restarted workflow is a re-spec. */
+  respec: boolean;
+  /** The SQL LIKE patterns (default backslash escape) of the idempotency keys of the stage's runs for one item and approval. */
+  runKeyLikes(workItemId: string, actionId: string): string[];
   /** The next attempt number, given the idempotency keys of the stage's earlier runs for this approval (0 when there are none). */
   nextAttempt(keys: readonly string[]): number;
   /** A denial of the spend check as a pause name, or null when it is not one (the same mapping the start itself uses). */
@@ -69,7 +78,7 @@ const LIST_LIMIT = 200;
 export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = Object.freeze(["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"]);
 const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
-type Plan = { userId: string; actionId: string; haltEpoch: number; specVersion: number; attempt: number };
+type Plan = { userId: string; actionId: string; haltEpoch: number; specVersion: number | null; attempt: number };
 type PlanOrSkip = { plan: Plan } | { skip: string };
 
 export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
@@ -91,24 +100,30 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       if (!item) return { skip: "item_gone" };
       if (item.halted) return { skip: "halted" };
       if (item.provenance !== "internal" || !entry.itemStages.includes(item.stage)) return { skip: "not_parked_here" };
-      if (item.version === null || item.spec_at === null) return { skip: "no_spec" };
+      if (entry.needsSpec && (item.version === null || item.spec_at === null)) return { skip: "no_spec" };
 
+      // The cards an approval of this stage may sit on: the item itself and, where the entry says so, the card this one replaced (retired with `superseded:<this item>`).
+      const targets = [workItemId];
+      if (entry.approval.from === "origin") {
+        const origin = await client.query<{ work_item_id: string }>("SELECT DISTINCT work_item_id FROM work_item_transitions WHERE account_id = $1 AND to_stage = 'closed' AND source_ref = $2", [accountId, `superseded:${workItemId}`]);
+        targets.push(...origin.rows.map((r) => r.work_item_id));
+      }
       // Any request of this kind that is still waiting to be performed means a person is acting right now: leave it to them.
-      const open = await client.query("SELECT 1 FROM run_action_requests WHERE account_id = $1 AND target_id = $2 AND kind IN ('advance_work_item', 'respec_work_item') AND state IN ('accepted', 'claimed') LIMIT 1", [accountId, workItemId]);
+      const open = await client.query("SELECT 1 FROM run_action_requests WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind IN ('advance_work_item', 'respec_work_item') AND state IN ('accepted', 'claimed') LIMIT 1", [accountId, targets]);
       if (open.rows.length > 0) return { skip: "approval_in_flight" };
       const approval = (
         await client.query<{ id: string; requested_by: string; principal_kind: string; finished_at: Date }>(
           `SELECT id, requested_by, principal_kind, finished_at FROM run_action_requests
-            WHERE account_id = $1 AND target_id = $2 AND kind = 'advance_work_item' AND state = 'done' AND outcome ->> 'advance' = 'started'
+            WHERE account_id = $1 AND target_id = ANY($2::uuid[]) AND kind = $3 AND state = 'done' AND outcome ->> 'advance' = 'started'
             ORDER BY finished_at DESC, id DESC LIMIT 1`,
-          [accountId, workItemId],
+          [accountId, targets, entry.approval.kind],
         )
       ).rows[0];
       if (!approval) return { skip: "no_approval" };
       const who = SESSION_RE.exec(approval.requested_by);
       if (!who || approval.principal_kind !== "session") return { skip: "no_approval" };
       // The Spec the person approved is the newest one: one written after the approval was performed is a different Spec, and the person decides about it.
-      if (item.spec_at.getTime() > approval.finished_at.getTime()) return { skip: "spec_changed" };
+      if (entry.needsSpec && item.spec_at !== null && item.spec_at.getTime() > approval.finished_at.getTime()) return { skip: "spec_changed" };
       const member = await client.query<{ role: string }>("SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2", [accountId, who[1]]);
       const role = member.rows[0]?.role;
       if (role !== "owner" && role !== "admin") return { skip: "approver_gone" };
@@ -127,11 +142,14 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       );
       if (refusedAfterWait.rows.length > 0) return { skip: "refused_after_wait" };
 
-      const keys = await client.query<{ idempotency_key: string }>(
-        "SELECT idempotency_key FROM agent_run_idempotency_keys WHERE account_id = $1 AND idempotency_key LIKE $2 ESCAPE '\\'",
-        [accountId, entry.runKeyLike(workItemId, approval.id)],
+      const keys = await client.query<{ idempotency_key: string; status: string | null }>(
+        `SELECT k.idempotency_key, r.status FROM agent_run_idempotency_keys k LEFT JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
+          WHERE k.account_id = $1 AND k.idempotency_key LIKE ANY($2::text[])`,
+        [accountId, entry.runKeyLikes(workItemId, approval.id)],
       );
-      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: Number(item.version), attempt: entry.nextAttempt(keys.rows.map((r) => r.idempotency_key)) } };
+      // A run of this stage that really started (it did not end `refused_spend`) means the stage was allowed once: what came of it is the workflow's own outcome.
+      if (keys.rows.some((r) => r.status !== "refused_spend")) return { skip: "stage_already_ran" };
+      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt: entry.nextAttempt(keys.rows.map((r) => r.idempotency_key)) } };
     });
   }
 
@@ -201,7 +219,16 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
             counts.skipped += 1;
             continue;
           }
-          await deps.startAdvance({ accountId: c.account_id, userId: plan.userId, workItemId: c.work_item_id, actionId: plan.actionId, haltEpoch: plan.haltEpoch, specVersion: plan.specVersion, ...(plan.attempt > 0 ? { startAttempt: plan.attempt } : {}) });
+          await deps.startAdvance({
+            accountId: c.account_id,
+            userId: plan.userId,
+            workItemId: c.work_item_id,
+            actionId: plan.actionId,
+            haltEpoch: plan.haltEpoch,
+            ...(entry.needsSpec ? { specVersion: plan.specVersion } : {}),
+            ...(entry.respec ? { respec: true } : {}),
+            ...(plan.attempt > 0 ? { startAttempt: plan.attempt } : {}),
+          });
           counts.resumed += 1;
           log(JSON.stringify({ event: "stage_resume.resumed", stage: entry.stage, work_item_id: c.work_item_id, attempt: plan.attempt }));
         } catch (err) {

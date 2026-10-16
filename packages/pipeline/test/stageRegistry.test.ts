@@ -7,6 +7,7 @@ import { PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "..
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, isWaitingStage, stageOfFact } from "../src/advance/waitingStages.js";
 import { RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
 import { attemptOfKey } from "../src/advance/attemptKeys.js";
+import { likeToRegex } from "./helpers/likeToRegex.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string): string => readFileSync(join(here, rel), "utf8");
@@ -22,9 +23,9 @@ describe("the parked-stage registry", () => {
     for (const stage of UNREGISTERED_STAGES) expect(WAITING_STAGES).toContain(stage);
   });
 
-  it("this PR registers the build stage only", () => {
-    expect(registeredStages().map((e) => e.stage)).toEqual(["build"]);
-    expect([...UNREGISTERED_STAGES].sort()).toEqual(["classify", "fix_round", "panel", "respec", "review", "spec"]);
+  it("S5k1c-8: the allowlist lost classify, spec and respec (the short Spec waits as `spec`); review, fix round and the panel are the later rows' to remove", () => {
+    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec"]);
+    expect([...UNREGISTERED_STAGES].sort()).toEqual(["fix_round", "panel", "review"]);
   });
 
   it("an entry is keyed by its own stage and parks only for a spend pause at stage positions the table lists", () => {
@@ -41,9 +42,9 @@ describe("the parked-stage registry", () => {
     expect(e.itemStages).toEqual(["spec_ready"]);
     const item = "11111111-2222-4333-8444-555555555555";
     const approval = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-    const like = e.runKeyLike(item, approval);
-    const toRegex = (p: string): RegExp => new RegExp(`^${p.replace(/\\(.)/g, "\u0000$1").replace(/%/g, ".*").replace(/_/g, ".").replace(/\u0000(.)/g, (_m, c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))}$`);
-    const re = toRegex(like);
+    const likes = e.runKeyLikes(item, approval);
+    expect(likes).toHaveLength(1);
+    const re = likeToRegex(likes[0]!);
     for (const k of [`advance:${item}:build:v2:${approval}`, `advance:${item}:build:v2:${approval}:s3`, `advance:${item}:build:v2:${approval}:s3:n0123456789abcdef`]) expect(re.test(k), k).toBe(true);
     for (const k of [`advance:${item}:build:v2:other`, `advance:${item}:spec:v2:${approval}`, `advance:00000000-0000-4000-8000-000000000000:build:v2:${approval}`]) expect(re.test(k), k).toBe(false);
   });

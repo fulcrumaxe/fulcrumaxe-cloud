@@ -14,6 +14,8 @@ export * from "./advance/reservationPauses.js";
 export * from "./advance/waitingStages.js";
 export * from "./advance/attemptKeys.js";
 export * from "./advance/stageRegistry.js";
+export * from "./advance/stageWords.js";
+export * from "./advance/stageStarts.js";
 export * from "./estimate/index.js";
 export * from "./concurrency/index.js";
 export { agentOutputBlock } from "./plan/envelope.js";

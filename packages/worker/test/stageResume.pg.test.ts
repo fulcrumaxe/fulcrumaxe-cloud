@@ -33,7 +33,10 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
     itemStages: ["spec_ready"],
     pauses: PAUSES,
     role: "executor",
-    runKeyLike: (item, approval) => `advance:${item}:build:v%:${approval}%`,
+    approval: { kind: "advance_work_item", from: "self" },
+    needsSpec: true,
+    respec: false,
+    runKeyLikes: (item, approval) => [`advance:${item}:build:v%:${approval}%`],
     nextAttempt: (keys) => (keys.length === 0 ? 0 : Math.max(...keys.map((k) => Number(/:s(\d+)(?::n[0-9a-f]{16})?$/.exec(k)?.[1] ?? 0))) + 1),
     pauseForDenial: (d) => DENIALS[d] ?? null,
   };
