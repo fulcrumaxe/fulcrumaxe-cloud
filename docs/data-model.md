@@ -69,6 +69,8 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `domain_events` | `0627_webhooks.sql` | tenant | yes |
 | `webhook_endpoints` | `0627_webhooks.sql` | tenant | yes |
 | `webhook_deliveries` | `0627_webhooks.sql` | tenant | yes |
+| `aap_instances` | `0837_aap.sql` | tenant (writes only through the `aap_definer` functions; `app_user` reads without the credential hash) | yes |
+| `action_approvals` | `0837_aap.sql` | tenant (same; `app_user` reads every column) | yes |
 
 `0618_discussions.sql` (D#71 DS-1) is the Discussions-and-work-item store: `discussions`/`discussion_comments`/`discussion_revisions` mirror a Discussion's content and edit history, `discussion_counters` tracks per-discussion sequence counters, `spec_versions`/`spec_corrections` version a Discussion's frozen Spec text and later corrections to it, and `work_item_deps` records dependency edges between `work_items` rows; the same migration adds `work_items.discussion_id`/`parent_id`/`title` and `agent_runs.spec_version_id`, and a `platform_ops`-only `erase_discussion_content()` entry point. `0627_webhooks.sql` (`#173`) is the webhook outbox: `domain_events` is an append-style per-account event log (a private `bigserial` sequence plus a public `evt_<uuid>` id, so a subscriber's own ids never reveal platform-wide event volume), `webhook_endpoints` holds a tenant's registered delivery targets, and `webhook_deliveries` is the per-endpoint fan-out/retry queue the sweep (`@fx/webhooks`) claims from with `SKIP LOCKED`.
 

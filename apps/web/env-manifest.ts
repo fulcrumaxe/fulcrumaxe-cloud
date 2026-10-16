@@ -130,8 +130,8 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "FX_PARTNER_LAYER", scope: "web", requiredIn: NONE, secret: false, feature: "Partner layer", validation: { type: "enum", values: ["on", "off"] }, whenMissing: "default_used", note: "Unset, or any value but on: off. Every host gets the static fulcrumaxe brand, the branding path never reads the database, partner assignment on signup does nothing, and /api/health reports partners: off. The layer-wide kill switch" },
 
   // Keys that seal data.
-  { name: "FX_KEK_V1", scope: "web", requiredIn: SP, secret: true, feature: "Model connections", validation: b64, whenMissing: "request_fails", note: "Model keys cannot be sealed or opened" },
-  { name: "FX_KEK_CURRENT_VERSION", scope: "web", requiredIn: NONE, secret: false, feature: "Model connections", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Version 1 is current" },
+  { name: "FX_KEK_V1", scope: "web", requiredIn: SP, secret: true, feature: "Model connections and action approvals", validation: b64, whenMissing: "request_fails", note: "Model keys cannot be sealed or opened, and an agent approval request is refused with sealing_unavailable because its tool arguments cannot be sealed" },
+  { name: "FX_KEK_CURRENT_VERSION", scope: "web", requiredIn: NONE, secret: false, feature: "Model connections and action approvals", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Version 1 is current" },
   { name: "FX_WEBHOOK_KEK_V1", scope: "web", requiredIn: SP, secret: true, feature: "Outbound webhooks", validation: b64, whenMissing: "request_fails", note: "Outbound webhook secrets cannot be sealed or opened" },
   { name: "FX_WEBHOOK_KEK_CURRENT_VERSION", scope: "web", requiredIn: NONE, secret: false, feature: "Outbound webhooks", validation: { type: "positive-int" }, whenMissing: "default_used", note: "Version 1 is current" },
   { name: "FX_CURSOR_KEY_V1", scope: "web", requiredIn: SP, secret: true, feature: "Public API event stream", validation: b64, whenMissing: "request_fails", note: "/api/v1/events and every paginated list answer 500 because a cursor cannot be sealed" },
