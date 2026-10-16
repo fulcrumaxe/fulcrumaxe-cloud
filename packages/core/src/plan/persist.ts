@@ -20,7 +20,8 @@ import type { ParsedPlan } from './roadmapFile.js';
  *
  * A task or milestone missing from a later import gets `removed_at`, never a delete. A proposal for a task that is now
  * done or gone and is still `new` becomes `withdrawn`; a withdrawn one whose task is remaining again becomes `new`; an
- * approved or rejected one is never touched by an import (a person's decision).
+ * approved or rejected one is never touched by an import (a person's decision), with one exception: a "Not now" rejection
+ * whose date has passed comes back to `new` when its source is still open (`resurfaceProposals`, S5-f).
  */
 export class ImportRunningError extends Error {
   constructor() {
@@ -197,6 +198,17 @@ function taskPayload(t: ComputedTask): Record<string, unknown> {
   };
 }
 
+/**
+ * D#483 S5-f: brings back the "Not now" proposals of a repo whose date has passed and whose source this import saw as still
+ * open (the row's `last_import_id` is this import's, which the writes above set for every open issue, Discussion and
+ * remaining plan task). One definer does it (0844 `resurface_proposals`), so the daily sweep (S5-g2) calls the same thing.
+ * It must run on a connection inside a RUNNING import of that repo; it answers how many came back.
+ */
+export async function resurfaceProposals(client: PoolClient, repoId: string, importId: string): Promise<number> {
+  const { rows } = await client.query<{ n: number }>('SELECT resurface_proposals($1::uuid, $2::uuid) AS n', [repoId, importId]);
+  return Number(rows[0]?.n ?? 0);
+}
+
 async function lockRunning(client: PoolClient, importId: string): Promise<void> {
   const { rows } = await client.query<{ state: string }>('SELECT state FROM plan_imports WHERE id = $1::uuid FOR UPDATE', [importId]);
   if (rows[0]?.state !== 'running') throw new ImportNotRunningError();
@@ -228,6 +240,8 @@ export async function writeSucceededImport(pool: Pool, principal: ImportPrincipa
           AND last_import_id IS DISTINCT FROM $2::uuid`,
       [w.repoId, w.importId],
     );
+    // A "Not now" whose date has passed and whose source is still open comes back (a person's own earlier choice, kept as asked).
+    await resurfaceProposals(client, w.repoId, w.importId);
     await client.query(
       `UPDATE plan_imports
           SET state = 'succeeded', level = $9, source_path = $2, source_sha = $3, counts = $4::jsonb, truncated = $5,

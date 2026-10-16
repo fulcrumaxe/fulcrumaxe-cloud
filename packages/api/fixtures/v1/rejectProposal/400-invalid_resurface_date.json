@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "invalid_resurface_date",
+    "message": "resurface_after must be in the future and at most 365 days away",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

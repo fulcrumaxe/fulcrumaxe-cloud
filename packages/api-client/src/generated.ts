@@ -2300,6 +2300,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;
@@ -2335,6 +2338,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;
@@ -2369,6 +2375,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;
@@ -2386,6 +2395,8 @@ export interface Operations {
     };
     query: undefined;
     body: {
+      kind: "not_now" | "never";
+      resurface_after?: string;
       note?: (string) | (null);
     };
     response: {
@@ -2408,6 +2419,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;
@@ -2442,6 +2456,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;
@@ -2476,6 +2493,9 @@ export interface Operations {
         state: "new" | "approved" | "rejected" | "withdrawn";
         decided_at: string | null;
         reject_note: string | null;
+        reject_kind: ("not_now" | "never") | (null);
+        resurface_after: string | null;
+        resurfaced_at: string | null;
         roadmap_position: (number) | (null);
         work_item_id: (string) | (null);
         work_item_stage: string | null;

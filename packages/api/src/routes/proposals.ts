@@ -22,7 +22,7 @@ import { UNAVAILABLE_TEXT, mapDbError, runActionDeps } from "./run-actions.js";
  *   GET  /proposals?repo_id=&state=&owner=&cursor=   list, newest first, 50 a page
  *   GET  /proposals/{id}                             detail
  *   POST /proposals/{id}/approve                     session only; Idempotency-Key required; 200 {proposal, work_item_id, started, not_started_reason}
- *   POST /proposals/{id}/reject {note?}              200 {proposal}
+ *   POST /proposals/{id}/reject {kind, resurface_after?, note?}   200 {proposal}   (S5-f: "not_now" comes back, "never" stays)
  *   POST /proposals/{id}/restore                     200 {proposal}
  *   POST /proposals/{id}/withdraw-approval           200 {proposal}
  *
@@ -34,6 +34,7 @@ import { UNAVAILABLE_TEXT, mapDbError, runActionDeps } from "./run-actions.js";
 function refuse(err: unknown): never {
   if (err instanceof ProposalRefusedError) {
     if (err.code === "invalid_cursor") throw new ApiError(400, "invalid_cursor", "cursor is malformed");
+    if (err.code === "invalid_resurface_date") throw new ApiError(400, "invalid_resurface_date", "resurface_after must be in the future and at most 365 days away");
     throw new ProposalRefusedApiError(err.code);
   }
   throw err;
@@ -60,6 +61,9 @@ const proposalSchema = z.object({
   state: z.enum(["new", "approved", "rejected", "withdrawn"]),
   decided_at: z.string().nullable(),
   reject_note: z.string().nullable(),
+  reject_kind: z.enum(["not_now", "never"]).nullable(),
+  resurface_after: z.string().nullable(),
+  resurfaced_at: z.string().nullable(),
   roadmap_position: z.number().int().nullable(),
   work_item_id: z.string().uuid().nullable(),
   work_item_stage: z.string().nullable(),
@@ -75,6 +79,16 @@ const listQuery = z.object({
 });
 
 const one = z.object({ proposal: proposalSchema });
+
+/** `kind` is required: a rejection is either "Not now" or "Never", and the caller says which. A date goes only with "Not now". */
+const rejectBody = z
+  .object({
+    kind: z.enum(["not_now", "never"]),
+    resurface_after: z.string().datetime({ offset: true }).optional(),
+    note: z.string().max(500).nullable().optional(),
+  })
+  .strict()
+  .refine((b) => b.kind === "not_now" || b.resurface_after === undefined, { message: "resurface_after goes only with kind not_now" });
 
 function proposalCtx(ctx: RouteContext) {
   const { accountId, userId, tokenId } = ctx.principal;
@@ -185,20 +199,29 @@ export const proposalRoutes: RouteEntry[] = [
     method: "POST",
     path: "/api/v1/proposals/{id}/reject",
     operationId: "rejectProposal",
-    summary: "Reject a proposal, with an optional note",
-    description: "Moves a `new` proposal to `rejected`, stamped with who and when. `note` is up to 500 characters. A re-import never changes the stamp.",
+    summary: "Reject a proposal as Not now or Never",
+    description:
+      "Moves a `new` proposal to `rejected`, stamped with who and when. `kind` is `not_now` or `never`. A `not_now` proposal comes back to `new` at the first import after `resurface_after` whose source (the issue, Discussion or plan task) is still open; " +
+      "`resurface_after` is an ISO 8601 date-time in the future and at most 365 days away, 30 days from now when omitted, and is refused with `never`. A `never` proposal stays rejected and absorbs later duplicates of the same idea. " +
+      "`note` is up to 500 characters. A re-import never changes a rejected proposal except to bring back a `not_now` one whose date has passed. Both kinds can be moved back with `restore`, which clears the kind and the date. " +
+      "Rejecting again with the same kind, date and note answers with the same proposal; a different one is refused with 409 `not_new`.",
     principals: ["session", "token"],
     minRole: "admin",
     scope: "work_items:write",
     idempotency: "optional",
     rateClass: "write",
     paramsSchema: idParams,
-    bodySchema: z.object({ note: z.string().max(500).nullable().optional() }).strict(),
+    bodySchema: rejectBody,
     responseSchema: one,
-    extraResponses: decisionErrors,
+    extraResponses: { ...decisionErrors, "400": "Error `invalid_resurface_date`: not in the future, or more than 365 days away." },
     async handler(ctx, input) {
-      const body = (input.body ?? {}) as { note?: string | null };
-      return { proposal: await rejectProposal(proposalCtx(ctx), input.params.id!, body.note ?? null).catch(refuse) };
+      const body = input.body as z.infer<typeof rejectBody>;
+      const proposal = await rejectProposal(proposalCtx(ctx), input.params.id!, {
+        kind: body.kind,
+        note: body.note ?? null,
+        ...(body.resurface_after ? { resurfaceAfter: new Date(body.resurface_after) } : {}),
+      }).catch(refuse);
+      return { proposal };
     },
   },
   {
@@ -206,7 +229,7 @@ export const proposalRoutes: RouteEntry[] = [
     path: "/api/v1/proposals/{id}/restore",
     operationId: "restoreProposal",
     summary: "Move a rejected proposal back to the inbox",
-    description: "`rejected` to `new`; the decision stamp and note are cleared. 409 `not_rejected` otherwise.",
+    description: "\"Move back to inbox\": `rejected` to `new` for either kind; the decision stamp, note, kind and date are cleared. 409 `not_rejected` otherwise.",
     principals: ["session", "token"],
     minRole: "admin",
     scope: "work_items:write",

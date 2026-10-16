@@ -29,6 +29,9 @@ interface ProposalBody {
   work_item_id: string | null;
   work_item_stage: string | null;
   reject_note: string | null;
+  reject_kind: string | null;
+  resurface_after: string | null;
+  resurfaced_at: string | null;
   decided_at: string | null;
   milestone_title: string | null;
 }
@@ -379,7 +382,7 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       const id = await proposalFor(a, await repoFor(a, 'team'));
       for (const target of [id, randomUUID(), 'not-a-uuid']) {
         for (const [method, suffix] of [['GET', ''], ['POST', '/approve'], ['POST', '/reject'], ['POST', '/restore'], ['POST', '/withdraw-approval']] as const) {
-          const res = await call(b, method, `/proposals/${target}${suffix}`, suffix === '/reject' ? { body: {} } : {});
+          const res = await call(b, method, `/proposals/${target}${suffix}`, suffix === '/reject' ? { body: { kind: 'never' } } : {});
           expect(res.status, `${method} ${suffix} ${target}`).toBe(404);
         }
       }
@@ -420,11 +423,12 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       const member = { accountId: owner.accountId, userId: memberId };
       const readOnly = await tokenFor(owner, ['read']);
       for (const suffix of ['/reject', '/restore', '/withdraw-approval']) {
-        expect((await call(member, 'POST', `/proposals/${id}${suffix}`)).status, suffix).toBe(403);
-        expect((await call(readOnly, 'POST', `/proposals/${id}${suffix}`)).status, suffix).toBe(403);
+        const withBody = suffix === '/reject' ? { body: { kind: 'never' } } : {};
+        expect((await call(member, 'POST', `/proposals/${id}${suffix}`, withBody)).status, suffix).toBe(403);
+        expect((await call(readOnly, 'POST', `/proposals/${id}${suffix}`, withBody)).status, suffix).toBe(403);
       }
       const writer = await tokenFor(owner, ['read', 'work_items:write']);
-      expect((await call(writer, 'POST', `/proposals/${id}/reject`, { body: { note: 'by token' } })).status).toBe(200);
+      expect((await call(writer, 'POST', `/proposals/${id}/reject`, { body: { kind: 'not_now', note: 'by token' } })).status).toBe(200);
       expect((await call(writer, 'POST', `/proposals/${id}/restore`)).status).toBe(200);
       expect((await admin.query('SELECT state FROM proposals WHERE id = $1', [id])).rows[0].state).toBe('new');
     });
@@ -434,20 +438,20 @@ describe('proposal routes (D#483 S3-L2a)', () => {
     it('reject takes a note and stamps who and when; restore clears both; the wrong state is 409', async () => {
       const who = await person('owner');
       const id = await proposalFor(who, await repoFor(who, 'team'));
-      const rejected = await call(who, 'POST', `/proposals/${id}/reject`, { body: { note: 'A5 walk: not now' } });
+      const rejected = await call(who, 'POST', `/proposals/${id}/reject`, { body: { kind: 'never', note: 'A5 walk: not now' } });
       expect(rejected.status).toBe(200);
       const r = (await body<{ proposal: ProposalBody }>(rejected)).proposal;
-      expect(r).toMatchObject({ state: 'rejected', reject_note: 'A5 walk: not now' });
+      expect(r).toMatchObject({ state: 'rejected', reject_note: 'A5 walk: not now', reject_kind: 'never', resurface_after: null, resurfaced_at: null });
       expect(r.decided_at).not.toBeNull();
       expect((await admin.query('SELECT decided_by_user_id FROM proposals WHERE id = $1', [id])).rows[0].decided_by_user_id).toBe(who.userId);
 
-      const again = await call(who, 'POST', `/proposals/${id}/reject`, { body: { note: 'a different note' } });
+      const again = await call(who, 'POST', `/proposals/${id}/reject`, { body: { kind: 'never', note: 'a different note' } });
       expect(again.status).toBe(409);
       expect(await code(again)).toBe('not_new');
 
       const restored = await call(who, 'POST', `/proposals/${id}/restore`);
       expect(restored.status).toBe(200);
-      expect((await body<{ proposal: ProposalBody }>(restored)).proposal).toMatchObject({ state: 'new', reject_note: null, decided_at: null });
+      expect((await body<{ proposal: ProposalBody }>(restored)).proposal).toMatchObject({ state: 'new', reject_note: null, reject_kind: null, resurface_after: null, decided_at: null });
       const twice = await call(who, 'POST', `/proposals/${id}/restore`);
       expect(twice.status).toBe(409);
       expect(await code(twice)).toBe('not_rejected');
@@ -457,15 +461,76 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       const who = await person('owner');
       const repo = await repoFor(who, 'team');
       const bare = await proposalFor(who, repo);
-      expect((await call(who, 'POST', `/proposals/${bare}/reject`, { body: {} })).status).toBe(200);
+      expect((await call(who, 'POST', `/proposals/${bare}/reject`, { body: { kind: 'never' } })).status).toBe(200);
       const nulled = await proposalFor(who, repo);
-      expect((await call(who, 'POST', `/proposals/${nulled}/reject`, { body: { note: null } })).status).toBe(200);
+      expect((await call(who, 'POST', `/proposals/${nulled}/reject`, { body: { kind: 'never', note: null } })).status).toBe(200);
       const long = await proposalFor(who, repo);
-      expect((await call(who, 'POST', `/proposals/${long}/reject`, { body: { note: 'x'.repeat(501) } })).status).toBe(422);
-      expect((await call(who, 'POST', `/proposals/${long}/reject`, { body: { note: 'x'.repeat(500) } })).status).toBe(200);
+      expect((await call(who, 'POST', `/proposals/${long}/reject`, { body: { kind: 'never', note: 'x'.repeat(501) } })).status).toBe(422);
+      expect((await call(who, 'POST', `/proposals/${long}/reject`, { body: { kind: 'never', note: 'x'.repeat(500) } })).status).toBe(200);
       const extra = await proposalFor(who, repo);
-      expect((await call(who, 'POST', `/proposals/${extra}/reject`, { body: { note: 'ok', state: 'approved' } })).status).toBe(422);
+      expect((await call(who, 'POST', `/proposals/${extra}/reject`, { body: { kind: 'never', note: 'ok', state: 'approved' } })).status).toBe(422);
       expect((await admin.query('SELECT state FROM proposals WHERE id = $1', [extra])).rows[0].state).toBe('new');
+    });
+
+    it('S5-f: the kind is required and is Not now or Never; a date goes only with Not now, is in the future and at most 365 days out', async () => {
+      const who = await person('owner');
+      const repo = await repoFor(who, 'team');
+      const id = await proposalFor(who, repo);
+      const day = 86_400_000;
+      const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+      const rejectWith = (b: Record<string, unknown>) => call(who, 'POST', `/proposals/${id}/reject`, { body: b });
+      for (const bad of [{}, { note: 'no kind' }, { kind: 'sometime' }, { kind: 'never', resurface_after: iso(day) }, { kind: 'not_now', resurface_after: 'tomorrow' }, { kind: 'not_now', resurface_after: '2030-01-01' }]) {
+        expect((await rejectWith(bad)).status, JSON.stringify(bad)).toBe(422);
+      }
+      for (const when of [iso(-1000), iso(366 * day)]) {
+        const res = await rejectWith({ kind: 'not_now', resurface_after: when });
+        expect(res.status, when).toBe(400);
+        expect(await code(res)).toBe('invalid_resurface_date');
+      }
+      expect((await admin.query('SELECT state, reject_kind FROM proposals WHERE id = $1', [id])).rows[0]).toEqual({ state: 'new', reject_kind: null });
+
+      const when = iso(7 * day);
+      const ok = await rejectWith({ kind: 'not_now', resurface_after: when, note: 'next week' });
+      expect(ok.status).toBe(200);
+      expect((await body<{ proposal: ProposalBody }>(ok)).proposal).toMatchObject({ state: 'rejected', reject_kind: 'not_now', resurface_after: when, resurfaced_at: null });
+      // The same request again answers with the same proposal; a different kind is not_new.
+      expect((await rejectWith({ kind: 'not_now', resurface_after: when, note: 'next week' })).status).toBe(200);
+      expect(await code(await rejectWith({ kind: 'never', note: 'next week' }))).toBe('not_new');
+      // Omitted, the date is 30 days out.
+      const other = await proposalFor(who, repo);
+      const def = (await body<{ proposal: ProposalBody }>(await call(who, 'POST', `/proposals/${other}/reject`, { body: { kind: 'not_now' } }))).proposal;
+      expect((new Date(def.resurface_after!).getTime() - Date.now()) / day).toBeGreaterThan(29.9);
+    });
+
+    it('A-S5-5 through the routes: after the date and a re-discovery a Not now is back in New with the day it was said; a Never stays rejected', async () => {
+      const who = await person('owner');
+      const repo = await repoFor(who, 'team_readonly');
+      planImportDeps.openSource = () => planSource(twoRemainingRoadmap);
+      planImportDeps.schedule = (work) => {
+        pending.push(work());
+      };
+      const discover = async () => {
+        pending.length = 0;
+        expect((await call(who, 'POST', `/repos/${repo}/plan-imports`, { key: null })).status).toBe(202);
+        await Promise.all(pending);
+      };
+      await discover();
+      const list = (await body<{ proposals: Array<ProposalBody & { dedupe_key: string }> }>(await call(who, 'GET', `/proposals?repo_id=${repo}`))).proposals;
+      const idOf = (key: string) => list.find((x) => x.dedupe_key === key)!.id;
+      const get = async (id: string) => (await body<{ proposal: ProposalBody }>(await call(who, 'GET', `/proposals/${id}`))).proposal;
+      const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
+      const notNow = (await body<{ proposal: ProposalBody }>(await call(who, 'POST', `/proposals/${idOf('plan:D#1:B')}/reject`, { body: { kind: 'not_now', resurface_after: tomorrow } }))).proposal;
+      await call(who, 'POST', `/proposals/${idOf('plan:D#1:C')}/reject`, { body: { kind: 'never' } });
+
+      await discover();
+      expect(await get(notNow.id)).toMatchObject({ state: 'rejected', reject_kind: 'not_now' });
+
+      await admin.query(`UPDATE proposals SET resurface_after = now() - interval '1 hour' WHERE id = $1`, [notNow.id]);
+      await discover();
+      const back = await get(notNow.id);
+      expect(back).toMatchObject({ state: 'new', reject_kind: null, resurface_after: null, decided_at: notNow.decided_at });
+      expect(back.resurfaced_at).not.toBeNull();
+      expect(await get(idOf('plan:D#1:C'))).toMatchObject({ state: 'rejected', reject_kind: 'never', resurfaced_at: null });
     });
 
     it('a re-import changes neither stamp: the rejected proposal keeps its state, time and note, and a restored one stays new', async () => {
@@ -483,7 +548,7 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       const p = list.proposals[0]!;
       expect(p).toMatchObject({ dedupe_key: 'plan:D#1:B', task_key: 'D#1:B', state: 'new', owner_process: 'product', milestone_title: 'm1: First milestone.' });
 
-      const rejected = (await body<{ proposal: ProposalBody }>(await call(who, 'POST', `/proposals/${p.id}/reject`, { body: { note: 'not now' } }))).proposal;
+      const rejected = (await body<{ proposal: ProposalBody }>(await call(who, 'POST', `/proposals/${p.id}/reject`, { body: { kind: 'never', note: 'not now' } }))).proposal;
       pending.length = 0;
       expect((await call(who, 'POST', `/repos/${repo}/plan-imports`, { key: null })).status).toBe(202);
       await Promise.all(pending);
@@ -661,14 +726,23 @@ const smallRoadmap = JSON.stringify({
   milestones: { m1: { definition: 'First milestone. More.', tasks: ['D#1:A', 'D#1:B'] } },
   task_status: { 'D#1:A': { milestone: 'm1', planned_prs: 1, prs: [10] }, 'D#1:B': { milestone: 'm1', planned_prs: 1, prs: [] } },
 });
+/** Two tasks remain (B and C), so the repository has two proposals to decide differently. */
+const twoRemainingRoadmap = JSON.stringify({
+  milestones: { m1: { definition: 'First milestone. More.', tasks: ['D#1:A', 'D#1:B', 'D#1:C'] } },
+  task_status: {
+    'D#1:A': { milestone: 'm1', planned_prs: 1, prs: [10] },
+    'D#1:B': { milestone: 'm1', planned_prs: 1, prs: [] },
+    'D#1:C': { milestone: 'm1', planned_prs: 1, prs: [] },
+  },
+});
 /** A fake read-only source standing in for GitHub: one roadmap file, one merged pull request. */
-function planSource(): PlanSource {
+function planSource(roadmap: string = smallRoadmap): PlanSource {
   return {
     async head() {
       return { defaultBranch: 'main', sha: SHA };
     },
     async file(p) {
-      return p === 'roadmap.json' ? smallRoadmap : null;
+      return p === 'roadmap.json' ? roadmap : null;
     },
     async pulls() {
       return { pulls: [{ number: 10, title: 'A', state: 'merged', dLines: [] }], truncated: false };
