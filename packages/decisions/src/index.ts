@@ -28,6 +28,38 @@ export {
 } from "./askPolicy.js";
 export type { AskNotify, AskPolicy, AskSettingRow } from "./askPolicy.js";
 export {
+  HOURS_MAX_WINDOWS,
+  ROUTE_ESCALATE_MAX_MINUTES,
+  ROUTE_ESCALATE_MIN_MINUTES,
+  ROUTE_MAX_LEVELS,
+  ROUTE_REPEAT_MAX,
+  deferToWorkingHours,
+  isTombstone,
+  isValidTimeZone,
+  planEscalation,
+  r5DefaultPlan,
+  resolveAskRoute,
+  validateRoute,
+} from "./escalation.js";
+export type {
+  AskRoute,
+  AskRouteRow,
+  EscalationPlan,
+  EscalationStep,
+  HoursWindow,
+  MemberRole,
+  NotifiedPair,
+  PlanResume,
+  RouteErrorCode,
+  RouteLevel,
+  RouteLookup,
+  RouteMember,
+  RouteSubject,
+  RouteTarget,
+  RouteValidation,
+  StepKind,
+} from "./escalation.js";
+export {
   DEFAULT_NODE_BUDGET,
   DEFAULT_WORK_BUDGET,
   RULE_LIMITS,
