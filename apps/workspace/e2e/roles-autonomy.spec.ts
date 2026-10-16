@@ -359,11 +359,16 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await row.getByTestId("au-window").fill("60");
     await row.getByTestId("au-ask-save").click();
     await expect(row.getByTestId("au-error")).toHaveText("That changed while you were saving. The latest settings are shown.");
-    expect(seen.gets.ask).toBe(2); // the reload after the conflict
+    // The error is drawn first and the reload is sent right after it, so the second read is not yet counted when the sentence appears.
+    await expect.poll(() => seen.gets.ask).toBe(2); // the reload after the conflict
     expect(seen.posts).toHaveLength(1);
   });
 
   test("live: a refresh reloads both reads, and a typed, unsaved change survives it", async ({ page }) => {
+    // The shell's account stream stays open and silent for this test (the request is never answered). With the fixture's default answer,
+    // an `idle` frame, the stream closes, and the click that opens the tab wakes it: the reopen then lets a refresh through at a moment
+    // that depends on network timing, on either side of the view's first read. Here the only refreshes are the ones the test sends.
+    await page.route("**/api/v1/events", () => {});
     const seen = await boot(page);
     await page.evaluate(async () => (await import(new URL("core/cloud-live.js", document.baseURI).href)).default.start());
     await openAutonomy(page);
