@@ -43,6 +43,12 @@ export const branchFor = (number: number): string => `fx/issue-${number}`;
 export type PromptRuntime = "sandbox" | "runner";
 export const promptRuntimeOf = (executionMode: string | null | undefined, role?: string): PromptRuntime => (role !== undefined ? (runsInOurSandbox(executionMode, role) ? "sandbox" : "runner") : isRunnerMode(executionMode) ? "runner" : "sandbox");
 
+/**
+ * D#599 PL-2b-2: whether a round is on the other side of the one that opened the pull request. `opened` is the mode of the item's newest executor run (the
+ * side the pull request was built on), `effective` the item's mode now (its placement, else the repository's). Absent `opened` is no round to compare.
+ */
+export const roundIsCrossSide = (opened: string | null | undefined, effective: string | null | undefined): boolean => opened !== undefined && opened !== null && promptRuntimeOf(opened) !== promptRuntimeOf(effective);
+
 export interface ExecutorPromptInput {
   owner: string;
   name: string;

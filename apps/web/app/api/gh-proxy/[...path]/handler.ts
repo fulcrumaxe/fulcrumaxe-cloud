@@ -23,6 +23,7 @@ import {
   type ProxyDecisionDeps,
   type RunnerCloneBudget,
   type RunnerGitDenyReason,
+  type RunnerBoundBranchResolver,
   type RunnerGitResolver,
   type SandboxRunResolver,
 } from "@fx/github";
@@ -106,6 +107,8 @@ export interface GhProxyHandlerDeps extends ProxyDecisionDeps {
   runnerTicket?: { keys: JWTVerifyGetKey; issuer: string } | { problem: string };
   /** The database lookup of a runner's lease (migration 0765), on the proxy's narrow login. Unset: the runner path answers 503. */
   resolveRunnerGit?: RunnerGitResolver;
+  /** D#599 PL-2b-2: the run's bound item branch, asked for a ticket that names one. */
+  resolveBoundBranch?: RunnerBoundBranchResolver;
   /** The per-repository daily byte budget for upload-pack responses (migration 0766). Unset: the runner path answers 503. */
   cloneBudget?: RunnerCloneBudget;
   /**
@@ -783,6 +786,7 @@ async function runnerGitHandler(req: NextRequest, deps: GhProxyHandlerDeps, tick
     { method: req.method, path, query, rawBody, contentEncoding: req.headers.get("content-encoding"), ticket: claims },
     {
       resolveRunnerGit,
+      ...(deps.resolveBoundBranch ? { resolveBoundBranch: deps.resolveBoundBranch } : {}),
       appCredentials: deps.appCredentials,
       tokenCache: deps.tokenCache,
       accessTokenRequester: deps.accessTokenRequester,

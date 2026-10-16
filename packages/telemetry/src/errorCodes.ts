@@ -225,6 +225,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Cloud runner approval (D#6 R2b-4a): a run approved by someone whose runner cannot take its repo, and a runner-run dial saved over a newer version.
   "runner_not_for_repo",
   "dial_changed",
+  // Item pull request branch binding (D#599 PL-2b-2): the proxy and the ticket route refused a branch the run is not bound to.
+  "runner_branch_unbound",
+  "ticket_branch_unbound",
   // Paired public repo, executor push routing (D#598 P1c): why a change was not sent. (push_failed is listed above.)
   "bad_input",
   "pairing_self",

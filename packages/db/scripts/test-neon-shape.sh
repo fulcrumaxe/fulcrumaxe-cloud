@@ -1754,6 +1754,71 @@ check_runner_usage_definer_role_shape() {
   fi
 }
 
+# D#599 PL-2b-2 (0828): the SECURITY DEFINER function owned by runner_bound_definer. Prints its oid when it is the one exact
+# signature (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
+# run_binding_resolver and nobody else but the owner (no PUBLIC, no platform_ops, no app_user), with no grant option;
+# SHAPE_FAIL:<count> when it is not; nothing when the role owns none (the generic owner check then rejects anything else).
+check_runner_bound_definer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.resolve_runner_bound_branch(uuid,uuid)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['run_binding_resolver']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'runner_bound_definer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'runner-bound-definer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by runner_bound_definer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but run_binding_resolver and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#599 PL-2b-2 (0828): role shape of runner_bound_definer. A no-op when the role does not exist. Every problem is named:
+# NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
+# the 13 granted by 0828 (column SELECT on agent_runs, work_items and run_events, USAGE on public; no table-wide grant), owning
+# exactly its one function and nothing else.
+check_runner_bound_definer_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column agent_runs.id SELECT','column agent_runs.account_id SELECT','column agent_runs.work_item_id SELECT','column agent_runs.job_signed SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.gh_number SELECT','column run_events.account_id SELECT','column run_events.run_id SELECT','column run_events.kind SELECT','column run_events.payload SELECT','column run_events.seq SELECT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_bound_definer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'runner_bound_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 13 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 13 granted by 0828' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 1
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.resolve_runner_bound_branch(uuid,uuid)'::regprocedure::oid)
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+      CASE WHEN has_schema_privilege('runner_bound_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'runner_bound_definer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): runner_bound_definer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#600 CX-1a (0792): the SECURITY DEFINER function owned by run_context_ledger_definer. Prints its oid when it is the one exact
 # signature (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds
 # agent_run_writer and nobody else but the owner (no PUBLIC, no platform_ops, no app_user), with no grant option;

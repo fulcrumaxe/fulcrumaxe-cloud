@@ -1,4 +1,4 @@
-import { GIT_TICKET_PATH, GitTicketMessage, GitTicketReply } from "@fulcrumaxe/runner-protocol";
+import { GIT_TICKET_PATH, GitTicketMessage, GitTicketReply, ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { branchOf } from "./done.js";
 import { stopReply } from "./heartbeat.js";
 import { RunnerHttpError, asRunner, parseJsonBody, parseMessage, requireLeases, type RunnerCloudDeps, type RunnerHttpRequest, type RunnerHttpResponse } from "./http.js";
@@ -17,6 +17,8 @@ import { signedUrl, verifyRunnerRequest } from "./verifyRunnerRequest.js";
  *     mode is never read, so a run keeps the mode it was claimed under (C24 section 2).
  *  5. the branch the ticket may push is `branchOf(job, lease)`: a fix round's own branch, otherwise `<prefix><run>-g<generation>`. It is
  *     computed from our rows only; nothing the runner sent names it, the repository or the run's role.
+ *     D#599 PL-2b-2: when that branch is the item's own pull request branch (`fx/issue-<n>`) it is signed only if the run's bound event, its signed job and
+ *     the item's issue number agree on it (the worker's `boundBranch`); otherwise 403 `ticket_branch_unbound` and nothing is signed.
  *  6. the worker signs it. While the signing key or the forward host is not configured nothing is signed and the answer is 503 `not_configured`.
  * The reply is `{ticket, expires_at, proxy_origin}`. `run_id` and `lease_generation` travel to the proxy only inside the signed ticket.
  */
@@ -36,7 +38,11 @@ export async function gitTicketRun(deps: RunnerCloudDeps, req: RunnerHttpRequest
   // A run that passed the fence has its repository and job; if either is gone, nothing here can be trusted and no ticket is made.
   if (!context.repo || !context.job) throw new RunnerHttpError(500, "internal", "internal error");
 
-  const signed = await asRunner(() => leases.signGitTicket({ issuer, ...lease, repo: context.repo!, ref: branchOf(context.job!, lease) }));
+  const ref = branchOf(context.job, lease);
+  // An item pull request branch is never taken from the job alone: the run must be bound to exactly it. A mismatch is a refusal, never a fallback.
+  if (ITEM_PR_BRANCH.test(ref) && context.boundBranch !== ref) throw new RunnerHttpError(403, "ticket_branch_unbound", "this run is not bound to that branch");
+
+  const signed = await asRunner(() => leases.signGitTicket({ issuer, ...lease, repo: context.repo!, ref }));
   if (!signed) throw new RunnerHttpError(503, "not_configured", "the runner API has no git ticket key configured");
   return {
     status: 200,

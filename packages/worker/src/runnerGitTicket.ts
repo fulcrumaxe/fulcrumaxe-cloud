@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { SignedJobSchema, type Job, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
+import { readBoundItemBranch } from "@fx/runner";
 import { signRunnerGitTicket, type GitTicketRepo, type RunnerGitTicketSigner } from "@fx/github";
 import { guarded } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
@@ -27,6 +28,11 @@ export interface GitTicketContext {
   repo: GitTicketRepo | null;
   /** The signed job we issued for the run, or null if the stored value does not parse. */
   job: Job | null;
+  /**
+   * D#599 PL-2b-2: the item pull request branch (`fx/issue-<n>`) this run is bound to, or null. Non-null only when the run's `runner.continues_bound` event, its
+   * signed job's `continues.branch` and `fx/issue-<item issue number>` all agree (`readBoundItemBranch`). The route signs an item branch only if it equals this.
+   */
+  boundBranch: string | null;
 }
 
 export type GitTicketContextResult = { kind: "fenced"; reason: StopReason } | ({ kind: "context" } & GitTicketContext);
@@ -89,6 +95,7 @@ export function createRunnerGitTicketFacade(runnerPool: Pool, deps: RunnerGitTic
           // The fence has just locked this row, so it exists; if it somehow does not, nothing here can be trusted and the run is a stop.
           if (!row) return { kind: "fenced", reason: "stale_generation" };
           const parsed = SignedJobSchema.safeParse(row.job_signed);
+          const bound = await readBoundItemBranch(client, { accountId: input.accountId, runId: input.runId });
           return {
             kind: "context",
             role: row.role,
@@ -96,6 +103,7 @@ export function createRunnerGitTicketFacade(runnerPool: Pool, deps: RunnerGitTic
             executionMode: row.execution_mode,
             repo: row.repo_id && row.gh_owner && row.gh_name ? { id: row.repo_id, owner: row.gh_owner, name: row.gh_name } : null,
             job: parsed.success ? parsed.data.job : null,
+            boundBranch: bound?.branch ?? null,
           };
         });
       }),

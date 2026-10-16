@@ -1,11 +1,12 @@
 import { gunzipSync } from "node:zlib";
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { decideRunner, isFullCloneRequest, parseReceivePackRefUpdates, parseTarget, parseUploadPackRequest, type ParsedRefUpdates } from "@fx/gh-policy";
 import { AppCredentialsError, type AppCredentialsSource } from "./appCredentials.js";
 import { getInstallationToken, InstallationTokenError, MintTimeoutError, type AccessTokenRequester, type InstallationTokenCache } from "./installationToken.js";
 import { isQueryAllowed, normalizeQuery, type ProxyDecisionQuery } from "./proxyDecision.js";
 import type { RunnerCloneBudget } from "./runnerCloneBudget.js";
 import { secondsUntilUtcMidnight } from "./runnerCloneBudget.js";
-import type { RunnerGitResolver } from "./runnerGitResolver.js";
+import type { RunnerBoundBranchResolver, RunnerGitResolver } from "./runnerGitResolver.js";
 import type { RunnerGitTicketClaims } from "./runnerGitTicket.js";
 import { InstallationNotWritableError } from "./writeInstallation.js";
 
@@ -30,6 +31,7 @@ export type RunnerGitDenyReason =
   | "runner_inflate_refused"
   | "runner_upload_pack_unparsable"
   | "runner_lease_unresolved"
+  | "runner_branch_unbound"
   | "runner_policy_denied"
   | "runner_mint_failed"
   | "installation_not_writable"
@@ -68,6 +70,8 @@ export interface RunnerGitDecisionInput {
 
 export interface RunnerGitDecisionDeps {
   resolveRunnerGit: RunnerGitResolver;
+  /** D#599 PL-2b-2: answers the item branch a run is bound to. Absent, a ticket naming an item branch is refused (fail closed). */
+  resolveBoundBranch?: RunnerBoundBranchResolver;
   appCredentials: AppCredentialsSource;
   tokenCache: InstallationTokenCache;
   accessTokenRequester: AccessTokenRequester;
@@ -144,6 +148,13 @@ export async function decideRunnerGitRequest(input: RunnerGitDecisionInput, deps
   }
   // A repository renamed since the ticket was signed no longer matches it.
   if (lease.owner !== ticket.repo.owner || lease.repo !== ticket.repo.name) return deny(403, "runner_repo_mismatch");
+
+  // D#599 PL-2b-2 (security model 3): a ticket for the item's pull request branch is honoured only while the run is still bound to exactly that branch.
+  // Checked on every request, so a binding that no longer holds stops a ticket that was signed while it did.
+  if (ITEM_PR_BRANCH.test(ticket.ref)) {
+    const bound = deps.resolveBoundBranch ? await deps.resolveBoundBranch({ accountId: ticket.accountId, runId: ticket.runId }) : null;
+    if (bound !== ticket.ref) return deny(403, "runner_branch_unbound");
+  }
 
   const gitRefUpdates: ParsedRefUpdates | undefined = isReceivePackPost ? parseReceivePackRefUpdates(input.rawBody) : undefined;
   const decision = decideRunner({

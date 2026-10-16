@@ -1,4 +1,5 @@
 import { randomUUID, type KeyObject } from "node:crypto";
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { SignJWT, createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JWK, type JWTVerifyGetKey } from "jose";
 
 /**
@@ -25,8 +26,16 @@ export const GIT_TICKET_MAX_AGE_SECONDS = 360;
 /** The most keys a ticket JWKS may hold: the current one and the one being retired. Old tickets die within their 5 minutes. */
 export const GIT_TICKET_MAX_JWKS_KEYS = 2;
 
-/** The one branch shape a ticket may name: `fx/<run id>-g<generation>`. The same shape the cloud's `RUNNER_RUN_BRANCH` pins. */
-export const GIT_TICKET_REF_PATTERN = /^fx\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]*$/;
+/** A run branch: `fx/<run id>-g<generation>`. The same shape the cloud's `RUNNER_RUN_BRANCH` pins. */
+const RUN_BRANCH_SOURCE = "fx\\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}-g[1-9][0-9]*";
+/** The anchors of the shared item pull request branch pattern, taken off so it can sit inside one alternation (the one constant, never a copy). */
+const ITEM_BRANCH_SOURCE = ITEM_PR_BRANCH.source.replace(/^\^/, "").replace(/\$$/, "");
+
+/**
+ * The branch shapes a ticket may name: a run branch, or (D#599 PL-2b) the item's own pull request branch `fx/issue-<n>` from the one shared
+ * `ITEM_PR_BRANCH`. The cloud signs the second only when the run's bound event agrees, and the proxy re-checks that on every request.
+ */
+export const GIT_TICKET_REF_PATTERN = new RegExp(`^(?:${RUN_BRANCH_SOURCE}|${ITEM_BRANCH_SOURCE})$`);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KEY_ID = /^[A-Za-z0-9._-]{1,64}$/;

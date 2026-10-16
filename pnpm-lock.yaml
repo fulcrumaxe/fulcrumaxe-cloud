@@ -733,6 +733,10 @@ importers:
         version: 2.1.9(@types/node@24.19.0)(supports-color@10.2.2)
 
   packages/gh-policy:
+    dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
     devDependencies:
       '@types/node':
         specifier: ^24.19.0
@@ -749,6 +753,9 @@ importers:
 
   packages/github:
     dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
       '@fx/core':
         specifier: workspace:*
         version: link:../core

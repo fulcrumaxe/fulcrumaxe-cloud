@@ -25,13 +25,37 @@
  *
  * D#6 R3c (C35 section 3.3) adds the review driver's and the merge gate's calls, each as narrow as the call itself:
  *   A7   POST /repos/{owner}/{repo}/statuses/{sha}, body exactly { state, context, description } with our review context
- *   A8   GET  /repos/{owner}/{repo}/branches/{branch}/protection (one path segment for the branch)
+ *   A8   GET  /repos/{owner}/{repo}/branches/{branch}/protection (one path segment for the branch; D#599 PL-2b-2 also takes, and only takes,
+ *        the two branch shapes of a cross-side continuation as ONE percent-encoded segment: `fx%2Fissue-<n>` (ITEM_PR_BRANCH) and
+ *        `fx%2F<run id>-g<n>` (RUNNER_RUN_BRANCH), see `foldContinuationBranchPath`)
  *   A9   the fixed GraphQL document `CommitChecks`, keyed by pull request number and reading its last commit (check-run name, status, conclusion and app id; status-context name and state)
  *   A10  PUT  /repos/{owner}/{repo}/pulls/{n}/merge, body exactly { sha, merge_method: "squash" }
  *
  * Calls not listed are refused until a numbered correction adds them with their own negative tests. Reading CI state uses only a
  * fixed GraphQL document that selects state and conclusion, never a check run's output text, summary or annotations.
  */
+
+import { ITEM_PR_BRANCH, RUNNER_RUN_BRANCH } from "@fulcrumaxe/runner-protocol";
+
+/**
+ * D#599 PL-2b-2 (TL ruling R-599-PL2b2-1): the narrowest widening of A8. The protection read of a cross-side continuation's branch names a branch with a slash
+ * (`fx/issue-12`, `fx/<run id>-g1`), which GitHub takes only as one percent-encoded segment and which the canonical form below would read as extra segments.
+ * This reads the RAW path, before any decoding, and folds it to the one-segment form A8 already holds only when ALL of these are true:
+ *   - the owner and repository are plain name characters (no escape in them);
+ *   - the branch segment is exactly `fx%2F` (capital `%2F`, the form `encodeURIComponent` writes) and then lower-case letters, digits and dashes;
+ *   - the decoded branch matches the shared `ITEM_PR_BRANCH` or the shared `RUNNER_RUN_BRANCH`, nothing else;
+ *   - nothing follows `/protection`: no trailing slash, query or fragment.
+ * Anything else is returned unchanged and meets the old rule (a slash makes extra segments, so it is refused): other `fx/...` names, extra segments, a double
+ * encoding (`%252F`), `..`, a lower-case `%2f`, a trailing slash, a leading zero. The method, query, body and Accept rules apply to the folded path as before.
+ */
+const CONTINUATION_PROTECTION_PATH = /^\/repos\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/branches\/fx%2F([a-z0-9-]{1,80})\/protection$/;
+export function foldContinuationBranchPath(path: string): string {
+  const m = CONTINUATION_PROTECTION_PATH.exec(path);
+  if (!m) return path;
+  const branch = `fx/${m[3]}`;
+  if (!ITEM_PR_BRANCH.test(branch) && !RUNNER_RUN_BRANCH.test(branch)) return path;
+  return `/repos/${m[1]}/${m[2]}/branches/fx-continuation/protection`;
+}
 
 /** The shape of the App client's request. The Accept header is optional because the production client sends none of its own. */
 export interface GithubRequest {
@@ -279,7 +303,7 @@ const QUERY_VALUES: Readonly<Record<string, (value: string) => boolean>> = {
 /** The rule a call breaks, or null when it is on the allowlist. `not_allowlisted` for anything the list does not hold; `accept` for a media type other than JSON. */
 export function localOnlyViolation(req: Pick<GithubRequest, "method" | "path" | "query" | "headers" | "body">): string | null {
   if (typeof req.method !== "string" || typeof req.path !== "string") return NOT_ALLOWLISTED;
-  const where = canonical(req.path);
+  const where = canonical(foldContinuationBranchPath(req.path));
   if (where === null) return NOT_ALLOWLISTED;
   const entry = LOCAL_ONLY_ALLOWLIST.find((e) => e.method === req.method && e.paths.some((template) => templateMatches(template, where.segments)));
   if (!entry) return NOT_ALLOWLISTED;
