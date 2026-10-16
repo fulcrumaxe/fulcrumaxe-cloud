@@ -160,9 +160,9 @@ export async function advanceLoadStep(accountId: string, workItemId: string): Pr
   return loadBody(await getWorker(), getIssueReader(), accountId, workItemId);
 }
 
-export async function advanceStartClassifyStep(accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded): Promise<AdvanceRunStart> {
+export async function advanceStartClassifyStep(accountId: string, workItemId: string, haltEpoch: number, actionId: string, loaded: TriageLoaded, attempt?: number): Promise<AdvanceRunStart> {
   "use step";
-  return startClassifyBody(await getWorker(), accountId, workItemId, haltEpoch, actionId, loaded);
+  return startClassifyBody(await getWorker(), accountId, workItemId, haltEpoch, actionId, loaded, attempt);
 }
 
 export async function advanceRunOutcomeStep(accountId: string, runId: string): Promise<ClassifyOutcome> {
@@ -182,9 +182,9 @@ export async function advancePanelStep(accountId: string, userId: string, workIt
 }
 
 /** The pipeline's Spec step: re-enters the panel (all finished), runs the PM, publishes the Spec. `actionId` names this attempt's PM run. */
-export async function advanceSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string): Promise<StepOutcome> {
+export async function advanceSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string, spendAttempt?: number): Promise<StepOutcome> {
   "use step";
-  return specBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId);
+  return specBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId, spendAttempt);
 }
 
 /** Starts the executor and records Spec ready -> In progress once the run exists. `pinned` is the Spec version the person approved. */
@@ -231,9 +231,9 @@ export async function advanceEventStep(accountId: string, userId: string, workIt
 
 // ---- the short Spec (small, bug, doc: no panel) ---------------------------------------------------------------------
 
-export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { category: string; title: string; body: string }, actionId: string): Promise<AdvanceRunStart> {
+export async function advanceStartLightSpecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, input: { category: string; title: string; body: string }, actionId: string, attempt?: number): Promise<AdvanceRunStart> {
   "use step";
-  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input, actionId);
+  return startLightSpecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input, actionId, attempt);
 }
 
 /** Publishes the short Spec from the finished PM run. The PM's text stays in the run. */
@@ -244,9 +244,9 @@ export async function advanceLightSpecPublishStep(accountId: string, userId: str
 
 // ---- Re-spec (D#6 R4d-5b): the project manager's file list for a Spec that has none, then the next Spec version ----------
 
-export async function advanceStartRespecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, specVersion: number | null, actionId: string): Promise<AdvanceRunStart> {
+export async function advanceStartRespecStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, specVersion: number | null, actionId: string, attempt?: number): Promise<AdvanceRunStart> {
   "use step";
-  return startRespecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, specVersion, actionId);
+  return startRespecBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, specVersion, actionId, attempt);
 }
 
 /** Publishes version N+1 (the same text plus the list) from the finished PM run. The PM's output stays in the run. */
@@ -342,6 +342,50 @@ export async function advanceMergeGateStep(accountId: string, userId: string, wo
 
 type Result = { status: string; detail?: string };
 
+/** D#483 S5-k1c: the stages before the build that wait on a limit (packages/pipeline waitingStages.ts; a test holds the names). */
+type EarlyWaitStage = "classify" | "spec" | "respec";
+
+/** The wait reason when an answer is a spending-limit denial (a named pause), else null: a start, a halt and every other refusal end the wait. */
+const pauseOf = (reason: string | null | undefined): string | null => (typeof reason === "string" && RESERVATION_PAUSE_REASONS.includes(reason) ? reason : null);
+
+/** The attempt number a restart by the parked-stage sweep begins at (0 on every start a person's approval makes). */
+const firstAttemptOf = (args: AdvanceStartArgs): number => (Number.isSafeInteger(args.startAttempt) && args.startAttempt! > 0 ? args.startAttempt! : 0);
+
+/**
+ * D#483 S5-k1c: one start before the build, asked until a spending limit allows it. The first ask is attempt `first`; while a limit denies it the item stays
+ * where it is, each denied ask leaves the stage's waiting fact, and the next ask (five minutes later, up to four hours) is a new attempt with its own run key.
+ * Any answer that is not a limit pause (a start, a halt, `account_not_active`, any other refusal) ends the wait and is returned as it came. After the four hours a
+ * pause is still the answer: the caller ends `<stage>_paused:<pause>`, which is no failure, and the sweep starts the stage again when the limit allows it.
+ */
+async function askUntilAllowed<T>(args: AdvanceStartArgs, stage: EarlyWaitStage, itemId: string, first: number, ask: (attempt: number) => Promise<T>, reasonOf: (answer: T) => string | null | undefined): Promise<{ answer: T; attempt: number; pause: string | null }> {
+  let attempt = first;
+  let waited = 0;
+  let answer = await ask(attempt);
+  for (;;) {
+    const reason = reasonOf(answer);
+    const pause = pauseOf(reason);
+    if (pause === null) {
+      // A restart by the sweep that ends in a refusal which is not a limit (and not a halt) leaves a stop after the waiting fact: the sweep reads it and does not
+      // start the stage again every pass. A start a person's approval made ends as it always did, with no extra fact.
+      if (first > 0 && typeof reason === "string" && !isHaltReason(reason)) await advanceEventStep(args.accountId, args.userId, itemId, { kind: "stopped", dedupeKey: `refused:${stage}:${args.actionId}:${attempt}`, code: `${stage}_refused` });
+      return { answer, attempt, pause: null };
+    }
+    await advanceEventStep(args.accountId, args.userId, itemId, { kind: "stage_waiting", stage, code: pause, attempt, dedupeKey: `wait:${stage}:${args.actionId}:${attempt}` });
+    if (waited >= BUILD_SPEND_WAIT_MS) return { answer, attempt, pause };
+    if (attempt === first) await advanceLogStep("advance.stage_waiting", { work_item_id: itemId, at: `${stage}_start`, reason: pause });
+    await sleep(BUILD_SPEND_POLL_MS);
+    waited += BUILD_SPEND_POLL_MS;
+    attempt += 1;
+    answer = await ask(attempt);
+  }
+}
+
+/** The workflow's end when the four hours are up and a limit still denies the start: not a failure, nothing stamped, the item where it was. */
+async function pausedEnd(itemId: string, stage: EarlyWaitStage, pause: string, attempt: number): Promise<Result> {
+  await advanceLogStep("advance.paused", { work_item_id: itemId, at: `${stage}_start`, reason: pause, attempt });
+  return { status: "paused", detail: `${stage}_paused:${pause}` };
+}
+
 export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promise<Result> {
   "use workflow";
   // A workflow started before the halt marker existed replays without a haltEpoch: read as 0, the epoch of an item never halted.
@@ -366,9 +410,9 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
   // An item left at In progress with nothing running: look for its pull request (found: the review; none: Needs human).
   if (loaded.mode === "check_build") return checkBuildPhase(args, pinned(loaded.specVersion), loaded.executorRunId);
   // The pipeline's own root item, left at Discussing without a Spec: the panel and the Spec once more.
-  if (loaded.mode === "spec") return specPhase(args, workItemId);
+  if (loaded.mode === "spec") return specPhase(args, workItemId, firstAttemptOf(args));
   // A small, bug or doc item the pipeline triaged earlier and has no Spec: the short Spec again, from the issue as it reads now.
-  if (loaded.mode === "light") return lightPhase(args, workItemId, { category: loaded.category, title: loaded.title, body: loaded.body });
+  if (loaded.mode === "light") return lightPhase(args, workItemId, { category: loaded.category, title: loaded.title, body: loaded.body }, firstAttemptOf(args));
 
   let category: string;
   if (loaded.decided !== null) {
@@ -376,8 +420,10 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
     category = loaded.decided;
     await advanceLogStep("advance.label_decided", { work_item_id: workItemId, category });
   } else {
-    const started = await advanceStartClassifyStep(accountId, workItemId, args.haltEpoch, actionId, loaded);
+    const asked = await askUntilAllowed(args, "classify", workItemId, firstAttemptOf(args), (n) => advanceStartClassifyStep(accountId, workItemId, args.haltEpoch, actionId, loaded, n > 0 ? n : undefined), (r) => (r.ok ? null : r.reason));
+    const started = asked.answer;
     if (!started.ok) {
+      if (asked.pause !== null) return pausedEnd(workItemId, "classify", asked.pause, asked.attempt);
       if (isHaltReason(started.reason)) return haltedEnd(args, "classify_start");
       await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "classify_start", reason: started.reason });
       return { status: "failed", detail: `classify_refused:${started.reason}` };
@@ -421,18 +467,18 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
       await advanceEventStep(accountId, args.userId, triaged.workItemId, { kind: "stopped", dedupeKey: `project:${actionId}`, code: "project_not_specified" });
       return { status: "stopped", detail: "project_not_specified" };
     }
-    return specPhase(args, triaged.workItemId);
+    return specPhase(args, triaged.workItemId, 0);
   }
   // Small, bug and doc run no panel: the project manager writes a short Spec straight from the issue, then the build.
   if (triaged.status === "triaged" && triaged.stage === "triaged" && triaged.workItemId && (triaged.category === "small" || triaged.category === "bug" || triaged.category === "doc")) {
-    return lightPhase(args, triaged.workItemId, { category: triaged.category, title: loaded.title, body: loaded.body });
+    return lightPhase(args, triaged.workItemId, { category: triaged.category, title: loaded.title, body: loaded.body }, 0);
   }
   // A question stays at Triaged, answered in its thread.
   return { status: triaged.status, detail: triaged.reason };
 }
 
 /** The panel, then the Spec, for the pipeline's root item. Ends at Spec ready, or with the pipeline's own outcome. */
-async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result> {
+async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: number): Promise<Result> {
   const { accountId, userId, actionId } = args;
 
   // D#6 C29: on a runner repository a step hands control back (`waiting`) instead of overrunning its time limit. No run was
@@ -463,7 +509,10 @@ async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result
   if (isHaltReason(panel.reason)) return haltedEnd(args, "panel");
   if (panel.status !== "completed") return { status: "failed", detail: panel.status === "waiting" && panel.reason === QUEUED_ON_RUNNER ? "panel_wait_timeout" : `panel_${panel.status}:${panel.reason ?? "none"}` };
 
-  const spec = await reenter(() => advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId));
+  // D#483 S5-k1c: the PM's start can be denied by a spending limit; the Spec step then answers the pause as its refusal and is asked again.
+  const specAsk = await askUntilAllowed(args, "spec", rootId, firstAttempt, (n) => reenter(() => advanceSpecStep(accountId, userId, rootId, args.haltEpoch, actionId, n > 0 ? n : undefined)), (r) => (r.status === "refused" ? r.reason : null));
+  const spec = specAsk.answer;
+  if (specAsk.pause !== null) return pausedEnd(rootId, "spec", specAsk.pause, specAsk.attempt);
   if (spec.status === "waiting" && spec.reason === QUEUED_ON_RUNNER) {
     // Still queued when the ceiling was reached: the pipeline's own wait limit, like every other wait here.
     await advanceLogStep("advance.failed", { work_item_id: rootId, at: "spec", reason: "wait_timeout" });
@@ -486,10 +535,12 @@ async function specPhase(args: AdvanceStartArgs, rootId: string): Promise<Result
  * the item at Triaged with the PM's explanation as its run's summary and the stop as a recorded fact. Approving again after
  * the issue was edited runs a fresh PM (the run is keyed per approval).
  */
-async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { category: string; title: string; body: string }): Promise<Result> {
+async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { category: string; title: string; body: string }, firstAttempt: number): Promise<Result> {
   const { accountId, userId, actionId } = args;
-  const started = await advanceStartLightSpecStep(accountId, userId, rootId, args.haltEpoch, issue, actionId);
+  const asked = await askUntilAllowed(args, "spec", rootId, firstAttempt, (n) => advanceStartLightSpecStep(accountId, userId, rootId, args.haltEpoch, issue, actionId, n > 0 ? n : undefined), (r) => (r.ok ? null : r.reason));
+  const started = asked.answer;
   if (!started.ok) {
+    if (asked.pause !== null) return pausedEnd(rootId, "spec", asked.pause, asked.attempt);
     if (isHaltReason(started.reason)) return haltedEnd(args, "light_spec_start");
     await advanceLogStep("advance.failed", { work_item_id: rootId, at: "light_spec_start", reason: started.reason });
     return { status: "failed", detail: `light_spec_refused:${started.reason}` };
@@ -525,7 +576,9 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
   }
   await advanceLogStep("advance.spec_ready", { work_item_id: rootId, at: "light_spec", version: published.version });
   // The Spec is published: the build, pinned to this version, then the review. The pipeline's card for the issue is the root.
-  return buildPhase({ ...args, workItemId: rootId }, published.version);
+  // The build asks from its own first attempt: a restart attempt of the short Spec's start is not the build's.
+  const { startAttempt: _spent, ...forBuild } = args;
+  return buildPhase({ ...forBuild, workItemId: rootId }, published.version);
 }
 
 /**
@@ -537,8 +590,10 @@ async function lightPhase(args: AdvanceStartArgs, rootId: string, issue: { categ
 async function respecPhase(args: AdvanceStartArgs): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
   const version = args.specVersion ?? null;
-  const started = await advanceStartRespecStep(accountId, userId, workItemId, args.haltEpoch, version, actionId);
+  const asked = await askUntilAllowed(args, "respec", workItemId, firstAttemptOf(args), (n) => advanceStartRespecStep(accountId, userId, workItemId, args.haltEpoch, version, actionId, n > 0 ? n : undefined), (r) => (r.ok ? null : r.reason));
+  const started = asked.answer;
   if (!started.ok) {
+    if (asked.pause !== null) return pausedEnd(workItemId, "respec", asked.pause, asked.attempt);
     if (isHaltReason(started.reason)) return haltedEnd(args, "respec_start");
     await advanceLogStep("advance.failed", { work_item_id: workItemId, at: "respec_start", reason: started.reason });
     return { status: "failed", detail: `respec_refused:${started.reason}` };

@@ -53,9 +53,10 @@ export async function panelBody(worker: AdvanceWorker | null, who: StepWho): Pro
 }
 
 /** The pipeline's Spec step (it re-enters the panel, runs the PM and publishes the Spec). */
-export async function specBody(worker: AdvanceWorker | null, who: StepWho, attempt?: string): Promise<StepOutcome> {
+export async function specBody(worker: AdvanceWorker | null, who: StepWho, attempt?: string, spendAttempt?: number): Promise<StepOutcome> {
   if (!worker) return refused("worker_unavailable");
-  return outcomeOf(await worker.advanceSpec(who, attempt));
+  // D#483 S5-k1c: the first ask carries no attempt number (the call is exactly what it was before); only a later ask after a spending-limit denial names one.
+  return outcomeOf(spendAttempt === undefined || spendAttempt === 0 ? await worker.advanceSpec(who, attempt) : await worker.advanceSpec(who, attempt, spendAttempt));
 }
 
 /** Starts the executor for an item at spec_ready. The approval (the action) names the run, so a replay finds it and a fresh approval after a refusal asks again. `pinnedVersion` is the Spec version the person approved. */

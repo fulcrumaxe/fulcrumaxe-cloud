@@ -1,5 +1,5 @@
 import type { AdvanceFacade, AdvanceRunStart } from "@fx/worker";
-import { buildRespecPrompt } from "@fx/pipeline";
+import { buildRespecPrompt, pauseOnDenial, siteStep } from "@fx/pipeline";
 import type { StepWho } from "./advanceStageSteps";
 
 /**
@@ -14,20 +14,23 @@ export type RespecStartWorker = Pick<AdvanceFacade, "advanceStartRun" | "advance
 export type RespecPublishWorker = Pick<AdvanceFacade, "advanceRespec">;
 
 /** Starts the file-list run on the Spec version the press named (`specVersion`). A newer version, or an erased one, is `spec_changed`: nothing is started. */
-export async function startRespecBody(worker: RespecStartWorker | null, who: StepWho, specVersion: number | null, actionId: string): Promise<AdvanceRunStart> {
+export async function startRespecBody(worker: RespecStartWorker | null, who: StepWho, specVersion: number | null, actionId: string, attempt = 0): Promise<AdvanceRunStart> {
   if (!worker) return { ok: false, reason: "worker_unavailable" };
   if (specVersion === null) return { ok: false, reason: "no_spec" };
   const spec = await worker.advanceLoadSpecText(who, specVersion);
   if (spec === null) return { ok: false, reason: "spec_changed" };
-  return worker.advanceStartRun({
-    accountId: who.accountId,
-    workItemId: who.workItemId,
-    haltEpoch: who.haltEpoch,
-    step: `respec:${actionId}`,
-    role: "project-manager",
-    prompt: buildRespecPrompt({ version: spec.version, spec: spec.body }),
-    clone: true,
-  });
+  // D#483 S5-k1c: a spending-limit denial is a named pause; each later ask is a new attempt with its own key (`respec:<approval>:s<n>`).
+  return pauseOnDenial(
+    await worker.advanceStartRun({
+      accountId: who.accountId,
+      workItemId: who.workItemId,
+      haltEpoch: who.haltEpoch,
+      step: siteStep("respec", actionId, attempt),
+      role: "project-manager",
+      prompt: buildRespecPrompt({ version: spec.version, spec: spec.body }),
+      clone: true,
+    }),
+  );
 }
 
 export interface RespecPublished {

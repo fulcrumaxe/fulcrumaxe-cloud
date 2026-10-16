@@ -3,6 +3,7 @@ import { PanelYieldError, runPanel } from "../plan/panel.js";
 import { runSpecStep } from "../plan/spec.js";
 import { createFollowedRunner, type FollowedRunnerOptions } from "./followedRunner.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
+import { specPmAttempt } from "./stageStarts.js";
 
 /**
  * D#483 P2: the panel and the Spec for one discussed work item, over real agent runs.
@@ -61,6 +62,11 @@ export interface SpecFlowOptions extends FollowedRunnerOptions {
   pmTimeoutMs?: number;
   /** The approval's id: names this attempt's PM run (see `SpecStepDeps.pmAttempt`). */
   attempt?: string;
+  /**
+   * D#483 S5-k1c: the number of the ask, when an earlier ask of the Spec PM's start was denied by a spending limit. A denied start leaves a keyed `refused_spend`
+   * run that a replay of the same key finds again, so each later ask names a new key (`<approval>:s<n>`). Absent or 0: the first ask, the key it always had.
+   */
+  spendAttempt?: number;
 }
 
 export async function runPanelForItem(pool: Pool, accountId: string, workItemId: string, ports: AdvanceRunPorts, options: SpecFlowOptions = {}): Promise<PanelForItemResult> {
@@ -91,7 +97,7 @@ export async function runSpecForItem(pool: Pool, accountId: string, workItemId: 
   let out;
   try {
     out = await runSpecStep(
-      { pool, accountId, runner: panel, writer, timeoutMs: options.roundTimeoutMs ?? REPLAY_PANEL_TIMEOUT_MS, writerTimeoutMs: options.pmTimeoutMs ?? PM_TIMEOUT_MS, ...(options.attempt ? { pmAttempt: options.attempt } : {}) },
+      { pool, accountId, runner: panel, writer, timeoutMs: options.roundTimeoutMs ?? REPLAY_PANEL_TIMEOUT_MS, writerTimeoutMs: options.pmTimeoutMs ?? PM_TIMEOUT_MS, ...(options.attempt ? { pmAttempt: specPmAttempt(options.attempt, options.spendAttempt ?? 0) } : {}) },
       { workItemId },
     );
   } catch (err) {
