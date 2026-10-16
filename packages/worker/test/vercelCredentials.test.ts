@@ -215,7 +215,7 @@ describe("P6: the builder feeds the worker's real sandbox port", () => {
         return sandbox(params.name);
       },
     };
-    const pools: WorkerPools = { runnerPool: {} as Pool, platformOpsPool: {} as Pool, close: async () => {} };
+    const pools: WorkerPools = { runnerPool: {} as Pool, platformOpsPool: {} as Pool, receiptPool: {} as Pool, close: async () => {} };
     return { sdk, gets, created, pools };
   }
   const base = { env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" } };

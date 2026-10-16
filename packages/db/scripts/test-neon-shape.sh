@@ -582,7 +582,9 @@ check_receipt_writer_role_shape() {
             OR (p.proname = 'decision_ask_raise'
               AND p.proargtypes = array_to_string('{text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_answer'
-              AND p.proargtypes = array_to_string('{uuid,text,uuid}'::regtype[]::oid[], ' ')::oidvector)))
+              AND p.proargtypes = array_to_string('{uuid,text,uuid}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'decision_ask_withdraw'
+              AND p.proargtypes = array_to_string('{integer}'::regtype[]::oid[], ' ')::oidvector)))
         UNION ALL SELECT 'relation ' || c.relname FROM pg_class c WHERE c.relowner = r.oid
         UNION ALL SELECT 'schema ' || n.nspname FROM pg_namespace n WHERE n.nspowner = r.oid
         UNION ALL SELECT 'type ' || t.typname FROM pg_type t WHERE t.typowner = r.oid) x), ''),
@@ -614,7 +616,7 @@ check_receipt_writer_role_shape() {
     exit 1
   fi
   if [ -n "$owned" ]; then
-    echo "neon-shape ($dbname): receipt_writer owns object(s) beyond the four exempted functions (item 10): $owned" >&2
+    echo "neon-shape ($dbname): receipt_writer owns object(s) beyond the five exempted functions (item 10): $owned" >&2
     exit 1
   fi
   if [ "$create_priv" != "f" ]; then

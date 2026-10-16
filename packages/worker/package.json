@@ -20,6 +20,7 @@
     "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/db": "workspace:*",
+    "@fx/decisions": "workspace:*",
     "@fx/github": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",

@@ -94,9 +94,9 @@ describe('decision_asks grants (0666)', () => {
     return rows;
   }
 
-  it('the only column-level UPDATE on decision_asks is receipt_writer\'s five answer columns', async () => {
+  it('the only column-level UPDATE on decision_asks is receipt_writer\'s five answer columns and the withdrawal reason (0826)', async () => {
     expect(await columnUpdaters()).toEqual([
-      { role: 'receipt_writer', columns: ['state', 'answered_option', 'answered_by', 'answered_at', 'receipt_id'] },
+      { role: 'receipt_writer', columns: ['state', 'answered_option', 'answered_by', 'answered_at', 'receipt_id', 'withdrawn_reason'] },
     ]);
   });
 
@@ -112,6 +112,15 @@ describe('decision_asks grants (0666)', () => {
 
   it('EXECUTE on decision_ask_answer is receipt_writer_invoker only', async () => {
     expect(await answerExecutors()).toEqual(['receipt_writer_invoker']);
+  });
+
+  it('EXECUTE on decision_ask_withdraw (0826) is receipt_writer_invoker only, PUBLIC and app_user included', async () => {
+    const { rows } = await admin.query<{ grantee: string }>(
+      `SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END AS grantee
+         FROM pg_proc p, aclexplode(p.proacl) a
+        WHERE p.proname = 'decision_ask_withdraw' AND a.grantee <> p.proowner ORDER BY 1`,
+    );
+    expect(rows.map((r) => r.grantee)).toEqual(['receipt_writer_invoker']);
   });
 
   it('findRlsViolations returns []', async () => {

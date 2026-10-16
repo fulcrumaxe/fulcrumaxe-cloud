@@ -5,24 +5,32 @@ import {
   PLATFORM_OPS_ENV,
   StartupGuardError,
   assertRunnerLoginRoles,
+  assertReceiptLoginRoles,
+  assertReceiptLoginIsolated,
+  assertRunnerLoginCannotWriteReceipts,
   assertPlatformOpsHasNoMembers,
   assertPlatformOpsSession,
   assertRunnerLoginNotSuperuser,
   OPS2_UNSAFE_SQL,
+  RCPT2_UNSAFE_SQL,
   createWorkerPools,
 } from "../src/pools.js";
 import { RUNNER_LOGIN_NAME } from "./support/scanRunnerLoginReaders.js";
+import { RECEIPT_LOGIN_NAME } from "./support/scanReceiptLoginReaders.js";
 
 const RUNNER_URL = "postgres://runner-user:runner-secret-pw@db.internal:5432/app";
 const OPS_URL = "postgres://ops-user:ops-secret-pw@db.internal:5432/app";
+const RECEIPT_URL = "postgres://receipt-user:receipt-secret-pw@db.internal:5432/app";
 
-type Answers = { sessionUser: string; rolsuper: boolean; members: number; roles?: boolean; holds?: boolean };
+type Answers = { sessionUser: string; rolsuper: boolean; members: number; roles?: boolean; holds?: boolean; receiptRoles?: boolean; runnerHoldsReceipt?: boolean };
 
 /** A pool that answers the three guard queries from `answers`, by the SQL it is sent. */
 function fakePool(answers: Answers, ended: string[] = [], name = "pool"): Pool {
   return {
     async query(sql: string) {
       if (/session_user::text/.test(sql)) return { rows: [{ v: answers.sessionUser }] };
+      if (/receipt_writer_invoker', 'USAGE'/.test(sql)) return { rows: [{ v: answers.receiptRoles ?? true }] };
+      if (/receipt_writer_invoker', 'MEMBER'/.test(sql)) return { rows: [{ v: answers.runnerHoldsReceipt ?? false }] };
       if (/rolsuper/.test(sql)) return { rows: [{ v: answers.rolsuper }] };
       if (/'platform_ops', 'MEMBER'/.test(sql)) return { rows: [{ v: answers.holds ?? false }] };
       if (/pg_auth_members/.test(sql)) return { rows: [{ v: answers.members }] };
@@ -36,7 +44,7 @@ function fakePool(answers: Answers, ended: string[] = [], name = "pool"): Pool {
 }
 
 const GOOD: Answers = { sessionUser: "platform_ops", rolsuper: false, members: 0 };
-const ENV = { [RUNNER_LOGIN_NAME]: RUNNER_URL, [PLATFORM_OPS_ENV]: OPS_URL };
+const ENV = { [RUNNER_LOGIN_NAME]: RUNNER_URL, [PLATFORM_OPS_ENV]: OPS_URL, [RECEIPT_LOGIN_NAME]: RECEIPT_URL };
 
 async function refusal(promise: Promise<unknown>): Promise<StartupGuardError> {
   const err = await promise.then(
@@ -143,7 +151,7 @@ describe("OPS-4 / CARRY-7: no runtime login holds platform_ops (fake pools)", ()
 });
 
 describe("createWorkerPools", () => {
-  it("returns both pools once every guard passes, built from the two variables", async () => {
+  it("returns the three pools once every guard passes, built from the three variables", async () => {
     const urls: string[] = [];
     const pools = await createWorkerPools(ENV, {
       makePool: (url) => {
@@ -151,18 +159,20 @@ describe("createWorkerPools", () => {
         return fakePool(GOOD);
       },
     });
-    expect(urls).toEqual([RUNNER_URL, OPS_URL]);
+    expect(urls).toEqual([RUNNER_URL, OPS_URL, RECEIPT_URL]);
     expect(pools.runnerPool).not.toBe(pools.platformOpsPool);
+    expect(pools.receiptPool).not.toBe(pools.runnerPool);
+    expect(pools.receiptPool).not.toBe(pools.platformOpsPool);
   });
 
-  it("refuses and closes both pools when a guard fails", async () => {
+  it("refuses and closes all three pools when a guard fails", async () => {
     const ended: string[] = [];
     let n = 0;
     const err = await refusal(
       createWorkerPools(ENV, { makePool: () => fakePool({ ...GOOD, members: 2 }, ended, `p${n++}`) }),
     );
     expect(err.rule).toBe("OPS-4");
-    expect(ended.sort()).toEqual(["p0", "p1"]);
+    expect(ended.sort()).toEqual(["p0", "p1", "p2"]);
   });
 
   it("closes the first pool when the second cannot be built", async () => {
@@ -181,10 +191,105 @@ describe("createWorkerPools", () => {
     expect(ended).toEqual(["first"]);
   });
 
+  it("closes the first two pools when the receipt pool cannot be built, and the driver's text does not leak", async () => {
+    const ended: string[] = [];
+    let n = 0;
+    const err = await refusal(
+      createWorkerPools(ENV, {
+        makePool: () => {
+          n++;
+          if (n === 3) throw new Error(`bad url ${RECEIPT_URL}`);
+          return fakePool(GOOD, ended, `p${n}`);
+        },
+      }),
+    );
+    expect(err.rule).toBe("CONFIG");
+    expect(err.message).not.toMatch(/receipt-secret-pw|receipt-user|db\.internal/);
+    expect(err.cause).toBeUndefined();
+    expect(ended.sort()).toEqual(["p1", "p2"]);
+  });
+
   it("refuses a missing variable without naming a value", async () => {
     const err = await refusal(createWorkerPools({ [PLATFORM_OPS_ENV]: OPS_URL }, { makePool: () => fakePool(GOOD) }));
     expect(err.rule).toBe("CONFIG");
     expect(err.message).not.toContain(OPS_URL);
+  });
+
+  it("D#7 DP4b-1: with the receipt variable unset or blank, the worker refuses to start with CONFIG, builds no pool and names no value", async () => {
+    for (const receipt of [undefined, "", "   "]) {
+      let built = 0;
+      const env = { ...ENV, [RECEIPT_LOGIN_NAME]: receipt };
+      const err = await refusal(createWorkerPools(env, { makePool: () => (built++, fakePool(GOOD)) }));
+      expect(err.rule, String(receipt)).toBe("CONFIG");
+      expect(built, String(receipt)).toBe(0);
+      expect(err.message).not.toMatch(/postgres:|secret-pw|db\.internal/);
+    }
+  });
+});
+
+describe("D#7 DP4b-1 RCPT-1: the receipt login is a member of app_user and receipt_writer_invoker", () => {
+  it("passes on a plain true; refuses a false, a null and a missing answer, naming the rule only", async () => {
+    await expect(assertReceiptLoginRoles(fakePool(GOOD))).resolves.toBeUndefined();
+    expect((await refusal(assertReceiptLoginRoles(fakePool({ ...GOOD, receiptRoles: false })))).rule).toBe("RCPT-1");
+    for (const v of [null, undefined, "t", 1]) {
+      expect((await refusal(assertReceiptLoginRoles({ query: async () => ({ rows: [{ v }] }) } as unknown as Pool))).rule).toBe("RCPT-1");
+    }
+    const err = await refusal(assertReceiptLoginRoles(fakePool({ ...GOOD, receiptRoles: false })));
+    expect(err.message).toContain("RCPT-1");
+    expect(err.message).not.toMatch(/postgres:|secret-pw|db\.internal/);
+  });
+
+  it("createWorkerPools refuses with RCPT-1 and closes all three pools", async () => {
+    const ended: string[] = [];
+    let n = 0;
+    const err = await refusal(createWorkerPools(ENV, { makePool: () => fakePool({ ...GOOD, receiptRoles: false }, ended, `p${n++}`) }));
+    expect(err.rule).toBe("RCPT-1");
+    expect(ended.sort()).toEqual(["p0", "p1", "p2"]);
+  });
+});
+
+describe("D#7 DP4b-1 RCPT-2: the receipt login is isolated", () => {
+  it("passes on a plain false, refuses true, null, undefined and a missing row", async () => {
+    await expect(assertReceiptLoginIsolated({ query: async () => ({ rows: [{ v: false }] }) } as unknown as Pool)).resolves.toBeUndefined();
+    for (const v of [true, null, undefined, "f", 0]) {
+      expect((await refusal(assertReceiptLoginIsolated({ query: async () => ({ rows: [{ v }] }) } as unknown as Pool))).rule).toBe("RCPT-2");
+    }
+    expect((await refusal(assertReceiptLoginIsolated({ query: async () => ({ rows: [] }) } as unknown as Pool))).rule).toBe("RCPT-2");
+  });
+
+  it("the check asks about superuser, bypassrls, current_user and each of the three forbidden roles, and fails closed on a missing role row", () => {
+    const sql = RCPT2_UNSAFE_SQL;
+    expect(sql).toMatch(/rolsuper OR rolbypassrls/);
+    expect(sql).toMatch(/rolname = session_user/);
+    expect(sql).toMatch(/rolname = current_user/);
+    for (const role of ["agent_run_writer", "receipt_writer", "platform_ops"]) {
+      expect(sql).toContain(`pg_has_role(session_user, '${role}', 'MEMBER')`);
+      expect(sql).toContain(`pg_has_role(current_user, '${role}', 'MEMBER')`);
+    }
+    expect(sql.match(/, true\)/g)).toHaveLength(2);
+  });
+});
+
+describe("D#7 DP4b-1 RCPT-3: the runner login cannot reach the receipt writer", () => {
+  it("passes on a plain false and refuses anything else, asked of the runner pool", async () => {
+    await expect(assertRunnerLoginCannotWriteReceipts(fakePool(GOOD))).resolves.toBeUndefined();
+    expect((await refusal(assertRunnerLoginCannotWriteReceipts(fakePool({ ...GOOD, runnerHoldsReceipt: true })))).rule).toBe("RCPT-3");
+    for (const v of [null, undefined, "f", 0]) {
+      expect((await refusal(assertRunnerLoginCannotWriteReceipts({ query: async () => ({ rows: [{ v }] }) } as unknown as Pool))).rule).toBe("RCPT-3");
+    }
+  });
+
+  it("createWorkerPools asks the RUNNER pool (the first one built), so only a runner login in receipt_writer_invoker trips it", async () => {
+    const answers = [{ ...GOOD, runnerHoldsReceipt: true }, GOOD, GOOD];
+    const ended: string[] = [];
+    let n = 0;
+    const err = await refusal(createWorkerPools(ENV, { makePool: () => fakePool(answers[n]!, ended, `p${n++}`) }));
+    expect(err.rule).toBe("RCPT-3");
+    expect(ended.sort()).toEqual(["p0", "p1", "p2"]);
+    // The same answer on the receipt pool is not RCPT-3's business.
+    const only: Answers[] = [GOOD, GOOD, { ...GOOD, runnerHoldsReceipt: true }];
+    let m = 0;
+    await expect(createWorkerPools(ENV, { makePool: () => fakePool(only[m++]!) })).resolves.toBeDefined();
   });
 });
 
@@ -204,7 +309,7 @@ describe("OPS-5: the runner login is a member of app_user and agent_run_writer",
     let n = 0;
     const err = await refusal(createWorkerPools(ENV, { makePool: () => fakePool({ ...GOOD, roles: false }, ended, `p${n++}`) }));
     expect(err.rule).toBe("OPS-5");
-    expect(ended.sort()).toEqual(["p0", "p1"]);
+    expect(ended.sort()).toEqual(["p0", "p1", "p2"]);
   });
 });
 

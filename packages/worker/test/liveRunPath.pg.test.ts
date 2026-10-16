@@ -95,7 +95,7 @@ describe("the live run path over its fakes [pg]", { timeout: 60_000 }, () => {
       previewPrompt: buildPreviewPrompt,
       sdk: sdkFake(),
       lookup: async () => [{ address: "140.82.112.3", family: 4 }],
-      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: adminPool, close: async () => undefined }),
+      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: adminPool, receiptPool: adminPool, close: async () => undefined }),
     });
     expect(worker.previewReady()).toBe(true);
     // The production composition runs in the production order: it never turns finalize-before-resume off.

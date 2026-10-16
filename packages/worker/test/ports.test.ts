@@ -174,7 +174,7 @@ describe("buildWorker: production ports, targetOverrides and portLimits (H14c-3-
   });
   const runnerPool = fakePool(() => []).pool;
   const platformOpsPool = fakePool(() => []).pool;
-  const pools: WorkerPools = { runnerPool, platformOpsPool, close: async () => void closed.n++ };
+  const pools: WorkerPools = { runnerPool, platformOpsPool, receiptPool: platformOpsPool, close: async () => void closed.n++ };
   const base = (over: Partial<BuildWorkerOptions> = {}): BuildWorkerOptions => ({
     env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" },
     vercel: { teamId: "t", projectId: "p", getToken: async () => "tok" },

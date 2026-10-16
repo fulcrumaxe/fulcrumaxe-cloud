@@ -61,7 +61,7 @@ describe("cancel with production credentials and a fail-closed hooks port [pg]",
     const worker = await buildWorker({
       env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" },
       sdk,
-      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: opsPool, close: async () => {} }),
+      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: opsPool, receiptPool: opsPool, close: async () => {} }),
       vercel: productionVercelCredentials(
         { VERCEL_TEAM_ID: TEAM, VERCEL_PROJECT_ID: PROJECT },
         { getContext: () => ({ headers: { "x-vercel-oidc-token": token } }) },

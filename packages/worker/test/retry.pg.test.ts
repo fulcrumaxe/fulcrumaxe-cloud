@@ -298,7 +298,7 @@ describe("retry_run performer [pg]", { timeout: 60_000 }, () => {
       ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {} }, hooks: { resume: async () => {} }, authorCheck: provider },
       lookup: async () => [{ address: "140.82.112.3", family: 4 }],
       sdk: { create: async (params) => (created.push(params), sandbox(params.name)), get: async (params) => sandbox(params.name) },
-      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: writerPool, close: async () => {} }),
+      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: writerPool, receiptPool: writerPool, close: async () => {} }),
       retrySeats: withSeats ? seats.seats : undefined,
     });
     return { worker, seats, created };

@@ -299,3 +299,32 @@ export async function answerAskIn(client: PoolClient, input: { askId: string; ch
     throw err;
   }
 }
+
+/** Why an ask was withdrawn (migration 0826). Stored on the row as `withdrawn_reason`. */
+export const ASK_WITHDRAW_REASONS = ['item_closed', 'item_halted', 'superseded'] as const;
+export type AskWithdrawReason = (typeof ASK_WITHDRAW_REASONS)[number];
+
+export interface WithdrawnAsk {
+  askId: string;
+  reason: AskWithdrawReason;
+}
+
+/** The most one sweep moves; the definer refuses a limit outside 1..500. */
+export const ASK_WITHDRAW_DEFAULT_LIMIT = 100;
+
+/**
+ * One sweep of `decision_ask_withdraw()` (migration 0826) on the RECEIPT pool: every open or overdue ask whose item is closed, merged,
+ * halted, or has a newer executor run is moved to `withdrawn` with its reason, across tenants. It is for the worker's tick only: the
+ * definer needs no session tenant, and nothing in the result is user text. Returns the asks that moved in this call, oldest first.
+ */
+export async function withdrawStaleAsks(pool: Pick<Pool, 'query'>, limit: number = ASK_WITHDRAW_DEFAULT_LIMIT): Promise<WithdrawnAsk[]> {
+  const { rows } = await pool.query<{ o_ask_id: string; o_reason: string }>(
+    'SELECT o_ask_id, o_reason FROM decision_ask_withdraw($1::integer)',
+    [limit],
+  );
+  return rows.map((r) => {
+    const reason = ASK_WITHDRAW_REASONS.find((x) => x === r.o_reason);
+    if (reason === undefined) throw new Error('decision_ask_withdraw returned an unknown reason');
+    return { askId: r.o_ask_id, reason };
+  });
+}

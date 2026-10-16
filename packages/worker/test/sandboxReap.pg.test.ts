@@ -35,7 +35,7 @@ describe("the sandbox reaper through the worker [pg]", () => {
       vercel: { teamId: "team_1", projectId: "prj_1", getToken: async () => "tok" },
       ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {} }, hooks: { resume: async () => {} } },
       sdk: sdk.sdk,
-      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: opsPool, close: async () => undefined }),
+      createPools: async () => ({ runnerPool: writerPool, platformOpsPool: opsPool, receiptPool: opsPool, close: async () => undefined }),
     });
   });
   afterAll(async () => {

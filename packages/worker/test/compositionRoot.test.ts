@@ -31,6 +31,7 @@ function fakePools(): WorkerPools & { closed: number } {
   return {
     runnerPool: { tag: "runner" } as unknown as Pool,
     platformOpsPool: { tag: "ops" } as unknown as Pool,
+    receiptPool: { tag: "receipt" } as unknown as Pool,
     async close() {
       state.closed++;
     },

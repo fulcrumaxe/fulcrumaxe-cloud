@@ -1421,6 +1421,9 @@ importers:
       '@fx/db':
         specifier: workspace:*
         version: link:../db
+      '@fx/decisions':
+        specifier: workspace:*
+        version: link:../decisions
       '@fx/github':
         specifier: workspace:*
         version: link:../github
