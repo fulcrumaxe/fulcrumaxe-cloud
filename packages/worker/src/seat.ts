@@ -1,6 +1,5 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUN_LIMIT_BOUNDS, RUN_LIMIT_INTEGER_KEYS, type RunLimitKey } from "@fx/core/src/run-limits/limits.js";
 import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { InstallationNotWritableError, assertWriteInstallation } from "@fx/github";
 import { loadLiveRoutingTable, route, type Size } from "@fx/model-router";
@@ -8,8 +7,8 @@ import { getRoleEntry } from "@fx/roles";
 import { loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
-import { effectiveModeSql, runsInOurSandbox, EXTENSION_SLICE_FRACTION, SANDBOX_MAX_TIMEOUT_MS, SANDBOX_TIMEOUT_MARGIN_MS, SANDBOX_VCPUS, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
-import { PINNED_MEMORY_MB, computeComputeUsd, isClaudeModelId, type PlanId } from "@fx/spend";
+import { effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
+import { isClaudeModelId, type PlanId } from "@fx/spend";
 
 /**
  * D#2 H14c-3-2d-2: the seat resolver. It reads everything for one run inside ONE tenant transaction and
@@ -45,44 +44,14 @@ export type SeatRefusal =
 export type SeatRunConfig = Omit<StartAgentRunInput, "accountId" | "role" | "workItemId" | "prompt" | "idempotency">;
 export type SeatResult = { ok: true; seat: SeatRunConfig & { limits: RunLimitsInput; timeoutMs: number; maxExtensions: number } } | { ok: false; reason: SeatRefusal };
 
-const MIN = 60_000;
-/** The platform ceiling on one run's length (also what the extension policy is handed). */
-export const RUN_TIME_CEILING_MS = RUN_LIMIT_BOUNDS.max_run_minutes.ceiling * MIN;
+// D#483 S5-p: the run-time chain (limits -> longest run -> compute price) lives in @fx/runner so the pipeline estimate prices from the same code.
+export { RUN_TIME_CEILING_MS, boundedLimit, runnerLimitsFrom, sandboxTimeFor };
 /** The one place a manifest tier becomes a model id (C55 s4). */
 export const TIER_TO_MODEL_ID: Readonly<Record<string, string>> = { haiku: "haiku-4.5", sonnet: "sonnet-5", opus: "opus-5" };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SIZE_OF_KIND: Readonly<Record<string, Size>> = { small: "Small", feature: "Feature", critical: "Critical" };
 const refuse = (reason: SeatRefusal): SeatResult => ({ ok: false, reason });
-
-/** R-BOUNDS (a): every resolved value is held to core's floor and ceiling (a non-number takes the default); whole numbers stay whole. */
-export function boundedLimit(key: RunLimitKey, value: unknown): number {
-  const b = RUN_LIMIT_BOUNDS[key];
-  if (typeof value !== "number" || !Number.isFinite(value)) return b.default;
-  const clamped = Math.min(Math.max(value, b.floor), b.ceiling);
-  return RUN_LIMIT_INTEGER_KEYS.includes(key) ? Math.trunc(clamped) : clamped;
-}
-
-/** The one mapping from core's resolved limits (minutes, snake_case) to the runner's (ms), plus the two figures the seat itself needs. */
-export function runnerLimitsFrom(resolved: Record<RunLimitKey, number>): { limits: RunLimitsInput; maxExtensions: number; perRunUsd: number } {
-  return {
-    limits: {
-      maxRunMs: boundedLimit("max_run_minutes", resolved.max_run_minutes) * MIN,
-      maxTurns: boundedLimit("max_turns", resolved.max_turns),
-      maxModelCalls: boundedLimit("max_model_calls", resolved.max_model_calls),
-      meteringSilenceMs: boundedLimit("silence_minutes", resolved.silence_minutes) * MIN,
-    },
-    maxExtensions: boundedLimit("max_extensions", resolved.max_extensions),
-    perRunUsd: boundedLimit("per_run_usd", resolved.per_run_usd),
-  };
-}
-
-/** D-TIMEOUT: the sandbox lives past the longest the run can go (every extension taken, up to the platform ceiling) by one margin. */
-export function sandboxTimeFor(limits: RunLimitsInput, maxExtensions: number): { maxPossibleRunMs: number; timeoutMs: number } {
-  const slice = Math.floor(limits.maxRunMs * EXTENSION_SLICE_FRACTION);
-  const maxPossibleRunMs = Math.min(limits.maxRunMs + maxExtensions * slice, RUN_TIME_CEILING_MS);
-  return { maxPossibleRunMs, timeoutMs: maxPossibleRunMs + SANDBOX_TIMEOUT_MARGIN_MS };
-}
 
 /**
  * The retry module's seat source over the resolver (H14c-3-2e). The retry module types `limits` as an index-signature
@@ -190,7 +159,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       const maxExtensions = preview ? 0 : resolved.maxExtensions;
       const capUsd = preview ? PREVIEW_MODEL_CAP_USD : resolved.perRunUsd;
       const { maxPossibleRunMs, timeoutMs } = sandboxTimeFor(limits, maxExtensions);
-      const estimateComputeUsd = computeComputeUsd(maxPossibleRunMs / 1000, SANDBOX_VCPUS, PINNED_MEMORY_MB / 1024);
+      const estimateComputeUsd = sandboxComputeUsdFor(maxPossibleRunMs);
       if (timeoutMs > (deps.maxTimeoutMs ?? SANDBOX_MAX_TIMEOUT_MS) || (preview && estimateComputeUsd > PREVIEW_COMPUTE_CAP_USD)) return refuse("limits_exceed_sandbox");
 
       const size = preview ? "Small" : kind === null ? undefined : SIZE_OF_KIND[kind];

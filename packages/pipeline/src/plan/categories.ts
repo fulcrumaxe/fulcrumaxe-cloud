@@ -15,10 +15,14 @@ export function discussionKindFor(category: TriageCategory): DiscussionKind {
   return category;
 }
 
-/** C36 / C18 item 3 and C58 G8/G9: Critical, Feature and Project run the
- * consensus panel, so only those move `triaged -> discussing` at triage time.
- * Small, Bug, Doc and Question are handled without a panel and stay `triaged`
- * (a question is answered in its thread and never gets a Spec). */
+/** C36 / C18 item 3 and C58 G8/G9: Critical, Feature and Project move
+ * `triaged -> discussing` at triage time. Only Critical and Feature run the
+ * consensus panel (`selectPanel` has no Project triple). A Project is planned in
+ * the interview flow: it rests at `discussing` and the advance workflow ends
+ * it right after triage with the stop `project_not_specified`, before any panel,
+ * Spec or build run, so the pipeline estimate prices it as `none`. Small, Bug,
+ * Doc and Question are handled without a panel and stay `triaged` (a question
+ * is answered in its thread and never gets a Spec). */
 export function runsPanel(category: TriageCategory): boolean {
   return category === "critical" || category === "feature" || category === "project";
 }

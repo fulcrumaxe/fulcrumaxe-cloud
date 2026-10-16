@@ -9,6 +9,7 @@ export * from "./advance/followedRunner.js";
 export * from "./advance/specFlow.js";
 export * from "./advance/build.js";
 export * from "./advance/buildSlots.js";
+export * from "./estimate/index.js";
 export { agentOutputBlock } from "./plan/envelope.js";
 export * from "./review/securityTrigger.js";
 export * from "./review/reviewPlan.js";

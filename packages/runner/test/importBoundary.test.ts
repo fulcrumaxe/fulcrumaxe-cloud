@@ -60,6 +60,9 @@ const FORBIDDEN_MODULE_FILES = new Set([
   // firewallPolicy.ts and targets/sandboxTarget.ts, and it already
   // type-imports networkPolicy.ts, so it belongs to this cluster.
   "githubForwardConfig.ts",
+  // D#483 S5-p: the sandbox's run-time arithmetic and compute price (the pinned vCPUs, the timeout margin, @fx/spend's rates). It is the one
+  // price source for the seat's reservation and the pipeline estimate; no restricted file (the run starter, the runner target) imports it.
+  "runTime.ts",
 ]);
 
 function listWorkflowFiles(): string[] {
