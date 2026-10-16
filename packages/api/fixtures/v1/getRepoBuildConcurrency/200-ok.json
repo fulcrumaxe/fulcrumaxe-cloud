@@ -1,0 +1,6 @@
+{
+  "value": 4,
+  "start_value": 2,
+  "applied_limit": 1,
+  "clamp_reason": "one_build_per_repo_until_d598"
+}

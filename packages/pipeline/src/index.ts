@@ -15,6 +15,7 @@ export * from "./advance/waitingStages.js";
 export * from "./advance/attemptKeys.js";
 export * from "./advance/stageRegistry.js";
 export * from "./estimate/index.js";
+export * from "./concurrency/index.js";
 export { agentOutputBlock } from "./plan/envelope.js";
 export * from "./review/securityTrigger.js";
 export * from "./review/reviewPlan.js";

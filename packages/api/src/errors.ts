@@ -18,6 +18,8 @@ export interface ErrorBody {
     request_id: string;
   };
   details?: { path: string; code: string }[];
+  /** A structured payload the refusal carries (D#483 S5-c2: the fresh cost preview on `preview_required` and `preview_stale`). */
+  data?: Record<string, unknown>;
 }
 
 export class ApiError extends Error {
@@ -26,6 +28,7 @@ export class ApiError extends Error {
     public readonly code: string,
     message: string,
     public readonly details?: { path: string; code: string }[],
+    public readonly data?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -414,6 +417,7 @@ export function mapError(
       body: {
         error: { code: err.code, message: err.message, request_id: requestId },
         ...(err.details ? { details: err.details } : {}),
+        ...(err.data ? { data: err.data } : {}),
       },
       ...(err instanceof RateLimitedError
         ? { headers: { "Retry-After": String(Math.max(1, Math.ceil(err.retryAfterSeconds))) } }

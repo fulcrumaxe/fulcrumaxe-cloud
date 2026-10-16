@@ -20,6 +20,7 @@
     "@fx/discussions": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@fx/model-router": "workspace:*",
+    "@fx/pipeline": "workspace:*",
     "@fx/plan-data": "workspace:*",
     "@fx/runner-cloud": "workspace:*",
     "@fx/sitekit-publish-gates": "workspace:*",
@@ -30,7 +31,6 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@fx/pipeline": "workspace:*",
     "@fx/runner": "workspace:*",
     "@fx/sitekit-checks": "workspace:*",
     "@types/node": "^24.19.0",
