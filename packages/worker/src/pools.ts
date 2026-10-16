@@ -32,7 +32,7 @@ const RECEIPT_LOGIN_ENV = "FX_RECEIPT_LOGIN_URL";
 /** The `platform_ops` connection string (already used by apps/web). */
 export const PLATFORM_OPS_ENV = "DATABASE_URL_PLATFORM_OPS";
 
-export type StartupRule = "OPS-1" | "OPS-2" | "OPS-4" | "OPS-5" | "RCPT-1" | "RCPT-2" | "RCPT-3" | "CONFIG" | "DB-UNAVAILABLE";
+export type StartupRule = "OPS-1" | "OPS-2" | "OPS-4" | "OPS-5" | "RCPT-1" | "RCPT-2" | "RCPT-3" | "AAP-2" | "CONFIG" | "DB-UNAVAILABLE";
 
 const RULE_TEXT: Readonly<Record<StartupRule, string>> = {
   "OPS-1": "the platform_ops pool must connect as exactly platform_ops (session_user), not a member of it",
@@ -45,6 +45,7 @@ const RULE_TEXT: Readonly<Record<StartupRule, string>> = {
   "RCPT-2":
     "the receipt login must not be a superuser or able to bypass row-level security, by any route, and must not be a member of agent_run_writer, receipt_writer or platform_ops",
   "RCPT-3": "the runner login must not be a member of receipt_writer_invoker: the credential an agent's run uses must never reach the receipt writer",
+  "AAP-2": "the runner login must not be a member of aap_invoker or aap_sweeper: the credential an agent's run uses must never reach the approval-request definers",
   "DB-UNAVAILABLE":
     "a guard query could not be run (database unreachable or the query failed), so nothing was verified and the worker will not start",
   CONFIG: "a required worker connection variable (the runner, platform_ops or receipt login) is not set, or a pool could not be built",
@@ -139,6 +140,28 @@ export const RCPT3_RUNNER_HOLDS_SQL = `SELECT (
 
 export async function assertRunnerLoginCannotWriteReceipts(runnerPool: Queryable): Promise<void> {
   if ((await scalar(runnerPool, RCPT3_RUNNER_HOLDS_SQL)) !== false) throw new StartupGuardError("RCPT-3");
+}
+
+/**
+ * AAP-2, run on the RUNNER pool: the runner login is not a member of `aap_invoker` (the request path) or `aap_sweeper` (the housekeeping), as
+ * `session_user` or `current_user`, directly or through another role. Only a plain false passes. A role that does not exist yet counts as not held.
+ */
+export const AAP2_RUNNER_HOLDS_SQL = `SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('aap_invoker', 'aap_sweeper')
+  AND (pg_has_role(session_user, r.oid, 'MEMBER') OR pg_has_role(current_user, r.oid, 'MEMBER'))) AS v`;
+
+export async function assertRunnerLoginCannotUseAap(runnerPool: Queryable): Promise<void> {
+  if ((await scalar(runnerPool, AAP2_RUNNER_HOLDS_SQL)) !== false) throw new StartupGuardError("AAP-2");
+}
+
+/**
+ * AAP-1 (flags, never refuses): can the receipt login run the approval-request housekeeping (a member of `aap_sweeper`, USAGE)? A refusal here
+ * would stop the whole worker for a missing grant, so a "no" is carried as `aapReady: false` and shown on every tick instead (see aapPurge.ts).
+ * A missing role reads as not ready.
+ */
+export const AAP1_RECEIPT_READY_SQL = `SELECT COALESCE((SELECT pg_has_role(session_user, r.oid, 'USAGE') FROM pg_roles r WHERE r.rolname = 'aap_sweeper'), false) AS v`;
+
+export async function receiptLoginCanUseAap(receiptPool: Queryable): Promise<boolean> {
+  return (await scalar(receiptPool, AAP1_RECEIPT_READY_SQL)) === true;
 }
 
 /**
@@ -244,6 +267,8 @@ export interface WorkerPools {
   platformOpsPool: Pool;
   /** The receipt login: the only pool that may call the decision-receipt and decision-ask definers (D#7 DP4b-1). */
   receiptPool: Pool;
+  /** AAP-1: the receipt login is a member of aap_sweeper. False means the approval-request housekeeping cannot run and says so every tick. */
+  aapReady?: boolean;
   close(): Promise<void>;
 }
 
@@ -297,9 +322,18 @@ export async function createWorkerPools(
     await assertReceiptLoginRoles(receiptPool);
     await assertReceiptLoginIsolated(receiptPool);
     await assertRunnerLoginCannotWriteReceipts(runnerPool);
+    await assertRunnerLoginCannotUseAap(runnerPool);
   } catch (err) {
     await close();
     throw err;
   }
-  return { runnerPool, platformOpsPool, receiptPool, close };
+  let aapReady: boolean;
+  try {
+    aapReady = await receiptLoginCanUseAap(receiptPool);
+  } catch (err) {
+    await close();
+    throw err;
+  }
+  if (!aapReady) console.error(JSON.stringify({ event: "aap.sweeper_membership_missing", fix: "make the receipt login a member of aap_sweeper" }));
+  return { runnerPool, platformOpsPool, receiptPool, aapReady, close };
 }

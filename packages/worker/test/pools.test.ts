@@ -14,6 +14,8 @@ import {
   OPS2_UNSAFE_SQL,
   RCPT2_UNSAFE_SQL,
   createWorkerPools,
+  assertRunnerLoginCannotUseAap,
+  receiptLoginCanUseAap,
 } from "../src/pools.js";
 import { RUNNER_LOGIN_NAME } from "./support/scanRunnerLoginReaders.js";
 import { RECEIPT_LOGIN_NAME } from "./support/scanReceiptLoginReaders.js";
@@ -22,13 +24,14 @@ const RUNNER_URL = "postgres://runner-user:runner-secret-pw@db.internal:5432/app
 const OPS_URL = "postgres://ops-user:ops-secret-pw@db.internal:5432/app";
 const RECEIPT_URL = "postgres://receipt-user:receipt-secret-pw@db.internal:5432/app";
 
-type Answers = { sessionUser: string; rolsuper: boolean; members: number; roles?: boolean; holds?: boolean; receiptRoles?: boolean; runnerHoldsReceipt?: boolean };
+type Answers = { sessionUser: string; rolsuper: boolean; members: number; roles?: boolean; holds?: boolean; receiptRoles?: boolean; runnerHoldsReceipt?: boolean; aapRunnerHolds?: boolean; aapReceiptReady?: boolean };
 
 /** A pool that answers the three guard queries from `answers`, by the SQL it is sent. */
 function fakePool(answers: Answers, ended: string[] = [], name = "pool"): Pool {
   return {
     async query(sql: string) {
       if (/session_user::text/.test(sql)) return { rows: [{ v: answers.sessionUser }] };
+      if (/aap_(invoker|sweeper)/.test(sql)) return { rows: [{ v: /'MEMBER'/.test(sql) ? (answers.aapRunnerHolds ?? false) : (answers.aapReceiptReady ?? true) }] };
       if (/receipt_writer_invoker', 'USAGE'/.test(sql)) return { rows: [{ v: answers.receiptRoles ?? true }] };
       if (/receipt_writer_invoker', 'MEMBER'/.test(sql)) return { rows: [{ v: answers.runnerHoldsReceipt ?? false }] };
       if (/rolsuper/.test(sql)) return { rows: [{ v: answers.rolsuper }] };
@@ -360,5 +363,44 @@ describe("OPS-5 [pg]: against real logins", () => {
 
   it("a login that is only an agent_run_writer member is refused", async () => {
     expect((await refusal(assertRunnerLoginRoles(poolFor("fx_ops5_writer_only")))).rule).toBe("OPS-5");
+  });
+});
+
+describe("AAP-1 and AAP-2: the approval-request definers (migration 0837)", () => {
+  it("AAP-2 refuses a runner login that is a member of aap_invoker or aap_sweeper, naming the rule only; anything but a plain false refuses", async () => {
+    await expect(assertRunnerLoginCannotUseAap(fakePool(GOOD))).resolves.toBeUndefined();
+    expect((await refusal(assertRunnerLoginCannotUseAap(fakePool({ ...GOOD, aapRunnerHolds: true })))).rule).toBe("AAP-2");
+    for (const v of [null, undefined, "f"]) {
+      expect((await refusal(assertRunnerLoginCannotUseAap({ query: async () => ({ rows: [{ v }] }) } as unknown as Pool))).rule).toBe("AAP-2");
+    }
+  });
+
+  it("AAP-1 reports whether the receipt login can call them, true only for a plain true", async () => {
+    expect(await receiptLoginCanUseAap(fakePool(GOOD))).toBe(true);
+    expect(await receiptLoginCanUseAap(fakePool({ ...GOOD, aapReceiptReady: false }))).toBe(false);
+    expect(await receiptLoginCanUseAap({ query: async () => ({ rows: [{ v: null }] }) } as unknown as Pool)).toBe(false);
+  });
+
+  it("createWorkerPools starts with aapReady false and says so on stderr, rather than refusing, when the grant is missing", async () => {
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (line: string) => void lines.push(line);
+    try {
+      const pools = await createWorkerPools(ENV, { makePool: () => fakePool({ ...GOOD, aapReceiptReady: false }) });
+      expect(pools.aapReady).toBe(false);
+      expect(lines.map((l) => JSON.parse(l).event)).toEqual(["aap.sweeper_membership_missing"]);
+      expect(lines.join("")).not.toMatch(/secret|postgres:/);
+    } finally {
+      console.error = real;
+    }
+    expect((await createWorkerPools(ENV, { makePool: () => fakePool(GOOD) })).aapReady).toBe(true);
+  });
+
+  it("createWorkerPools refuses with AAP-2 and closes every pool when the runner login holds aap_invoker or aap_sweeper", async () => {
+    const ended: string[] = [];
+    let n = 0;
+    const err = await refusal(createWorkerPools(ENV, { makePool: () => fakePool(n++ === 0 ? { ...GOOD, aapRunnerHolds: true } : GOOD, ended, `p${n}`) }));
+    expect(err.rule).toBe("AAP-2");
+    expect(ended).toHaveLength(3);
   });
 });

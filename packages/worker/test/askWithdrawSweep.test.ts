@@ -86,13 +86,13 @@ describe("the tick: the invariant sweep also runs the withdrawal on the RECEIPT 
     return buildWorker(options);
   }
 
-  it("sweepInvariants asks the receipt pool for the withdrawal, and the runner pool only for the invariant rules", async () => {
-    const receipt = fake([[]]);
-    const runner = { async query(sql: string) { if (/decision_ask_withdraw/.test(sql)) throw new Error("the runner pool must not run the withdrawal"); return { rows: [] }; } } as unknown as Pool;
+  it("sweepInvariants asks the receipt pool for the withdrawal and the approval-request housekeeping, and the runner pool only for the invariant rules", async () => {
+    const receipt = fake([[], [{ o_expired: 0, o_arguments_purged: 0, o_idempotency_purged: 0, o_instances_purged: 0 } as never]]);
+    const runner = { async query(sql: string) { if (/decision_ask_withdraw|aap_sweep/.test(sql)) throw new Error("the runner pool must not run the withdrawal or the approval-request sweep"); return { rows: [] }; } } as unknown as Pool;
     const worker = await build(receipt.pool, runner);
     const result = await worker.sweepInvariants();
     expect(result.failed).toBe(0);
-    expect(receipt.calls.map((c) => c[0])).toEqual([expect.stringContaining("decision_ask_withdraw")]);
+    expect(receipt.calls.map((c) => c[0])).toEqual([expect.stringContaining("decision_ask_withdraw"), expect.stringContaining("aap_sweep")]);
   });
 
   it("a failing withdrawal does not fail the invariant sweep's result", async () => {

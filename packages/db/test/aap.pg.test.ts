@@ -16,6 +16,7 @@ import { PG_ERROR } from './helpers/pgErrors.js';
  * LOGIN that is a member of app_user AND aap_invoker, the stand-in for the production login (ops grants the membership).
  */
 const INVOKER_LOGIN = 'fx_aap_invoker_test';
+const SWEEPER_LOGIN = 'fx_aap_sweeper_test';
 const KEY1 = randomBytes(32).toString('base64');
 const KEY2 = randomBytes(32).toString('base64');
 const kekOf = (env: Record<string, string | undefined>): ArgumentsKek => envArgumentsKek(env);
@@ -27,6 +28,7 @@ describe('AAP storage (0837)', () => {
   let admin: PoolClient;
   let appUserPool: Pool;
   let invokerPool: Pool;
+  let sweeperPool: Pool;
   let a: SeedRefs;
   let b: SeedRefs;
   let owner: string;
@@ -79,10 +81,14 @@ describe('AAP storage (0837)', () => {
         END IF;
       END $$`);
     await admin.query(`GRANT app_user, aap_invoker TO ${INVOKER_LOGIN}`);
+    await admin.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SWEEPER_LOGIN}') THEN CREATE ROLE ${SWEEPER_LOGIN} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; END IF; END $$`);
+    await admin.query(`GRANT app_user, aap_sweeper TO ${SWEEPER_LOGIN}`);
     const u = new URL(process.env.DATABASE_URL_APP_USER!);
     u.username = INVOKER_LOGIN;
     u.password = '';
     invokerPool = createPool(u.toString());
+    u.username = SWEEPER_LOGIN;
+    sweeperPool = createPool(u.toString());
     appUserPool = createPool(process.env.DATABASE_URL_APP_USER!);
     a = await seedAccount(admin, randomUUID());
     b = await seedAccount(admin, randomUUID());
@@ -93,14 +99,15 @@ describe('AAP storage (0837)', () => {
   });
   afterAll(async () => {
     admin.release();
-    await Promise.all([adminPool.end(), appUserPool.end(), invokerPool.end()]);
+    await Promise.all([adminPool.end(), appUserPool.end(), invokerPool.end(), sweeperPool.end()]);
   });
 
   describe('1. who can write, and who can read what', () => {
     const FUNCTIONS = [
       'aap_instance_authenticate', 'aap_instance_create', 'aap_instance_close', 'aap_request_create', 'aap_request_get', 'aap_request_consume',
-      'aap_request_outcome', 'aap_approval_decide',
+      'aap_request_outcome', 'aap_approval_decide', 'aap_request_create_idempotent', 'aap_sweep',
     ];
+    const PLAIN = ['aap_manager_account', 'aap_view', 'aap_sweep_at'];
     it('every definer is owned by aap_definer, pinned, and executable by aap_invoker alone; the helper is reachable by no one', async () => {
       const { rows } = await admin.query(
         `SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef, p.proconfig,
@@ -108,29 +115,31 @@ describe('AAP storage (0837)', () => {
                    FROM aclexplode(p.proacl) x WHERE x.grantee <> p.proowner) AS grantees
            FROM pg_proc p WHERE p.proname LIKE 'aap\\_%' AND p.pronamespace = 'public'::regnamespace ORDER BY p.proname`,
       );
-      expect(rows.map((r) => r.proname).sort()).toEqual([...FUNCTIONS, 'aap_manager_account', 'aap_view'].sort());
+      expect(rows.map((r) => r.proname).sort()).toEqual([...FUNCTIONS, ...PLAIN].sort());
       for (const r of rows) {
         expect(r.owner).toBe('aap_definer');
         expect(r.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
-        if (r.proname === 'aap_manager_account' || r.proname === 'aap_view') expect(r.grantees).toBeNull();
-        else expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, true, ['aap_invoker']]);
+        if (PLAIN.includes(r.proname)) expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, false, null]);
+        else expect([r.proname, r.prosecdef, r.grantees]).toEqual([r.proname, true, [r.proname === 'aap_sweep' ? 'aap_sweeper' : 'aap_invoker']]);
       }
     });
 
     it('plain app_user can call none of them and cannot write any of the four tables', async () => {
+      await expect(appUserPool.query(`SELECT * FROM aap_sweep(1)`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
       await expect(appUserPool.query(`SELECT aap_instance_authenticate('x')`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
       const { rows } = await admin.query<{ t: string; priv: string; ok: boolean }>(
         `SELECT t, priv, has_table_privilege('app_user', t, priv) AS ok
-           FROM unnest(ARRAY['aap_instances','action_approvals']) t, unnest(ARRAY['INSERT','UPDATE','DELETE','TRUNCATE']) priv`,
+           FROM unnest(ARRAY['aap_instances','action_approvals','aap_idempotency']) t, unnest(ARRAY['INSERT','UPDATE','DELETE','TRUNCATE']) priv`,
       );
       expect(rows.filter((r) => r.ok)).toEqual([]);
     });
 
-    it('app_user reads no credential hash; the two roles hold no privilege they should not', async () => {
+    it('app_user reads no credential hash and no idempotency row; the two roles hold no privilege they should not', async () => {
       const { rows } = await admin.query<{ c: string; ok: boolean }>(
         `SELECT c, has_column_privilege('app_user', t, c, 'SELECT') AS ok FROM (VALUES ('aap_instances','credential_sha256')) v(t, c)`,
       );
       expect(rows).toEqual([{ c: 'credential_sha256', ok: false }]);
+      expect((await admin.query(`SELECT has_any_column_privilege('app_user', 'aap_idempotency', 'SELECT') AS ok`)).rows[0].ok).toBe(false);
       expect((await admin.query(`SELECT count(*)::int AS n FROM pg_proc p, aclexplode(p.proacl) x WHERE x.grantee = 'aap_invoker'::regrole AND p.proname NOT LIKE 'aap\\_%'`)).rows[0].n).toBe(0);
       expect((await admin.query(`SELECT pg_has_role('app_user', 'aap_definer', 'USAGE') AS ok`)).rows[0].ok).toBe(false);
     });
@@ -356,6 +365,158 @@ describe('AAP storage (0837)', () => {
       expect(after.expires_at).toEqual(before.expires_at);
       expect(after.consumed_at).toEqual(before.consumed_at);
       await expect(admin.query(`UPDATE action_approvals SET outcome = 'succeeded' WHERE id = $1`, [req.id])).rejects.toThrow();
+    });
+  });
+
+  describe('8. idempotency compares parsed JSON, not bytes', () => {
+    it('returns the same row for the same fields in another key order, and idempotency_conflict for different ones', async () => {
+      const { secret } = await instance(a);
+      const first = await createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'k1', arguments: { a: 1, b: { c: 2, d: 3 } }, context: { x: 1, y: 2 } }));
+      const again = await createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'k1', arguments: { b: { d: 3, c: 2 }, a: 1 }, context: { y: 2, x: 1 } }));
+      expect(again).toMatchObject({ id: first.id, replayed: true });
+      expect(first.replayed).toBe(false);
+      await rejectsWith(createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'k1', arguments: { a: 2 } })), 'idempotency_conflict');
+      await rejectsWith(createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'k1', arguments: { a: 1, b: { c: 2, d: 3 } }, context: { x: 1, y: 2 }, tool: 'other' })), 'idempotency_conflict');
+      const other = await instance(a);
+      const separate = await createRequest(invokerPool, KEK, other.secret, input({ idempotencyKey: 'k1', arguments: { a: 1, b: { c: 2, d: 3 } }, context: { x: 1, y: 2 } }));
+      expect(separate.id).not.toBe(first.id);
+      const raced = await Promise.all([1, 2, 3].map(() => createRequest(invokerPool, KEK, other.secret, input({ idempotencyKey: 'race' }))));
+      expect(new Set(raced.map((r) => r.id)).size).toBe(1);
+    });
+  });
+
+  describe('9. housekeeping', () => {
+    /** The sweep with a clock we choose, as the table owner: aap_sweep_at is the only clock-taking version and no login can call it. */
+    const sweepAt = async (at: string, limit = 1000) => {
+      const r = (await admin.query(`SELECT * FROM aap_sweep_at($1::timestamptz, $2)`, [at, limit])).rows[0];
+      return { expired: r.o_expired as number, args: r.o_arguments_purged as number, idempotency: r.o_idempotency_purged as number, instances: r.o_instances_purged as number };
+    };
+    /** The sweep at `col + delta` of a row, computed in SQL so microseconds are exact (a JS Date would round them to milliseconds). */
+    const sweepAtRow = async (table: string, id: string, col: string, delta: string) => {
+      const { rows } = await admin.query(`SELECT (${col} + $2::interval)::text AS t FROM ${table} WHERE ${table === 'aap_idempotency' ? 'response_ref' : 'id'} = $1`, [id, delta]);
+      return sweepAt(rows[0].t);
+    };
+    const replayExact = async (id: string): Promise<boolean[]> =>
+      (await admin.query(`SELECT i.purge_after = r.decided_at + interval '7 days' AS exact FROM aap_idempotency i JOIN action_approvals r ON r.id = i.response_ref WHERE r.id = $1`, [id])).rows.map((r) => r.exact);
+
+    it('expires a pending request at its deadline, and not before', async () => {
+      const { secret } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input({ deadlineAt: deadline(120_000) }));
+      await sweepAtRow('action_approvals', req.id, 'deadline_at', '-1 microsecond');
+      expect((await row(req.id)).status).toBe('pending');
+      expect((await sweepAtRow('action_approvals', req.id, 'deadline_at', '0 seconds')).expired).toBeGreaterThanOrEqual(1);
+      expect(await row(req.id)).toMatchObject({ status: 'expired', decided_by_kind: null });
+      await rejectsWith(consumeRequest(invokerPool, secret, req.id), 'not_approved');
+    });
+
+    it('nulls sealed arguments 30 days after the request left pending, keeping the hash and the byte count', async () => {
+      const { secret } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input());
+      await asUser(a.accountId, owner, (c) => decideRequest(c, req.id, false, null, null));
+      const kept = (await row(req.id)).arguments_sha256;
+      const bytes = (await row(req.id)).arguments_bytes;
+      await sweepAtRow('action_approvals', req.id, 'decided_at', '30 days - 1 microsecond');
+      expect((await row(req.id)).arguments_sealed).not.toBeNull();
+      await sweepAtRow('action_approvals', req.id, 'decided_at', '30 days');
+      expect(await row(req.id)).toMatchObject({ arguments_sealed: null, arguments_kek_version: null, arguments_sha256: kept, arguments_bytes: bytes });
+    });
+
+    it('drops the replay record 7 days after the decision, and keeps one for a request still pending', async () => {
+      const { secret } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'purge-me', deadlineAt: deadline(13 * DAY) }));
+      await sweepAt(new Date(Date.now() + 6 * DAY).toISOString());
+      expect(await replayExact(req.id)).toHaveLength(1);
+      await asUser(a.accountId, owner, (c) => decideRequest(c, req.id, false, null, null));
+      expect(await replayExact(req.id)).toEqual([true]);
+      await sweepAtRow('action_approvals', req.id, 'decided_at', '7 days - 1 microsecond');
+      expect(await replayExact(req.id)).toHaveLength(1);
+      expect((await sweepAtRow('action_approvals', req.id, 'decided_at', '7 days')).idempotency).toBeGreaterThanOrEqual(1);
+      expect(await replayExact(req.id)).toHaveLength(0);
+    });
+
+    it('starts the replay record\'s 7 days when a request is cancelled, when its instance is closed, and when it expires', async () => {
+      const make = async (key: string, ms = 13 * DAY) => {
+        const inst = await instance(a);
+        return { ...inst, req: await createRequest(invokerPool, KEK, inst.secret, input({ idempotencyKey: key, deadlineAt: deadline(ms) })) };
+      };
+      const cancelled = await make('clock-cancel');
+      await cancelRequest(invokerPool, cancelled.secret, cancelled.req.id);
+      expect(await replayExact(cancelled.req.id)).toEqual([true]);
+      const closed = await make('clock-close');
+      await asUser(a.accountId, owner, (c) => closeInstance(c, {}, closed.id, false));
+      expect(await replayExact(closed.req.id)).toEqual([true]);
+      const expiring = await make('clock-expire', 120_000);
+      await sweepAtRow('action_approvals', expiring.req.id, 'deadline_at', '0 seconds');
+      expect((await row(expiring.req.id)).status).toBe('expired');
+      expect(await replayExact(expiring.req.id)).toEqual([true]);
+    });
+
+    it('removes a deleted instance after 7 days but keeps its requests as receipts: the hash and byte count stay, the instance reference is nulled', async () => {
+      const { secret, id } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'gone' }));
+      await asUser(a.accountId, owner, (c) => closeInstance(c, {}, id, true));
+      const before = await row(req.id);
+      await sweepAtRow('aap_instances', id, 'deleted_at', '7 days - 1 microsecond');
+      expect((await admin.query(`SELECT 1 FROM aap_instances WHERE id = $1`, [id])).rowCount).toBe(1);
+      expect(before.status).toBe('cancelled');
+      await sweepAtRow('aap_instances', id, 'deleted_at', '7 days');
+      expect((await admin.query(`SELECT 1 FROM aap_instances WHERE id = $1`, [id])).rowCount).toBe(0);
+      expect((await admin.query(`SELECT 1 FROM aap_idempotency WHERE instance_id = $1`, [id])).rowCount).toBe(0);
+      const after = await row(req.id);
+      expect(after).toMatchObject({ instance_id: null, status: 'cancelled', account_id: a.accountId, arguments_sha256: before.arguments_sha256, arguments_bytes: before.arguments_bytes });
+      // the receipt still ages out like any other: its sealed arguments are purged at 30 days
+      expect(after.arguments_sealed).not.toBeNull();
+      await sweepAtRow('action_approvals', req.id, 'decided_at', '30 days');
+      expect(await row(req.id)).toMatchObject({ arguments_sealed: null, arguments_sha256: before.arguments_sha256 });
+      // and nothing but the foreign key can null the reference
+      await expect(admin.query(`UPDATE action_approvals SET instance_id = $2 WHERE id = $1`, [req.id, randomUUID()])).rejects.toThrow();
+    });
+
+    it('does one batch of at most `limit` rows per call, oldest first', async () => {
+      const inst = (await instance(a)).id;
+      const ids = [];
+      for (const day of [1, 2, 3]) ids.push(await insertRow(inst, 'pending', { deadline_at: new Date(Date.UTC(2001, 0, day)) }));
+      for (let i = 1; i <= 3; i++) {
+        expect((await sweepAt(new Date().toISOString(), 1)).expired).toBe(1);
+        const expired = (await admin.query(`SELECT count(*)::int AS n FROM action_approvals WHERE id = ANY($1) AND status = 'expired'`, [ids])).rows[0].n;
+        expect(expired).toBe(i);
+      }
+      expect((await row(ids[0]!)).status).toBe('expired');
+    });
+
+    it('refuses a missing time or a limit outside 1 to 1000 by name', async () => {
+      for (const limit of [0, 1001]) {
+        await expect(admin.query(`SELECT * FROM aap_sweep_at(now(), $1)`, [limit])).rejects.toThrow(/^aap_sweep_bad_input/);
+        await expect(sweeperPool.query(`SELECT * FROM aap_sweep($1)`, [limit])).rejects.toThrow(/^aap_sweep_bad_input/);
+      }
+      await expect(admin.query(`SELECT * FROM aap_sweep_at(NULL, 10)`)).rejects.toThrow(/^aap_sweep_bad_input/);
+    });
+
+    it('has no clock argument, so a far-future time cannot be passed, and it purges nothing that is not yet due', async () => {
+      const { secret } = await instance(a);
+      const pending = await createRequest(invokerPool, KEK, secret, input({ idempotencyKey: 'not-due' }));
+      const decided = await createRequest(invokerPool, KEK, secret, input());
+      await asUser(a.accountId, owner, (c) => decideRequest(c, decided.id, false, null, null));
+      const doomed = await instance(a);
+      await asUser(a.accountId, owner, (c) => closeInstance(c, {}, doomed.id, true));
+      await expect(sweeperPool.query(`SELECT * FROM aap_sweep(now() + interval '100 years', 1000)`)).rejects.toMatchObject({ code: '42883' });
+      await sweeperPool.query(`SELECT * FROM aap_sweep(1000)`);
+      expect((await row(pending.id)).status).toBe('pending');
+      expect((await row(decided.id)).arguments_sealed).not.toBeNull();
+      expect((await admin.query(`SELECT 1 FROM aap_instances WHERE id = $1`, [doomed.id])).rowCount).toBe(1);
+      expect((await admin.query(`SELECT 1 FROM aap_idempotency WHERE response_ref = $1`, [pending.id])).rowCount).toBe(1);
+    });
+
+    it('only the sweep login can run the sweep, and nobody but the table owner can reach the clock-taking version', async () => {
+      await expect(invokerPool.query(`SELECT * FROM aap_sweep(10)`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await expect(sweeperPool.query(`SELECT aap_instance_authenticate('x')`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await expect(sweeperPool.query(`SELECT * FROM aap_sweep_at(now(), 10)`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await expect(invokerPool.query(`SELECT * FROM aap_sweep_at(now(), 10)`)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      const { rows } = await admin.query<{ r: string; ok: boolean }>(
+        `SELECT r, has_function_privilege(r, 'aap_sweep_at(timestamptz, integer)', 'EXECUTE') AS ok FROM unnest(ARRAY['app_user', 'aap_invoker', 'aap_sweeper', '${INVOKER_LOGIN}', '${SWEEPER_LOGIN}']) r`,
+      );
+      expect(rows.filter((r) => r.ok)).toEqual([]);
+      expect((await admin.query(`SELECT pg_has_role('${INVOKER_LOGIN}', 'aap_sweeper', 'MEMBER') AS a, pg_has_role('${SWEEPER_LOGIN}', 'aap_invoker', 'MEMBER') AS b`)).rows[0]).toEqual({ a: false, b: false });
     });
   });
 
