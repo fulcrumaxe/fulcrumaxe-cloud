@@ -50,6 +50,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `decision_settings` | `0400_decisions.sql` | tenant | yes |
 | `decision_receipts` | `0400_decisions.sql` | tenant | yes |
 | `decision_ask_settings` | `0812_decision_ask_settings.sql` | tenant | yes |
+| `action_rules` | `0847_action_rules.sql` | tenant (append-only; `app_user` SELECT and INSERT, owner or admin to insert) | yes |
 | `ask_routes` | `0836_ask_routes.sql` | tenant | yes |
 | `idempotency_keys` | `0600_api_core.sql` | tenant | yes |
 | `stripe_webhook_events` | `0606_derived_account_status.sql` | platform-wide (`platform_ops`-only policy; no grant to `app_user`/`partner_user`) | yes |

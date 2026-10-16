@@ -137,6 +137,13 @@ admin now) and appends one version with its `ask_route.changed` audit row in one
 levels), `restoreAskRoute` appends an earlier version's content as a new version, and `resolveCurrentAskRoute` does the four-step lookup
 (repo + type, repo + `*`, account + type, account + `*`; a tombstone falls to the next step, then to the R5 default).
 
+`actionRules.ts` stores the customer's approval rules for tool calls in `action_rules` (migration 0847) as append-only versions per
+account or repo: `appendRuleSet` validates the set with `validateRuleSet` (refusing with the validator's own codes) and appends one version
+plus its audit row in one transaction, `rollbackRuleSet` appends a copy of an earlier version, and `resolveActionRules` returns the repo's
+own set, else the account's, else the empty set (every call asks). The audit row goes through `audit_write_action_rules`, a definer owned by
+the new `action_rules_auditor` role; `audit_write` is not touched.
+
+
 `decisions.ts` reads and writes the `decision_settings`/`decision_receipts`
 tables: `getCurrentDialSetting`/`listDialHistory` are plain reads over
 `withTenant`-scoped connections; `writeDialSetting` inserts the next
