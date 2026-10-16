@@ -53,10 +53,12 @@ export interface IssueAction {
 interface IssueRow {
   number: number;
   title: string;
+  body?: string | null;
   pull_request?: unknown;
 }
 
-function request(opts: IssueOptions, method: string, path: string, body?: unknown): Promise<unknown> {
+/** One GitHub API call over https (Node's default connect path). Exported so other GitHub reads in this package share it. */
+export function request(opts: Pick<IssueOptions, "token" | "apiBase" | "ca">, method: string, path: string, body?: unknown): Promise<unknown> {
   const base = new URL(opts.apiBase ?? "https://api.github.com");
   if (base.protocol !== "https:") throw new GithubError("the GitHub API address must be https", 0);
   const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -95,7 +97,7 @@ function request(opts: IssueOptions, method: string, path: string, body?: unknow
   });
 }
 
-async function openIssues(opts: IssueOptions): Promise<IssueRow[]> {
+async function openIssues(opts: Pick<IssueOptions, "repo" | "token" | "apiBase" | "ca">): Promise<IssueRow[]> {
   const all: IssueRow[] = [];
   for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
     const rows = (await request(opts, "GET", `/repos/${opts.repo}/issues?labels=${ISSUE_LABEL}&state=open&per_page=100&page=${page}`)) as IssueRow[];
@@ -160,4 +162,95 @@ export async function syncIssues(results: Results, opts: IssueOptions): Promise<
     }
   }
   return actions;
+}
+
+export const sessionIssueTitle = (role: string): string => `live-e2e: session lapsed (${role})`;
+
+/**
+ * The fixed list of lapse reasons (R-441-T3-18). The code, never the wording, is what the issue body records and what a
+ * later check compares: jobs share no memory, so the open issue is the only place the last reason can live.
+ */
+export const LAPSE_REASON_CODES = { lapsed: "idle", expired: "past-limit", malformed: "malformed", rejected: "app-rejected" } as const;
+export const REASON_LINE_PREFIX = "Reason code: ";
+const REASON_LINE = new RegExp(`^${REASON_LINE_PREFIX}([a-z0-9-]{1,32})$`, "m");
+
+/** The reason code for a keep-alive state; a state outside the list is `other` (it still opens, and compares, as one reason). */
+export const lapseReasonCode = (state: string): string => (LAPSE_REASON_CODES as Record<string, string>)[state] ?? "other";
+
+/** The reason code an open issue body records, or undefined when it has none (an issue from before the line existed). */
+export const reasonCodeOf = (body: string | null | undefined): string | undefined => REASON_LINE.exec(body ?? "")?.[1];
+
+export interface SessionIssueEvent {
+  role: string;
+  /** The keep-alive state (a closed set of words, never a cookie). */
+  state: string;
+  lapsed: boolean;
+}
+
+/**
+ * One issue per lapsed role, never one per pack that needed it (4a): opened with `live-e2e` + `needs-owner` and
+ * the capture command; while the role stays lapsed for the same reason nothing is added (the keep-alive runs every
+ * few hours), and when the reason changes the issue is updated and commented on; closed once the role is healthy again. A role that is not in `events` (never captured, or forgotten) is left alone.
+ */
+export async function syncSessionIssues(
+  events: SessionIssueEvent[],
+  opts: Pick<IssueOptions, "repo" | "token" | "apiBase" | "ca" | "runUrl"> & { captureCommand: (role: string) => string },
+): Promise<IssueAction[]> {
+  if (!REPO_PATTERN.test(opts.repo)) throw new GithubError("repo must be owner/name", 0);
+  const open = await openIssues(opts);
+  const actions: IssueAction[] = [];
+  for (const e of events) {
+    const title = sessionIssueTitle(e.role);
+    const existing = open.filter((i) => i.title === title).sort((a, b) => a.number - b.number)[0];
+    const pack = `session:${e.role}`;
+    if (e.lapsed) {
+      const headline = `The stored session for \`${e.role}\` is no longer usable (${e.state}). Packs that need it report SKIPPED-NEED until it is captured again.`;
+      const code = lapseReasonCode(e.state);
+      const body = [headline, "", `${REASON_LINE_PREFIX}${code}`, "", `Capture it again on the owner's machine: \`${opts.captureCommand(e.role)}\``, ...(opts.runUrl !== undefined ? ["", `Run: ${opts.runUrl}`] : [])].join("\n");
+      if (existing === undefined) {
+        const made = (await request(opts, "POST", `/repos/${opts.repo}/issues`, { title, body, labels: [ISSUE_LABEL, NEEDS_OWNER_LABEL] })) as { number: number };
+        actions.push({ pack, action: "created", number: made.number });
+      } else if (reasonCodeOf(existing.body) !== code) {
+        // Compared on the machine-readable line only, so the wording around it can change without re-commenting every open issue.
+        await request(opts, "PATCH", `/repos/${opts.repo}/issues/${existing.number}`, { body });
+        await request(opts, "POST", `/repos/${opts.repo}/issues/${existing.number}/comments`, { body: `Still lapsed, now: ${e.state}.${opts.runUrl !== undefined ? ` Run: ${opts.runUrl}` : ""}` });
+        actions.push({ pack, action: "commented", number: existing.number });
+      } else {
+        actions.push({ pack, action: "none", number: existing.number });
+      }
+    } else if (e.state === "ok" && existing !== undefined) {
+      await request(opts, "POST", `/repos/${opts.repo}/issues/${existing.number}/comments`, { body: "The session is usable again." });
+      await request(opts, "PATCH", `/repos/${opts.repo}/issues/${existing.number}`, { state: "closed", state_reason: "completed" });
+      actions.push({ pack, action: "closed", number: existing.number });
+    } else {
+      actions.push({ pack, action: "none" });
+    }
+  }
+  return actions;
+}
+
+export const STORE_ISSUE_TITLE = "live-e2e: session store unreadable";
+
+/**
+ * A store that cannot be read (a rotated key, an edited or corrupt file) is one issue with the way out, not a crash and
+ * not one issue per pack; it closes itself the first time the store reads again.
+ */
+export async function syncStoreIssue(
+  unreadable: boolean,
+  opts: Pick<IssueOptions, "repo" | "token" | "apiBase" | "ca" | "runUrl"> & { why: string; recapture: string },
+): Promise<IssueAction> {
+  if (!REPO_PATTERN.test(opts.repo)) throw new GithubError("repo must be owner/name", 0);
+  const existing = (await openIssues(opts)).filter((i) => i.title === STORE_ISSUE_TITLE).sort((a, b) => a.number - b.number)[0];
+  const pack = "session-store";
+  if (unreadable && existing === undefined) {
+    const body = [`The encrypted session store cannot be read (${opts.why}). Every pack that needs a session reports SKIPPED-NEED until it is fixed.`, "", opts.recapture, ...(opts.runUrl !== undefined ? ["", `Run: ${opts.runUrl}`] : [])].join("\n");
+    const made = (await request(opts, "POST", `/repos/${opts.repo}/issues`, { title: STORE_ISSUE_TITLE, body, labels: [ISSUE_LABEL, NEEDS_OWNER_LABEL] })) as { number: number };
+    return { pack, action: "created", number: made.number };
+  }
+  if (!unreadable && existing !== undefined) {
+    await request(opts, "POST", `/repos/${opts.repo}/issues/${existing.number}/comments`, { body: "The session store reads again." });
+    await request(opts, "PATCH", `/repos/${opts.repo}/issues/${existing.number}`, { state: "closed", state_reason: "completed" });
+    return { pack, action: "closed", number: existing.number };
+  }
+  return { pack, action: "none", ...(existing !== undefined ? { number: existing.number } : {}) };
 }

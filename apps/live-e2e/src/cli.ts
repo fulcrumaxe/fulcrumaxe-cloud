@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), and `workflow-routes` (the Workflow SDK route list).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), and `workflow-routes` (the Workflow SDK route list), and `capture-session` and `sessions` (sessions-cli.ts).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -22,6 +22,8 @@ import { BYPASS_ENV, readHostProbe, type HostProbe } from "./needs.js";
 import { buildPlan, describeOutcome } from "./plan.js";
 import type { Results } from "./report.js";
 import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
+import { captureCommand, sessionsCommand, type CommandRunner } from "./sessions-cli.js";
+import type { Launcher } from "./sessions.js";
 import { computeRouting, parseRange } from "./routing.js";
 import { describeFinding, includeUnscannedRefusal, scanDir, type ScanResult } from "./scrub.js";
 import { EmptySelectionError, TRIGGERS, UnknownPackError, type Trigger } from "./select.js";
@@ -106,6 +108,11 @@ export interface Io {
   fetch?: typeof fetch;
   /** Test seam: the extra trust root for the GitHub API address (a local TLS fake). */
   githubCa?: string;
+  /** Test seams for the session commands (sessions-cli.ts): the browser, whether it is headless, `sudo`, and the clock. */
+  launcher?: Launcher;
+  headless?: boolean;
+  run?: CommandRunner;
+  now?: () => number;
   cwd: string;
   env: Record<string, string | undefined>;
   host: HostProbe;
@@ -336,6 +343,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
   if (argv[0] === "issues") return issuesCommand(argv.slice(1), io);
   if (argv[0] === "last-tested") return lastTestedCommand(argv.slice(1), io);
   if (argv[0] === "workflow-routes") return workflowRoutesCommand(argv.slice(1), io);
+  if (argv[0] === "capture-session") return captureCommand(argv.slice(1), io);
+  if (argv[0] === "sessions") return sessionsCommand(argv.slice(1), io);
   let args: Args;
   try {
     args = parseArgs(argv);
