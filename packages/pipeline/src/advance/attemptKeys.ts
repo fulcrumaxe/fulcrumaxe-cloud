@@ -10,15 +10,20 @@
 /** A note pin that the build adds after the attempt suffix (`runNotesStepSuffix`): sixteen hex digits after `:n`. */
 const NOTE_PIN = /:n[0-9a-f]{16}$/;
 const ATTEMPT = /:s(\d{1,6})$/;
+/** The generation suffix the worker adds when a run is started again on the other side (`:p1`, `:p2`; advance.ts PLACEMENT_RESTARTS_MAX), after the attempt and before a note pin. */
+const PLACEMENT = /:p\d{1,2}$/;
 
-/** The key with any trailing note pin and attempt suffix removed, so a key that is already `<key>:s<n>` is treated as `<key>`. */
+/** The key without what the worker adds after the attempt: a note pin, then a placement generation. */
+const withoutTail = (key: string): string => key.replace(NOTE_PIN, "").replace(PLACEMENT, "");
+
+/** The key with any trailing note pin, placement generation and attempt suffix removed, so a key that is already `<key>:s<n>` is treated as `<key>`. */
 export function attemptBase(key: string): string {
-  return key.replace(NOTE_PIN, "").replace(ATTEMPT, "");
+  return withoutTail(key).replace(ATTEMPT, "");
 }
 
-/** The attempt a key is: 0 for the bare key, n for `<key>:s<n>`. A note pin after the suffix is read through. */
+/** The attempt a key is: 0 for the bare key, n for `<key>:s<n>`. A placement generation and a note pin after the suffix are read through. */
 export function attemptOfKey(key: string): number {
-  const m = ATTEMPT.exec(key.replace(NOTE_PIN, ""));
+  const m = ATTEMPT.exec(withoutTail(key));
   return m ? Number(m[1]) : 0;
 }
 

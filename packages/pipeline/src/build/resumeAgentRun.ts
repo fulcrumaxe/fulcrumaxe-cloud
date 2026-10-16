@@ -157,7 +157,7 @@ export async function resumeAgentRun(
   admitClient.release();
   const admitResult = await target.admit(run, admitClient);
   if (!admitResult.admitted) {
-    await writeRunStatus(pool, { accountId: input.accountId, runId: id, from: "pending", to: "refused_spend" });
+    await writeRunStatus(pool, { accountId: input.accountId, runId: id, from: "pending", to: "refused_spend", failureReason: admitResult.reason });
     return { id, status: "refused_spend", reason: admitResult.reason };
   }
 

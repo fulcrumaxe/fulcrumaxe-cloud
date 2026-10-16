@@ -43,8 +43,14 @@ export interface ParkedStageEntryInput {
   needsSpec: boolean;
   /** The restarted workflow is a re-spec. */
   respec: boolean;
-  /** The SQL LIKE patterns (default backslash escape) of the idempotency keys of the stage's runs for one item and approval. */
-  runKeyLikes(workItemId: string, actionId: string): string[];
+  /** The SQL LIKE patterns (default backslash escape) of the idempotency keys of the stage's runs for one item and approval (a head-bound stage: for the head its wait was for). */
+  runKeyLikes(workItemId: string, actionId: string, headSha?: string | null): string[];
+  /** D#483 S5-k1d: the stage waits on one head of an open change; the sweep resumes only while that head is still the head. Absent: not head-bound. */
+  headBound?: boolean;
+  /** D#483 S5-k1d: runs of the stage that really started are expected beside the denied ones (a review with several reviewers); not read as "the stage already ran". */
+  startedRunsOk?: boolean;
+  /** D#483 S5-k1d: the facts that, written after the latest waiting fact, end the sweep's claim on the item. Absent: `build_refused` and `stopped`. */
+  progressKinds?: readonly string[];
   /** The next attempt number, given the idempotency keys of the stage's earlier runs for this approval (0 when there are none). */
   nextAttempt(keys: readonly string[]): number;
   /** A denial of the spend check as a pause name, or null when it is not one (the same mapping the start itself uses). */
@@ -78,7 +84,9 @@ const LIST_LIMIT = 200;
 export const STAGE_RESUME_TERMINAL_STATUSES: readonly string[] = Object.freeze(["succeeded", "failed", "timed_out", "killed_spend", "refused_spend", "cancelled"]);
 const SESSION_RE = /^session:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
-type Plan = { userId: string; actionId: string; haltEpoch: number; specVersion: number | null; attempt: number };
+type Plan = { userId: string; actionId: string; haltEpoch: number; specVersion: number | null; attempt: number; head: { sha: string; prNumber: number | null; rereview: number } | null };
+/** What a stage that has no `progressKinds` of its own treats as "it ended in a refusal that is not a limit". */
+const DEFAULT_PROGRESS_KINDS: readonly string[] = Object.freeze(["build_refused", "stopped"]);
 type PlanOrSkip = { plan: Plan } | { skip: string };
 
 export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
@@ -132,30 +140,56 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       if (Number(live.rows[0]?.n ?? 0) > 0) return { skip: "run_live" };
 
       // A restart that ended in a refusal that is not a limit (or a stop) left a newer fact than the waiting one: that is not this sweep's to retry every pass.
-      // Only a new waiting fact (a later limit pause) or a person's new approval makes the item this sweep's again.
+      // Only a new waiting fact (a later limit pause) or a person's new approval makes the item this sweep's again. A review or a fix round also leaves its own
+      // progress facts (the reviewers started, a verdict, a fix round), and any of them after the wait means the stage has moved on.
       const refusedAfterWait = await client.query(
         `SELECT 1 FROM work_item_driver_events e
-          WHERE e.account_id = $1 AND e.work_item_id = $2 AND e.kind IN ('build_refused', 'stopped')
+          WHERE e.account_id = $1 AND e.work_item_id = $2 AND e.kind = ANY($3::text[])
             AND e.seq > COALESCE((SELECT max(w.seq) FROM work_item_driver_events w WHERE w.account_id = $1 AND w.work_item_id = $2 AND w.kind IN ('stage_waiting', 'build_waiting')), 0)
           LIMIT 1`,
-        [accountId, workItemId],
+        [accountId, workItemId, [...(entry.progressKinds ?? DEFAULT_PROGRESS_KINDS)]],
       );
-      if (refusedAfterWait.rows.length > 0) return { skip: "refused_after_wait" };
+      if (refusedAfterWait.rows.length > 0) return { skip: entry.progressKinds === undefined ? "refused_after_wait" : "moved_on_after_wait" };
+
+      // A stage that waits on one head of an open change resumes only for that head. The head, the pull request and the re-review round are on the waiting fact
+      // (the workflow and every refresh write them); a push seen since the wait began, to a different head, ends the parking: the review of a new head is a new ask.
+      let head: Plan["head"] = null;
+      if (entry.headBound === true) {
+        const latest = (
+          await client.query<{ head_sha: string | null; pr_number: number | null; round: number | null }>(
+            "SELECT head_sha, pr_number, round FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind IN ('stage_waiting', 'build_waiting') ORDER BY seq DESC LIMIT 1",
+            [accountId, workItemId],
+          )
+        ).rows[0];
+        if (!latest || latest.head_sha === null) return { skip: "no_head" };
+        const moved = await client.query(
+          `SELECT 1 FROM work_item_driver_events p
+            WHERE p.account_id = $1 AND p.work_item_id = $2 AND p.kind = 'pr_head_pushed' AND p.head_sha IS DISTINCT FROM $3
+              AND p.seq > COALESCE((SELECT min(w.seq) FROM work_item_driver_events w WHERE w.account_id = $1 AND w.work_item_id = $2 AND w.kind = 'stage_waiting' AND w.stage = $4 AND w.head_sha = $3), 0)
+            LIMIT 1`,
+          [accountId, workItemId, latest.head_sha, entry.stage],
+        );
+        if (moved.rows.length > 0) return { skip: "head_moved" };
+        head = { sha: latest.head_sha, prNumber: latest.pr_number, rereview: latest.round ?? 0 };
+      }
 
       const keys = await client.query<{ idempotency_key: string; status: string | null }>(
         `SELECT k.idempotency_key, r.status FROM agent_run_idempotency_keys k LEFT JOIN agent_runs r ON r.account_id = k.account_id AND r.id = k.run_id
           WHERE k.account_id = $1 AND k.idempotency_key LIKE ANY($2::text[])`,
-        [accountId, entry.runKeyLikes(workItemId, approval.id)],
+        [accountId, entry.runKeyLikes(workItemId, approval.id, head?.sha ?? null)],
       );
       // A run of this stage that really started (it did not end `refused_spend`) means the stage was allowed once: what came of it is the workflow's own outcome.
-      if (keys.rows.some((r) => r.status !== "refused_spend")) return { skip: "stage_already_ran" };
-      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt: entry.nextAttempt(keys.rows.map((r) => r.idempotency_key)) } };
+      // (A review starts several reviewers; a started one beside a denied one is the normal partial start, and the restart finds it by its key.)
+      if (entry.startedRunsOk !== true && keys.rows.some((r) => r.status !== "refused_spend")) return { skip: "stage_already_ran" };
+      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt: entry.nextAttempt(keys.rows.map((r) => r.idempotency_key)), head } };
     });
   }
 
   /** One waiting fact on the item (a refresh, or the claim). Deduped by `key`; answers whether this call wrote it. */
-  async function fact(entry: ParkedStageEntryInput, accountId: string, workItemId: string, pause: string, attempt: number, key: string): Promise<boolean> {
-    return withTenant(runnerPool, accountId, async (client) => (await recordDriverEvent(client, accountId, { workItemId, kind: "stage_waiting", stage: entry.stage, code: pause, attempt, dedupeKey: key })).recorded);
+  async function fact(entry: ParkedStageEntryInput, accountId: string, workItemId: string, pause: string, attempt: number, key: string, head: Plan["head"] = null): Promise<boolean> {
+    // A head-bound stage's refresh and claim carry the head, the pull request and the re-review round the wait was for, so the next pass reads the same wait.
+    const onHead = head === null ? {} : { headSha: head.sha, ...(head.prNumber !== null ? { prNumber: head.prNumber } : {}), round: head.rereview };
+    return withTenant(runnerPool, accountId, async (client) => (await recordDriverEvent(client, accountId, { workItemId, kind: "stage_waiting", stage: entry.stage, code: pause, attempt, dedupeKey: key, ...onHead })).recorded);
   }
 
   async function sweepParkedStages(entries: readonly ParkedStageEntryInput[]): Promise<StageResumeCounts & { nextDueAt: number | null }> {
@@ -204,7 +238,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
               continue;
             }
             // Still denied: no run row. The fact is refreshed so the card keeps naming the limit (and the pause window, three passes, does not run out).
-            await fact(entry, c.account_id, c.work_item_id, pause, plan.attempt, `sweep:${plan.actionId}:${bucket}`);
+            await fact(entry, c.account_id, c.work_item_id, pause, plan.attempt, `sweep:${plan.actionId}:${bucket}`, plan.head);
             counts.refreshed += 1;
             continue;
           }
@@ -214,7 +248,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
           }
           // The claim: one per attempt per pass, so two passes at once (or a retried cron) start one workflow. A later pass may claim the same attempt again if the
           // workflow never made a run row (nothing then counts it as used).
-          const claimed = await fact(entry, c.account_id, c.work_item_id, c.pause, plan.attempt, `resume:${plan.actionId}:${plan.attempt}:${bucket}`);
+          const claimed = await fact(entry, c.account_id, c.work_item_id, c.pause, plan.attempt, `resume:${plan.actionId}:${plan.attempt}:${bucket}`, plan.head);
           if (!claimed) {
             counts.skipped += 1;
             continue;
@@ -228,6 +262,7 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
             ...(entry.needsSpec ? { specVersion: plan.specVersion } : {}),
             ...(entry.respec ? { respec: true } : {}),
             ...(plan.attempt > 0 ? { startAttempt: plan.attempt } : {}),
+            ...(plan.head !== null && plan.head.rereview > 0 ? { startRereview: plan.head.rereview } : {}),
           });
           counts.resumed += 1;
           log(JSON.stringify({ event: "stage_resume.resumed", stage: entry.stage, work_item_id: c.work_item_id, attempt: plan.attempt }));

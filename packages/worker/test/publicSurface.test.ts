@@ -66,6 +66,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "advanceRecordEvent",
       "advanceRecordRound",
       "advanceRespec",
+      "advanceReviewRuns",
       "advanceRunOutcome",
       "advanceSpec",
       "advanceStartFix",

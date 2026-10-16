@@ -17,6 +17,7 @@ import {
   recordRoundBody,
   reviewLoadBody,
   reviewPlanBody,
+  reviewRunsBody,
   verifiedGateBody,
   reviewerOutcomeBody,
   startFixBody,
@@ -293,9 +294,16 @@ export async function advanceStartReviewerStep(
   role: string,
   prior: Array<{ role: string; runId: string }>,
   rereview = 0,
+  attempt = 0,
 ): Promise<StartedReviewer> {
   "use step";
-  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior, rereview);
+  return startReviewerBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, role, prior, rereview, attempt);
+}
+
+/** D#483 S5-k1d: the reviewer runs of this head and re-review round that really started, so a restarted review asks only for the roles that have none. */
+export async function advanceReviewRunsStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
+  "use step";
+  return reviewRunsBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, headSha, rereview);
 }
 
 export async function advanceReviewerOutcomeStep(accountId: string, runId: string): Promise<ReviewerOutcome> {
@@ -325,9 +333,10 @@ export async function advanceStartFixStep(
   round: number,
   failing: Array<{ role: string; runId: string }>,
   retry = 0,
+  spendAttempt = 0,
 ): Promise<FixOut> {
   "use step";
-  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry);
+  return startFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, ctx, pr, actionId, round, failing, retry, spendAttempt);
 }
 
 export async function advanceFixDescentStep(ctx: Pick<ReviewCtx, "repoId" | "owner" | "name" | "executionMode" | "prExecutionMode">, base: string, head: string): Promise<DescentOut> {
@@ -344,6 +353,8 @@ type Result = { status: string; detail?: string };
 
 /** D#483 S5-k1c: the stages before the build that wait on a limit (packages/pipeline waitingStages.ts; a test holds the names). */
 type EarlyWaitStage = "classify" | "spec" | "respec";
+/** D#483 S5-k1d: and the two after it, which wait on one head of the open pull request. */
+type WaitStage = EarlyWaitStage | "review" | "fix_round";
 
 /** The wait reason when an answer is a spending-limit denial (a named pause), else null: a start, a halt and every other refusal end the wait. */
 const pauseOf = (reason: string | null | undefined): string | null => (typeof reason === "string" && RESERVATION_PAUSE_REASONS.includes(reason) ? reason : null);
@@ -381,7 +392,7 @@ async function askUntilAllowed<T>(args: AdvanceStartArgs, stage: EarlyWaitStage,
 }
 
 /** The workflow's end when the four hours are up and a limit still denies the start: not a failure, nothing stamped, the item where it was. */
-async function pausedEnd(itemId: string, stage: EarlyWaitStage, pause: string, attempt: number): Promise<Result> {
+async function pausedEnd(itemId: string, stage: WaitStage, pause: string, attempt: number): Promise<Result> {
   await advanceLogStep("advance.paused", { work_item_id: itemId, at: `${stage}_start`, reason: pause, attempt });
   return { status: "paused", detail: `${stage}_paused:${pause}` };
 }
@@ -764,7 +775,13 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   }
   await advanceLogStep("advance.built", { work_item_id: workItemId, run_id: runId, stage });
   // The pull request is open: the reviewers are next, in this same workflow.
-  if (stage === "pr_opened" || stage === "changes_requested" || stage === "review_passed") return reviewPhase(args, pinned);
+  // The review asks from its own first attempt: a restart attempt of the build's start is not the reviewers'.
+  if (stage === "pr_opened" || stage === "changes_requested" || stage === "review_passed") {
+    const forReview: AdvanceStartArgs = { ...args };
+    delete forReview.startAttempt;
+    delete forReview.startRereview;
+    return reviewPhase(forReview, pinned);
+  }
   return { status: "built", detail: stage ?? undefined };
 }
 
@@ -874,10 +891,59 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
   return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded };
 }
 
-/** Starts the given roles in parallel (each keyed by head and role) and waits for each; a role that could not start has no verdict. */
-async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[] }> {
+/**
+ * D#483 S5-k1d: a wait fact of a review or a fix round. Besides the pause and the attempt it carries the head, the pull request and the re-review round the ask was
+ * for, so the sweep resumes only while that head is still the head, and restarts the review at the round it was in.
+ */
+async function waitOnHead(args: AdvanceStartArgs, stage: "review" | "fix_round", pause: string, attempt: number, pr: { number: number; headSha: string }, rereview: number): Promise<void> {
+  await advanceEventStep(args.accountId, args.userId, args.workItemId, {
+    kind: "stage_waiting",
+    stage,
+    code: pause,
+    attempt,
+    dedupeKey: `wait:${stage}:${pr.headSha}:${rereview}:${attempt}`,
+    headSha: pr.headSha,
+    prNumber: pr.number,
+    round: rereview,
+  });
+}
+
+/**
+ * Starts the given roles in parallel (each keyed by head and role) and waits for each; a role that could not start has no verdict.
+ *
+ * D#483 S5-k1d: a reviewer a spending limit denied is a wait, not a refusal. The roles that started keep running; only the denied ones are asked again (five minutes
+ * later, each ask a new attempt with its own key), for up to four hours. Reviewer runs of this head and round that already exist (an earlier ask of this review, or a
+ * restart of it by the sweep) are used as they are and never asked for again. After the four hours a pause is still the answer: the caller ends `review_paused:<pause>`,
+ * which is no failure, and the sweep starts the review again when the limit allows it.
+ */
+async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; baseRef: string; branch: string }, roles: string[], prior: Array<{ role: string; runId: string }>, round: number, rereview = 0): Promise<{ verdicts: Verdict[]; refused: string[]; paused: { pause: string; attempt: number } | null }> {
   const { accountId, userId, workItemId } = args;
-  const started = await Promise.all(roles.map((role) => advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview)));
+  const answers = new Map<string, StartedReviewer>();
+  const attemptOf = new Map<string, number>();
+  for (const k of await advanceReviewRunsStep(accountId, userId, workItemId, args.haltEpoch, pr.headSha, rereview)) if (roles.includes(k.role)) answers.set(k.role, { role: k.role, runId: k.runId, reason: null });
+  let attempt = firstAttemptOf(args);
+  let waited = 0;
+  let pending = roles.filter((r) => !answers.has(r));
+  for (;;) {
+    const asked = await Promise.all(
+      pending.map((role) => {
+        attemptOf.set(role, attempt);
+        return advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, attempt > 0 ? attempt : undefined);
+      }),
+    );
+    for (const a of asked) answers.set(a.role, a);
+    const denied = asked.filter((a) => a.runId === null && pauseOf(a.reason) !== null);
+    if (denied.length === 0) break;
+    const pause = pauseOf(denied[0]!.reason) as string;
+    await waitOnHead(args, "review", pause, attempt, pr, rereview);
+    if (waited >= BUILD_SPEND_WAIT_MS) return { verdicts: [], refused: [], paused: { pause, attempt } };
+    if (waited === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "review_start", reason: pause });
+    await sleep(BUILD_SPEND_POLL_MS);
+    waited += BUILD_SPEND_POLL_MS;
+    attempt += 1;
+    pending = denied.map((d) => d.role);
+  }
+  const started = roles.map((role) => answers.get(role) as StartedReviewer);
   await advanceLogStep("advance.review_started", {
     work_item_id: workItemId,
     round,
@@ -891,10 +957,32 @@ async function runReviewers(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number
   for (const s of started) {
     if (s.runId !== null) {
       const role = s.role;
-      verdicts.push(await waitForReviewer(accountId, userId, workItemId, role, s.runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview)).runId));
+      verdicts.push(await waitForReviewer(accountId, userId, workItemId, role, s.runId, async () => (await advanceStartReviewerStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, role, prior, rereview, (attemptOf.get(role) ?? 0) > 0 ? attemptOf.get(role) : undefined)).runId));
     }
   }
-  return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role) };
+  return { verdicts, refused: started.filter((s) => s.runId === null).map((s) => s.role), paused: null };
+}
+
+/**
+ * D#483 S5-k1d: the executor's fix round start, asked until a spending limit allows it. The first ask is attempt `firstAttempt`; while a limit denies it the pull request
+ * stays where it is, each denied ask leaves the stage's wait fact on the head, and the next ask (five minutes later, up to four hours) is a new attempt with its own key.
+ * Any answer that is not a limit pause (a start, a halt, any other refusal) ends the wait and is returned as it came.
+ */
+async function askFixUntilAllowed(args: AdvanceStartArgs, ctx: ReviewCtx, pr: { number: number; headSha: string; branch: string }, round: number, failing: Array<{ role: string; runId: string }>, rereview: number): Promise<{ fix: FixOut; attempt: number; pause: string | null }> {
+  const { accountId, userId, workItemId, actionId } = args;
+  let attempt = firstAttemptOf(args);
+  let waited = 0;
+  for (;;) {
+    const fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round, failing, rereview, attempt > 0 ? attempt : undefined);
+    const pause = fix.ok ? null : pauseOf(fix.reason);
+    if (pause === null) return { fix, attempt, pause: null };
+    await waitOnHead(args, "fix_round", pause, attempt, pr, rereview);
+    if (waited >= BUILD_SPEND_WAIT_MS) return { fix, attempt, pause };
+    if (waited === 0) await advanceLogStep("advance.stage_waiting", { work_item_id: workItemId, at: "fix_start", reason: pause });
+    await sleep(BUILD_SPEND_POLL_MS);
+    waited += BUILD_SPEND_POLL_MS;
+    attempt += 1;
+  }
 }
 
 /** The two answers a step gives when the item was halted: still halted, or halted and resumed since this workflow started. */
@@ -1017,13 +1105,15 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     // A push since the "no change" fix makes it a new head: it gets the full review, not the narrow one.
     if (again !== null && again.head !== pr.headSha) again = null;
     const carried: Array<{ role: string; runId: string }> = again?.passes ?? [];
-    const rereview: number = again?.n ?? 0;
+    // A restart by the sweep begins in the re-review round the parked review was in (the waiting fact carries it); every later pass of the loop has its own.
+    const rereview: number = again?.n ?? (attempt === 0 ? (Number.isSafeInteger(args.startRereview) && args.startRereview! > 0 ? args.startRereview! : 0) : 0);
 
     // Who must review this head: code and acceptance always; security when the item is critical, the diff touches a
     // security surface, or (below) the code reviewer asks for it; the debater when the repo's role setting allows it.
     let plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, false);
     const roundOne = again !== null ? again.roles.filter((r) => r !== "debater") : plan.roles.filter((r) => r !== "debater");
     const first = await runReviewers(args, ctx, pr, roundOne, [], attempt, rereview);
+    if (first.paused !== null) return pausedEnd(workItemId, "review", first.paused.pause, first.paused.attempt);
     const verdicts = [...first.verdicts];
     let refused = [...first.refused];
 
@@ -1033,6 +1123,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       const extra = plan.roles.filter((r) => r !== "debater" && !roundOne.includes(r) && !carried.some((c) => c.role === r));
       if (extra.length > 0) {
         const more = await runReviewers(args, ctx, pr, extra, [], attempt, rereview);
+        if (more.paused !== null) return pausedEnd(workItemId, "review", more.paused.pause, more.paused.attempt);
         verdicts.push(...more.verdicts);
         refused = [...refused, ...more.refused];
       }
@@ -1045,6 +1136,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       const passes = [...carried, ...verdicts.filter((v) => v.verdict === "pass").map((v) => ({ role: v.role, runId: v.runId }))];
       debaterRan = true;
       const debate = await runReviewers(args, ctx, pr, ["debater"], passes, attempt, rereview);
+      if (debate.paused !== null) return pausedEnd(workItemId, "review", debate.paused.pause, debate.paused.attempt);
       verdicts.push(...debate.verdicts);
       refused = [...refused, ...debate.refused];
     }
@@ -1087,7 +1179,9 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
 
     // A fix round: the executor RESUMES the build's sandbox and session with the findings, then the head is read again.
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
-    let fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
+    const fixAsk = await askFixUntilAllowed(args, ctx, pr, round.nextRound ?? round.round + 1, failing, rereview);
+    if (fixAsk.pause !== null) return pausedEnd(workItemId, "fix_round", fixAsk.pause, fixAsk.attempt);
+    let fix = fixAsk.fix;
     if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
     if (!fix.ok || fix.runId === null) {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
@@ -1106,7 +1200,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       }
       // D#599 PL-2: the fix run was queued on a side the item has left; the same fix round starts again on the new side (keyed by the worker).
       if (fixed.done && fixed.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
-        const again = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
+        const again = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview, fixAsk.attempt > 0 ? fixAsk.attempt : undefined);
         if (again.ok && again.runId !== null && again.runId !== fix.runId) {
           await advanceLogStep("advance.fix_restarted", { work_item_id: workItemId, from_run_id: fix.runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
           fix = again;
