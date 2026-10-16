@@ -1884,12 +1884,14 @@ test("public repository: unchanged on push and pull request (full suite, never t
 // The logic runs on inline fixture YAML, so it runs on the public plane too; tests that read the real file skip when it is absent.
 const LIVE_E2E_LABEL = "live-e2e";
 const LIVE_E2E_ENVIRONMENT = "live-staging";
-// Secrets by job: the bypass header everywhere; the Stripe restricted test key only in the two tiers that pay.
+// Secrets by job: the bypass header everywhere; the session key (acts as every stored role) only where a session is used or
+// refreshed; the Stripe restricted test key and the fixture repo token only in the two tiers that pay.
 SECRET_ALLOWLIST[LIVE_E2E_PATH] = {
   poller: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET"] },
-  smoke: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET"] },
-  standard: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_STRIPE_RESTRICTED_KEY"] },
-  full: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_STRIPE_RESTRICTED_KEY"] },
+  keepalive: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_SESSION_KEY"] },
+  smoke: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_SESSION_KEY"] },
+  standard: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_SESSION_KEY", "LIVE_E2E_STRIPE_RESTRICTED_KEY", "LIVE_E2E_FIXTURE_REPO_TOKEN"] },
+  full: { environment: LIVE_E2E_ENVIRONMENT, secrets: ["VERCEL_AUTOMATION_BYPASS_SECRET", "LIVE_E2E_SESSION_KEY", "LIVE_E2E_STRIPE_RESTRICTED_KEY", "LIVE_E2E_FIXTURE_REPO_TOKEN"] },
 };
 /** Every way a workflow at this repository path breaks the rules; the exception applies only when `relPath` is exactly LIVE_E2E_PATH. */
 function liveE2eViolations(relPath, doc, text = "") {
@@ -1946,7 +1948,7 @@ function liveTriggerContexts() {
     "needs.poller.outputs.changed": "true",
   };
   const out = [];
-  for (const cron of ["17 1 * * *", "47 2 * * 0", "*/30 * * * *"]) out.push({ ...base, "github.event_name": "schedule", "github.event.schedule": cron });
+  for (const cron of ["17 1 * * *", "47 2 * * 0", "*/30 * * * *", "41 */6 * * *"]) out.push({ ...base, "github.event_name": "schedule", "github.event.schedule": cron });
   for (const tier of ["smoke", "standard", "full"]) out.push({ ...base, "github.event_name": "workflow_dispatch", "inputs.tier": tier });
   out.push({ ...base, "github.event_name": "deployment_status", "github.event.deployment_status.state": "success", "github.event.deployment_status.environment": "staging" });
   out.push({ ...base, "github.event_name": "pull_request" });
@@ -1964,6 +1966,7 @@ on:
     - cron: "17 1 * * *"
     - cron: "47 2 * * 0"
     - cron: "*/30 * * * *"
+    - cron: "41 */6 * * *"
   deployment_status:
 permissions:
   contents: read
@@ -2021,6 +2024,15 @@ jobs:
           BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           STRIPE: \${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}
         run: echo full
+  keepalive:
+    if: vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main' && github.event_name == 'schedule' && github.event.schedule == '41 */6 * * *'
+    runs-on: live-e2e
+    environment: live-staging
+    steps:
+      - env:
+          BYPASS: \${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          LIVE_E2E_SESSION_KEY: \${{ secrets.LIVE_E2E_SESSION_KEY }}
+        run: echo keepalive
 `;
 const liveFixtureDoc = () => parseYamlText(LIVE_E2E_FIXTURE);
 const liveRealPath = path.join(repoRoot, LIVE_E2E_PATH);
@@ -2120,6 +2132,11 @@ test("live-e2e exception: nothing beyond the named label, secrets, environment a
   assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ secrets.OTHER_SECRET }}" })), ["smoke reads OTHER_SECRET"]);
   assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}" })), ["smoke reads LIVE_E2E_STRIPE_RESTRICTED_KEY"]);
   assert.deepEqual(mutate((d) => d.jobs.poller.steps.push({ run: "echo ${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}" })), ["poller reads LIVE_E2E_STRIPE_RESTRICTED_KEY"]);
+  // the session key and the fixture repo token are not widened: the keepalive and smoke never read the fixture repo token
+  assert.deepEqual(mutate((d) => d.jobs.keepalive.steps.push({ run: "echo ${{ secrets.LIVE_E2E_FIXTURE_REPO_TOKEN }}" })), ["keepalive reads LIVE_E2E_FIXTURE_REPO_TOKEN"]);
+  assert.deepEqual(mutate((d) => d.jobs.keepalive.steps.push({ run: "echo ${{ secrets.LIVE_E2E_STRIPE_RESTRICTED_KEY }}" })), ["keepalive reads LIVE_E2E_STRIPE_RESTRICTED_KEY"]);
+  assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ secrets.LIVE_E2E_FIXTURE_REPO_TOKEN }}" })), ["smoke reads LIVE_E2E_FIXTURE_REPO_TOKEN"]);
+  assert.deepEqual(mutate((d) => d.jobs.poller.steps.push({ run: "echo ${{ secrets.LIVE_E2E_SESSION_KEY }}" })), ["poller reads LIVE_E2E_SESSION_KEY"]);
   assert.deepEqual(mutate((d) => { d.jobs.standard.environment = "release"; }), ["standard must run in environment live-staging"]);
   assert.deepEqual(mutate((d) => d.jobs.smoke.steps.push({ run: "echo ${{ toJSON(secrets) }}" })), ["smoke reads secrets by a dynamic name"]);
   assert.deepEqual(mutate((d) => { d.jobs.extra = { "runs-on": "live-e2e", if: "vars.CI_DISABLED != 'true' && github.ref == 'refs/heads/main'", steps: [{ run: "echo ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}" }] }; }), ["extra is not an allowed secret reader"]);
