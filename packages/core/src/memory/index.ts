@@ -70,7 +70,7 @@ export interface MemoryEntry {
 }
 
 /** Every code a memory call can throw. All are on the telemetry allowlist (packages/telemetry/src/errorCodes.ts); a test pins the two together. */
-export const MEMORY_ERROR_CODES = ['invalid_message', 'invalid_transition', 'secret_detected', 'memory_full', 'conflict'] as const;
+export const MEMORY_ERROR_CODES = ['invalid_message', 'invalid_transition', 'secret_detected', 'memory_full', 'conflict', 'mixed_sources', 'must_open_first'] as const;
 export type MemoryErrorCode = (typeof MEMORY_ERROR_CODES)[number];
 
 /** Maps to 422. */
@@ -78,6 +78,8 @@ export class MemoryInputError extends Error {
   constructor(
     readonly code: MemoryErrorCode,
     message: string,
+    /** `must_open_first` only: how many cards of the batch the caller had not opened (always a number, so a screen can say it). */
+    readonly unopened: number = 0,
   ) {
     super(message);
     this.name = 'MemoryInputError';
@@ -165,9 +167,31 @@ const INVISIBLE_RE = /[\s\u0000-\u001f\u007f\u200b-\u200f\u2028\u2029\u2060\ufef
 const MIN_ENCODED_SECRET_CHARS = 16;
 
 /**
+ * The base64 of `secret` as it reads inside other text, for each of the three byte alignments (0, 1 or 2 bytes before it), standard and URL-safe.
+ * What a token turns into depends on how many bytes come before it: the encoder reads three bytes at a time, so a token that starts one or two
+ * bytes into a group shares its first and last characters with its neighbours. Only the characters fully decided by the token's own bits are kept,
+ * which drops the unstable ends and, with them, any padding: the result is the same whether the surrounding text was padded, unpadded or neither.
+ * A token of at least 16 bytes leaves 18 or more stable characters in every form.
+ */
+export function base64Forms(secret: string): string[] {
+  const token = Buffer.from(secret, 'utf8');
+  const forms: string[] = [];
+  for (const lead of [0, 1, 2]) {
+    const encoded = Buffer.concat([Buffer.alloc(lead), token]).toString('base64');
+    const first = Math.ceil((8 * lead) / 6);
+    const end = Math.floor((8 * (lead + token.length)) / 6);
+    const stable = encoded.slice(first, end);
+    if (stable === '') continue;
+    forms.push(stable, stable.replace(/\+/g, '-').replace(/\//g, '_'));
+  }
+  return forms;
+}
+
+/**
  * Whether the text holds a live token value: as is, with every space, control and zero-width character removed (a value split across a line or
- * padded with invisible characters), or encoded as base64 (standard or URL-safe, padded or not), URL-encoded, or percent-encoded byte by byte.
- * One pass of `includes` per form per value, so the cost is linear in the text.
+ * padded with invisible characters), or encoded as base64 (standard or URL-safe, padded or not, at any of the three alignments it can start
+ * on inside other text; see `base64Forms`), URL-encoded, or percent-encoded byte by byte. One pass of `includes` per form per value, so the cost
+ * is linear in the text.
  */
 export function holdsLiveSecret(text: string, secrets: readonly (string | undefined)[]): boolean {
   if (redactSecrets(text, secrets) !== text) return true;
@@ -178,7 +202,7 @@ export function holdsLiveSecret(text: string, secrets: readonly (string | undefi
     if (secret.length < MIN_ENCODED_SECRET_CHARS) continue;
     if (stripped.includes(secret)) return true;
     const b64 = Buffer.from(secret, 'utf8').toString('base64');
-    const forms = [b64, b64.replace(/=+$/, ''), b64.replace(/\+/g, '-').replace(/\//g, '_'), b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), encodeURIComponent(secret)];
+    const forms = [b64, b64.replace(/=+$/, ''), b64.replace(/\+/g, '-').replace(/\//g, '_'), b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), encodeURIComponent(secret), ...base64Forms(secret)];
     if (forms.some((f) => stripped.includes(f))) return true;
     const pct = [...Buffer.from(secret, 'utf8')].map((b) => `%${b.toString(16).padStart(2, '0')}`).join('');
     if (lower.includes(pct)) return true;
@@ -216,15 +240,20 @@ export function mapMemoryDbError(err: unknown): unknown {
   // Two concurrent edits of one entry: the second hits the one-successor index. Fixed code, no constraint name passed through.
   if (e?.code === '23505') return new MemoryInputError('conflict', 'that entry was changed by someone else; reload and try again');
   if (e?.code === '22023') {
-    const m = /^(invalid_transition|invalid_message)/.exec(e.message ?? '');
-    if (m !== null) return new MemoryInputError(m[1] as MemoryErrorCode, (e.message ?? '').replace(/^invalid_\w+:\s*/, ''));
+    const m = /^(invalid_transition|invalid_message|mixed_sources|must_open_first)/.exec(e.message ?? '');
+    if (m !== null) {
+      const text = (e.message ?? '').replace(/^(?:invalid_\w+|mixed_sources|must_open_first):\s*/, '');
+      // `must_open_first: 2 of 5 cards have not been opened`: the count is the first number of the text.
+      const unopened = m[1] === 'must_open_first' ? Number(/^\d+/.exec(text)?.[0] ?? 0) : 0;
+      return new MemoryInputError(m[1] as MemoryErrorCode, text, unopened);
+    }
   }
   // A table CHECK (23514) or any other 22023 carries a Postgres constraint or function name, so it gets a fixed message instead.
   if (e?.code === '22023' || e?.code === '23514') return new MemoryInputError('invalid_message', 'that memory entry is not valid');
   return err;
 }
 
-function assertUuid(label: string, id: string): void {
+export function assertUuid(label: string, id: string): void {
   if (!UUID_RE.test(id)) throw new NotFoundError(`${label} ${id} not found`);
 }
 
@@ -232,7 +261,8 @@ function assertEnum<T extends string>(label: string, list: readonly T[], v: unkn
   if (typeof v !== 'string' || !(list as readonly string[]).includes(v)) throw new MemoryInputError('invalid_message', `unknown ${label}`);
 }
 
-async function inSession<T>(ctx: MemoryCtx, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+/** One tenant transaction for a caller who is an active member, with the database's refusals mapped onto the errors a route already answers. */
+export async function inSession<T>(ctx: Pick<MemoryCtx, 'pool' | 'principal'>, fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const { accountId, userId } = ctx.principal;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
     await assertActiveMembership(client, accountId, userId);
@@ -247,6 +277,13 @@ async function inSession<T>(ctx: MemoryCtx, fn: (client: PoolClient) => Promise<
 /** `prepareMemoryText` over the tenant's live token values, read now. */
 export async function prepareMemoryTextFor(ctx: Pick<MemoryCtx, 'liveSecrets'>, body: unknown, why?: string | null): Promise<{ body: string; why: string | null }> {
   return prepareMemoryText(body, why, await ctx.liveSecrets());
+}
+
+/** The entries with these ids, in the order asked (an id that is not visible to the caller is left out). */
+export async function readEntries(client: PoolClient, ids: readonly string[]): Promise<MemoryEntry[]> {
+  const { rows } = await client.query<Row>(`SELECT ${COLUMNS} FROM memory_entries WHERE id = ANY($1::uuid[])`, [ids]);
+  const byId = new Map(rows.map((r) => [r.id, toEntry(r)]));
+  return ids.flatMap((id) => byId.get(id) ?? []);
 }
 
 async function readEntry(client: PoolClient, id: string): Promise<MemoryEntry> {
