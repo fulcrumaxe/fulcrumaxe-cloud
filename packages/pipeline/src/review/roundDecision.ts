@@ -4,6 +4,7 @@ import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { escalate } from "../build/fixLoop.js";
+import type { CiGate, CiWaitReason } from "./ciWait.js";
 import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type VerdictRole } from "./verdicts.js";
 
 /**
@@ -15,13 +16,16 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  *   reviewer_fail  a reviewer said `fail` (wrong approach, or it could not review): no fix round is worth starting. The
  *                item stays at Changes requested and the driver stops, with the stop recorded.
  *   incomplete   a required role has no verdict (it could not be started): nothing is decided, the driver stops.
+ *   ci_pending   (D#598 P7b) the head's CI or a repo-wide guard is still running: NOTHING is recorded, not even a needs-fix.
+ *                The driver waits and asks again with the same verdicts; the decision is made once CI has finished.
+ *   head_moved   (D#598 P7b) the pull request's head is no longer the reviewed one: NOTHING is recorded. The driver reviews the new head.
  *
  * Rounds are counted by the fix rounds that STARTED (the `fix_round_started` driver events), not by stage transitions:
  * two reviewers asking for changes on one head record two transitions but are ONE round. The fix loop's own transition
  * count is therefore not used here (`recordReviewVerdict` runs in its `deferred` mode).
  */
 
-export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "incomplete";
+export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "incomplete" | "ci_pending" | "head_moved";
 
 export interface RoundInput {
   accountId: string;
@@ -42,6 +46,8 @@ export interface RoundResult {
   recorded: RecordedVerdict[];
   /** The fix round this decision would start (1-based). Set for `fix`. */
   nextRound?: number;
+  /** Why CI is not finished (fixed words). Set for `ci_pending` only. */
+  ciReasons?: CiWaitReason[];
 }
 
 /** Fix rounds started so far for one item (the driver events). */
@@ -62,8 +68,15 @@ export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verd
   return "all_passed";
 }
 
-export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry, input: RoundInput): Promise<RoundResult> {
+/**
+ * `ci` is required, not optional: a caller that does not pass one cannot record a verdict, so the wait cannot be skipped by omission.
+ * The gate is read BEFORE any write; if it throws, nothing is recorded and the caller's step retries.
+ */
+export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry, input: RoundInput, ci: CiGate): Promise<RoundResult> {
   const round = input.round ?? (await fixRoundsStarted(pool, input.accountId, input.workItemId));
+  const wait = await ci.read({ accountId: input.accountId, workItemId: input.workItemId, prNumber: input.prNumber, headSha: input.headSha });
+  if (wait.state === "head_moved") return { decision: "head_moved", round, recorded: [] };
+  if (wait.state === "pending") return { decision: "ci_pending", round, recorded: [], ciReasons: wait.reasons };
   const decision = decideRound({ requiredRoles: input.requiredRoles, verdicts: input.verdicts, fixRoundsStarted: round });
   // Every verdict first, then the records: passes first, non-passes last (see verdicts.ts). An incomplete round records no pass.
   const { recorded } = await recordVerdictsInOrder(pool, registry, {

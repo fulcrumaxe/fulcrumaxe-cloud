@@ -4,6 +4,7 @@ import type { ExecutionTargetRegistry } from "@fx/runner";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { listDriverEvents, recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import type { CiGate } from "../../src/review/ciWait.js";
 import { fixRoundsStarted, maxFixRounds, recordRound } from "../../src/review/roundDecision.js";
 import type { GatheredVerdict } from "../../src/review/verdicts.js";
 import { createFakeExecutionTarget } from "../build/helpers/fakeExecutionTarget.js";
@@ -18,6 +19,8 @@ import { pgHarness } from "../helpers/pgHarness.js";
 describe("recordRound [pg]", () => {
   const db = pgHarness();
   const HEAD = "a".repeat(40);
+  /** D#598 P7b: CI has finished. The wait itself is tested in ciWait.pg.test.ts. */
+  const SETTLED: CiGate = { read: async () => ({ state: "settled", reasons: [] }) };
 
   async function seed(): Promise<{ accountId: string; workItemId: string; registry: ExecutionTargetRegistry }> {
     const accountId = randomUUID();
@@ -54,7 +57,7 @@ describe("recordRound [pg]", () => {
   it("every required role passed: all_passed, the item is at review_passed, and the verdicts are one driver event", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"], ["acceptance-tester", "pass"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("all_passed");
     expect(await stageOf(accountId, workItemId)).toBe("review_passed");
     const ev = (await events(accountId, workItemId)).filter((e) => e.kind === "review_verdicts");
@@ -68,7 +71,7 @@ describe("recordRound [pg]", () => {
   ] as const)("a needs-fix and a pass on one head (%s): the item ends at changes_requested, never review_passed (the live bug)", async (_n, spec) => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, spec.map(([r, v]) => [r, v]) as never);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("fix");
     expect(out.nextRound).toBe(1);
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
@@ -82,7 +85,7 @@ describe("recordRound [pg]", () => {
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "fail"]]);
     // a fail beside a needs-fix is a reviewer_fail; use two needs-fix for the round count
     const two = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "needs-fix"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: "b".repeat(40), prNumber: 41, requiredRoles: REQUIRED, verdicts: two });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: "b".repeat(40), prNumber: 41, requiredRoles: REQUIRED, verdicts: two }, SETTLED);
     expect(out.decision).toBe("fix");
     expect(out.round).toBe(0);
     expect((await transitions(workItemId)).filter((t) => t.to_stage === "changes_requested")).toHaveLength(2);
@@ -96,7 +99,7 @@ describe("recordRound [pg]", () => {
     });
     expect(await fixRoundsStarted(db.runWriterPool, accountId, workItemId)).toBe(maxFixRounds());
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("escalated");
     expect(out.round).toBe(maxFixRounds());
     expect(await stageOf(accountId, workItemId)).toBe("needs_human");
@@ -113,7 +116,7 @@ describe("recordRound [pg]", () => {
       for (const i of [1, 2]) await recordDriverEvent(c, accountId, { workItemId, kind: "fix_round_started", dedupeKey: `r${i}`, round: i });
     });
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out).toMatchObject({ decision: "fix", round: 2, nextRound: 3 });
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
   });
@@ -121,7 +124,7 @@ describe("recordRound [pg]", () => {
   it("a reviewer's fail stops the driver: changes_requested stays, no needs_human, and the stop is a driver event", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"], ["acceptance-tester", "fail"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("reviewer_fail");
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
     const esc = (await events(accountId, workItemId)).filter((e) => e.kind === "escalated");
@@ -132,7 +135,7 @@ describe("recordRound [pg]", () => {
   it("an incomplete round (a required reviewer has no verdict) records no pass, so the card never says passed with a reviewer missing", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("incomplete");
     expect(out.recorded).toEqual([]);
     expect(await stageOf(accountId, workItemId)).toBe("pr_opened");
@@ -143,7 +146,7 @@ describe("recordRound [pg]", () => {
   it("an incomplete round still records a non-pass it has", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("incomplete");
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
   });
@@ -152,8 +155,8 @@ describe("recordRound [pg]", () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]]);
     const input = { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts };
-    const first = await recordRound(db.runWriterPool, registry, input);
-    const again = await recordRound(db.runWriterPool, registry, input);
+    const first = await recordRound(db.runWriterPool, registry, input, SETTLED);
+    const again = await recordRound(db.runWriterPool, registry, input, SETTLED);
     expect(again.decision).toBe(first.decision);
     expect(again.recorded.map((r) => r.outcome)).toEqual(["duplicate", "duplicate"]);
     expect((await transitions(workItemId)).filter((t) => t.to_stage === "changes_requested")).toHaveLength(1);
@@ -164,7 +167,7 @@ describe("recordRound [pg]", () => {
     const { accountId, workItemId } = await seed();
     const { target, calls } = createFakeExecutionTarget();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "needs-fix"]]);
-    const out = await recordRound(db.runWriterPool, { sandbox: target }, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts });
+    const out = await recordRound(db.runWriterPool, { sandbox: target }, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out.decision).toBe("fix");
     expect(calls).toEqual([]);
   });
@@ -172,7 +175,7 @@ describe("recordRound [pg]", () => {
   it("a debater's needs-fix is recorded as the code review it debated", async () => {
     const { accountId, workItemId, registry } = await seed();
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "pass"], ["acceptance-tester", "pass"], ["debater", "needs-fix"]]);
-    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: [...REQUIRED, "debater"], verdicts });
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: [...REQUIRED, "debater"], verdicts }, SETTLED);
     expect(out.decision).toBe("fix");
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
     expect((await transitions(workItemId)).at(-1)).toEqual({ to_stage: "changes_requested", reviewer: "code" });

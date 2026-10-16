@@ -24,8 +24,8 @@ import { ghError, type GhReply, type GhRequest } from "../../../../github/test/h
  *    `updateForbidden`. A body that is not a JSON object, or an `expected_head_sha` that is not a 40-hex string, is 422 as well.
  *  - `GET /compare/{base}...{head}`: `status` (`ahead` / `behind` / `diverged` / `identical`), `ahead_by`, `behind_by` and `files`,
  *    with `files` on one response only, capped at 300 (`per_page`/`page` page the commits); the head must be a commit that exists (404 otherwise).
- *  - `GET /commits/{sha}/check-runs` and `/status`: one passing check run named by `checkNames` on every commit and an empty combined
- *    status, each cut at `per_page` with `total_count`, so a gate over the real port reaches its merge call.
+ *  - `GET /commits/{sha}/check-runs` and `/status`: one passing check run named by `checkNames` on every commit (or the runs of `checkRuns`,
+ *    with GitHub's null `conclusion` until completed) and an empty combined status (or `statuses`), each cut at `per_page` with `total_count`, so a gate over the real port reaches its merge call.
  *  - `GET /branches/{b}/protection/required_status_checks`: 200 with `strict` when set, 404 "Branch not protected" / "Required status
  *    checks not enabled" (GitHub's own messages), 403 on `protectionStatus: 403`.
  *  - `GET /rules/branches/{b}`: a paged array of rules (`required_status_checks` rules carry `parameters` with both
@@ -83,6 +83,10 @@ export interface MergeWorld {
   breakProtectionAfterMerge?: boolean;
   /** The check runs present and passing on every commit. */
   checkNames: string[];
+  /** D#598 P7b: replaces `checkNames` with runs in any state. GitHub's `conclusion` is null until a run has completed, and `status` is queued | in_progress | completed. */
+  checkRuns?: Array<{ name: string; status: "queued" | "in_progress" | "completed"; conclusion: string | null }>;
+  /** D#598 P7b: commit statuses on every commit (context -> state); the combined state is derived the way GitHub derives it. */
+  statuses?: Record<string, "error" | "failure" | "pending" | "success">;
   /** Replaces the `message` of the merge and update-branch errors, to show no code reads it (protection's documented 404 messages stay exact). */
   messageOverride?: string;
   updateForbidden: boolean;
@@ -237,11 +241,16 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
 
     const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(req.path);
     if (req.method === "GET" && checks) {
-      const list = w.checkNames.map((name, i) => ({ id: i + 1, head_sha: checks[1], name, status: "completed", conclusion: "success", app: { id: 1 } }));
+      const runs = w.checkRuns ?? w.checkNames.map((name) => ({ name, status: "completed" as const, conclusion: "success" as string | null }));
+      const list = runs.map((r, i) => ({ id: i + 1, head_sha: checks[1], name: r.name, status: r.status, conclusion: r.status === "completed" ? r.conclusion : null, app: { id: 1 } }));
       return json(200, { total_count: list.length, check_runs: paged(list, query) });
     }
     const combined = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/status$/.exec(req.path);
-    if (req.method === "GET" && combined) return json(200, { sha: combined[1], state: "pending", total_count: 0, statuses: [] });
+    if (req.method === "GET" && combined) {
+      const latest = Object.entries(w.statuses ?? {}).map(([context, state]) => ({ context, state }));
+      const state = latest.length === 0 || latest.some((x) => x.state === "pending") ? "pending" : latest.every((x) => x.state === "success") ? "success" : "failure";
+      return json(200, { sha: combined[1], state, total_count: latest.length, statuses: paged(latest, query) });
+    }
 
     const protectionPath = req.path === `${base}/branches/${w.baseRef}/protection/required_status_checks` || req.path === `${base}/rules/branches/${w.baseRef}`;
     if (req.method === "GET" && protectionPath && w.breakProtectionAfterMerge && w.merges.length > 0) return err(500, "Server Error");

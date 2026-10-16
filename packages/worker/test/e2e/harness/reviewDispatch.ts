@@ -23,7 +23,8 @@ export function createHarnessReviewDeps(): AdvanceReviewDeps {
       const c = r.ctx;
       return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: false } };
     },
-    recordRound: (pool, registry, input) => recordRound(pool, registry, { ...input, requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never }),
+    // D#598 P7b: this harness has no GitHub, so its CI is settled (the wait itself is tested in packages/pipeline/test/review/ciWait*.test.ts).
+    recordRound: (pool, registry, input) => recordRound(pool, registry, { ...input, requiredRoles: input.requiredRoles as never, verdicts: input.verdicts as never }, { read: async () => ({ state: "settled", reasons: [] }) }),
     resume: async () => {
       throw new Error("a fix round is not part of this harness");
     },
