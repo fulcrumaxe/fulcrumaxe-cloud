@@ -138,6 +138,56 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     expect(t.started).toEqual([]);
   });
 
+  // D#483 S3 E8: one process per item, at start. A direct POST /work-items/{id}/approve reaches this performer.
+  it("E8: a work item whose proposal is owned by the internal loop is refused owned_by_internal_loop and starts nothing; a product-owned one starts", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const loop = await world(a);
+    const product = await world(a);
+    const proposal = (workItem: string, owner: string, state: string, n: number) =>
+      admin.query(
+        `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process, state, work_item_id)
+         VALUES ($1, $2, $3, '{plan_task}', 't', 'internal', $4, $5, $6)`,
+        [a.accountId, a.repoId, `plan:E8-${n}`, owner, state, workItem],
+      );
+    // an approved row cannot be internal_loop (a CHECK), so the loop-owned one is a new proposal that holds a work item
+    await proposal(loop, "internal_loop", "new", 1);
+    await proposal(product, "product", "new", 2);
+    const t = build();
+    expect(await t.module.performAdvanceWorkItem(await action(a, loop))).toEqual({ result: "refused", errorCode: "owned_by_internal_loop" });
+    expect(t.started).toEqual([]);
+    expect((await t.module.performAdvanceWorkItem(await action(a, product))).result).toBe("done");
+    expect(t.started).toHaveLength(1);
+    expect(t.started[0]).toMatchObject({ workItemId: product });
+  });
+
+  it("E8: the re-spec action goes through the same performer and is refused owned_by_internal_loop for a loop-owned item too", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const loop = await world(a, { stage: "spec_ready" });
+    await admin.query(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process, state, work_item_id)
+       VALUES ($1, $2, 'plan:E8-respec', '{plan_task}', 't', 'internal', 'internal_loop', 'new', $3)`,
+      [a.accountId, a.repoId, loop],
+    );
+    const row = await withTenant(appPool, a.accountId, a.userId, undefined, async (c) => (await c.query("SELECT * FROM run_action_request('respec_work_item', $1, NULL, $2)", [loop, "r".repeat(64)])).rows[0]);
+    expect(await createRunActionFacade(writerPool, {} as never).claimRunAction(row.action_id, 600)).not.toBeNull();
+    const t = build();
+    expect(await t.module.performRespecWorkItem(row.action_id)).toEqual({ result: "refused", errorCode: "owned_by_internal_loop" });
+    expect(t.started).toEqual([]);
+  });
+
+  it("an external work item that a product-owned proposal approved onto the roadmap is still refused external_requires_human by the performer", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await world(a, { provenance: "external" });
+    await admin.query(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, title, provenance, owner_process, state, work_item_id, roadmap_position, decided_at)
+       VALUES ($1, $2, 'plan:E8-external', '{plan_task}', 't', 'external', 'product', 'approved', $3, 1, now())`,
+      [a.accountId, a.repoId, w],
+    );
+    const t = build();
+    expect(await t.module.performAdvanceWorkItem(await action(a, w))).toEqual({ result: "refused", errorCode: "external_requires_human" });
+    expect(t.started).toEqual([]);
+  });
+
   it("a role lowered to member between the request and the perform is refused principal_not_authorised", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await world(a);

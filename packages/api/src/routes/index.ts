@@ -29,6 +29,7 @@ import { commentRoutes, discussionRoutes } from "./discussions.js";
 import { siteRoutes } from "./sites.js";
 import { sitekitBillingRoutes } from "./sitekitBilling.js";
 import { planRoutes } from "./plan.js";
+import { proposalRoutes } from "./proposals.js";
 import { correctionRoutes } from "./corrections.js";
 import { runHandoffRoutes } from "./run-handoff.js";
 
@@ -84,6 +85,7 @@ export const ROUTES: RouteEntry[] = [
   ...siteRoutes,
   ...sitekitBillingRoutes,
   ...planRoutes,
+  ...proposalRoutes,
   ...correctionRoutes,
   ...runHandoffRoutes,
 ];

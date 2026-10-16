@@ -1,0 +1,59 @@
+{
+  "proposals": [
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "repo_id": "66666666-6666-4666-8666-666666666666",
+      "dedupe_key": "gh:issue:12",
+      "sources": [
+        "github_issue"
+      ],
+      "gh_number": 12,
+      "discussion_number": null,
+      "task_key": null,
+      "milestone_key": null,
+      "milestone_title": null,
+      "title": "Add dark mode",
+      "summary": "People ask for a dark theme.",
+      "category_hint": null,
+      "estimate_usd": null,
+      "provenance": "internal",
+      "owner_process": "product",
+      "state": "new",
+      "decided_at": null,
+      "reject_note": null,
+      "roadmap_position": null,
+      "work_item_id": null,
+      "work_item_stage": null,
+      "created_at": "2026-10-16T06:00:00.000Z",
+      "updated_at": "2026-10-16T06:00:00.000Z"
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "repo_id": "66666666-6666-4666-8666-666666666666",
+      "dedupe_key": "gh:issue:12",
+      "sources": [
+        "github_issue"
+      ],
+      "gh_number": 12,
+      "discussion_number": null,
+      "task_key": null,
+      "milestone_key": null,
+      "milestone_title": null,
+      "title": "Add dark mode",
+      "summary": "People ask for a dark theme.",
+      "category_hint": null,
+      "estimate_usd": null,
+      "provenance": "internal",
+      "owner_process": "product",
+      "state": "approved",
+      "decided_at": "2026-10-16T06:05:00.000Z",
+      "reject_note": null,
+      "roadmap_position": 1,
+      "work_item_id": "77777777-7777-4777-8777-777777777777",
+      "work_item_stage": "triaged",
+      "created_at": "2026-10-16T06:00:00.000Z",
+      "updated_at": "2026-10-16T06:00:00.000Z"
+    }
+  ],
+  "next_cursor": "2026-10-16T06:00:00.000000Z|55555555-5555-4555-8555-555555555555"
+}

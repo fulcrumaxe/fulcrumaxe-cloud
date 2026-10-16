@@ -19630,6 +19630,2107 @@
             }
           }
         }
+      },
+      "delete": {
+        "operationId": "removeRepoPlan",
+        "summary": "Remove the repository's imported plan",
+        "description": "Session only, owner or admin; a token is refused. Removes the imported plan: its milestones, tasks and import records, and the proposals that are still `new` or `withdrawn`. Approved and rejected proposals are decisions and are kept (they stop showing a task), and work items are never touched. Importing again restores everything that can be read from the repository. Answers 200 with what was removed. Refused while an import is running (409 `import_running`); an import that died more than 10 minutes ago is closed as interrupted and does not block it. Removing a plan that is already gone answers 200 with zero counts. A repository that has lost its GitHub App installation can still be cleared.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Remove the repository's imported plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "removed": {
+                      "type": "object",
+                      "properties": {
+                        "proposals_removed": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "tasks_removed": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "milestones_removed": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "imports_removed": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "proposals_removed",
+                        "tasks_removed",
+                        "milestones_removed",
+                        "imports_removed"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "removed"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` (a token) or `insufficient_role` (below admin).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: the repository does not exist in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `import_running`: an import is running for this repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals": {
+      "get": {
+        "operationId": "listProposals",
+        "summary": "The proposal inbox",
+        "description": "Proposals newest first, 50 to a page, filtered by `repo_id`, `state` and `owner` (`product` or `internal_loop`). `next_cursor` is the last row's `created_at|id` and is null on the last page; pass it back as `cursor`. Each row carries its task and milestone when it has one, and an approved row carries its work item's live stage (read from the work item, never stored on the proposal).",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "repo_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "new",
+                "approved",
+                "rejected",
+                "withdrawn"
+              ]
+            }
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "product",
+                "internal_loop"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The proposal inbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposals": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "repo_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "dedupe_key": {
+                            "type": "string"
+                          },
+                          "sources": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "gh_number": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "discussion_number": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "task_key": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "milestone_key": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "milestone_title": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "summary": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "category_hint": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "estimate_usd": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "provenance": {
+                            "type": "string",
+                            "enum": [
+                              "internal",
+                              "external"
+                            ]
+                          },
+                          "owner_process": {
+                            "type": "string",
+                            "enum": [
+                              "product",
+                              "internal_loop"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "new",
+                              "approved",
+                              "rejected",
+                              "withdrawn"
+                            ]
+                          },
+                          "decided_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "reject_note": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "roadmap_position": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "work_item_id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "work_item_stage": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "repo_id",
+                          "dedupe_key",
+                          "sources",
+                          "gh_number",
+                          "discussion_number",
+                          "task_key",
+                          "milestone_key",
+                          "milestone_title",
+                          "title",
+                          "summary",
+                          "category_hint",
+                          "estimate_usd",
+                          "provenance",
+                          "owner_process",
+                          "state",
+                          "decided_at",
+                          "reject_note",
+                          "roadmap_position",
+                          "work_item_id",
+                          "work_item_stage",
+                          "created_at",
+                          "updated_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "proposals",
+                    "next_cursor"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error `invalid_cursor`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: `repo_id` names no repository in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals/{id}": {
+      "get": {
+        "operationId": "getProposal",
+        "summary": "One proposal",
+        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "dedupe_key": {
+                          "type": "string"
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "gh_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "discussion_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "task_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "category_hint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "owner_process": {
+                          "type": "string",
+                          "enum": [
+                            "product",
+                            "internal_loop"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "new",
+                            "approved",
+                            "rejected",
+                            "withdrawn"
+                          ]
+                        },
+                        "decided_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reject_note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "roadmap_position": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_stage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "repo_id",
+                        "dedupe_key",
+                        "sources",
+                        "gh_number",
+                        "discussion_number",
+                        "task_key",
+                        "milestone_key",
+                        "milestone_title",
+                        "title",
+                        "summary",
+                        "category_hint",
+                        "estimate_usd",
+                        "provenance",
+                        "owner_process",
+                        "state",
+                        "decided_at",
+                        "reject_note",
+                        "roadmap_position",
+                        "work_item_id",
+                        "work_item_stage",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "proposal"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals/{id}/approve": {
+      "post": {
+        "operationId": "approveProposal",
+        "summary": "Approve a proposal onto the roadmap",
+        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction. Then, when the proposal is issue-backed, the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` or `not_issue_backed` and the work item waits at Triaged. Discussion- and task-backed proposals can be approved onto the roadmap but start only once the stage driver can take its input from a proposal. An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal and work item and creates nothing; if its start was never requested it is requested now. If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "required",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Approve a proposal onto the roadmap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "dedupe_key": {
+                          "type": "string"
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "gh_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "discussion_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "task_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "category_hint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "owner_process": {
+                          "type": "string",
+                          "enum": [
+                            "product",
+                            "internal_loop"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "new",
+                            "approved",
+                            "rejected",
+                            "withdrawn"
+                          ]
+                        },
+                        "decided_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reject_note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "roadmap_position": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_stage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "repo_id",
+                        "dedupe_key",
+                        "sources",
+                        "gh_number",
+                        "discussion_number",
+                        "task_key",
+                        "milestone_key",
+                        "milestone_title",
+                        "title",
+                        "summary",
+                        "category_hint",
+                        "estimate_usd",
+                        "provenance",
+                        "owner_process",
+                        "state",
+                        "decided_at",
+                        "reject_note",
+                        "roadmap_position",
+                        "work_item_id",
+                        "work_item_stage",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "work_item_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "started": {
+                      "type": "boolean"
+                    },
+                    "not_started_reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "no_write_install",
+                            "not_issue_backed",
+                            "owned_by_internal_loop"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "proposal",
+                    "work_item_id",
+                    "started",
+                    "not_started_reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: no such proposal in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `owned_by_internal_loop`, `not_new`, `repo_not_connected`, `work_item_wrong_repo` or `work_item_wrong_stage`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet. Nothing was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals/{id}/reject": {
+      "post": {
+        "operationId": "rejectProposal",
+        "summary": "Reject a proposal, with an optional note",
+        "description": "Moves a `new` proposal to `rejected`, stamped with who and when. `note` is up to 500 characters. A re-import never changes the stamp.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "work_items:write"
+            ]
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 500
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reject a proposal, with an optional note",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "dedupe_key": {
+                          "type": "string"
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "gh_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "discussion_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "task_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "category_hint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "owner_process": {
+                          "type": "string",
+                          "enum": [
+                            "product",
+                            "internal_loop"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "new",
+                            "approved",
+                            "rejected",
+                            "withdrawn"
+                          ]
+                        },
+                        "decided_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reject_note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "roadmap_position": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_stage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "repo_id",
+                        "dedupe_key",
+                        "sources",
+                        "gh_number",
+                        "discussion_number",
+                        "task_key",
+                        "milestone_key",
+                        "milestone_title",
+                        "title",
+                        "summary",
+                        "category_hint",
+                        "estimate_usd",
+                        "provenance",
+                        "owner_process",
+                        "state",
+                        "decided_at",
+                        "reject_note",
+                        "roadmap_position",
+                        "work_item_id",
+                        "work_item_stage",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "proposal"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: no such proposal in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_new`, `not_rejected`, `not_approved`, `work_started`, `owned_by_internal_loop` or `repo_not_connected`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals/{id}/restore": {
+      "post": {
+        "operationId": "restoreProposal",
+        "summary": "Move a rejected proposal back to the inbox",
+        "description": "`rejected` to `new`; the decision stamp and note are cleared. 409 `not_rejected` otherwise.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "work_items:write"
+            ]
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Move a rejected proposal back to the inbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "dedupe_key": {
+                          "type": "string"
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "gh_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "discussion_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "task_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "category_hint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "owner_process": {
+                          "type": "string",
+                          "enum": [
+                            "product",
+                            "internal_loop"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "new",
+                            "approved",
+                            "rejected",
+                            "withdrawn"
+                          ]
+                        },
+                        "decided_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reject_note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "roadmap_position": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_stage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "repo_id",
+                        "dedupe_key",
+                        "sources",
+                        "gh_number",
+                        "discussion_number",
+                        "task_key",
+                        "milestone_key",
+                        "milestone_title",
+                        "title",
+                        "summary",
+                        "category_hint",
+                        "estimate_usd",
+                        "provenance",
+                        "owner_process",
+                        "state",
+                        "decided_at",
+                        "reject_note",
+                        "roadmap_position",
+                        "work_item_id",
+                        "work_item_stage",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "proposal"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: no such proposal in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_new`, `not_rejected`, `not_approved`, `work_started`, `owned_by_internal_loop` or `repo_not_connected`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proposals/{id}/withdraw-approval": {
+      "post": {
+        "operationId": "withdrawProposalApproval",
+        "summary": "Withdraw an approval before work starts",
+        "description": "`approved` to `new` while the work item is at Triaged with no run. The work item is closed in the same transaction. 409 `work_started` once a run began or the item left Triaged; after that the card's Cancel stops it and the proposal stays `approved`, showing the item's live stage.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "work_items:write"
+            ]
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Withdraw an approval before work starts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "proposal": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "repo_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "dedupe_key": {
+                          "type": "string"
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "gh_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "discussion_number": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "task_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_key": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "milestone_title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "summary": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "category_hint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "provenance": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "external"
+                          ]
+                        },
+                        "owner_process": {
+                          "type": "string",
+                          "enum": [
+                            "product",
+                            "internal_loop"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "new",
+                            "approved",
+                            "rejected",
+                            "withdrawn"
+                          ]
+                        },
+                        "decided_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reject_note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "roadmap_position": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_id": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "work_item_stage": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "repo_id",
+                        "dedupe_key",
+                        "sources",
+                        "gh_number",
+                        "discussion_number",
+                        "task_key",
+                        "milestone_key",
+                        "milestone_title",
+                        "title",
+                        "summary",
+                        "category_hint",
+                        "estimate_usd",
+                        "provenance",
+                        "owner_process",
+                        "state",
+                        "decided_at",
+                        "reject_note",
+                        "roadmap_position",
+                        "work_item_id",
+                        "work_item_stage",
+                        "created_at",
+                        "updated_at"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "proposal"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: no such proposal in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_new`, `not_rejected`, `not_approved`, `work_started`, `owned_by_internal_loop` or `repo_not_connected`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/work-items/{id}/corrections": {

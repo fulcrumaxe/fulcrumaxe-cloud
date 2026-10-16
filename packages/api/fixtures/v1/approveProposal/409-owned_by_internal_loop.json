@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "owned_by_internal_loop",
+    "message": "this item belongs to the repository's own development loop",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

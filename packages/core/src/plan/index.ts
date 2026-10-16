@@ -8,3 +8,6 @@ export * from './referenceLine.js';
 export * from './roadmapFile.js';
 export * from './roadmapWriter.js';
 export * from './specTables.js';
+export * from './proposals.js';
+export * from './approve.js';
+export * from './remove.js';

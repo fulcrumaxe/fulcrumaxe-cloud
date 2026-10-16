@@ -10,7 +10,7 @@ import { PG_ERROR } from './helpers/pgErrors.js';
 
 /** D#483 S3-a: the plan and proposal tables, their roles, guards and definers (0723). */
 const TABLES = ['plan_imports', 'plan_milestones', 'plan_tasks', 'proposals'] as const;
-const DEFINERS = ['plan_import_begin(uuid)', 'approve_proposal(uuid, uuid)', 'reject_proposal(uuid, text)', 'restore_proposal(uuid)', 'withdraw_approval(uuid)'];
+const DEFINERS = ['plan_import_begin(uuid)', 'remove_repo_plan(uuid)', 'approve_proposal(uuid, uuid)', 'reject_proposal(uuid, text)', 'restore_proposal(uuid)', 'withdraw_approval(uuid)'];
 
 describe('plan import and proposals (0723)', () => {
   let adminPool: Pool;
@@ -100,7 +100,7 @@ describe('plan import and proposals (0723)', () => {
       }
     });
 
-    it('platform_ops has one tenant-bound policy on plan_imports and proposals only, false for a direct login', async () => {
+    it('platform_ops has one tenant-bound policy on plan_imports and proposals only, false for a direct login (0832 adds none for it)', async () => {
       const { rows } = await admin.query(`SELECT tablename, qual FROM pg_policies WHERE schemaname = 'public' AND 'platform_ops' = ANY (roles) AND tablename = ANY ($1)`, [[...TABLES]]);
       expect(rows.map((r) => r.tablename).sort()).toEqual(['plan_imports', 'proposals']);
       for (const r of rows) expect(String(r.qual).toLowerCase()).toContain("session_user <> 'platform_ops'");
@@ -615,23 +615,207 @@ describe('plan import and proposals (0723)', () => {
     });
   });
 
+  describe('remove_repo_plan (0832)', () => {
+    const remove = (r: SeedRefs, user: string, repo: string, token?: string) =>
+      as(r, user, async (c) => (await c.query('SELECT * FROM remove_repo_plan($1)', [repo])).rows[0], token);
+
+    /** One repo with a finished import, a milestone, a task, and one proposal in each state (two of them decisions on the task). */
+    async function seedPlan(r: SeedRefs) {
+      const repo = await newRepo(r);
+      const imp = await newImport(r, repo);
+      await admin.query(`INSERT INTO plan_milestones (account_id, repo_id, key, title, position, last_import_id) VALUES ($1, $2, 'm1', 'M one', 0, $3)`, [r.accountId, repo, imp]);
+      const task = (await admin.query(
+        `INSERT INTO plan_tasks (account_id, repo_id, task_key, milestone_key, title, planned_prs, status, owner_process, first_import_id, last_import_id) VALUES ($1, $2, 'D#1:T1', 'm1', 'T', 1, 'not_started', 'product', $3, $3) RETURNING id`,
+        [r.accountId, repo, imp],
+      )).rows[0].id;
+      const wi = await newWorkItem(r, repo);
+      const pNew = await newProposal(r, repo, { plan_task_id: task, last_import_id: imp });
+      const pWithdrawn = await newProposal(r, repo, { state: 'withdrawn', last_import_id: imp });
+      const pApproved = await newProposal(r, repo, { plan_task_id: task, last_import_id: imp, state: 'approved', roadmap_position: 1, decided_at: new Date(), decided_by_user_id: r.userId, work_item_id: wi });
+      const pRejected = await newProposal(r, repo, { plan_task_id: task, last_import_id: imp, state: 'rejected', decided_at: new Date(), decided_by_user_id: r.userId, reject_note: 'not now' });
+      return { repo, imp, task, wi, pNew, pWithdrawn, pApproved, pRejected };
+    }
+    const counts = async (repo: string) =>
+      Object.fromEntries(await Promise.all(TABLES.map(async (t) => [t, (await admin.query(`SELECT count(*)::int n FROM ${t} WHERE repo_id = $1`, [repo])).rows[0].n])));
+
+    it('removes the plan rows and the undecided proposals, keeps approved and rejected ones untouched, and audits what it removed', async () => {
+      const s = await seedPlan(a);
+      const cols = 'id, state, decided_at, decided_by_user_id, reject_note, roadmap_position, work_item_id, title';
+      const before = (await admin.query(`SELECT ${cols} FROM proposals WHERE id = ANY ($1) ORDER BY id`, [[s.pApproved, s.pRejected]])).rows;
+      expect(await remove(a, a.userId, s.repo)).toEqual({ proposals_removed: 2, tasks_removed: 1, milestones_removed: 1, imports_removed: 1 });
+      expect(await counts(s.repo)).toEqual({ plan_imports: 0, plan_milestones: 0, plan_tasks: 0, proposals: 2 });
+      const after = (await admin.query(`SELECT ${cols}, plan_task_id, last_import_id FROM proposals WHERE id = ANY ($1) ORDER BY id`, [[s.pApproved, s.pRejected]])).rows;
+      // the decisions are byte for byte the same; only the links into the removed plan are cleared
+      expect(after).toEqual(before.map((x) => ({ ...x, plan_task_id: null, last_import_id: null })));
+      // the approved proposal's work item is untouched
+      expect((await admin.query('SELECT stage FROM work_items WHERE id = $1', [s.wi])).rows[0].stage).toBe('triaged');
+      const audit = (await admin.query(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'plan.removed' AND payload->>'repo_id' = $2`, [a.accountId, s.repo])).rows;
+      expect(audit).toHaveLength(1);
+      expect(audit[0]).toMatchObject({ actor: a.userId, payload: { repo_id: s.repo, proposals: 2, tasks: 1, milestones: 1, imports: 1 } });
+      // a second removal finds nothing and says so
+      expect(await remove(a, a.userId, s.repo)).toEqual({ proposals_removed: 0, tasks_removed: 0, milestones_removed: 0, imports_removed: 0 });
+    });
+
+    it('touches no other repo and no other tenant, and an admin may remove', async () => {
+      const mine = await seedPlan(a);
+      const sibling = await seedPlan(a);
+      const theirs = await seedPlan(b);
+      const siblingBefore = await counts(sibling.repo);
+      const theirsBefore = await counts(theirs.repo);
+      await remove(a, adminUser, mine.repo);
+      expect(await counts(sibling.repo)).toEqual(siblingBefore);
+      expect(await counts(theirs.repo)).toEqual(theirsBefore);
+      // another tenant's repo is not found, and nothing changes
+      await expect(remove(a, a.userId, theirs.repo)).rejects.toMatchObject({ code: 'P0002' });
+      expect(await counts(theirs.repo)).toEqual(theirsBefore);
+    });
+
+    it('refuses a member, a token (even with every scope), a session with no user and a missing repo, and removes nothing', async () => {
+      const s = await seedPlan(a);
+      const before = await counts(s.repo);
+      await expect(remove(a, memberUser, s.repo)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      const tok = await mintToken(a, ['read', 'work_items:write', 'runs:cancel']);
+      await expect(remove(a, a.userId, s.repo, tok)).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await expect(withTenant(appPool, a.accountId, async (c) => c.query('SELECT * FROM remove_repo_plan($1)', [s.repo]))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      await expect(remove(a, a.userId, randomUUID())).rejects.toMatchObject({ code: 'P0002' });
+      await expect(as(a, a.userId, (c) => c.query('SELECT * FROM remove_repo_plan(NULL)'))).rejects.toMatchObject({ code: PG_ERROR.INVALID_PARAMETER_VALUE });
+      expect(await counts(s.repo)).toEqual(before);
+    });
+
+    it('refuses while an import is running (import_running) and removes nothing; a dead one (over 10 minutes) is closed as interrupted and removed with the rest', async () => {
+      const s = await seedPlan(a);
+      const before = await counts(s.repo);
+      const running = await as(a, a.userId, async (c) => (await c.query<{ id: string }>('SELECT plan_import_begin($1) AS id', [s.repo])).rows[0]!.id);
+      await expect(remove(a, a.userId, s.repo)).rejects.toMatchObject({ code: '55000', message: 'import_running' });
+      expect(await counts(s.repo)).toEqual({ ...before, plan_imports: before.plan_imports + 1 });
+      await admin.query(`UPDATE plan_imports SET started_at = now() - interval '11 minutes' WHERE id = $1`, [running]);
+      expect(await remove(a, a.userId, s.repo)).toMatchObject({ imports_removed: 2 });
+      expect(await counts(s.repo)).toEqual({ plan_imports: 0, plan_milestones: 0, plan_tasks: 0, proposals: 2 });
+      // after a removal an import can start at once
+      expect(await as(a, a.userId, async (c) => (await c.query('SELECT plan_import_begin($1) AS id', [s.repo])).rows[0]!.id)).toBeTruthy();
+    });
+
+    it('works on a repo that has lost its installation, so a detached repo can still be cleared', async () => {
+      const s = await seedPlan(a);
+      await admin.query('UPDATE repos SET installation_id = NULL WHERE id = $1', [s.repo]);
+      expect(await remove(a, a.userId, s.repo)).toMatchObject({ tasks_removed: 1 });
+    });
+
+    it('a direct platform_ops login cannot call it, and cannot delete from the four tables', async () => {
+      const s = await seedPlan(a);
+      const client = await opsPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT set_config('app.account_id', $1, true), set_config('app.user_id', $2, true)`, [a.accountId, a.userId]);
+        await client.query('SAVEPOINT s');
+        await expect(client.query('SELECT * FROM remove_repo_plan($1)', [s.repo])).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        for (const t of TABLES) {
+          await client.query('ROLLBACK TO SAVEPOINT s');
+          // platform_ops holds no DELETE on the plan tables (the removal belongs to plan_remover, not to it)
+          await expect(client.query(`DELETE FROM ${t} WHERE repo_id = $1`, [s.repo]), t).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        }
+        await client.query('ROLLBACK');
+      } finally {
+        client.release();
+      }
+      expect((await counts(s.repo)).plan_tasks).toBe(1);
+    });
+
+    it('the delete guard refuses plan_remover a decided proposal even with row security out of the way, and lets an undecided one go', async () => {
+      const s = await seedPlan(a);
+      const client = await adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('ALTER TABLE proposals NO FORCE ROW LEVEL SECURITY');
+        await client.query('ALTER TABLE proposals DISABLE ROW LEVEL SECURITY');
+        await client.query('SET SESSION AUTHORIZATION plan_remover');
+        await client.query('SAVEPOINT s');
+        // plan_remover can read only account_id, repo_id and state of a proposal, so it names the rows by those
+        for (const st of ['approved', 'rejected']) {
+          await expect(client.query('DELETE FROM proposals WHERE repo_id = $1 AND state = $2', [s.repo, st]), st).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE, message: expect.stringContaining('is never deleted') });
+          await client.query('ROLLBACK TO SAVEPOINT s');
+        }
+        expect((await client.query(`DELETE FROM proposals WHERE repo_id = $1 AND state IN ('new', 'withdrawn')`, [s.repo])).rowCount).toBe(2);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        await client.query('RESET SESSION AUTHORIZATION').catch(() => undefined);
+        client.release();
+      }
+      expect((await counts(s.repo)).proposals).toBe(4);
+    });
+
+    it('plan_remover may insert only a plan.removed audit row for the account in context', async () => {
+      const client = await adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT set_config('app.account_id', $1, true)`, [a.accountId]);
+        await client.query('SET LOCAL ROLE plan_remover');
+        await client.query('SAVEPOINT s');
+        const ins = (account: string, action: string) => client.query(`INSERT INTO audit_log (account_id, actor, action, payload, created_at) VALUES ($1, 'x', $2, '{}', now())`, [account, action]);
+        await expect(ins(a.accountId, 'plan.exported')).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        await client.query('ROLLBACK TO SAVEPOINT s');
+        await expect(ins(b.accountId, 'plan.removed')).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        await client.query('ROLLBACK TO SAVEPOINT s');
+        await ins(a.accountId, 'plan.removed');
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('a repo delete still cascades to approved and rejected proposals (the guard binds plan_remover only)', async () => {
+      const s = await seedPlan(a);
+      await admin.query('DELETE FROM repos WHERE id = $1', [s.repo]);
+      expect(await counts(s.repo)).toEqual({ plan_imports: 0, plan_milestones: 0, plan_tasks: 0, proposals: 0 });
+    });
+  });
+
+  describe('E8: the runner login reads the owner of the proposal behind a work item (0832)', () => {
+    it('agent_run_writer reads three columns of proposals, only for its tenant, and writes nothing', async () => {
+      const repo = await newRepo(a);
+      const wi = await newWorkItem(a, repo);
+      await newProposal(a, repo, { state: 'approved', roadmap_position: 1, decided_at: new Date(), work_item_id: wi });
+      const runnerPool = createPool(process.env.DATABASE_URL_RUN_WRITER!);
+      // The runner login is a member of app_user too; SET LOCAL ROLE narrows a transaction to agent_run_writer's own privileges.
+      const asWriter = <T>(account: string, fn: (c: PoolClient) => Promise<T>) =>
+        withTenant(runnerPool, account, async (c) => {
+          await c.query('SET LOCAL ROLE agent_run_writer');
+          return fn(c);
+        });
+      try {
+        const read = (account: string) => asWriter(account, async (c) => (await c.query('SELECT owner_process FROM proposals WHERE account_id = $1 AND work_item_id = $2', [account, wi])).rows);
+        expect(await read(a.accountId)).toEqual([{ owner_process: 'product' }]);
+        expect(await read(b.accountId)).toEqual([]);
+        await expect(asWriter(a.accountId, (c) => c.query('SELECT title FROM proposals'))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        await expect(asWriter(a.accountId, (c) => c.query(`UPDATE proposals SET owner_process = 'internal_loop'`))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        await expect(asWriter(a.accountId, (c) => c.query('DELETE FROM proposals'))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      } finally {
+        await runnerPool.end();
+      }
+    });
+  });
+
   describe('definer shape', () => {
     it('every new function pins search_path, the definers are owned by platform_ops with EXECUTE for app_user only, and no guard is owned by platform_ops', async () => {
       const { rows } = await admin.query(
         `SELECT p.proname, p.prosecdef, pg_get_userbyid(p.proowner) AS owner, p.proconfig, p.oid::regprocedure::text AS sig
            FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
-            AND p.proname IN ('plan_import_begin','approve_proposal','reject_proposal','restore_proposal','withdraw_approval','proposal_decider','plan_tables_write_guard','proposals_importer_guard','plan_imports_importer_guard')`,
+            AND p.proname IN ('plan_import_begin','approve_proposal','reject_proposal','restore_proposal','withdraw_approval','proposal_decider','plan_tables_write_guard','proposals_importer_guard','plan_imports_importer_guard','remove_repo_plan','proposals_delete_guard')`,
       );
-      expect(rows).toHaveLength(9);
+      expect(rows).toHaveLength(11);
       for (const r of rows) {
         expect(r.proconfig, r.proname).toContain('search_path=pg_catalog, public, pg_temp');
-        if (r.prosecdef) expect(r.owner, r.proname).toBe('platform_ops');
+        if (r.proname === 'remove_repo_plan') expect(r.owner, r.proname).toBe('plan_remover');
+        else if (r.prosecdef) expect(r.owner, r.proname).toBe('platform_ops');
         else expect(r.owner, `${r.proname} is a guard`).not.toBe('platform_ops');
       }
       for (const sig of DEFINERS) {
         expect((await admin.query(`SELECT has_function_privilege('app_user', $1::regprocedure, 'EXECUTE') AS ok, has_function_privilege('plan_importer', $1::regprocedure, 'EXECUTE') AS imp, has_function_privilege(0, $1::regprocedure, 'EXECUTE') AS pub`, [sig])).rows[0], sig).toEqual({ ok: true, imp: false, pub: false });
       }
       expect((await admin.query(`SELECT has_function_privilege('app_user', 'proposal_decider(text)'::regprocedure, 'EXECUTE') AS ok`)).rows[0].ok).toBe(false);
+      // 0832: the removal definer is owned by plan_remover, and platform_ops gained nothing from it
+      expect((await admin.query(`SELECT has_function_privilege('platform_ops', 'remove_repo_plan(uuid)'::regprocedure, 'EXECUTE') AS ok`)).rows[0].ok).toBe(false);
+      for (const t of TABLES) expect((await admin.query(`SELECT has_table_privilege('platform_ops', $1, 'DELETE') AS ok`, [t])).rows[0].ok, t).toBe(false);
     });
 
     // The authorization helper must not be owned by platform_ops: as owner it could mark it IMMUTABLE, and a pooled
