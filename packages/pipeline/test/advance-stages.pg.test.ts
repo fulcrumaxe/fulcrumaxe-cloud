@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { sanitize } from "@fx/trust";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { getRunContext } from "@fx/core/src/runs/contextPanel.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { BACK_TO_DISCUSSION_REF_PREFIX } from "@fx/core/src/work-items/operatorActions.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -44,6 +45,12 @@ class World implements AdvanceRunPorts {
     private readonly accountId: string,
     private readonly workItemId: string,
   ) {}
+
+  /** The worker's `findStep`: the run an earlier call of a step started. */
+  async findStep(prefix: string): Promise<{ step: string; runId: string } | null> {
+    for (const [step, runId] of this.byStep) if (step === prefix || step.startsWith(`${prefix}:n`)) return { step, runId };
+    return null;
+  }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.tail.then(fn, fn);
@@ -530,6 +537,127 @@ describe("the build", () => {
       expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
       expect(req.prompt).not.toContain("REPOSITORY MAP");
       expect(req.prompt).not.toContain("should-not-appear");
+    });
+  });
+
+  describe("D#600 CX-8b: what the build recorded is what the context panel shows", () => {
+    const SHA = "d".repeat(40);
+    const MAP_SRC: RepoMapSource = {
+      headSha: async () => SHA,
+      tree: async () => ({ truncated: false, entries: [{ path: "package.json", type: "blob" as const, sha: "1".repeat(40) }, { path: "src/app.ts", type: "blob" as const, sha: "2".repeat(40) }] }),
+      blob: async () => JSON.stringify({ name: "widgets", scripts: { test: "vitest run" } }),
+    };
+    /** A connected repository with two approved repo-scope entries; returns the entry ids by body. */
+    async function seeded() {
+      const t = await atSpecReady();
+      const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
+      const install = randomUUID();
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [install, t.accountId]);
+      const node = `R_kgDO${randomUUID().slice(0, 8)}`;
+      const inst = (await h.admin.query<{ gh_installation_id: string }>("SELECT gh_installation_id FROM installations WHERE id = $1", [install])).rows[0]!.gh_installation_id;
+      await h.admin.query("UPDATE repos SET installation_id = $2, gh_node_id = $3 WHERE id = $1", [repo, install, node]);
+      const ids = new Map<string, string>();
+      for (const body of ["run pnpm test before you push\nand more", "keep the loader's public name"]) {
+        const r = await h.admin.query<{ id: string }>(
+          `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256) VALUES ($1, 'repo', $2, 'command', $3, 'person', 'approved', 1, $4) RETURNING id`,
+          [t.accountId, `${node}@${inst}`, body, createHash("sha256").update(body).digest("hex")],
+        );
+        ids.set(body, r.rows[0]!.id);
+      }
+      const repoMap = createRepoMapPort({ open: async () => MAP_SRC, cache: createPgRepoMapCache(h.runWriterPool) });
+      return { t, repo, ids, repoMap };
+    }
+    const panel = (accountId: string, runId: string) => getRunContext({ pool: h.pureAppUserPool, principal: { accountId, userId: randomUUID() } as never }, runId);
+    const ledger = (accountId: string, runId: string) =>
+      h.admin.query(`INSERT INTO run_context_ledger (account_id, run_id, basis) VALUES ($1, $2, 'partial')`, [accountId, runId]);
+
+    it("a sandbox run that recalled two entries and loaded a cached map shows both; a deleted entry reads Deleted entry; a runner run shows neither", async () => {
+      const { t, repo, ids, repoMap } = await seeded();
+      const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      expect(out).toMatchObject({ status: "started" });
+      const runId = (out as { runId: string }).runId;
+      await ledger(t.accountId, runId);
+      const mapRow = (await h.admin.query<{ body_sha256: string }>("SELECT body_sha256 FROM repo_context_maps WHERE repo_id = $1", [repo])).rows[0]!;
+
+      const shown = await panel(t.accountId, runId);
+      expect(shown.recalled_memory.map((m) => m.name).sort()).toEqual(["keep the loader's public name", "run pnpm test before you push"]);
+      expect(shown.recalled_memory.map((m) => m.id).sort()).toEqual([...ids.values()].sort());
+      expect(shown.recalled_memory.every((m) => m.version === 1)).toBe(true);
+      expect(shown.repo_map_version).toBe(`v1 · ${mapRow.body_sha256.slice(0, 12)}`);
+
+      // Undo path: the person deletes an entry afterwards. The run still lists it, by a fixed word, not its text.
+      await h.admin.query("UPDATE memory_entries SET status = 'deleted', prior_status = 'approved', deleted_at = now() WHERE id = $1", [ids.get("keep the loader's public name")]);
+      const after = await panel(t.accountId, runId);
+      expect(after.recalled_memory.map((m) => m.name).sort()).toEqual(["Deleted entry", "run pnpm test before you push"]);
+      expect(JSON.stringify(after)).not.toContain("loader");
+
+      // A runner run shows neither a name nor a map, whatever is recorded.
+      // (runtime is immutable, so a second run on the runner gets a copy of the same record.)
+      const runnerRun = randomUUID();
+      await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded')`, [runnerRun, t.accountId, t.workItemId]);
+      await h.admin.query(
+        `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256) SELECT account_id, $2::uuid, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256 FROM run_context_inputs WHERE run_id = $1`,
+        [runId, runnerRun],
+      );
+      await ledger(t.accountId, runnerRun);
+      const onMachine = await panel(t.accountId, runnerRun);
+      expect(onMachine.runtime).toBe("runner");
+      expect(onMachine.recalled_memory).toEqual([]);
+      expect(onMachine.repo_map_version).toBeNull();
+    });
+
+    it("another account's session reads nothing of this run's record (404)", async () => {
+      const { t, repoMap } = await seeded();
+      const runId = ((await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap })) as { runId: string }).runId;
+      await ledger(t.accountId, runId);
+      const other = await tenant();
+      await expect(panel(other, runId)).rejects.toThrow(/not found/);
+    });
+
+    it("a replay of the same approval keeps the first record", async () => {
+      const { t, repoMap } = await seeded();
+      const approval = randomUUID();
+      const first = (await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { repoMap })) as { runId: string };
+      const before = (await h.admin.query("SELECT recalled_entry_ids, map_sha256 FROM run_context_inputs WHERE run_id = $1", [first.runId])).rows;
+      const again = (await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world)) as { runId: string };
+      expect(again.runId).toBe(first.runId);
+      expect((await h.admin.query("SELECT recalled_entry_ids, map_sha256 FROM run_context_inputs WHERE run_id = $1", [first.runId])).rows).toEqual(before);
+    });
+
+    it("a build that recalled nothing and carried no map writes no row", async () => {
+      const t = await atSpecReady();
+      const runId = ((await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)) as { runId: string }).runId;
+      expect((await h.admin.query("SELECT 1 FROM run_context_inputs WHERE run_id = $1", [runId])).rowCount).toBe(0);
+    });
+
+    it("a retry of the same approval after a failed record never points the item at the cancelled run: it is refused, and a fresh approval starts a fresh run", async () => {
+      const { t, repoMap } = await seeded();
+      t.world.script = () => ({ status: "running" });
+      const approval = randomUUID();
+      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd" }) };
+      await expect(startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { repoMap: badMap })).rejects.toThrow();
+      const cancelledRun = t.world.cancelled[0]!;
+      expect((await t.world.outcome(cancelledRun)).status).toBe("cancelled");
+      // The retry of the SAME approval finds the earlier step; it must not hand back the cancelled run.
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { repoMap })).toEqual({ status: "refused", reason: "prior_run_cancelled" });
+      expect(await stageOf(t.workItemId)).toBe("spec_ready");
+      expect((await h.admin.query("SELECT 1 FROM work_item_transitions WHERE run_id = $1", [cancelledRun])).rowCount).toBe(0);
+      // A fresh approval starts a fresh, live run and records its inputs.
+      const fresh = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      expect(fresh).toMatchObject({ status: "started" });
+      expect((fresh as { runId: string }).runId).not.toBe(cancelledRun);
+      expect(await stageOf(t.workItemId)).toBe("in_progress");
+      expect((await h.admin.query("SELECT 1 FROM run_context_inputs WHERE run_id = $1", [(fresh as { runId: string }).runId])).rowCount).toBe(1);
+    });
+
+    it("FAILS CLOSED (D#601 C2): when the record cannot be written the start rolls back, the item stays at spec_ready and the new run is cancelled", async () => {
+      const { t } = await seeded();
+      // A map whose version breaks the table's check makes the insert fail.
+      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd" }) };
+      await expect(startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap: badMap })).rejects.toThrow();
+      expect(await stageOf(t.workItemId)).toBe("spec_ready");
+      expect(t.world.cancelled).toHaveLength(1);
+      expect((await h.admin.query("SELECT 1 FROM run_context_inputs WHERE account_id = $1", [t.accountId])).rowCount).toBe(0);
     });
   });
 

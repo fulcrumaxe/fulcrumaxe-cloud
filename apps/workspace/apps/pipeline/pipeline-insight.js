@@ -245,6 +245,15 @@ export function readyBanner(data) {
 /** Everything the panel draws, from one response. */
 export function buildInsight(data) {
   const runs = (Array.isArray(data.runs) ? data.runs : []).map((r) => runView(r));
+  // The context button's accessible name is unique per run: runs of one role (a build and its fix rounds) are told apart by their place among them.
+  const sameRole = new Map();
+  for (const r of runs) sameRole.set(r.role, (sameRole.get(r.role) || 0) + 1);
+  const seenRole = new Map();
+  for (const r of runs) {
+    const nth = (seenRole.get(r.role) || 0) + 1;
+    seenRole.set(r.role, nth);
+    r.contextLabel = "What this run loaded: " + r.role + (sameRole.get(r.role) > 1 ? ", run " + nth + " of " + sameRole.get(r.role) : "");
+  }
   const running = runs.filter((r) => r.live);
   const finished = runs.filter((r) => !r.live);
   const spent = (Array.isArray(data.runs) ? data.runs : []).reduce((n, r) => n + (!LIVE_STATUSES.has(r.status) && Number.isFinite(r.usd) ? r.usd : 0), 0);
@@ -362,7 +371,7 @@ export function createInsightPanel(deps) {
       r.costNote ? h("p", { class: "pl-muted", "data-testid": "pl-run-cost-note" }, r.costNote) : null,
       r.attachHint ? h("p", { class: "pl-muted", "data-testid": "pl-run-attach-hint" }, "You can also watch this run on the runner machine with ", h("code", null, "fx-runner attach"), ".") : null,
       // D#600 CX-8: the Runs app's detail holds the context panel; this opens that run there.
-      r.id ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-run-context", "aria-label": "What this run loaded: " + r.role, onClick: () => window.FULCWM && window.FULCWM.open("runs", { runId: r.id }) }, "What this run loaded") : null,
+      r.id ? h("button", { type: "button", class: "pl-act", "data-testid": "pl-run-context", "aria-label": r.contextLabel || "What this run loaded: " + r.role, onClick: () => window.FULCWM && window.FULCWM.open("runs", { runId: r.id }) }, "What this run loaded") : null,
       r.lines.length
         ? h(
             "ol",

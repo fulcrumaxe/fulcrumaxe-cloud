@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import type { RunsReadCtx } from './read.js';
@@ -38,11 +39,15 @@ export interface RunContextPanel {
   tool_output: { tool: string; bytes: number }[];
   compactions: number | null;
   /**
-   * The memory entries the run recalled, by display name and id@version (D#601). No run records which entries it recalled yet (the
-   * recall record arrives with MEM-3), so this is empty until then; the app draws the list when it is not.
+   * The memory entries the run's prompt held, in prompt order, by display name and id@version (D#601; recorded when the build starts, migration
+   * 0833). The name is derived from the entry's row now, never stored: a deleted entry reads "Deleted entry". Empty for a run that recalled nothing,
+   * for a run that predates the record, and always for a run on the person's machine (its memory names stay off the runner side).
    */
   recalled_memory: { id: string; name: string; version: number }[];
-  /** The repo map's version the run's prompt held (CX-3a). Null until a map is recorded. */
+  /**
+   * The repo map the run's prompt held (CX-3a), as `v<format version> · <first 12 of the sha256 of the raw map text>` (R-600-CX3b-1: the raw-text
+   * hash is the map's identity). Null when the run carried no map or predates the record, and always for a run on the person's machine.
+   */
   repo_map_version: string | null;
 }
 
@@ -62,6 +67,30 @@ interface Row {
   memory_tokens: string | null;
   tool_output_bytes: unknown;
   compactions: number | null;
+  recalled_ids: string[] | null;
+  recalled_versions: number[] | null;
+  map_version: string | null;
+  map_sha256: string | null;
+}
+
+interface EntryRow {
+  id: string;
+  status: string | null;
+  scope: string | null;
+  kind: string | null;
+  body: string | null;
+}
+
+/** The longest display name of a recalled entry, as the prompt's own label cuts it. */
+const NAME_MAX = 60;
+const DELETED_NAME = 'Deleted entry';
+
+/** An entry's display name: the first line of its text with spaces folded, as the prompt names it; its scope and kind when the text has no first line. */
+function entryName(e: EntryRow): string {
+  // A deleted entry, a purged one and an id this account cannot see are ONE label: the panel is no oracle for another tenant's ids.
+  if (e.status === 'deleted' || e.body === null) return DELETED_NAME;
+  const first = e.body.split('\n', 1)[0]!.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX);
+  return first !== '' ? first : `${e.scope ?? 'memory'}/${e.kind ?? 'entry'}`;
 }
 
 const num = (v: string | null): number | null => (v === null ? null : Number(v));
@@ -72,15 +101,18 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
   if (!UUID_RE.test(id)) throw new NotFoundError(`run ${id} not found`);
   const { accountId, userId } = ctx.principal;
   return withTenant(ctx.pool, accountId, userId, async (client) => {
+    // The account filter is explicit on every table read here, as defence in depth on top of the forced row security.
     const r = (
       await client.query<Row>(
         `SELECT r.id, r.runtime, r.status, (l.run_id IS NOT NULL) AS has_ledger, l.basis, l.sections,
                 l.first_turn_input_tokens, l.peak_context_tokens, l.cache_read_tokens, l.cache_write_tokens, l.memory_tokens,
-                l.tool_output_bytes, l.compactions
+                l.tool_output_bytes, l.compactions,
+                i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256
            FROM agent_runs r
            LEFT JOIN run_context_ledger l ON l.account_id = r.account_id AND l.run_id = r.id
-          WHERE r.id = $1::uuid`,
-        [id],
+           LEFT JOIN run_context_inputs i ON i.account_id = r.account_id AND i.run_id = r.id
+          WHERE r.id = $1::uuid AND r.account_id = $2::uuid`,
+        [id, accountId],
       )
     ).rows[0];
     if (!r) throw new NotFoundError(`run ${id} not found`);
@@ -114,6 +146,10 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       .map(([tool, bytes]) => ({ tool, bytes: count(bytes) }))
       .sort((a, b) => b.bytes - a.bytes || a.tool.localeCompare(b.tool))
       .slice(0, 32);
+    // A run on the person's machine is sizes and counts only: no memory names and no map identity, whatever the tables hold.
+    const hosted = r.runtime !== 'runner';
+    const recalled_memory = hosted ? await recalledMemoryOf(client, accountId, r.recalled_ids, r.recalled_versions) : [];
+    const repo_map_version = hosted && r.map_version !== null && r.map_sha256 !== null ? `v${r.map_version} · ${r.map_sha256.slice(0, 12)}` : null;
     return {
       ...base,
       recorded: true,
@@ -126,8 +162,19 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       memory_tokens: num(r.memory_tokens),
       tool_output,
       compactions: r.compactions,
-      recalled_memory: [],
-      repo_map_version: null,
+      recalled_memory,
+      repo_map_version,
     };
   });
+}
+
+/** The recorded entries in prompt order, each named from its row as it stands now (see `entryName`). */
+async function recalledMemoryOf(client: PoolClient, accountId: string, ids: string[] | null, versions: number[] | null): Promise<RunContextPanel['recalled_memory']> {
+  if (!ids || !versions || ids.length === 0 || ids.length !== versions.length) return [];
+  const capped = ids.slice(0, 50);
+  const rows = (
+    await client.query<EntryRow>(`SELECT id, status, scope, kind, body FROM memory_entries WHERE account_id = $1::uuid AND id = ANY($2::uuid[])`, [accountId, capped])
+  ).rows;
+  const byId = new Map(rows.map((e) => [e.id, e]));
+  return capped.map((id, i) => ({ id, name: entryName(byId.get(id) ?? { id, status: null, scope: null, kind: null, body: null }), version: Math.max(1, Math.trunc(versions[i] ?? 1)) }));
 }

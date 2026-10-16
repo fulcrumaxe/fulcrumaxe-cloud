@@ -293,10 +293,12 @@ function mountApp(contentEl, launchArg) {
     const top = pane.scrollTop;
     // A focused fold header (Run facts, Event log ...) stays focused across the redraw; anything else falls back to Back.
     const fold = had && a.tagName === "SUMMARY" && a.parentElement ? a.parentElement.dataset.testid : "";
+    // A control inside the context panel (its Retry button, its loading line) hands focus to the panel's heading when the redraw replaces it, not to Back.
+    const keep = had && a.dataset && a.dataset.keep ? a.dataset.keep : "";
     paintDetail();
     pane.scrollTop = top;
     if (!had) return;
-    const again = fold ? pane.querySelector('[data-testid="' + fold + '"] > summary') : null;
+    const again = fold ? pane.querySelector('[data-testid="' + fold + '"] > summary') : keep ? pane.querySelector('[data-keep-target="' + keep + '"]') : null;
     (again || pane.querySelector(".runs-back")).focus({ preventScroll: true });
   }
   const refresh = coalesce(() =>

@@ -394,6 +394,8 @@ export function readContext(raw) {
 export function contextModel(ctx) {
   if (!ctx.recorded || ctx.basis === null) {
     const live = ctx.status === "pending" || ctx.status === "running";
+    // A run on the person's machine with no ledger says where its contents are, not that nothing was kept (it keeps sizes only, and may have sent none).
+    if (!live && ctx.runtime === "runner") return { state: "none", text: CONTEXT_WORDS.runner + ". " + CONTEXT_WORDS.runnerHelp };
     return { state: live ? "live" : "none", text: live ? CONTEXT_WORDS.live : CONTEXT_WORDS.none };
   }
   const runner = ctx.runtime === "runner";
@@ -439,10 +441,11 @@ function ctxRow(r) {
 
 /** The panel. `context` is undefined while it loads, null when it could not be read, else the read body. */
 export function contextSection(context, retry) {
-  const sec = (state, ...kids) => h("section", { class: "runs-sec runs-ctx", "data-testid": "runs-context", "data-state": state }, h("h4", { class: "runs-sec-title" }, "Context"), ...kids);
-  if (context === undefined) return sec("loading", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-loading" }, CONTEXT_WORDS.loading));
+  // The heading takes focus when a redraw replaces the control that had it (Retry): `data-keep` marks what hands focus to `data-keep-target`.
+  const sec = (state, ...kids) => h("section", { class: "runs-sec runs-ctx", "data-testid": "runs-context", "data-state": state }, h("h4", { class: "runs-sec-title", tabindex: "-1", "data-testid": "runs-ctx-heading", "data-keep": "ctx", "data-keep-target": "ctx" }, "Context"), ...kids);
+  if (context === undefined) return sec("loading", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-loading", "data-keep": "ctx" }, CONTEXT_WORDS.loading));
   if (context === null) {
-    return sec("error", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-error" }, CONTEXT_WORDS.error), h("button", { type: "button", class: "runs-more", "data-testid": "runs-ctx-retry", onClick: retry }, CONTEXT_WORDS.retry));
+    return sec("error", h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-error" }, CONTEXT_WORDS.error), h("button", { type: "button", class: "runs-more", "data-testid": "runs-ctx-retry", "data-keep": "ctx", onClick: retry }, CONTEXT_WORDS.retry));
   }
   const m = contextModel(context);
   if (m.state === "none" || m.state === "live") return sec(m.state, h("p", { class: "runs-muted", "data-testid": "runs-ctx-empty" }, m.text));
