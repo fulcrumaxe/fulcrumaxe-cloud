@@ -1,8 +1,10 @@
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { JobSchema, type LocalOnlyEvent, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, JobSchema, type LocalOnlyEvent, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { readyOrCode } from "../../src/commands/run.js";
 import type { CommandContext } from "../../src/context.js";
 import { API_KEY_FILE, CREDENTIALS_DIR, clearApiKey, perJobApiKey, writeApiKey } from "../../src/credentials.js";
@@ -18,7 +20,9 @@ import { pollLoop } from "../../src/daemon/pollLoop.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
 import { createWorkspaceStore } from "../../src/job/workspace.js";
 import type { SandboxHandle, SandboxPort, StartDetachedOptions, StartDetachedResult } from "../../src/sandbox/port.js";
-import { recordSession } from "../../src/engines/claude/session.js";
+import { planSession, recordSession } from "../../src/engines/claude/session.js";
+import { runCapture } from "../../src/engines/claude/capture.js";
+import { createGitPath } from "../../src/daemon/gitPath.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { roleToolsDigest } from "../../src/job/roleTools.js";
 import { KEYRING, jobFor, signRaw, signedJob } from "../helpers/signedJob.js";
@@ -1155,5 +1159,67 @@ describe("the stage marks (D#6 C42-2)", () => {
     const claimed = await rig.claim(signRaw(continuing()) as never);
     expect((await rig.handle(claimed)).status).toBe("completed");
     expect(stagesOf(claimed.runId)).toEqual(["workspace_ready", "cloned"]);
+  });
+});
+
+describe("a cross-side fix round on the item's pull request branch (D#599 PL-2b-3)", () => {
+  const ITEM_BRANCH = "fx/issue-12";
+  const cross = { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: null, branch: ITEM_BRANCH, pr_number: 41 };
+  const crossJob = (continues: unknown = cross) => signRaw(jobFor({ continues: continues as never })) as never;
+
+  /** Real git against a local bare remote: the daemon's own git path, the real session planner over an empty session index, and a fake sandbox that records resume. */
+  function realRig() {
+    const home = path.join(root, "home");
+    mkdirSync(home);
+    const env = { PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" };
+    const sh = (...args: string[]): string => execFileSync("git", args, { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const remote = path.join(root, "remote.git");
+    sh("init", "--bare", "-b", "main", remote);
+    const seed = path.join(root, "seed");
+    sh("init", "-b", "main", seed);
+    writeFileSync(path.join(seed, "README.md"), "hello\n");
+    sh("-C", seed, "add", "README.md");
+    sh("-C", seed, "commit", "-m", "first");
+    sh("-C", seed, "push", remote, "main");
+    sh("-C", remote, "branch", ITEM_BRANCH, "main");
+    const git = createGitPath({ capture: (command, args, e, timeoutMs) => runCapture(spawn, command, args, e, timeoutMs), mirrorsRoot: path.join(root, "cache", "mirrors"), stateDir: path.join(root, "state"), remoteUrl: () => pathToFileURL(remote).href });
+    const rig = makeRig({ handler: { git } });
+    const planned: Array<ReturnType<typeof planSession>> = [];
+    rig.deps.run.planSession = (continues) => (planned.push(planSession(continues, {})), planned.at(-1)!);
+    const resumes: string[] = [];
+    const startDetached = rig.port.port.startDetached.bind(rig.port.port);
+    rig.port.port.resume = ((_h: SandboxHandle, session: string, _p: string, opts: StartDetachedOptions) => (resumes.push(session), startDetached(_h, opts))) as SandboxPort["resume"];
+    rig.port.port.startDetached = ((h: SandboxHandle, opts: StartDetachedOptions) => {
+      const workdir = opts.workdir;
+      if (workdir === undefined) throw new Error("expected a workdir");
+      // The agent commits one file in its workspace, as a real run would.
+      writeFileSync(path.join(workdir, "fix.txt"), "work\n");
+      sh("-C", workdir, "add", "fix.txt");
+      sh("-C", workdir, "commit", "-m", "agent change");
+      return startDetached(h, opts);
+    }) as SandboxPort["startDetached"];
+    return { rig, sh, remote, planned, resumes };
+  }
+
+  it("runs a fresh session in a new workspace on the bound branch, never resumes, and pushes refs/heads/fx/issue-12 without a plus", async () => {
+    const { rig, sh, remote, planned, resumes } = realRig();
+    const before = sh("-C", remote, "rev-parse", `refs/heads/${ITEM_BRANCH}`).trim();
+    const claimed = await rig.claim(crossJob());
+    expect((await rig.handle(claimed)).status).toBe("completed");
+    expect(planned.length).toBeGreaterThan(0);
+    for (const plan of planned) expect(plan).toEqual({ kind: "fresh", branch: ITEM_BRANCH });
+    expect(resumes).toEqual([]);
+    expect(rig.port.starts).toHaveLength(1);
+    expect(path.dirname(rig.port.starts[0]!.workdir ?? "")).toBe(rig.workspaces);
+    const after = sh("-C", remote, "rev-parse", `refs/heads/${ITEM_BRANCH}`).trim();
+    expect(after).not.toBe(before);
+    expect(sh("-C", remote, "rev-parse", `${after}^`).trim()).toBe(before);
+    expect(sh("-C", remote, "for-each-ref", "--format=%(refname)").split("\n").filter(Boolean).sort()).toEqual([`refs/heads/${ITEM_BRANCH}`, "refs/heads/main"]);
+  });
+
+  it("sends the version this build declares, and that version is the cross-side floor", () => {
+    expect(CURRENT_PROTOCOL_VERSION).toBe(3);
+    expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBe(3);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
   });
 });

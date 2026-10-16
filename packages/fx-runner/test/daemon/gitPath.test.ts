@@ -174,12 +174,13 @@ describe("the push target is built from the lease alone", () => {
     expect(calls[0]!).toContain("--no-verify");
   });
 
-  it("a job whose branch prefix is not fx/, or that continues a branch that is not a run branch, is refused before anything is made", () => {
+  it("a job whose branch prefix is not fx/, or that continues a branch that is neither a run branch nor an item branch, is refused before anything is made", () => {
     const { gitPath, cacheDir, calls } = makeGitPath();
     expect(() => gitPath.check(jobFor(), lease)).not.toThrow();
     expect(() => gitPath.check(jobFor({ branch_prefix: "release/" }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
     expect(() => gitPath.check(jobFor({ branch_prefix: "fx/../" }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
-    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: "fx/issue-3" } }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: "fx/issue-0" } }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+    expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: "fx/docs/x" } }), lease)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
     expect(() => gitPath.check(jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s", branch: RUN_BRANCH } }), lease)).not.toThrow();
     expect(() => gitPath.check(jobFor(), { runId: "main", leaseGeneration: 1 })).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
     expect(calls).toEqual([]);
@@ -553,7 +554,7 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     expect(pushPlan(lease, null)).toEqual(pushPlan(lease));
   });
 
-  const BAD_BRANCHES = ["main", "master", "fx/issue-12", `${RUN_BRANCH.slice(0, -1)}0`, "refs/heads/x", `refs/heads/${RUN_BRANCH}`, `${RUN_BRANCH}/../../main`, `${RUN_BRANCH}..x`, `${RUN_BRANCH}x`, `${RUN_BRANCH}\n`, `+${RUN_BRANCH}`, `${RUN_BRANCH}:refs/heads/main`, "fx/", "", "fx/2A2A2A2A-2B2B-4C2C-8D2D-2E2E2E2E2E2E-g1", "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1000000000"];
+  const BAD_BRANCHES = ["main", "master", "fx/issue-0", "fx/issue-12/x", `${RUN_BRANCH.slice(0, -1)}0`, "refs/heads/x", `refs/heads/${RUN_BRANCH}`, `${RUN_BRANCH}/../../main`, `${RUN_BRANCH}..x`, `${RUN_BRANCH}x`, `${RUN_BRANCH}\n`, `+${RUN_BRANCH}`, `${RUN_BRANCH}:refs/heads/main`, "fx/", "", "fx/2A2A2A2A-2B2B-4C2C-8D2D-2E2E2E2E2E2E-g1", "fx/2a2a2a2a-2b2b-4c2c-8d2d-2e2e2e2e2e2e-g1000000000"];
   for (const branch of BAD_BRANCHES) {
     it(`refuses the target ${JSON.stringify(branch)} as push_ref_refused, in the plan and in check, and runs no process`, () => {
       expect(() => fixPlan(branch)).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
@@ -728,5 +729,110 @@ describe("a fix round pushes to the pull request's branch (D#6 R4a-3b, C25 secti
     await gitPath.prepare(fixJob, FIX_LEASE, second);
     expect(readFileSync(path.join(second, "agent.txt"), "utf8")).toBe("work\n");
     expect(refsOf(path.join(cacheDir, "mirrors", `${job.repo.id}.git`))).toContain(`refs/heads/${first.branch}`);
+  });
+});
+
+describe("a fix round on the item's own pull request branch (D#599 PL-2b-3)", () => {
+  const ITEM_BRANCH = "fx/issue-12";
+  const ITEM_LEASE = { runId: "8d8d8d8d-8e8e-4f8f-8a8a-808080808080", leaseGeneration: 1 };
+  const itemContinues = { parent_run_id: randomUUID(), session_id: null, branch: ITEM_BRANCH, pr_number: 12 };
+  const pushCalls = (calls: Call[]): Call[] => calls.filter((c) => c.args.includes("push"));
+  const forceish = (args: readonly string[]): string[] => args.filter((a) => /^--(force|mirror|delete|force-with-lease)/.test(a) || /^-[a-zA-Z]*f/.test(a) || a.startsWith("+") || a.includes(":+"));
+  const openItemBranch = (): string => {
+    sh("-C", remote, "branch", ITEM_BRANCH, "main");
+    return tip(remote, `refs/heads/${ITEM_BRANCH}`);
+  };
+
+  it("the plan is the lease's private ref to refs/heads/fx/issue-12, with no plus and no wildcard; only the two shapes are accepted", () => {
+    const plan = pushPlan(ITEM_LEASE, { branch: ITEM_BRANCH });
+    expect(plan.refspec).toBe(`refs/fx-push/${ITEM_LEASE.runId}-g1:refs/heads/${ITEM_BRANCH}`);
+    expect(plan.refspec).not.toMatch(/^\+|\*|--/);
+    for (const branch of ["fx/issue-0", "fx/issue-012", "fx/issue-12/x", "fx/issues-12", "refs/heads/fx/issue-12", "fx/issue-12\n", "fx/issue-", "fx/issue-12345678901", "fx/docs/x", "main"]) {
+      expect(() => pushPlan(ITEM_LEASE, { branch }), branch).toThrow(expect.objectContaining({ code: "push_ref_refused" }));
+    }
+  });
+
+  it("fast-forwards the bound branch from a fresh workspace, on a real remote, with no plus and no force flag", async () => {
+    const base = openItemBranch();
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor({ continues: itemContinues });
+    gitPath.check(job, ITEM_LEASE);
+    const workspace = newWorkspace("item");
+    expect((await gitPath.prepare(job, ITEM_LEASE, workspace)).base).toBe(base);
+    expect(sh("-C", workspace, "branch", "--show-current").trim()).toBe(ITEM_BRANCH);
+    const fix = agentCommits(workspace, "fix.txt");
+    const mainBefore = tip(remote, "main");
+    expect(await gitPath.publish(job, ITEM_LEASE, workspace, base)).toEqual({ pushed: true, branch: ITEM_BRANCH, sha: fix });
+    expect(tip(remote, `refs/heads/${ITEM_BRANCH}`)).toBe(fix);
+    expect(tip(remote, "main")).toBe(mainBefore);
+    expect(refsOf(remote)).toEqual([`refs/heads/${ITEM_BRANCH}`, "refs/heads/main"]);
+    const pushes = pushCalls(calls);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]!.args.at(-1)).toBe(`refs/fx-push/${ITEM_LEASE.runId}-g1:refs/heads/${ITEM_BRANCH}`);
+    for (const push of pushes) expect(forceish(push.args)).toEqual([]);
+  });
+
+  it("refuses to push when the remote's HEAD names the branch: push_ref_refused, nothing pushed, the remote unchanged", async () => {
+    const base = openItemBranch();
+    sh("-C", remote, "symbolic-ref", "HEAD", `refs/heads/${ITEM_BRANCH}`);
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor({ continues: itemContinues });
+    const workspace = newWorkspace("item-head");
+    await gitPath.prepare(job, ITEM_LEASE, workspace);
+    agentCommits(workspace, "fix.txt");
+    await expect(gitPath.publish(job, ITEM_LEASE, workspace, base)).rejects.toMatchObject({ code: "push_ref_refused" });
+    expect(tip(remote, `refs/heads/${ITEM_BRANCH}`)).toBe(base);
+    expect(pushCalls(calls)).toEqual([]);
+  });
+
+  it("the same refusal covers a run branch the remote names as its HEAD", async () => {
+    sh("-C", remote, "branch", RUN_BRANCH, "main");
+    const base = tip(remote, `refs/heads/${RUN_BRANCH}`);
+    sh("-C", remote, "symbolic-ref", "HEAD", `refs/heads/${RUN_BRANCH}`);
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor({ continues: { parent_run_id: randomUUID(), session_id: "s1", branch: RUN_BRANCH } });
+    const workspace = newWorkspace("run-head");
+    await gitPath.prepare(job, ITEM_LEASE, workspace);
+    agentCommits(workspace, "fix.txt");
+    await expect(gitPath.publish(job, ITEM_LEASE, workspace, base)).rejects.toMatchObject({ code: "push_ref_refused" });
+    expect(pushCalls(calls)).toEqual([]);
+  });
+
+  it("a remote whose HEAD names another branch does not stop it (the control for the refusal above)", async () => {
+    const base = openItemBranch();
+    expect(sh("-C", remote, "symbolic-ref", "HEAD").trim()).toBe("refs/heads/main");
+    const { gitPath } = makeGitPath();
+    const job = jobFor({ continues: itemContinues });
+    const workspace = newWorkspace("item-ctl");
+    await gitPath.prepare(job, ITEM_LEASE, workspace);
+    const fix = agentCommits(workspace, "fix.txt");
+    expect((await gitPath.publish(job, ITEM_LEASE, workspace, base)).pushed).toBe(true);
+    expect(tip(remote, `refs/heads/${ITEM_BRANCH}`)).toBe(fix);
+  });
+
+  it("a branch that moved since dispatch ends push_rejected, and no force push is tried", async () => {
+    const base = openItemBranch();
+    const { gitPath, calls } = makeGitPath();
+    const job = jobFor({ continues: itemContinues });
+    const workspace = newWorkspace("item-moved");
+    await gitPath.prepare(job, ITEM_LEASE, workspace);
+    agentCommits(workspace, "fix.txt");
+    const other = path.join(root, "person");
+    sh("clone", "--branch", ITEM_BRANCH, remote, other);
+    writeFileSync(path.join(other, "person.txt"), "by hand\n");
+    sh("-C", other, "add", "person.txt");
+    sh("-C", other, "commit", "-m", "by hand");
+    sh("-C", other, "push", "origin", ITEM_BRANCH);
+    const theirs = tip(other, "HEAD");
+    expect(theirs).not.toBe(base);
+    await expect(gitPath.publish(job, ITEM_LEASE, workspace, base)).rejects.toMatchObject({ code: "push_rejected" });
+    expect(tip(remote, `refs/heads/${ITEM_BRANCH}`)).toBe(theirs);
+    expect(pushCalls(calls)).toEqual([]);
+  });
+
+  it("a branch that is gone at prepare is continuation_branch_missing", async () => {
+    const { gitPath } = makeGitPath();
+    const workspace = newWorkspace("item-gone");
+    await expect(gitPath.prepare(jobFor({ continues: itemContinues }), ITEM_LEASE, workspace)).rejects.toMatchObject({ code: "continuation_branch_missing" });
   });
 });

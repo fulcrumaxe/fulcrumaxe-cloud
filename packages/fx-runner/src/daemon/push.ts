@@ -13,6 +13,7 @@
  * under the guard config), then pushed from there, so the credential helper only ever sees a URL this runner chose.
  */
 import path from "node:path";
+import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { assertGitVersion, GitPathError, type Git } from "./git.js";
 import { EMPTY_BLOB_IDS, isSandboxStubName, SANDBOX_STUB_PATHSPECS } from "./sandboxStubs.js";
 import { takeSnapshot } from "./snapshot.js";
@@ -33,6 +34,9 @@ export interface PushLease {
 /** The only branch a fix round may push: the shape of a name `pushPlan` makes for a fresh run (the uuid is the fresh run's, not necessarily the parent's). */
 export const CONTINUES_BRANCH = /^fx\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-g[1-9][0-9]{0,8}$/;
 
+/** True for the two branch shapes a fix round may push: a run branch, or the item's own pull request branch `fx/issue-<n>` (D#599 PL-2b). Nothing else, whatever else looks like an `fx/` name. */
+export const isContinuesBranch = (branch: unknown): branch is string => typeof branch === "string" && (CONTINUES_BRANCH.test(branch) || ITEM_PR_BRANCH.test(branch));
+
 /** What `pushPlan` reads of a job's `continues`: the branch of the pull request being fixed. */
 export interface PushContinues {
   branch: string;
@@ -47,9 +51,9 @@ export interface PushPlan {
   refspec: string;
 }
 
-/** The branch of a fix round, or `push_ref_refused` when it is not the shape of a run branch. */
+/** The branch of a fix round, or `push_ref_refused` when it is neither a run branch nor an item pull request branch. */
 export function continuesBranch(continues: PushContinues): string {
-  if (typeof continues.branch !== "string" || !CONTINUES_BRANCH.test(continues.branch)) throw new GitPathError("push_ref_refused");
+  if (!isContinuesBranch(continues.branch)) throw new GitPathError("push_ref_refused");
   return continues.branch;
 }
 
@@ -104,6 +108,15 @@ export async function remoteBranchTip(git: Git, mirrorDir: string, url: string, 
     if (ref === `refs/heads/${branch}` && sha !== undefined && OBJECT_ID.test(sha)) return sha;
   }
   return null;
+}
+
+/**
+ * The branch the remote's `HEAD` names (its default branch), or null when the remote names none. Asked of the remote itself, not the mirror,
+ * so a default branch renamed since the last sync is still seen. Only `ref: refs/heads/<name>\tHEAD` is read.
+ */
+export async function remoteDefaultBranch(git: Git, mirrorDir: string, url: string): Promise<string | null> {
+  const listing = await git.run("push_failed", ["-C", mirrorDir, "ls-remote", "--symref", "--", url, "HEAD"]);
+  return listing.match(/^ref: refs\/heads\/(\S+)\tHEAD$/m)?.[1] ?? null;
 }
 
 /**
@@ -268,6 +281,8 @@ export async function publishBranch(git: Git, mirrorDir: string, url: string, wo
         // A fix round updates a pull request's branch, so the branch must still be there, still at the commit this run started from.
         // A moved tip cannot take this push (it would not be a fast-forward), and the daemon does not retry: it reports `push_rejected`.
         const net = transport === undefined ? { git, url } : await transport.open();
+        // The remote's default branch is never pushed to by a fix round, whatever name the signed job carries (D#599 PL-2b security model 4).
+        if ((await remoteDefaultBranch(net.git, mirrorDir, net.url)) === plan.branch) throw new GitPathError("push_ref_refused");
         const remoteTip = await remoteBranchTip(net.git, mirrorDir, net.url, plan.branch);
         if (remoteTip === null) throw new GitPathError("continuation_branch_missing");
         if (remoteTip !== base) throw new GitPathError("push_rejected");

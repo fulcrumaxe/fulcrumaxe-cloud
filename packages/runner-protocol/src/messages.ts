@@ -206,9 +206,10 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 
 /**
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
- * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn); a bump never cuts an older runner off, see below.
+ * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
+ * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 2;
+export const CURRENT_PROTOCOL_VERSION = 3;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
