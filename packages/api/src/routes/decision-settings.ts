@@ -9,6 +9,7 @@ import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import { ApiError } from "../errors.js";
+import { decisionLabel, invariantLabel } from "./decision-labels.js";
 import type { RouteEntry } from "../registry.js";
 
 /**
@@ -37,6 +38,8 @@ const dialBodySchema = z.object({ decision_type: z.string().min(1).max(100), dis
 const dispositionSchema = z.enum(DISPOSITIONS);
 const dialSchema = z.object({
   decision_type: z.string(),
+  /** The customer-facing name; the id is for code. */
+  label: z.string(),
   class: z.string(),
   /** False for class 1 and class 3: shown, never writable. */
   adjustable: z.boolean(),
@@ -58,7 +61,7 @@ const settingsResponseSchema = z.object({
   presets: z.array(z.object({ name: z.string(), label: z.string(), customer_role: z.string() })),
   dials: z.array(dialSchema),
   /** The fixed list, read from the source the DP5 inventory test reads. It has no write route. */
-  invariants: z.array(z.object({ key: z.string(), layer: z.string() })),
+  invariants: z.array(z.object({ key: z.string(), layer: z.string(), label: z.string() })),
 });
 const previewResponseSchema = z.object({
   preset: z.string(),
@@ -88,12 +91,12 @@ function effective(entry: CatalogueEntry, row: DecisionSetting | null): Disposit
   return entry.allowedDispositions.includes(stored) ? stored : "ask";
 }
 
-function activePreset(rows: Map<string, DecisionSetting | null>): PresetName | null {
+export function activePreset(rows: Map<string, DecisionSetting | null>): PresetName | null {
   const match = PRESETS.find((p) => classTwo().every((e) => effective(e, rows.get(e.id) ?? null) === presetDisposition(e, p.name)));
   return match ? match.name : null;
 }
 
-async function currentRows(client: PoolClient, repoId: string): Promise<Map<string, DecisionSetting | null>> {
+export async function currentRows(client: PoolClient, repoId: string): Promise<Map<string, DecisionSetting | null>> {
   const rows = new Map<string, DecisionSetting | null>();
   for (const entry of classTwo()) rows.set(entry.id, await getCurrentDialSetting(client, repoId, entry.id));
   return rows;
@@ -120,6 +123,7 @@ function view(repoId: string, canChange: boolean, rows: Map<string, DecisionSett
       const row = entry.class === CLASS_2 ? (rows.get(entry.id) ?? null) : null;
       return {
         decision_type: entry.id,
+        label: decisionLabel(entry.id),
         class: entry.class,
         adjustable: entry.class === CLASS_2,
         disposition: entry.class === CLASS_2 ? effective(entry, row) : presetDisposition(entry, "cautious"),
@@ -129,7 +133,7 @@ function view(repoId: string, canChange: boolean, rows: Map<string, DecisionSett
         version: row?.version ?? null,
       };
     }),
-    invariants: FIXED_INVARIANTS.map((i) => ({ key: i.key, layer: i.layer })),
+    invariants: FIXED_INVARIANTS.map((i) => ({ key: i.key, layer: i.layer, label: invariantLabel(i.key) })),
   };
 }
 

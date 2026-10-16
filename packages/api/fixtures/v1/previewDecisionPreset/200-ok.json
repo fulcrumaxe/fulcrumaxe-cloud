@@ -1,0 +1,38 @@
+{
+  "preset": "balanced",
+  "label": "Balanced",
+  "customer_role": "you oversee, and can reverse",
+  "active_preset": null,
+  "moves": [
+    {
+      "decision_type": "nonbreaking_refactor_approach",
+      "from": "ask",
+      "to": "announce"
+    },
+    {
+      "decision_type": "test_strategy_choice",
+      "from": "ask",
+      "to": "announce"
+    },
+    {
+      "decision_type": "start_work_small",
+      "from": "ask",
+      "to": "announce"
+    },
+    {
+      "decision_type": "start_work_bug",
+      "from": "ask",
+      "to": "announce"
+    },
+    {
+      "decision_type": "start_work_doc",
+      "from": "ask",
+      "to": "announce"
+    },
+    {
+      "decision_type": "launch_sub_item",
+      "from": "ask",
+      "to": "announce"
+    }
+  ]
+}

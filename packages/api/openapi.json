@@ -9539,6 +9539,9 @@
                           "decision_type": {
                             "type": "string"
                           },
+                          "label": {
+                            "type": "string"
+                          },
                           "class": {
                             "type": "string"
                           },
@@ -9587,6 +9590,7 @@
                         },
                         "required": [
                           "decision_type",
+                          "label",
                           "class",
                           "adjustable",
                           "disposition",
@@ -9608,11 +9612,15 @@
                           },
                           "layer": {
                             "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
                           }
                         },
                         "required": [
                           "key",
-                          "layer"
+                          "layer",
+                          "label"
                         ],
                         "additionalProperties": false
                       }
@@ -9971,6 +9979,9 @@
                           "decision_type": {
                             "type": "string"
                           },
+                          "label": {
+                            "type": "string"
+                          },
                           "class": {
                             "type": "string"
                           },
@@ -10019,6 +10030,7 @@
                         },
                         "required": [
                           "decision_type",
+                          "label",
                           "class",
                           "adjustable",
                           "disposition",
@@ -10040,11 +10052,15 @@
                           },
                           "layer": {
                             "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
                           }
                         },
                         "required": [
                           "key",
-                          "layer"
+                          "layer",
+                          "label"
                         ],
                         "additionalProperties": false
                       }
@@ -10286,6 +10302,9 @@
                           "decision_type": {
                             "type": "string"
                           },
+                          "label": {
+                            "type": "string"
+                          },
                           "class": {
                             "type": "string"
                           },
@@ -10334,6 +10353,7 @@
                         },
                         "required": [
                           "decision_type",
+                          "label",
                           "class",
                           "adjustable",
                           "disposition",
@@ -10355,11 +10375,15 @@
                           },
                           "layer": {
                             "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
                           }
                         },
                         "required": [
                           "key",
-                          "layer"
+                          "layer",
+                          "label"
                         ],
                         "additionalProperties": false
                       }
@@ -10411,6 +10435,663 @@
           },
           "409": {
             "description": "A dial changed while the request was running (`dial_changed`), or the account is not active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/ask-settings": {
+      "get": {
+        "operationId": "getAskSettings",
+        "summary": "How long a customer has to answer an agent's question, what happens if nobody does, and who is notified",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "How long a customer has to answer an agent's question, what happens if nobody does, and who is notified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "preset_basis": {
+                      "type": "string"
+                    },
+                    "bounds": {
+                      "type": "object",
+                      "properties": {
+                        "min_minutes": {
+                          "type": "number"
+                        },
+                        "max_minutes": {
+                          "type": "number"
+                        },
+                        "default_minutes": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "min_minutes",
+                        "max_minutes",
+                        "default_minutes"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "notify_values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "notify_default": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "allowed_outcomes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "account": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "timeout_outcome": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "notify": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "version": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "timeout_outcome",
+                                  "notify",
+                                  "version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "repo": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "timeout_outcome": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "notify": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "version": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "timeout_outcome",
+                                  "notify",
+                                  "version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "effective": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": "number"
+                                  },
+                                  "answer_window_text": {
+                                    "type": "string"
+                                  },
+                                  "timeout_outcome": {
+                                    "type": "string"
+                                  },
+                                  "notify": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "answer_window_text",
+                                  "timeout_outcome",
+                                  "notify"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "label",
+                          "class",
+                          "allowed_outcomes",
+                          "account",
+                          "repo",
+                          "effective"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "preset_basis",
+                    "bounds",
+                    "notify_values",
+                    "notify_default",
+                    "rows"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "setAskSetting",
+        "summary": "Set the answer window, the outcome when nobody answers, or notify for one key",
+        "description": "Appends one `decision_ask_settings` version for the key (scope, decision type) holding all three values, and one audit row naming the previous and new values. A null value means inherit. Setting all three null hands the key back to its parent. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "account",
+                      "repo"
+                    ]
+                  },
+                  "decision_type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "answer_window_minutes": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "timeout_outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "stop_and_flag",
+                          "proceed_recommended"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "notify": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "email",
+                          "none"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "scope",
+                  "decision_type",
+                  "answer_window_minutes",
+                  "timeout_outcome",
+                  "notify"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set the answer window, the outcome when nobody answers, or notify for one key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "preset_basis": {
+                      "type": "string"
+                    },
+                    "bounds": {
+                      "type": "object",
+                      "properties": {
+                        "min_minutes": {
+                          "type": "number"
+                        },
+                        "max_minutes": {
+                          "type": "number"
+                        },
+                        "default_minutes": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "min_minutes",
+                        "max_minutes",
+                        "default_minutes"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "notify_values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "notify_default": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "allowed_outcomes": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "account": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "timeout_outcome": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "notify": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "version": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "timeout_outcome",
+                                  "notify",
+                                  "version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "repo": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": [
+                                      "number",
+                                      "null"
+                                    ]
+                                  },
+                                  "timeout_outcome": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "notify": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "version": {
+                                    "type": "number"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "timeout_outcome",
+                                  "notify",
+                                  "version"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "effective": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "answer_window_minutes": {
+                                    "type": "number"
+                                  },
+                                  "answer_window_text": {
+                                    "type": "string"
+                                  },
+                                  "timeout_outcome": {
+                                    "type": "string"
+                                  },
+                                  "notify": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "answer_window_minutes",
+                                  "answer_window_text",
+                                  "timeout_outcome",
+                                  "notify"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "label",
+                          "class",
+                          "allowed_outcomes",
+                          "account",
+                          "repo",
+                          "effective"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "preset_basis",
+                    "bounds",
+                    "notify_values",
+                    "notify_default",
+                    "rows"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A setting changed while the request was running (`ask_setting_changed`), or the account is not active.",
             "content": {
               "application/json": {
                 "schema": {

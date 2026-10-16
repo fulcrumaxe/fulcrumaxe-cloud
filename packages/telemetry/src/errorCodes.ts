@@ -240,6 +240,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "branch_exists",
   "pr_failed",
   "unsafe_git_config",
+  // Autonomy settings (D#7 DP10b): an answer-window setting saved over a newer version.
+  "ask_setting_changed",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

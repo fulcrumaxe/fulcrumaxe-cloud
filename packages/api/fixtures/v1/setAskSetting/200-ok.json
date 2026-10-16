@@ -1,0 +1,132 @@
+{
+  "repo_id": "33333333-3333-4333-8333-333333333333",
+  "can_change": true,
+  "preset_basis": "cautious",
+  "bounds": {
+    "min_minutes": 15,
+    "max_minutes": 20160,
+    "default_minutes": 1440
+  },
+  "notify_values": [
+    "email",
+    "none"
+  ],
+  "notify_default": "email",
+  "rows": [
+    {
+      "decision_type": "*",
+      "label": "Every decision type",
+      "class": null,
+      "allowed_outcomes": [
+        "stop_and_flag",
+        "proceed_recommended"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": null
+    },
+    {
+      "decision_type": "nonbreaking_refactor_approach",
+      "label": "How to restructure code without changing what it does",
+      "class": "human_over_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag",
+        "proceed_recommended"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 1440,
+        "answer_window_text": "1 day",
+        "timeout_outcome": "stop_and_flag",
+        "notify": "email"
+      }
+    },
+    {
+      "decision_type": "test_strategy_choice",
+      "label": "How to test a change",
+      "class": "human_over_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag",
+        "proceed_recommended"
+      ],
+      "account": {
+        "answer_window_minutes": 90,
+        "timeout_outcome": "proceed_recommended",
+        "notify": null,
+        "version": 1
+      },
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 90,
+        "answer_window_text": "1 hour 30 minutes",
+        "timeout_outcome": "proceed_recommended",
+        "notify": "email"
+      }
+    },
+    {
+      "decision_type": "runner_run_on_member_plan",
+      "label": "Running work on a team member's own plan",
+      "class": "human_over_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 1440,
+        "answer_window_text": "1 day",
+        "timeout_outcome": "stop_and_flag",
+        "notify": "email"
+      }
+    },
+    {
+      "decision_type": "publish_deprecation_notice",
+      "label": "Publishing a deprecation notice",
+      "class": "human_over_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 1440,
+        "answer_window_text": "1 day",
+        "timeout_outcome": "stop_and_flag",
+        "notify": "email"
+      }
+    },
+    {
+      "decision_type": "publish_release_artifact",
+      "label": "Publishing a release",
+      "class": "human_in_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 1440,
+        "answer_window_text": "1 day",
+        "timeout_outcome": "stop_and_flag",
+        "notify": "email"
+      }
+    },
+    {
+      "decision_type": "external_paid_api_call",
+      "label": "Calling a paid outside service",
+      "class": "human_in_the_loop",
+      "allowed_outcomes": [
+        "stop_and_flag"
+      ],
+      "account": null,
+      "repo": null,
+      "effective": {
+        "answer_window_minutes": 1440,
+        "answer_window_text": "1 day",
+        "timeout_outcome": "stop_and_flag",
+        "notify": "email"
+      }
+    }
+  ]
+}
