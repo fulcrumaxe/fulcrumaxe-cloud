@@ -93,6 +93,8 @@ interface Case {
   deny(accountId: string, workItemId: string): Promise<Limits>;
   /** The limits after the person raised the limit (or the month turned). */
   cleared(denying: Limits): Limits;
+  /** State the clearing changes in the database, when it is not a limit (the credits connection reading ok again). */
+  onClear?(accountId: string): Promise<void>;
 }
 
 const priorRun = async (accountId: string, workItemId: string | null): Promise<string> => {
@@ -139,6 +141,24 @@ const CASES: Case[] = [
     },
     cleared: (l) => ({ ...l, perSpawnCapUsd: 60 }),
   },
+  {
+    // D#483 S5-k2: the customer's own model credits ran out. The state is the one the worker writes (broken, credits_exhausted); the real reserve() reads it.
+    pause: "model_credits_exhausted",
+    denial: "model_credits_exhausted",
+    async deny(accountId) {
+      await h.admin.query(
+        `INSERT INTO model_connections (account_id, provider, key_ciphertext, key_nonce, wrapped_dek, kek_version, key_fingerprint, status, last_error_code)
+         VALUES ($1, 'ai_gateway', $2, $3, $4, 1, $5, 'broken', 'credits_exhausted')`,
+        [accountId, Buffer.from("ciphertext"), Buffer.from("nonce"), Buffer.from("wrapped"), `fp-${randomUUID()}`],
+      );
+      return { plan: "starter", estimateModelUsd: 10, monthlyModelBudgetUsd: 600, perSpawnCapUsd: 40 };
+    },
+    // Credits come back and the reconcile pass reads the connection ok: no limit changes, no person acts.
+    cleared: (l) => l,
+    async onClear(accountId) {
+      await h.admin.query(`UPDATE model_connections SET status = 'ok', last_error_code = NULL WHERE account_id = $1`, [accountId]);
+    },
+  },
 ];
 
 describe.each(CASES)("S5k: $denial becomes $pause", (c) => {
@@ -180,6 +200,7 @@ describe.each(CASES)("S5k: $denial becomes $pause", (c) => {
     expect(await runs(w)).toEqual([{ status: "refused_spend" }, { status: "refused_spend" }]);
 
     ports.limits = c.cleared(denying);
+    await c.onClear?.(a);
     const started = await startBuildForItem(h.runWriterPool, a, w, approval, ports, { spendAttempt: 2 });
     expect(started).toMatchObject({ status: "started" });
     expect(await stageOf(w)).toMatchObject({ stage: "in_progress", halted_at: null });

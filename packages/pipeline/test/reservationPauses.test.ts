@@ -28,6 +28,8 @@ describe("the four denials and their names", () => {
     expect(pauseForDenial("work_item_cap_exceeded")).toBe("item_cap_reached");
     expect(pauseForDenial("per_spawn_cap_exceeded")).toBe("run_limit_below_estimate");
     expect(pauseForDenial("envelope_exceeded")).toBe("envelope_reached");
+    // D#483 S5-k2: the customer's own model credits ran out.
+    expect(pauseForDenial("model_credits_exhausted")).toBe("model_credits_exhausted");
   });
 
   it("every denial named here is one the runner's closed refusal set really carries (a renamed denial fails here, not in production)", () => {
@@ -43,7 +45,7 @@ describe("the four denials and their names", () => {
 
   it("the pause names do not collide with the slot wait names (one fact kind carries both)", () => {
     for (const p of RESERVATION_PAUSE_REASONS) expect((BUILD_WAIT_REASONS as readonly string[]).includes(p)).toBe(false);
-    expect(new Set(RESERVATION_PAUSE_REASONS).size).toBe(5);
+    expect(new Set(RESERVATION_PAUSE_REASONS).size).toBe(6);
   });
 });
 
@@ -61,6 +63,15 @@ describe("the sentences", () => {
   it("the two limits a person sets in Roles > Limits say where to raise them", () => {
     expect(RESERVATION_PAUSE_SENTENCES.item_cap_reached).toBe("This item reached its spending cap. Raise it in Roles > Limits.");
     expect(RESERVATION_PAUSE_SENTENCES.run_limit_below_estimate).toBe("This step needs more than the per-run limit in Roles > Limits.");
+  });
+
+  it("D#483 S5-k2: the credits pause is the Spec sentence, verbatim: the customer's own credits, and work resumes on its own", () => {
+    expect(RESERVATION_PAUSE_SENTENCES.model_credits_exhausted).toBe("Your model credits ran out. Top up, and work resumes on its own.");
+  });
+
+  it("D#483 S5-k2: no pause is about our own spend (R-597-1 and the C5 rule: only the customer's limits and credits pause their work)", () => {
+    expect([...RESERVATION_PAUSE_REASONS].sort()).toEqual(["account_budget_reached", "compute_cap_reached", "envelope_reached", "item_cap_reached", "model_credits_exhausted", "run_limit_below_estimate"]);
+    for (const p of RESERVATION_PAUSE_REASONS) expect(p).not.toMatch(/infra|platform/);
   });
 });
 

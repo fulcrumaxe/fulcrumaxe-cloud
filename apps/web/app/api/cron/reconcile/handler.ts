@@ -7,9 +7,10 @@ import { githubInstallationsJobFromEnv } from "../../../../lib/github/installati
 import { githubReposJobFromEnv } from "../../../../lib/github/repoReconcile";
 import { reconcileStripeClient, stripeKeyIsLive, stripeReconcileKeyFromEnv } from "@fx/billing";
 import { applyFetchedSubscription } from "@fx/billing/subscriptionSync";
-import { envKekSource, fetchValidationHttpClient, healthCheck } from "@fx/model-connection";
+import { envKekSource, fetchValidationHttpClient, healthCheck, revalidateCreditsExhausted } from "@fx/model-connection";
 import {
   buildReconcileJobs,
+  createModelCreditsRevalidateJob,
   createModelKeyHealthJob,
   createStripeSubscriptionsJob,
   effectiveSandboxReapMode,
@@ -122,6 +123,31 @@ export function modelKeyHealthJobFromEnv(pool: TickDeps["pool"], report: ReportE
   });
 }
 
+/**
+ * D#483 S5-k2: the credits re-validation job, built from the same environment as the key health job (app_user database and key-encryption key), with
+ * the same `not_configured` result when either is absent. It makes the same one validation call per connection, through the same client.
+ */
+export function modelCreditsRevalidateJobFromEnv(pool: TickDeps["pool"], report: ReportError): ReconcileJob {
+  let kek: ReturnType<typeof envKekSource> | null = null;
+  try {
+    const source = envKekSource();
+    source.keyFor(source.currentVersion());
+    kek = source;
+  } catch {
+    // fx-swallow-ok: an unusable key-encryption key is the not_configured case, and the error text names no value
+  }
+  if (!process.env.DATABASE_URL_APP_USER || !kek) return createModelCreditsRevalidateJob({ revalidate: null, reportError: report });
+  const readyKek = kek;
+  const httpClient = fetchValidationHttpClient();
+  return createModelCreditsRevalidateJob({
+    revalidate: async (accountId, connectionId) => {
+      cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
+      return revalidateCreditsExhausted({ pool: cachedAppUserPool, platformOpsPool: pool, httpClient, kek: readyKek }, accountId, connectionId);
+    },
+    reportError: report,
+  });
+}
+
 let cachedPlatformOpsPool: ReturnType<typeof createPool> | undefined;
 
 function requireEnv(name: string): string {
@@ -193,6 +219,7 @@ export async function reconcileHandler(
         githubRepos: githubReposJobFromEnv(deps.platformOpsPool, deps.reportError),
         stripeSubscriptions: stripeSubscriptionsJobFromEnv(deps.platformOpsPool, deps.reportError),
         modelKeyHealth: modelKeyHealthJobFromEnv(deps.platformOpsPool, deps.reportError),
+        modelCreditsRevalidate: modelCreditsRevalidateJobFromEnv(deps.platformOpsPool, deps.reportError),
         sandbox: [...sandboxReapJobs(worker, sandboxDeps), sandboxInventoryJob(worker, sandboxDeps)],
       }),
       enabled: deps.enabled,

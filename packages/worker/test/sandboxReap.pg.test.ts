@@ -33,7 +33,7 @@ describe("the sandbox reaper through the worker [pg]", () => {
     worker = await buildWorker({
       env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" },
       vercel: { teamId: "team_1", projectId: "prj_1", getToken: async () => "tok" },
-      ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {} }, hooks: { resume: async () => {} } },
+      ports: { decryptTenantKey: async () => "k", modelConnection: createFakeModelConnectionPort(), connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} }, hooks: { resume: async () => {} } },
       sdk: sdk.sdk,
       createPools: async () => ({ runnerPool: writerPool, platformOpsPool: opsPool, receiptPool: opsPool, close: async () => undefined }),
     });

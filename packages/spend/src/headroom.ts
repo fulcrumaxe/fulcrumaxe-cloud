@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import { backgroundBudgetUsd, foregroundBudgetUsd } from './plans.js';
 import { defaultFeatureCapUsd, defaultPerSpawnCapUsd, defaultSmallCapUsd } from './caps.js';
-import { monthToDateUsd, workItemCommittedUsd, type ReserveParams } from './reserve.js';
+import { creditsExhausted, monthToDateUsd, workItemCommittedUsd, type ReserveParams } from './reserve.js';
 import { envelopeAdmits, envelopeRunUsd, itemEnvelopeId } from './envelope.js';
 import type { Budget, ReserveResult } from './types.js';
 
@@ -53,6 +53,8 @@ export async function checkHeadroom(pool: Pool, params: HeadroomParams): Promise
       const conn = await client.query(`SELECT 1 FROM model_connections WHERE account_id = $1 AND status = 'ok' LIMIT 1`, [params.accountId]);
       if (conn.rows.length === 0) return { decision: 'deny', reason: 'model_connection_not_ok' };
     }
+    // D#483 S5-k2: the same credits check reserve() makes, right after the account check.
+    if (purpose !== 'preview' && estimateModelUsd > 0 && (await creditsExhausted(client, params.accountId))) return { decision: 'deny', reason: 'model_credits_exhausted' };
 
     // 2. The per-run limit.
     if (estimateModelUsd > perSpawnCapUsd) return { decision: 'deny', reason: 'per_spawn_cap_exceeded' };

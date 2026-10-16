@@ -1119,6 +1119,9 @@ importers:
       '@fx/discussions':
         specifier: workspace:*
         version: link:../discussions
+      '@fx/model-connection':
+        specifier: workspace:*
+        version: link:../model-connection
       '@types/node':
         specifier: ^24.19.0
         version: 24.19.0

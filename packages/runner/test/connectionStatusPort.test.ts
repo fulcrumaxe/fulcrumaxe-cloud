@@ -27,5 +27,13 @@ describe("ConnectionStatusPort test double", () => {
   it("starts with no recorded calls", () => {
     const port = createTestConnectionStatusPort();
     expect(port.calls).toEqual([]);
+    expect(port.creditsCalls).toEqual([]);
+  });
+
+  it("D#483 S5-k2: records markCreditsExhausted by run id, apart from markBroken", async () => {
+    const port = createTestConnectionStatusPort();
+    await port.markCreditsExhausted("run-3");
+    expect(port.creditsCalls).toEqual(["run-3"]);
+    expect(port.calls).toEqual([]);
   });
 });

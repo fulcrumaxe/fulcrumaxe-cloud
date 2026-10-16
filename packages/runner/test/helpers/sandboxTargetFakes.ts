@@ -59,7 +59,7 @@ export interface SandboxTargetTestHarness {
   fakeSandbox: FakeSandboxController;
   hooks: RecordedHookResumePort;
   runtime: RecordedStubRuntime;
-  connectionStatus: ConnectionStatusPort & { readonly calls: readonly RecordedMarkBrokenCall[] };
+  connectionStatus: ConnectionStatusPort & { readonly calls: readonly RecordedMarkBrokenCall[]; readonly creditsCalls: readonly string[] };
 }
 
 /** Builds a full `SandboxTargetDeps` over `fakeSandbox`/a stub runtime,

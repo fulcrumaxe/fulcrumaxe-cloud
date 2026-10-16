@@ -69,7 +69,7 @@ describe("cancel with production credentials and a fail-closed hooks port [pg]",
       ports: {
         decryptTenantKey: async () => "k",
         modelConnection: { get: async () => { throw new Error("unused"); } },
-        connectionStatus: { markBroken: async () => {} },
+        connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} },
         hooks: { resume: async () => { throw new Error(HOOKS_ERROR); } },
       },
     });

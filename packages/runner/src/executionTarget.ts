@@ -45,6 +45,8 @@ export type FailureReason =
   /** D#6 R2a0: the runner was revoked (by its owner, an admin, or because its registrant lost admin) while it held the run. */
   | "runner_revoked"
   | "model_key_broken"
+  /** D#483 S5-k2: the provider answered out-of-credit. The customer's connection is recorded broken for credits; this is not a failed key and not an ordinary run failure. */
+  | "model_credits_exhausted"
   | "sandbox_error"
   | "internal_error"
   /** The agent command never came up inside the start window (the sandbox exists, nothing runs in it). */
@@ -115,10 +117,10 @@ export interface TerminalReport {
    * later `resumeAgentRun` can find it. */
   sessionId?: string;
   /** D#2 H09b2 (H09.5): the specific HTTP-shaped code a model-key failure
-   * carried (401/402/403), when `failureReason` is `"model_key_broken"`.
-   * `finalize` uses this ONLY to decide whether to call
-   * `ConnectionStatusPort.markBroken` (401/403 only, never 402) -- see
-   * `modelFailure.ts`'s own doc comment. */
+   * carried (401/403, or `"credits_exhausted"`), when `failureReason` is
+   * `"model_key_broken"` or `"model_credits_exhausted"`. `finalize` uses this
+   * ONLY to decide whether to call `ConnectionStatusPort.markBroken` (401/403
+   * only) -- see `modelFailure.ts`'s own doc comment. */
   modelFailureCode?: ModelFailureCode;
   /** D#2 H14c-5b-2a (C48 LIMIT-END): set when the run ended because it
    * reached a limit (`timed_out`, or `killed_spend` for `per_run_usd`).
@@ -191,6 +193,7 @@ const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   backend_not_selectable: true,
   account_not_active: true,
   model_connection_not_ok: true,
+  model_credits_exhausted: true,
   per_spawn_cap_exceeded: true,
   work_item_cap_exceeded: true,
   envelope_exceeded: true,

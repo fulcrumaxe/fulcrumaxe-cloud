@@ -301,7 +301,7 @@ describe("the build for an item at Spec ready", () => {
     expect(events()).not.toContain("advance.failed");
   });
 
-  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5k-4: a limit that never clears (%s) is waited out for four hours and then the workflow PARKS: build_paused with its name, no failed record, the item stays approvable", async (pause) => {
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "model_credits_exhausted"])("S5k-4: a limit that never clears (%s) is waited out for four hours and then the workflow PARKS: build_paused with its name, no failed record, the item stays approvable", async (pause) => {
     const w = setup({ item: AT_SPEC, build: { status: "refused", reason: pause } });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "paused", detail: `build_paused:${pause}` });
     expect(world.sleeps).toBe(48);

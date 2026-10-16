@@ -9,6 +9,7 @@ import { seedAccount, seedRepo } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 import type { NormalizedEvent } from "../src/types.js";
+import { CREDITS_EXHAUSTED_ANSWERS, NOT_CREDITS_ANSWERS, eventTextFor } from "../../model-connection/test/helpers/creditsAnswers.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -171,7 +172,9 @@ describe("D#2 H09b2: key failure and mid-run spend kill [pg]", () => {
     );
   });
 
-  it("H09.5: a fake 402 (quota_for_entity_exceeded) stops the run WITHOUT calling markBroken", async () => {
+  // D#483 S5-k2: each of the three out-of-credit answers ends the run with its own reason, records the connection for credits, and is never the
+  // key-failure path (no markBroken) and never an ordinary failure. One fixture per answer, the same ones the classifier tests use.
+  it.each(CREDITS_EXHAUSTED_ANSWERS)("S5-k2: $name stops the run as model_credits_exhausted, records the connection for credits, and does not call markBroken", async (answer) => {
     const { accountId, repoId } = await seedRepoFixture();
     const errorEvent: NormalizedEvent = {
       runId: "placeholder",
@@ -180,13 +183,25 @@ describe("D#2 H09b2: key failure and mid-run spend kill [pg]", () => {
       type: "error",
       ts: new Date().toISOString(),
       isError: true,
-      text: "quota_for_entity_exceeded",
+      text: eventTextFor(answer),
     };
     const { harness, runId } = await runToFinalize(accountId, repoId, [errorEvent]);
 
     const row = await db.admin.query(`SELECT status FROM agent_runs WHERE id = $1`, [runId]);
     expect(row.rows[0].status).toBe("failed");
     expect(harness.connectionStatus.calls).toEqual([]);
+    expect(harness.connectionStatus.creditsCalls).toEqual([runId]);
+    const events = await db.admin.query(`SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.status_changed'`, [runId]);
+    const reasons = events.rows.map((e: { payload: { failureReason?: string } }) => e.payload.failureReason);
+    expect(reasons).toContain("model_credits_exhausted");
+    expect(reasons).not.toContain("model_key_broken");
+  });
+
+  it.each(NOT_CREDITS_ANSWERS.filter((a) => a.status !== 401 && a.status !== 403))("S5-k2: $name is not out-of-credit: nothing is recorded for credits", async (answer) => {
+    const { accountId, repoId } = await seedRepoFixture();
+    const errorEvent: NormalizedEvent = { runId: "placeholder", role: "code-reviewer", seq: 1, type: "error", ts: new Date().toISOString(), isError: true, text: eventTextFor(answer) };
+    const { harness } = await runToFinalize(accountId, repoId, [errorEvent]);
+    expect(harness.connectionStatus.creditsCalls).toEqual([]);
   });
 
   it("H09.5: pauses every OTHER queued (pending) run for the same tenant", async () => {

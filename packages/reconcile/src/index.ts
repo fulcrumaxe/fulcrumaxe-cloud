@@ -60,6 +60,13 @@ export {
   type GithubTransport,
 } from './githubAppApi.js';
 export {
+  createModelCreditsRevalidateJob,
+  MODEL_CREDITS_REVALIDATE_JOB,
+  MODEL_CREDITS_PER_RUN,
+  type RevalidateCredits,
+  type ModelCreditsRevalidateDeps,
+} from './jobs/modelCreditsRevalidate.js';
+export {
   createModelKeyHealthJob,
   MODEL_KEY_HEALTH_JOB,
   MODEL_KEYS_PER_RUN,

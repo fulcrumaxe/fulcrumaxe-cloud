@@ -1,6 +1,6 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { connectionAad, markBrokenWithClient, open, type KekSource } from "@fx/model-connection";
+import { connectionAad, markBrokenWithClient, markCreditsExhaustedWithClient, open, type KekSource } from "@fx/model-connection";
 import type { BrokenConnectionCode, ConnectionStatusPort, DecryptTenantKey, ModelConnectionPort } from "@fx/runner";
 
 /**
@@ -102,22 +102,26 @@ export function createModelConnectionPort(runnerPool: Pool): ModelConnectionPort
  * status); the lookup and the write share one transaction.
  */
 export function createConnectionStatusPort(platformOpsPool: Pool): ConnectionStatusPort {
+  /** One transaction: the owning account from the run row, then the write for it. Never an account id from the caller. */
+  async function forRunsAccount(runId: string, write: (client: PoolClient, accountId: string) => Promise<unknown>): Promise<void> {
+    const client = await platformOpsPool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<{ account_id: string }>("SELECT account_id FROM agent_runs WHERE id = $1", [runId]);
+      const accountId = rows[0]?.account_id;
+      if (!accountId) throw new Error("worker: connection status write for a run that does not exist");
+      await write(client, accountId);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
   return {
-    async markBroken(runId: string, code: BrokenConnectionCode): Promise<void> {
-      const client = await platformOpsPool.connect();
-      try {
-        await client.query("BEGIN");
-        const { rows } = await client.query<{ account_id: string }>("SELECT account_id FROM agent_runs WHERE id = $1", [runId]);
-        const accountId = rows[0]?.account_id;
-        if (!accountId) throw new Error("worker: markBroken for a run that does not exist");
-        await markBrokenWithClient(client, accountId, code);
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK").catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
-    },
+    markBroken: (runId: string, code: BrokenConnectionCode): Promise<void> => forRunsAccount(runId, (client, accountId) => markBrokenWithClient(client, accountId, code)),
+    // D#483 S5-k2: the out-of-credit answer. Same derivation of the tenant; a different write (the connection only, no account stop).
+    markCreditsExhausted: (runId: string): Promise<void> => forRunsAccount(runId, (client, accountId) => markCreditsExhaustedWithClient(client, accountId)),
   };
 }

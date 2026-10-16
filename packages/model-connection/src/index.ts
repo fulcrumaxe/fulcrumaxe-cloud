@@ -37,8 +37,11 @@ export { remove } from './remove.js';
 
 export { getStatus, getOutsideMeterEntitlement } from './summary.js';
 
-export type { HealthCheckCtx, HealthCheckResult } from './validate.js';
-export { test, healthCheck } from './validate.js';
+export type { HealthCheckCtx, HealthCheckResult, CreditsRevalidateResult } from './validate.js';
+export { test, healthCheck, revalidateCreditsExhausted } from './validate.js';
+
+export type { ProviderAnswer } from './creditsExhausted.js';
+export { CREDITS_EXHAUSTED_CODE, isCreditsExhaustedAnswer, markCreditsExhausted, markCreditsExhaustedWithClient } from './creditsExhausted.js';
 
 export type { BrokenConnectionCode, ConnectionStatusPort } from './markBroken.js';
 export { markBroken, markBrokenWithClient, createConnectionStatusPort } from './markBroken.js';

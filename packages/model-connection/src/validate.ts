@@ -9,6 +9,7 @@ import type { KekSource } from './kek.js';
 import { open, type Sealed } from './crypto.js';
 import type { ValidationHttpClient, ValidationOutcome } from './httpClient.js';
 import { connectionAad, type ModelConnectionCtx, type Provider } from './types.js';
+import { CREDITS_EXHAUSTED_CODE } from './creditsExhausted.js';
 
 interface LockedRow {
   id: string;
@@ -384,5 +385,50 @@ export async function healthCheck(
       payload: { state: 'broken' },
     });
     return { action: 'broken' };
+  });
+}
+
+/** What one credits re-validation did to the row. */
+export type CreditsRevalidateResult =
+  | { action: 'resumed' }
+  | { action: 'now_rejected' }
+  | { action: 'still_exhausted' }
+  | { action: 'skipped' };
+
+/**
+ * D#483 S5-k2: re-checks ONE connection that is broken for out-of-credit, through the same validation call the key check uses (a GET on a read
+ * endpoint that names no model and uses no tokens: `requestFor`; the strict provider fakes refuse any other method or path, and a test holds that).
+ *
+ *  - ok: the connection is `ok` again (the existing ok write: status, `last_error_code` cleared, `key_broken_at` cleared) and the items that were
+ *    paused for credits start on their own at the next reservation.
+ *  - rejected (401, or an Anthropic 403): the key itself is now bad. It becomes broken for that reason, with the account's key stop, exactly as a
+ *    rejected key does anywhere else.
+ *  - network_error (a 402, 429, 5xx, a timeout): nothing is written. It stays broken for credits and is looked at again next pass.
+ *
+ * Only a row that is STILL broken for credits is touched, re-checked under the row lock, so a key the customer replaced meanwhile (which resets the row
+ * to `unvalidated`) or a connection a person already re-tested gets no write from this pass.
+ */
+export async function revalidateCreditsExhausted(ctx: HealthCheckCtx, accountId: string, connectionId: string): Promise<CreditsRevalidateResult | null> {
+  let read: Awaited<ReturnType<typeof readAndOpenKey>>;
+  try {
+    read = await readAndOpenKey(ctx.pool, ctx.kek, accountId);
+  } catch (err) {
+    if (err instanceof NotFoundError) return null;
+    throw err;
+  }
+  const { encrypted, plaintextKey } = read;
+  if (encrypted.id !== connectionId) return null;
+
+  const outcome = await ctx.httpClient.validate({ provider: encrypted.provider, plaintextKey });
+
+  return withPlatformOps(ctx.platformOpsPool, async (opsClient): Promise<CreditsRevalidateResult> => {
+    await applyStuckHolderTimeouts(opsClient);
+    const locked = await lockConnectionRow(opsClient, accountId);
+    if (locked.id !== encrypted.id || !locked.key_nonce.equals(encrypted.key_nonce)) return { action: 'skipped' };
+    const { rows } = await opsClient.query<{ status: string; last_error_code: string | null }>(`SELECT status, last_error_code FROM model_connections WHERE id = $1`, [locked.id]);
+    if (rows[0]?.status !== 'broken' || rows[0]?.last_error_code !== CREDITS_EXHAUSTED_CODE) return { action: 'skipped' };
+    if (outcome.kind === 'network_error') return { action: 'still_exhausted' };
+    await writeOutcome(opsClient, accountId, locked.id, outcome);
+    return outcome.kind === 'ok' ? { action: 'resumed' } : { action: 'now_rejected' };
   });
 }

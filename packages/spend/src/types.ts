@@ -64,6 +64,7 @@ export type BackendPriceTable = Readonly<Record<string, ModelRate>>;
 export type DenyReason =
   | 'account_not_active'
   | 'model_connection_not_ok'
+  | 'model_credits_exhausted'
   | 'per_spawn_cap_exceeded'
   | 'work_item_cap_exceeded'
   | 'envelope_exceeded'

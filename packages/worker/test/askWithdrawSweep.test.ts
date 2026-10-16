@@ -72,7 +72,7 @@ describe("the tick: the invariant sweep also runs the withdrawal on the RECEIPT 
   const ports: WorkerPorts = {
     decryptTenantKey: async () => "k",
     modelConnection: { get: async () => { throw new Error("not used"); } },
-    connectionStatus: { markBroken: async () => {} },
+    connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} },
     hooks: { resume: async () => {} },
   };
   function build(receipt: Pool, runner: Pool): Promise<Awaited<ReturnType<typeof buildWorker>>> {

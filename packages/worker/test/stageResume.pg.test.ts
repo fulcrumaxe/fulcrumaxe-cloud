@@ -143,6 +143,36 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
     expect(mine(started, w)[0]).toMatchObject({ workItemId: w, startAttempt: 1 });
   });
 
+  it("S5-k2: an item parked on out-of-credit is refreshed (no run row) while the connection is broken for credits, and resumes on its own the pass after it reads ok", async () => {
+    const { a, w, approval } = await parked({ pause: "model_credits_exhausted" });
+    await earlierAsk(a, w, keyOf(w, approval));
+    await admin.query(`UPDATE model_connections SET status = 'broken', last_error_code = 'credits_exhausted' WHERE account_id = $1`, [a.accountId]);
+    const creditsEntry: ParkedStageEntryInput = { ...entry, pauses: [...PAUSES, "model_credits_exhausted"], pauseForDenial: (d) => (d === "model_credits_exhausted" ? "model_credits_exhausted" : DENIALS[d] ?? null) };
+    const l = limits(600);
+    const started: AdvanceStartArgs[] = [];
+    const clock = { t: Date.now() };
+    const before = await counts(a.accountId);
+    for (let pass = 0; pass < 3; pass += 1) {
+      clock.t += 15 * 60_000;
+      await admin.query("UPDATE work_item_driver_events SET created_at = created_at - interval '20 minutes' WHERE work_item_id = $1", [w]);
+      await sweeper(l, started, clock).sweepParkedStages([creditsEntry]);
+    }
+    expect(mine(started, w)).toEqual([]);
+    const refreshed = await counts(a.accountId);
+    expect(refreshed.runs).toBe(before.runs);
+    expect(refreshed.reservations).toBe(before.reservations);
+    expect(refreshed.facts).toBeGreaterThan(before.facts);
+    expect((await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq DESC LIMIT 1", [w])).rows[0].code).toBe("model_credits_exhausted");
+
+    // The reconcile pass reads the connection ok. Nobody touches the item.
+    await admin.query(`UPDATE model_connections SET status = 'ok', last_error_code = NULL WHERE account_id = $1`, [a.accountId]);
+    clock.t += 15 * 60_000;
+    await admin.query("UPDATE work_item_driver_events SET created_at = created_at - interval '20 minutes' WHERE work_item_id = $1", [w]);
+    await sweeper(l, started, clock).sweepParkedStages([creditsEntry]);
+    expect(mine(started, w)).toHaveLength(1);
+    expect(mine(started, w)[0]).toMatchObject({ workItemId: w, startAttempt: 1 });
+  });
+
   it("S5k-5: once the limit is raised the next pass starts the workflow on the same approval, with no person, at an attempt above every earlier one", async () => {
     const { a, w, approval } = await parked();
     for (const suffix of ["", ":s1", ":s2", ":s3:n0123456789abcdef"]) await earlierAsk(a, w, keyOf(w, approval, suffix));
