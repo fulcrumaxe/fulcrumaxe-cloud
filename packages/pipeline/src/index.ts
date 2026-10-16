@@ -4,6 +4,7 @@ export * from "./runActions/index.js";
 export * from "./preview/prompt.js";
 export * from "./preview/result.js";
 export * from "./advance/issueTriage.js";
+export * from "./advance/proposalIntake.js";
 export * from "./advance/runPorts.js";
 export * from "./advance/followedRunner.js";
 export * from "./advance/specFlow.js";

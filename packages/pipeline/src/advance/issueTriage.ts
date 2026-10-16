@@ -34,8 +34,8 @@ export interface IssueTriageInput {
   sourceEventId: string;
   repoId: string;
   login: string;
-  /** The issue's number on GitHub. */
-  number: number;
+  /** The issue's number on GitHub; null for an item that came from an approved proposal with no issue (it has no number to give the root). */
+  number: number | null;
 }
 
 /** Plain data for the worker: the pipeline's own status word and the ids a later step needs. */

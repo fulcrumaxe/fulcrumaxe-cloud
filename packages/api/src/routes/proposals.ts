@@ -154,8 +154,7 @@ export const proposalRoutes: RouteEntry[] = [
     summary: "Approve a proposal onto the roadmap",
     description:
       "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction. " +
-      "Then, when the proposal is issue-backed, the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` or `not_issue_backed` and the work item waits at Triaged. " +
-      "Discussion- and task-backed proposals can be approved onto the roadmap but start only once the stage driver can take its input from a proposal. " +
+      "Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. " +
       "An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal and work item and creates nothing; if its start was never requested it is requested now. " +
       "If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
     principals: ["session"],
@@ -167,7 +166,7 @@ export const proposalRoutes: RouteEntry[] = [
       proposal: proposalSchema,
       work_item_id: z.string().uuid(),
       started: z.boolean(),
-      not_started_reason: z.enum(["no_write_install", "not_issue_backed", "owned_by_internal_loop"]).nullable(),
+      not_started_reason: z.enum(["no_write_install", "owned_by_internal_loop"]).nullable(),
     }),
     extraResponses: {
       ...decisionErrors,

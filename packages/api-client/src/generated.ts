@@ -2377,7 +2377,7 @@ export interface Operations {
       };
       work_item_id: string;
       started: boolean;
-      not_started_reason: ("no_write_install" | "not_issue_backed" | "owned_by_internal_loop") | (null);
+      not_started_reason: ("no_write_install" | "owned_by_internal_loop") | (null);
     };
   };
   rejectProposal: {
