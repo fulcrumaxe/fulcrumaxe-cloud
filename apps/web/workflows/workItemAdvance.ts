@@ -133,6 +133,13 @@ const CHECK_AMBIGUOUS = "check_build_ambiguous";
  */
 const BUILD_REAPING_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 120_000, 120_000, 120_000, 120_000];
 const BUILD_REAPING_REASON = "start_sandbox_reaping";
+/**
+ * D#483 S5-c1: the start answered that the item cannot take a build slot yet (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the two lists
+ * equal, because the workflow bundle imports no server package). Each poll leaves a `build_waiting` fact, and the slot module counts an item as waiting only while its latest one is under three polls old (a test holds the two numbers together).
+ */
+const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+const BUILD_SLOT_POLL_MS = 60_000;
+const BUILD_SLOT_WAIT_MS = 4 * 3_600_000;
 /** C44-7: the fixed reason when a second fix on one head also changed nothing. */
 const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
@@ -576,9 +583,24 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   const { accountId, userId, workItemId, actionId } = args;
 
   let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
-  for (let i = 0; started.reason === BUILD_REAPING_REASON && i < BUILD_REAPING_BACKOFF_MS.length; i++) {
-    await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: "sandbox_reaping", attempt: i + 1 });
-    await sleep(BUILD_REAPING_BACKOFF_MS[i]!);
+  // Two waits, each with its own bound. A reaper claim on the sandbox: a few backoffs. No build slot (the person's concurrency setting, D#483 S5-c1): the
+  // item stays at Spec ready and asks again every minute, up to four hours (as many polls as the run wait below already makes in one workflow, so no new event-count risk); a start that finds no slot has run nothing and spent nothing. A halt or any other
+  // refusal ends the loop at once.
+  let reapingTries = 0;
+  let slotWaitedMs = 0;
+  let lastSlotReason: string | null = null;
+  for (;;) {
+    if (started.reason === BUILD_REAPING_REASON && reapingTries < BUILD_REAPING_BACKOFF_MS.length) {
+      await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: "sandbox_reaping", attempt: reapingTries + 1 });
+      await sleep(BUILD_REAPING_BACKOFF_MS[reapingTries]!);
+      reapingTries++;
+    } else if (started.reason !== null && BUILD_SLOT_WAIT_REASONS.includes(started.reason) && slotWaitedMs < BUILD_SLOT_WAIT_MS) {
+      // Logged when the reason first appears or changes, not on every poll: the poll itself leaves the liveness fact (the worker's `build_waiting` event).
+      if (started.reason !== lastSlotReason) await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: started.reason });
+      lastSlotReason = started.reason;
+      await sleep(BUILD_SLOT_POLL_MS);
+      slotWaitedMs += BUILD_SLOT_POLL_MS;
+    } else break;
     started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
   }
   if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");

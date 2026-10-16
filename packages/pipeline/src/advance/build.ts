@@ -7,6 +7,7 @@ import { isBuildableKind } from "@fx/discussions";
 import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { agentOutputBlock } from "../plan/envelope.js";
+import { takeBuildSlot } from "./buildSlots.js";
 import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
@@ -254,32 +255,47 @@ export async function startBuildForItem(
   // A runner run gets its map from the daemon's own mirror (CX-3b), so the cloud builds none for it.
   const map = prior || !options.repoMap || facts.repo_id === null || promptRuntimeOf(executionMode) !== "sandbox" ? undefined : await options.repoMap.forRun({ accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name });
   const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}) });
-  const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
-  // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
-  if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
 
-  // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
-  // that died in between finds the stamp missing and makes it.
-  await attachRunNotes(pool, accountId, workItemId, started.runId, prior ? { suffix: prior.step.slice(baseStep.length) } : { ids: notes.map((n) => n.id) });
+  // D#483 S5-c1: an item moves into `in_progress` only by taking a build slot, under the account's advisory lock. The run starts INSIDE that lock, so
+  // two starts at once cannot both pass a limit that has room for one, and a start that finds no slot has started nothing (no run, no spend). An item
+  // already at `in_progress` is a replay of its own start and needs no slot.
+  const movesToInProgress = facts.stage === "spec_ready" || facts.stage === "needs_human";
+  let startedRunId: string | null = null;
+  try {
+    const claim = await takeBuildSlot(
+      pool,
+      accountId,
+      workItemId,
+      async (client): Promise<BuildStartResult> => {
+        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
+        if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
+        startedRunId = started.runId;
 
-  if (facts.stage === "spec_ready" || facts.stage === "needs_human") {
-    try {
-      await withTenant(pool, accountId, (client) =>
-        recordStage(client, { workItemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `build:${started.runId}`, runId: started.runId }),
-      );
-    } catch (err) {
-      // The item was halted after the run was created: the halt lists and cancels that run, and this stops it too.
-      if (err instanceof WorkItemHaltedError) {
-        await ports.cancel(started.runId).catch(() => undefined);
-        return { status: "refused", reason: "item_halted" };
-      }
-      if (!(err instanceof IllegalStageTransitionError)) throw err;
+        // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
+        // that died in between finds the stamp missing and makes it.
+        await attachRunNotes(pool, accountId, workItemId, started.runId, prior ? { suffix: prior.step.slice(baseStep.length) } : { ids: notes.map((n) => n.id) });
+
+        if (movesToInProgress) await recordStage(client, { workItemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `build:${started.runId}`, runId: started.runId });
+        return { status: "started", runId: started.runId, branch: branchFor(number) };
+      },
+      { needsSlot: movesToInProgress },
+    );
+    if (!claim.granted) return { status: "refused", reason: claim.reason };
+    return claim.value;
+  } catch (err) {
+    // The item was halted after the run was created: the halt lists and cancels that run, and this stops it too.
+    if (err instanceof WorkItemHaltedError) {
+      if (startedRunId !== null) await ports.cancel(startedRunId).catch(() => undefined);
+      return { status: "refused", reason: "item_halted" };
+    }
+    if (err instanceof IllegalStageTransitionError) {
       // The item moved on (closed, cancelled) between the read and the write: the run must not keep going.
-      await ports.cancel(started.runId).catch(() => undefined);
+      if (startedRunId !== null) await ports.cancel(startedRunId).catch(() => undefined);
       return { status: "refused", reason: "stage_changed" };
     }
+    throw err;
   }
-  return { status: "started", runId: started.runId, branch: branchFor(number) };
 }
 
 /** The item's stage now, or null when it is gone. */
