@@ -179,11 +179,15 @@ export interface CaptureOptions {
   profileRoot?: string;
   /** Test seam: what a handled signal ends the process with. */
   exit?: (code: number) => void;
+  /** Test seam: how long a handled signal waits for a browser that is still launching (default LAUNCH_GRACE_MS). */
+  launchGraceMs?: number;
 }
 
 export const CAPTURE_PREFIX = "live-e2e-capture-";
 /** A capture can run for its whole timeout (10 minutes by default), so only a folder older than this is a leftover. */
 export const STALE_PROFILE_MS = 30 * 60_000;
+/** How long a handled signal waits for a browser that is still launching before it removes the profile anyway. */
+const LAUNCH_GRACE_MS = 15_000;
 const SIGNAL_EXIT: Record<string, number> = { SIGINT: 130, SIGHUP: 129, SIGTERM: 143 };
 
 /**
@@ -229,15 +233,29 @@ export async function captureSession(opts: CaptureOptions): Promise<string> {
   sweepStaleProfiles(root);
   const profileDir = mkdtempSync(join(root, CAPTURE_PREFIX));
   let launching: Promise<CaptureBrowser> | undefined;
+  let signalled = false;
   const closeAll = async (): Promise<void> => {
-    await launching?.then((b) => b.close()).catch(() => undefined);
+    // A launcher that never settles must not keep the profile on disk: wait a bounded time for the browser, then remove it.
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<void>((r) => {
+      timer = setTimeout(r, opts.launchGraceMs ?? LAUNCH_GRACE_MS);
+      timer.unref();
+    });
+    try {
+      await Promise.race([launching?.then((b) => b.close()).catch(() => undefined), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
     rmSync(profileDir, { recursive: true, force: true });
   };
+  // Installed in the same tick as the folder is made, so there is no moment a profile exists without a handler.
   const handlers = Object.keys(SIGNAL_EXIT).map((sig) => {
     const handler = (): void => {
+      if (signalled) return;
+      signalled = true;
       void closeAll().finally(() => (opts.exit ?? process.exit)(SIGNAL_EXIT[sig] as number));
     };
-    process.once(sig as NodeJS.Signals, handler);
+    process.on(sig as NodeJS.Signals, handler);
     return [sig as NodeJS.Signals, handler] as const;
   });
   try {
@@ -256,8 +274,19 @@ export async function captureSession(opts: CaptureOptions): Promise<string> {
       if (now() >= deadline) throw new Error("no session cookie appeared before the deadline; nothing was stored");
       await new Promise((r) => setTimeout(r, opts.pollMs ?? 1000));
     }
+  } catch (error) {
+    // Closing the browser makes the poll (or the launch) reject. Once a signal is being handled that is not a failure
+    // to report: letting it escape would exit 1 before the handler gets to exit with the signal's code.
+    if (signalled) await new Promise<never>(() => undefined);
+    throw error;
   } finally {
-    for (const [sig, handler] of handlers) process.off(sig, handler);
-    await closeAll();
+    // The handlers stay until cleanup is done: a signal that lands while the browser is closing still ends cleanly.
+    try {
+      await closeAll();
+    } finally {
+      for (const [sig, handler] of handlers) process.off(sig, handler);
+    }
+    // A signal arrived during cleanup: its handler owns the exit code, so do not return or rethrow ahead of it.
+    if (signalled) await new Promise<never>(() => undefined);
   }
 }
