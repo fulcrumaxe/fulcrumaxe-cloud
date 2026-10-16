@@ -259,6 +259,31 @@ describe("the build for an item at Spec ready", () => {
     expect(world.sleeps).toBe(8);
   });
 
+  it("S5-c1: a start with no build slot waits a minute at a time with no error and no failed record, and starts when the slot frees", async () => {
+    const full: AdvanceStepResult = { status: "refused", reason: "one_build_per_repo_until_d598" };
+    const w = setup({ item: AT_SPEC, buildSequence: [full, { status: "refused", reason: "waiting_for_build_slot_account" }, full], stages: ["pr_opened"] });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(4);
+    expect(world.sleeps).toBe(3);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(events().slice(0, 4)).toEqual(["advance.build_waiting", "advance.build_waiting", "advance.build_waiting", "advance.build_started"]);
+    expect(logs[0]).toMatchObject({ at: "build_start", reason: "one_build_per_repo_until_d598" });
+  });
+
+  it("S5-c1: a slot that never frees is given up on after four hours with the wait reason, and the item stays approvable", async () => {
+    const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "waiting_for_build_slot_repo" } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:waiting_for_build_slot_repo" });
+    expect(world.sleeps).toBe(4 * 60);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(4 * 60 + 1);
+  });
+
+  it("S5-c1: a halt while waiting for a slot ends the wait at once", async () => {
+    const w = setup({ item: AT_SPEC, buildSequence: [{ status: "refused", reason: "waiting_for_build_slot_repo" }], build: { status: "refused", reason: "item_halted" } });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(2);
+    expect(world.sleeps).toBe(1);
+  });
+
   it("a refused build start (no model key, spend refused, another run live) changes nothing: the item stays at Spec ready, approvable again, and the log says why", async () => {
     const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "start_no_model" } });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_no_model" });

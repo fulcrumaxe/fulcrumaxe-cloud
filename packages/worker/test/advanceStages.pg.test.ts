@@ -256,6 +256,20 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(await none.advanceBuildFailed(a.accountId, w, randomUUID(), "run_failed")).toEqual({ status: "refused", reason: "build_unavailable" });
   });
 
+  it("S5-c1: a start that found no build slot leaves one build_waiting fact per poll-minute (no build_refused), so the waiter is live only while it polls", async () => {
+    const a = await seedAccount(admin, randomUUID());
+    const w = await item(a);
+    const t = build({ build: (async () => ({ status: "refused", reason: "one_build_per_repo_until_d598" })) as never });
+    const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
+    const approval = randomUUID();
+    expect(await t.module.advanceBuild(who, approval)).toEqual({ status: "refused", reason: "one_build_per_repo_until_d598" });
+    await t.module.advanceBuild(who, approval);
+    const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
+    // Two polls in one minute are one fact (a minute boundary between them may make it two).
+    expect(rows.rowCount).toBeLessThanOrEqual(2);
+    expect(rows.rows.every((r) => r.kind === "build_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
+  });
+
   it("advanceBuild passes the approval to the pipeline; advanceBuildFailed passes a fixed code and refuses anything else", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);

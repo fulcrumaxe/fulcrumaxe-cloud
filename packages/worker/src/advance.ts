@@ -970,6 +970,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     console.info(JSON.stringify({ event: "advance.correction_applied", work_item_id: who.workItemId, run_id: runId, count: ids.length }));
   }
 
+  /** The refusals that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the lists equal). */
+  const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+
   async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };
     if (!UUID_RE.test(approvalId) || (expectedVersion !== undefined && !(Number.isSafeInteger(expectedVersion) && expectedVersion > 0))) return { status: "refused", reason: "invalid_input" };
@@ -980,7 +983,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (out.status === "started" && out.runId) await recordCorrectionsApplied(who, out.runId);
     // A build that did not start is a fact of the item (its code is a fixed word the start named).
     // A start that met a reaper claim is not a refusal of the build: the workflow waits and starts again, so no fact is recorded.
-    if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
+    // D#483 S5-c1: nor is a start that found no build slot: the item waits (the workflow asks again) and the wait is derived from the counts when read.
+    if (out.status === "refused" && out.reason !== undefined && out.reason !== null && BUILD_SLOT_WAIT_REASONS.includes(out.reason)) {
+      // Each poll of a wait leaves one fact (deduped per minute): the slot module counts an item as waiting only while its latest one is fresh.
+      await writeEvent(who, { kind: "build_waiting", dedupeKey: `wait:${approvalId}:${Math.floor(Date.now() / 60_000)}`, code: out.reason });
+    } else if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {
       await writeEvent(who, { kind: "build_refused", dedupeKey: `build:${approvalId}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(out.reason ?? "") ? out.reason : "refused" });
     }
     return out;
