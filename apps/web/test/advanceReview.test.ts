@@ -11,6 +11,7 @@ vi.mock("@fx/pipeline", async (original) => ({
 }));
 
 import { createReviewDeps } from "../lib/advanceReview";
+import { reviewLoadBody } from "../lib/advanceReviewSteps";
 
 const ACCOUNT = "0f8a4c2e-9d1b-4e7a-8c35-6a1f2b3c4d5e";
 const REPO = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
@@ -75,5 +76,26 @@ describe("the review stage's merge gate (D#6 R2b)", () => {
     await deps.mergeGate(pool, { accountId: ACCOUNT, workItemId: ITEM, prNumber: 7 });
     const gateDeps = mocks.runMergeGateForItem.mock.calls[0]![0] as { localReviewOptIn: { enabled(input: { accountId: string; repoId: string }): Promise<boolean> } };
     expect(await gateDeps.localReviewOptIn.enabled({ accountId: ACCOUNT, repoId: REPO })).toBe(false);
+  });
+});
+
+describe("the review stage's context load", () => {
+  beforeEach(() => {
+    mocks.loadReviewContext.mockReset();
+  });
+
+  it("carries the fix rounds already started through the facade, so a restarted workflow reviews at round count + 1", async () => {
+    mocks.loadReviewContext.mockResolvedValue({
+      ok: true,
+      ctx: { workItemId: ITEM, stage: "review", repoId: REPO, owner: "acme", name: "widgets", issue: 12, tier: "T2", specVersion: 3, fixRoundsStarted: 2, debaterMode: null },
+    });
+    const { pool } = fakePool(false);
+    const loaded = await createReviewDeps(async () => ({}) as never).load(pool, ACCOUNT, ITEM);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.ctx.fixRoundsStarted).toBe(2);
+    // The worker hands this object on as the step's context; the workflow's load step turns it into the round the prompt gets.
+    const body = await reviewLoadBody({ advanceLoadReview: async () => ({ ok: true, ctx: loaded.ctx }) } as never, { accountId: ACCOUNT, workItemId: ITEM } as never, 3);
+    expect(body.ok && body.fixRoundsStarted).toBe(2);
   });
 });

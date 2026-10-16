@@ -54,7 +54,20 @@ export interface ReviewPromptInput {
   /** D#600 CX-2: recalled memory, rendered by `renderMemorySlot` (absent: none). */
   memory?: { stable?: RenderedMemory; item?: RenderedMemory };
   notes?: readonly NoteItem[];
+  /** The review round, 1-based: round N is the review after N-1 fix rounds. Absent is round 1. */
+  round?: number;
 }
+
+/** From this review round on, the security reviewer is told to step back from finding instances one by one. */
+export const SECURITY_STEP_BACK_ROUND = 3;
+
+const SECURITY_THREAT_MODEL =
+  "Before you list any finding, write the threat model in your summary: who the adversary is (for example a person outside the trust set, an injected work item or repo file steering an agent, a mistaken agent), what they can control, and what is out of model. Then report only findings that an adversary inside that model can use. Say plainly which findings you left out because they need an out-of-model adversary.";
+
+const SECURITY_STEP_BACK =
+  "This is review round {round}, so earlier rounds already found and fixed problems here. Do not hunt for one more instance of the same kind. Step back: check whether the design relies on a blocklist or on filtering known-bad input, and whether it lets something through when a check cannot run or a value is missing. The safe shape is an allowlist (only what is named is allowed) that fails closed (anything unknown, missing or erroring is refused). If the code is not that shape, the finding is the design, with the allowlist it should use; do not file each bypass of the blocklist separately. If it is that shape and you have no in-model attack, pass.";
+
+const stepBack = (round: number): string => SECURITY_STEP_BACK.replace("{round}", String(round));
 
 const JOBS: Record<ReviewPromptRole, string> = {
   "code-reviewer":
@@ -62,7 +75,7 @@ const JOBS: Record<ReviewPromptRole, string> = {
   "acceptance-tester":
     "You are the acceptance tester. Check every acceptance criterion in the Spec against the change: run the code and the tests, and try each criterion yourself. A criterion you could not verify is a failure: do not pass it.",
   "security-reviewer":
-    "You are the security reviewer. Review the change for security problems: injection, unsafe file or shell handling, secrets, authentication and session mistakes, unsafe defaults, unsafe dependencies. Run the tests.",
+    "You are the security reviewer. Review the change for security problems: injection, unsafe file or shell handling, secrets, authentication and session mistakes, unsafe defaults, unsafe dependencies. Run the tests. " + SECURITY_THREAT_MODEL,
   debater:
     "You are the debater. The reviewers below passed this change. Try to refute their verdict: find a defect, a missed case or an unverified claim they let through. Check their claims yourself by running the code and the tests. Pass only if you cannot refute it.",
 };
@@ -86,6 +99,8 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
 export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt {
   checkReviewInput(input);
   const { role, owner, name, issue, pr, headSha, baseRef, version } = input;
+  if (input.round !== undefined && (!Number.isSafeInteger(input.round) || input.round < 1)) throw new ReviewPromptInputError("round");
+  const round = input.round ?? 1;
   const branch = input.branch ?? branchFor(issue);
   const example =
     role === "code-reviewer"
@@ -109,7 +124,7 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
         ];
   const prior = role === "debater" && input.prior && input.prior.length > 0 ? input.prior.slice(0, 6) : [];
   return assemblePrompt({
-    roleLine: JOBS[role],
+    roleLine: role === "security-reviewer" && round >= SECURITY_STEP_BACK_ROUND ? `${JOBS[role]} ${stepBack(round)}` : JOBS[role],
     boundary: [
       `Pull request #${pr} on ${owner}/${name} implements issue #${issue}. Its branch is ${branch}; review exactly commit ${headSha} and no other.`,
       ...checkout,

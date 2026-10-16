@@ -26,6 +26,8 @@ export interface ReviewContext {
   issue: number;
   tier: WorkItemTier;
   specVersion: number;
+  /** Fix rounds already started for the item (the driver events): review round N is the one after N-1 fix rounds. */
+  fixRoundsStarted: number;
   /** The repo's role-setting mode for the debater, or null when it has no row (the debater is then off). */
   debaterMode: string | null;
   /** Raw values of the repository's guard settings; only `@fx/trust` interprets them. */
@@ -47,6 +49,7 @@ interface Row {
   gh_name: string | null;
   kind: string | null;
   version: number | null;
+  fix_rounds: string | null;
   debater_mode: string | null;
   auto_merge: unknown;
   block_external: unknown;
@@ -56,6 +59,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
   const row = await withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<Row>(
       `SELECT w.stage, w.provenance, w.repo_id, r.gh_repo_id, ${effectiveModeSql("w", "r")} AS execution_mode, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version,
+              (SELECT count(*)::text FROM work_item_driver_events e WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'fix_round_started') AS fix_rounds,
               (SELECT rs.mode FROM role_settings rs WHERE rs.account_id = w.account_id AND rs.repo_id = w.repo_id AND rs.role = 'debater') AS debater_mode,
               r.settings->'autoMerge' AS auto_merge, r.settings->'blockExternalAutoMerge' AS block_external
          FROM work_items w
@@ -93,6 +97,7 @@ export async function loadReviewContext(pool: Pool, accountId: string, workItemI
       issue: Number(row.gh_number),
       tier,
       specVersion: Number(row.version),
+      fixRoundsStarted: Number(row.fix_rounds ?? "0"),
       debaterMode: row.debater_mode,
       autoMerge: row.auto_merge,
       blockExternalAutoMerge: row.block_external,

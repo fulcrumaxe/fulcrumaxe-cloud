@@ -217,6 +217,8 @@ export interface AdvanceReviewContext extends AdvancePrSource {
   /** critical | feature | small | bug | doc */
   tier: string;
   specVersion: number;
+  /** Fix rounds already started (the driver events); the security reviewer's step-back starts at review round 3. */
+  fixRoundsStarted?: number;
   debaterEnabled: boolean;
 }
 export type AdvanceReviewLoad = { ok: true; ctx: AdvanceReviewContext } | { ok: false; reason: string };

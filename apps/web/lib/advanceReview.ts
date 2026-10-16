@@ -20,7 +20,7 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       const r = await loadReviewContext(pool, accountId, workItemId);
       if (!r.ok) return { ok: false, reason: r.reason };
       const c = r.ctx;
-      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier) } };
+      return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier) } };
     },
     recordRound: (pool, registry, input) =>
       recordRound(pool, registry, {

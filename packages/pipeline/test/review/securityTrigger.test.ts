@@ -21,6 +21,9 @@ describe("the surfaces, by path", () => {
     ["process_exec", ["scripts/deploy.sh", "src/exec.ts", "lib/spawnWorker.ts", "src/subprocess.py", "tools/run.ps1", "src/shell.ts"]],
     ["file_permissions", ["src/chmod.ts", "lib/umask.ts", "scripts/chown-data.ts"]],
     ["sandbox_proxy", ["packages/runner/src/sandboxPort.ts", "src/gh-proxy/handler.ts", "src/firewall.ts", "infra/sandbox-image/Dockerfile", "src/seccomp.ts"]],
+    ["code_plane_push", ["packages/pipeline/src/build/planePush.ts", "apps/web/app/api/runner/plane-push-token/handler.ts", "packages/gh-policy/src/planePublish.ts", "packages/github/src/planePublishProxy.ts", "packages/worker/src/runnerPlanePush.ts"]],
+    ["plan_writeback", ["packages/pipeline/src/build/planWriteback.ts", "packages/pipeline/src/build/planWritebackGitHub.ts", "packages/db/migrations/0825_plan_writebacks.sql"]],
+    ["setup_requests", ["packages/core/src/setup-requests/store.ts", "packages/api/src/routes/setupRequests.ts", "packages/db/migrations/0856_setup_requests.sql", "packages/worker/test/setupHold.pg.test.ts"]],
   ] as const)("%s fires for a path that names it", (code, paths) => {
     for (const path of paths) expect(securityTriggers({ files: [{ path, patch: "@@\n+x", changes: 1 }] }), path).toContain(code);
   });
@@ -146,7 +149,34 @@ describe("the answer", () => {
   });
   it("each surface the owner named has at least one rule: nothing was dropped from the list", () => {
     expect([...SECURITY_TRIGGER_CODES].filter((c) => c !== "diff_unavailable" && c !== "files_truncated").sort()).toEqual(
-      ["auth_sessions_tokens", "ci_workflow", "crypto", "dependency_manifest", "file_permissions", "network_client", "process_exec", "sandbox_proxy", "secrets_env", "sql_migrations"].sort(),
+      ["auth_sessions_tokens", "ci_workflow", "crypto", "dependency_manifest", "file_permissions", "network_client", "process_exec", "sandbox_proxy", "secrets_env", "sql_migrations", "code_plane_push", "plan_writeback", "setup_requests"].sort(),
     );
+  });
+});
+
+describe("D#598 P7a: plane push, plan write-back and setup requests", () => {
+  const NEW = ["code_plane_push", "plan_writeback", "setup_requests"] as const;
+  it("an unrelated path and unrelated lines fire none of the three", () => {
+    for (const f of [file("src/ui/Button.tsx"), file("packages/core/src/planner/estimate.ts"), file("docs/plane-geometry.md"), withLine("const rows = items.map((i) => i.id);")]) {
+      for (const c of NEW) expect(codes(f), f.path).not.toContain(c);
+    }
+  });
+  it.each([
+    ["code_plane_push", "await planePush(branch, commit);"],
+    ["code_plane_push", "const target = settings.code_repo;"],
+    ["plan_writeback", "await runPlanWriteback(item);"],
+    ["plan_writeback", "// write-back of the plan to the repo"],
+    ["setup_requests", "await createSetupRequest(input);"],
+    ["setup_requests", "SELECT * FROM setup_requests WHERE id = $1"],
+  ] as const)("%s fires on an added line", (code, line) => {
+    expect(codes(withLine(line))).toContain(code);
+  });
+  it("a line that only mentions a plane or a plan fires none of the three", () => {
+    for (const line of ["// the plane of the chart", "const plan = pickPlan(account);", "const setup = init();"]) {
+      for (const c of NEW) expect(codes(withLine(line)), line).not.toContain(c);
+    }
+  });
+  it("one change to one of the paths is enough to require the security review", () => {
+    expect(securityDiffTriggerFired({ files: [file("packages/pipeline/src/build/planePushGit.ts")] })).toBe(true);
   });
 });

@@ -898,7 +898,7 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
         await stopped(args, "review_load", loaded.reason);
         return { end: { status: "failed", detail: `review_${loaded.reason}` } };
       }
-      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
+      const next: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
       const again = await advanceFindPrStep(next);
       if (!again.ok) {
         await stopped(args, "review_pr", again.reason);
@@ -939,7 +939,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await stopped(args, "review_load", loaded.reason);
     return { status: "failed", detail: `review_${loaded.reason}` };
   }
-  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
+  let ctx: ReviewCtx = { repoId: loaded.repoId, owner: loaded.owner, name: loaded.name, issue: loaded.issue, tier: loaded.tier, specVersion: loaded.specVersion, fixRoundsStarted: loaded.fixRoundsStarted, debaterEnabled: loaded.debaterEnabled, executionMode: loaded.executionMode, recordedPr: loaded.recordedPr, prExecutionMode: loaded.prExecutionMode };
 
   // C44-7: a fix round that proved "no change needed" asks the reviewers that wanted the fix to look again at the SAME head, once per head.
   // `again` is that pending look; `lookedAgain` holds the heads already given theirs (workflow state, rebuilt by a replay from the same step results).
@@ -1034,6 +1034,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     const failing = verdicts.filter((v) => v.verdict !== "pass").map((v) => ({ role: v.role, runId: v.runId }));
     let fix = await advanceStartFixStep(accountId, userId, workItemId, args.haltEpoch, ctx, pr, actionId, round.nextRound ?? round.round + 1, failing, rereview);
     if (isHaltReason(fix.reason)) return haltedEnd(args, "fix");
+    // The fix round is now started: the next review of this item is the round after it (the security reviewer's step-back counts these).
+    ctx = { ...ctx, fixRoundsStarted: round.nextRound ?? round.round + 1 };
     if (!fix.ok || fix.runId === null) {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "fix", reason: fix.reason ?? "none" });
       return { status: "fix_refused", detail: fix.reason ?? undefined };

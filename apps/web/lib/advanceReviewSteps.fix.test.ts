@@ -69,4 +69,18 @@ describe("startReviewerBody", () => {
     expect(req.contextSections.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
     expect(req.contextSections.every((s) => s.bytes > 0)).toBe(true);
   });
+
+  it("D#598 P7a: the security reviewer's prompt gets the step-back once two fix rounds have started, for any repository", async () => {
+    const promptFor = async (fixRoundsStarted: number | undefined): Promise<string> => {
+      const f = fixture("sandbox");
+      await startReviewerBody(f.worker, WHO, { ...f.ctx, ...(fixRoundsStarted === undefined ? {} : { fixRoundsStarted }) }, PR, "security-reviewer", [], 0);
+      return (f.started.mock.calls[0]!.at(-1) as { prompt: string }).prompt;
+    };
+    for (const n of [undefined, 0, 1]) {
+      const p = await promptFor(n);
+      expect(p).toMatch(/write the threat model/);
+      expect(p).not.toMatch(/Step back: check whether/);
+    }
+    for (const n of [2, 3]) expect(await promptFor(n)).toMatch(/Step back: check whether/);
+  });
 });

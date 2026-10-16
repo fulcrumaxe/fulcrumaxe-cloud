@@ -62,6 +62,8 @@ export interface ReviewCtx extends AdvancePrSource {
   tier: string;
   /** The Spec version the person approved. */
   specVersion: number;
+  /** Fix rounds already started, kept up to date by the workflow as it starts them. Absent: none. */
+  fixRoundsStarted?: number;
   debaterEnabled: boolean;
 }
 
@@ -74,7 +76,7 @@ export async function reviewLoadBody(worker: ReviewWorker | null, who: StepWho, 
   if (!out.ok) return { ok: false, reason: out.reason };
   const c = out.ctx;
   if (pinned !== null && c.specVersion !== pinned) return { ok: false, reason: "spec_changed" };
-  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
+  return { ok: true, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted ?? 0, debaterEnabled: c.debaterEnabled, executionMode: c.executionMode, recordedPr: c.recordedPr, prExecutionMode: c.prExecutionMode };
 }
 
 export interface PrFound {
@@ -217,6 +219,7 @@ export async function startReviewerBody(
       version: spec.version,
       spec: spec.body,
       runtime: promptRuntimeOf(ctx.executionMode, role),
+      round: (ctx.fixRoundsStarted ?? 0) + 1,
       ...(role === "debater" ? { prior: priorSummaries } : {}),
     });
   } catch (err) {

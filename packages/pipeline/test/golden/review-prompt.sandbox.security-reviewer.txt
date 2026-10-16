@@ -1,4 +1,4 @@
-You are the security reviewer. Review the change for security problems: injection, unsafe file or shell handling, secrets, authentication and session mistakes, unsafe defaults, unsafe dependencies. Run the tests.
+You are the security reviewer. Review the change for security problems: injection, unsafe file or shell handling, secrets, authentication and session mistakes, unsafe defaults, unsafe dependencies. Run the tests. Before you list any finding, write the threat model in your summary: who the adversary is (for example a person outside the trust set, an injected work item or repo file steering an agent, a mistaken agent), what they can control, and what is out of model. Then report only findings that an adversary inside that model can use. Say plainly which findings you left out because they need an out-of-model adversary.
 Pull request #41 on acme/widgets implements issue #7. Its branch is fx/issue-7; review exactly commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa and no other.
 The repository is checked out in your working directory. Check the commit out first:
   git fetch origin fx/issue-7 && git checkout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
