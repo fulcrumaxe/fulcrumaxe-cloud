@@ -1127,6 +1127,32 @@ check_sandbox_net_role_shape() {
   fi
 }
 
+# D#7 AAP-d1 (0837): the SECURITY DEFINER functions owned by one role, each executable by one named invoker role and nobody else.
+# Called as check_invoker_exception_shape <db> <role> <invoker> <quoted, comma-separated exact function names>. Prints the oids, comma
+# separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp, with an
+# explicit ACL whose only grantees besides the owner are the invoker (no PUBLIC, no grant option); SHAPE_FAIL:<count> when any is not;
+# nothing when the role owns none (the generic owner check then rejects anything else).
+check_invoker_exception_shape() {
+  local dbname="$1" role="$2" invoker="$3" names="$4" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.proname IN ($names)
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = '$invoker'::regrole)
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> '$invoker'::regrole OR a.is_grantable))) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check '$role-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by $role fail the exception shape (not one of $names, a loose search_path, or EXECUTE for anyone but $invoker)"
+    return 0
+  fi
+  echo "$oids"
+}
+
 # D#2 SANDBOX-REAPER-2 (0761): the one SECURITY DEFINER owned by sandbox_claim_guard (sandbox_reap_claimed(text)), matched by exact
 # signature. Prints its oid when it is a definer pinned to search_path=pg_catalog, public, pg_temp whose ACL holds platform_ops (the owner of
 # agent_run_create, its only caller) and nobody else but the owner, with no PUBLIC entry and no grant option; SHAPE_FAIL:<count> when a
