@@ -677,7 +677,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
            FROM work_items w
            LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
            LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
-           LEFT JOIN proposals pr ON pr.account_id = w.account_id AND pr.work_item_id = w.id
+           LEFT JOIN proposals pr ON pr.account_id = w.account_id AND pr.work_item_id = w.id AND pr.state = 'approved'
           WHERE w.id = $1 AND w.account_id = $2`,
         [workItemId, accountId],
       );
