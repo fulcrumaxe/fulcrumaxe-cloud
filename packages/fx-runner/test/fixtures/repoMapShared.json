@@ -1,0 +1,377 @@
+{
+ "commit": "0123456789abcdef0123456789abcdef01234567",
+ "entries": [
+  {
+   "path": "src",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000001"
+  },
+  {
+   "path": "src/deep",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000002"
+  },
+  {
+   "path": "src/deep/er",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000003"
+  },
+  {
+   "path": "src/deep/er/est",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000004"
+  },
+  {
+   "path": "packages",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000005"
+  },
+  {
+   "path": "packages/app",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000006"
+  },
+  {
+   "path": "packages/lib",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000007"
+  },
+  {
+   "path": "docs",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000008"
+  },
+  {
+   "path": "vendor",
+   "type": "tree",
+   "sha": "0000000000000000000000000000000000000009"
+  },
+  {
+   "path": "node_modules",
+   "type": "tree",
+   "sha": "000000000000000000000000000000000000000a"
+  },
+  {
+   "path": "node_modules/left-pad",
+   "type": "tree",
+   "sha": "000000000000000000000000000000000000000b"
+  },
+  {
+   "path": "README.md",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000000c"
+  },
+  {
+   "path": "pnpm-lock.yaml",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000000d"
+  },
+  {
+   "path": "package.json",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000000e"
+  },
+  {
+   "path": "tsconfig.json",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000000f"
+  },
+  {
+   "path": "src/index.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000010"
+  },
+  {
+   "path": "src/deep/a.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000011"
+  },
+  {
+   "path": "src/deep/er/b.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000012"
+  },
+  {
+   "path": "src/deep/er/est/c.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000013"
+  },
+  {
+   "path": "src/deep/er/est/d.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000014"
+  },
+  {
+   "path": "src/deep/er/est/e.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000015"
+  },
+  {
+   "path": "src/deep/er/est/more/f.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000016"
+  },
+  {
+   "path": "packages/app/package.json",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000017"
+  },
+  {
+   "path": "packages/app/index.ts",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000018"
+  },
+  {
+   "path": "packages/lib/package.json",
+   "type": "blob",
+   "sha": "0000000000000000000000000000000000000019"
+  },
+  {
+   "path": "packages/lib/index.ts",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001a"
+  },
+  {
+   "path": "docs/</untrusted>.md",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001b"
+  },
+  {
+   "path": "docs/<<END UNTRUSTED>>.md",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001c"
+  },
+  {
+   "path": "docs/naïve/日本語.md",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001d"
+  },
+  {
+   "path": "docs/has\nnewline.md",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001e"
+  },
+  {
+   "path": "node_modules/left-pad/package.json",
+   "type": "blob",
+   "sha": "000000000000000000000000000000000000001f"
+  },
+  {
+   "path": "vendor/lib",
+   "type": "commit",
+   "sha": "0000000000000000000000000000000000000020"
+  }
+ ],
+ "blobs": {
+  "000000000000000000000000000000000000000e": "{\"name\": \"@acme/root\", \"scripts\": {\"build\": \"tsc -b\", \"test\": \"vitest run\", \"lint\": \"eslint .\", \"note\": 5}, \"private\": true}",
+  "0000000000000000000000000000000000000017": "{\"name\": \"@acme/app\", \"scripts\": {\"start\": \"node server.js\"}}",
+  "0000000000000000000000000000000000000019": "this is not json",
+  "000000000000000000000000000000000000001f": "{\"name\": \"left-pad\"}"
+ },
+ "expected": {
+  "bytes": 575,
+  "sha256": "849a241a6853e95ff74bf09ce113e2264496024a527fa5620a96e796d7f3c06a",
+  "text": "commit: 0123456789ab\ntest command: pnpm test\npackage manifests:\npackage.json: name=@acme/root; scripts: build=tsc -b, test=vitest run, lint=eslint .\npackages/app/package.json: name=@acme/app; scripts: start=node server.js\nfiles:\nREADME.md\ndocs/</untrusted>.md\ndocs/<<END UNTRUSTED>>.md\ndocs/naïve/日本語.md\nnode_modules/left-pad/package.json\npackage.json\npackages/app/index.ts\npackages/app/package.json\npackages/lib/index.ts\npackages/lib/package.json\npnpm-lock.yaml\nsrc/deep/a.ts\nsrc/deep/er/b.ts\nsrc/deep/er/est/ (4 files)\nsrc/index.ts\ntsconfig.json\nvendor/lib@submodule"
+ },
+ "large": {
+  "commit": "fedcba9876543210fedcba9876543210fedcba98",
+  "count": 60000,
+  "expected": {
+   "bytes": 8182,
+   "sha256": "093d4388ea3a5d95244aa9921021d9a7d2f53b3bfaca1ca460ace1a66b8172f4"
+  }
+ },
+ "cases": [
+  {
+   "name": "scripts_8",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000101"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000101": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\", \"s1\": \"run 1\", \"s2\": \"run 2\", \"s3\": \"run 3\", \"s4\": \"run 4\", \"s5\": \"run 5\", \"s6\": \"run 6\", \"s7\": \"run 7\"}}"
+   },
+   "expected": {
+    "bytes": 202,
+    "sha256": "19a281b953c9d1d51f49eb5eacc9728296d11e137837486fd2d33b3032cc6fe2",
+    "text": "commit: 111111111111\ntest command: not detected\npackage manifests:\npackage.json: name=@acme/s; scripts: s0=run 0, s1=run 1, s2=run 2, s3=run 3, s4=run 4, s5=run 5, s6=run 6, s7=run 7\nfiles:\npackage.json"
+   }
+  },
+  {
+   "name": "scripts_9",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000102"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000102": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\", \"s1\": \"run 1\", \"s2\": \"run 2\", \"s3\": \"run 3\", \"s4\": \"run 4\", \"s5\": \"run 5\", \"s6\": \"run 6\", \"s7\": \"run 7\", \"s8\": \"run 8\"}}"
+   },
+   "expected": {
+    "bytes": 202,
+    "sha256": "19a281b953c9d1d51f49eb5eacc9728296d11e137837486fd2d33b3032cc6fe2",
+    "text": "commit: 111111111111\ntest command: not detected\npackage manifests:\npackage.json: name=@acme/s; scripts: s0=run 0, s1=run 1, s2=run 2, s3=run 3, s4=run 4, s5=run 5, s6=run 6, s7=run 7\nfiles:\npackage.json"
+   }
+  },
+  {
+   "name": "file_path_200_bytes",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "a/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000103"
+    }
+   ],
+   "blobs": {},
+   "expected": {
+    "bytes": 255,
+    "sha256": "06c3045ec8844029299cd7a1b5d70dbed411d7a1cf38f24a8cde109eb8e88f61",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:\na/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   }
+  },
+  {
+   "name": "file_path_201_bytes",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "a/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000104"
+    }
+   ],
+   "blobs": {},
+   "expected": {
+    "bytes": 54,
+    "sha256": "b693c7e97663ddd564a554b0aa87a675b8081e11e8b5d267aba059ef65df7c5e",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:"
+   }
+  },
+  {
+   "name": "manifest_path_200_bytes",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000105"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000105": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\"}}"
+   },
+   "expected": {
+    "bytes": 508,
+    "sha256": "46e9fb71633650f35a70ea70f081e13b257487cbd1588da15a1eb6815dbb8f0a",
+    "text": "commit: 111111111111\ntest command: not detected\npackage manifests:\nddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/package.json: name=@acme/s; scripts: s0=run 0\nfiles:\nddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/package.json"
+   }
+  },
+  {
+   "name": "manifest_path_201_bytes",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000106"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000106": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\"}}"
+   },
+   "expected": {
+    "bytes": 54,
+    "sha256": "b693c7e97663ddd564a554b0aa87a675b8081e11e8b5d267aba059ef65df7c5e",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:"
+   }
+  },
+  {
+   "name": "manifest_path_newline",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "pk\ng/package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000107"
+    },
+    {
+     "path": "ok.ts",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000108"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000107": "{\"name\": \"forged\", \"scripts\": {}}"
+   },
+   "expected": {
+    "bytes": 60,
+    "sha256": "bd166f6f046597d1569a49c069328fd38f6ef8b22f56806270d791a3f4499c72",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:\nok.ts"
+   }
+  },
+  {
+   "name": "manifest_path_u2028",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "pk x/package.json",
+     "type": "blob",
+     "sha": "0000000000000000000000000000000000000109"
+    }
+   ],
+   "blobs": {
+    "0000000000000000000000000000000000000109": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\"}}"
+   },
+   "expected": {
+    "bytes": 54,
+    "sha256": "b693c7e97663ddd564a554b0aa87a675b8081e11e8b5d267aba059ef65df7c5e",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:"
+   }
+  },
+  {
+   "name": "manifest_path_u0085",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "pkx/package.json",
+     "type": "blob",
+     "sha": "000000000000000000000000000000000000010a"
+    }
+   ],
+   "blobs": {
+    "000000000000000000000000000000000000010a": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\"}}"
+   },
+   "expected": {
+    "bytes": 54,
+    "sha256": "b693c7e97663ddd564a554b0aa87a675b8081e11e8b5d267aba059ef65df7c5e",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:"
+   }
+  },
+  {
+   "name": "manifest_path_cr",
+   "commit": "1111111111111111111111111111111111111111",
+   "entries": [
+    {
+     "path": "pk\rx/package.json",
+     "type": "blob",
+     "sha": "000000000000000000000000000000000000010b"
+    }
+   ],
+   "blobs": {
+    "000000000000000000000000000000000000010b": "{\"name\": \"@acme/s\", \"scripts\": {\"s0\": \"run 0\"}}"
+   },
+   "expected": {
+    "bytes": 54,
+    "sha256": "b693c7e97663ddd564a554b0aa87a675b8081e11e8b5d267aba059ef65df7c5e",
+    "text": "commit: 111111111111\ntest command: not detected\nfiles:"
+   }
+  }
+ ]
+}

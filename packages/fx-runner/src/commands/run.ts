@@ -232,7 +232,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     const usage = createUsageGate({ credentialMode: registration.credential_mode === "subscription" ? "subscription" : "api_key", now: () => clock.now().getTime() });
     const stopped = new AbortController();
     const client = createRunnerClient({ origin: registration.cloud_origin, key, now: ctx.now, fetchFn: ctx.fetchFn, bypass: requireUsable(ctx.bypass) });
-    const git = createGitPath({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
+    const git = createGitPath({ capture: host.engine.capture, ...(host.engine.captureLarge === undefined ? {} : { captureLarge: host.engine.captureLarge }), envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, ...(hooks.remoteUrl === undefined ? {} : { remoteUrl: hooks.remoteUrl }) });
     // Path A (cloud-verified jobs) exists only where this build pins a GitHub proxy for the cloud; a verified job elsewhere ends `git_proxy_unpinned`.
     const gitA = gitProxyHashFor(registration.cloud_origin, hooks.gitProxies) === undefined ? undefined : createGitPathA({ capture: host.engine.capture, envOptions, mirrorsRoot, stateDir, keepClear, signal: stopped.signal, cloudOrigin: registration.cloud_origin, platform: host.platform, mintTicket: (runId, generation) => client.gitTicket(runId, generation), ...(hooks.gitProxies === undefined ? {} : { pinned: hooks.gitProxies }) });
     const packageStoreRoot = path.join(path.dirname(mirrorsRoot), "pnpm-store");

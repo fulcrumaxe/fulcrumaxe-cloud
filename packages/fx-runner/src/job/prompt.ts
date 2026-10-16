@@ -1,5 +1,6 @@
 import { isReviewJobRole, type Job } from "@fulcrumaxe/runner-protocol";
 import { TEST_ROLES } from "./depsRegistry.js";
+import { repoMapHeading } from "./repoMap.js";
 import { roleToolsFor } from "./roleTools.js";
 
 /**
@@ -110,7 +111,7 @@ export type PromptJob = Pick<Job, "role" | "task" | "role_card">;
  * block. This function only builds a string: nothing in this package runs text from a job, and it is never put in an
  * argument list. An unknown role throws.
  */
-export function buildPrompt(job: PromptJob, notes: readonly string[] = []): string {
+export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoMap?: { version: string; text: string }): string {
   roleToolsFor(job.role);
   return [
     `You are a ${job.role} agent in the autonomous development team.`,
@@ -126,6 +127,9 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = []): stri
     ...notes.flatMap((note) => ["", note]),
     "",
     "<untrusted>",
+    // D#600 CX-3b: the repository map is the repo's own text (every path in it is repo-controlled), so it rides inside the untrusted block, ahead of the
+    // task, with a closing tag in a path neutralised like any other. It sits before the Spec, as on the cloud side.
+    ...(repoMap === undefined ? [] : [repoMapHeading(repoMap.version), escapeUntrustedClose(repoMap.text), ""]),
     escapeUntrustedClose(job.task.prompt),
     CLOSING,
     "",
