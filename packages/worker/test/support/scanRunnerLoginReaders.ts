@@ -24,7 +24,7 @@ const WORKER_DIR = path.join("packages", "worker") + path.sep;
 
 
 /** Joins adjacent string literals ("a" + "b") and literal-array joins (["a","b"].join("_")) until stable. */
-function fold(source: string): string {
+export function fold(source: string): string {
   const concat = new RegExp(String.raw`(['"\`])([^'"\`\\\n]*)\1\s*\+\s*(['"\`])([^'"\`\\\n]*)\3`, "g");
   const join = new RegExp(
     String.raw`\[\s*((?:(['"\`])[^'"\`\\\n]*\2\s*,?\s*)+)\]\s*\.join\(\s*(['"\`])([^'"\`\\\n]*)\3\s*\)`,
@@ -223,7 +223,7 @@ function decodeEscapes(text: string): string {
 }
 
 /** Returns code with comments dropped and each literal replaced by "§n" (its text goes in `literals`). Template `${}` bodies count as code. */
-function tokenize(source: string, literals: string[]): string {
+export function tokenize(source: string, literals: string[]): string {
   let code = "";
   let i = 0;
   const n = source.length;
@@ -347,7 +347,7 @@ function walk(dir: string, out: string[]): string[] {
  * A root that is not a git checkout (a fixture) is walked instead, skipping only
  * SKIP_DIRS.
  */
-function listFiles(root: string, top: string): string[] {
+export function listFiles(root: string, top: string): string[] {
   return listFilesWithMode(root, top).files;
 }
 

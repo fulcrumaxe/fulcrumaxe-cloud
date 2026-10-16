@@ -129,6 +129,25 @@ export async function getCurrentDialSetting(
   return rows[0] ? mapDecisionSettingRow(rows[0]) : null;
 }
 
+/**
+ * The dial row at exactly `version` for `(repoId, decisionType)` (D#7 DP4b-1), or `null` for version 0 (no row: the catalogue default
+ * applies) or a version that was never written. A read only. `client` must come from `withTenant`, as for `getCurrentDialSetting`.
+ */
+export async function getDialSettingAt(
+  client: PoolClient,
+  repoId: string,
+  decisionType: string,
+  version: number,
+): Promise<DecisionSetting | null> {
+  if (!Number.isInteger(version) || version < 1) return null;
+  const { rows } = await client.query<DecisionSettingRow>(
+    `SELECT * FROM decision_settings
+     WHERE repo_id = $1 AND decision_type = $2 AND version = $3`,
+    [repoId, decisionType, version],
+  );
+  return rows[0] ? mapDecisionSettingRow(rows[0]) : null;
+}
+
 /** Every version ever written for `(repoId, decisionType)`, oldest first -- the full history, not just current state. */
 export async function listDialHistory(
   client: PoolClient,

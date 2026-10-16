@@ -6,6 +6,7 @@ import { forgetWorkerForTests } from "../src/compositionRoot.js";
 
 const poolA = { tag: "runner-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
 const poolB = { tag: "ops-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
+const poolC = { tag: "receipt-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
 
 const mocks = vi.hoisted(() => ({ createWorkerPools: vi.fn() }));
 vi.mock("../src/pools.js", async (original) => ({
@@ -16,7 +17,7 @@ vi.mock("../src/pools.js", async (original) => ({
 beforeEach(() => {
   forgetWorkerForTests();
   mocks.createWorkerPools.mockReset();
-  mocks.createWorkerPools.mockImplementation(async () => ({ runnerPool: poolA, platformOpsPool: poolB, close: async () => {} }));
+  mocks.createWorkerPools.mockImplementation(async () => ({ runnerPool: poolA, platformOpsPool: poolB, receiptPool: poolC, close: async () => {} }));
 });
 
 const OPTIONS = {
@@ -111,8 +112,9 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);
+    expect(everything).not.toContain(poolC);
     const keys = everything.flatMap((v) => (typeof v === "object" && v !== null ? Object.keys(v) : []));
-    for (const forbidden of ["pool", "pools", "runnerPool", "platformOpsPool", "targetDeps", "sandboxPort", "deps", "client", "connect", "query", "end", "connectionString", "options"]) {
+    for (const forbidden of ["pool", "pools", "runnerPool", "platformOpsPool", "receiptPool", "targetDeps", "sandboxPort", "deps", "client", "connect", "query", "end", "connectionString", "options"]) {
       expect(keys, forbidden).not.toContain(forbidden);
     }
     await worker.close();
@@ -128,6 +130,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);
+    expect(everything).not.toContain(poolC);
     expect(everything).not.toContain(follow);
     const keys = everything.flatMap((v) => (typeof v === "object" && v !== null ? Object.keys(v) : []));
     for (const forbidden of ["start", "starter", "follow", "inCreateTransaction", "hookToken", "token"]) expect(keys, forbidden).not.toContain(forbidden);
@@ -173,7 +176,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     let n = 0;
     mocks.createWorkerPools.mockImplementation(async () => {
       const id = `w${++n}`;
-      return { runnerPool: poolA, platformOpsPool: poolB, close: async () => void closes.push(id) };
+      return { runnerPool: poolA, platformOpsPool: poolB, receiptPool: poolC, close: async () => void closes.push(id) };
     });
     const first = await createWorker(OPTIONS);
     await first.close();

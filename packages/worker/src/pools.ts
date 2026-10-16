@@ -13,16 +13,26 @@ import { createPool } from "@fx/db/src/pool.js";
  * (test/runnerLoginReader.test.ts scans every source file for the name, ways to
  * spell it, and any import of this module from outside the package).
  *
+ * THIS IS ALSO THE ONLY FILE THAT READS THE RECEIPT LOGIN (D#7 DP4b-1, RCPT-*).
+ * It is a member of `app_user` and `receipt_writer_invoker` and nothing else:
+ * the only login that can call the decision-receipt and decision-ask definers.
+ * Without it the worker does not start (`CONFIG`): a receipt is written for
+ * every resolved decision, so there is no half state in which the worker runs
+ * and quietly drops or skips them. test/receiptLoginReader.test.ts scans for it
+ * the way runnerLoginReader.test.ts does for the runner login.
+ *
  * Errors here carry a fixed rule id and message only: never a connection
  * string, a role's password, the driver's message or its `cause`.
  */
 
 /** The runner login's connection string (`app_user` + `agent_run_writer`). */
 const RUNNER_LOGIN_ENV = "FX_RUNNER_LOGIN_URL";
+/** The receipt login's connection string (`app_user` + `receipt_writer_invoker`, and nothing else). */
+const RECEIPT_LOGIN_ENV = "FX_RECEIPT_LOGIN_URL";
 /** The `platform_ops` connection string (already used by apps/web). */
 export const PLATFORM_OPS_ENV = "DATABASE_URL_PLATFORM_OPS";
 
-export type StartupRule = "OPS-1" | "OPS-2" | "OPS-4" | "OPS-5" | "CONFIG" | "DB-UNAVAILABLE";
+export type StartupRule = "OPS-1" | "OPS-2" | "OPS-4" | "OPS-5" | "RCPT-1" | "RCPT-2" | "RCPT-3" | "CONFIG" | "DB-UNAVAILABLE";
 
 const RULE_TEXT: Readonly<Record<StartupRule, string>> = {
   "OPS-1": "the platform_ops pool must connect as exactly platform_ops (session_user), not a member of it",
@@ -31,9 +41,13 @@ const RULE_TEXT: Readonly<Record<StartupRule, string>> = {
   "OPS-4":
     "no runtime login may hold platform_ops, directly or through another role; only the database owner may be a member of it, and the owner must not be a runtime login; never grant any other role membership in platform_ops",
   "OPS-5": "the runner login must be a member of both app_user and agent_run_writer, or a run fails with a permission error after its money is reserved",
+  "RCPT-1": "the receipt login must be a member of both app_user and receipt_writer_invoker, or a decision receipt cannot be written",
+  "RCPT-2":
+    "the receipt login must not be a superuser or able to bypass row-level security, by any route, and must not be a member of agent_run_writer, receipt_writer or platform_ops",
+  "RCPT-3": "the runner login must not be a member of receipt_writer_invoker: the credential an agent's run uses must never reach the receipt writer",
   "DB-UNAVAILABLE":
     "a guard query could not be run (database unreachable or the query failed), so nothing was verified and the worker will not start",
-  CONFIG: "a required worker connection variable is not set, or a pool could not be built",
+  CONFIG: "a required worker connection variable (the runner, platform_ops or receipt login) is not set, or a pool could not be built",
 };
 
 /** The worker refused to start. `rule` names which guard; nothing else leaks. */
@@ -85,6 +99,46 @@ export async function assertRunnerLoginNotSuperuser(pool: Queryable): Promise<vo
 export async function assertRunnerLoginRoles(pool: Queryable): Promise<void> {
   const ok = await scalar(pool, "SELECT (pg_has_role(session_user, 'app_user', 'USAGE') AND pg_has_role(session_user, 'agent_run_writer', 'USAGE')) AS v");
   if (ok !== true) throw new StartupGuardError("OPS-5");
+}
+
+/**
+ * RCPT-1: the receipt login has the privileges of `app_user` AND `receipt_writer_invoker` without SET ROLE (USAGE, as OPS-5: the
+ * pool never runs SET ROLE, so a NOINHERIT grant would leave it with neither). A plain true; anything else, a missing role included, refuses.
+ */
+export async function assertReceiptLoginRoles(pool: Queryable): Promise<void> {
+  const ok = await scalar(pool, "SELECT (pg_has_role(session_user, 'app_user', 'USAGE') AND pg_has_role(session_user, 'receipt_writer_invoker', 'USAGE')) AS v");
+  if (ok !== true) throw new StartupGuardError("RCPT-1");
+}
+
+/**
+ * RCPT-2: the receipt login is unsafe if it is a superuser or can bypass row-level security by any route (the OPS-2 query), or is a
+ * member, as `session_user` or `current_user`, directly or indirectly, of `agent_run_writer`, `receipt_writer` or `platform_ops`: each
+ * of those would let it do what the receipt writer's definers are there to prevent. Only a plain false passes.
+ */
+export const RCPT2_UNSAFE_SQL = `SELECT (
+  COALESCE((SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = session_user), true)
+  OR COALESCE((SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user), true)
+  OR EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls)
+             AND (pg_has_role(session_user, r.oid, 'MEMBER') OR pg_has_role(current_user, r.oid, 'MEMBER')))
+  OR pg_has_role(session_user, 'agent_run_writer', 'MEMBER') OR pg_has_role(current_user, 'agent_run_writer', 'MEMBER')
+  OR pg_has_role(session_user, 'receipt_writer', 'MEMBER') OR pg_has_role(current_user, 'receipt_writer', 'MEMBER')
+  OR pg_has_role(session_user, 'platform_ops', 'MEMBER') OR pg_has_role(current_user, 'platform_ops', 'MEMBER')
+) AS v`;
+
+export async function assertReceiptLoginIsolated(pool: Queryable): Promise<void> {
+  if ((await scalar(pool, RCPT2_UNSAFE_SQL)) !== false) throw new StartupGuardError("RCPT-2");
+}
+
+/**
+ * RCPT-3, run on the RUNNER pool: the runner login (the credential an agent's run uses) is not a member of `receipt_writer_invoker`,
+ * as `session_user` or `current_user`, directly or through another role. Only a plain false passes.
+ */
+export const RCPT3_RUNNER_HOLDS_SQL = `SELECT (
+  pg_has_role(session_user, 'receipt_writer_invoker', 'MEMBER') OR pg_has_role(current_user, 'receipt_writer_invoker', 'MEMBER')
+) AS v`;
+
+export async function assertRunnerLoginCannotWriteReceipts(runnerPool: Queryable): Promise<void> {
+  if ((await scalar(runnerPool, RCPT3_RUNNER_HOLDS_SQL)) !== false) throw new StartupGuardError("RCPT-3");
 }
 
 /**
@@ -188,6 +242,8 @@ export interface WorkerPools {
   /** The runner login: the only pool that may write `agent_runs`. */
   runnerPool: Pool;
   platformOpsPool: Pool;
+  /** The receipt login: the only pool that may call the decision-receipt and decision-ask definers (D#7 DP4b-1). */
+  receiptPool: Pool;
   close(): Promise<void>;
 }
 
@@ -196,35 +252,54 @@ export interface CreateWorkerPoolsDeps {
   makePool?: (connectionString: string) => Pool;
 }
 
-/** Builds both pools from `env` and runs every guard; on any refusal the pools are closed and the guard error thrown. */
+/** Builds the three pools from `env` and runs every guard; on any refusal the pools are closed and the guard error thrown. */
 export async function createWorkerPools(
   env: Readonly<Record<string, string | undefined>>,
   deps: CreateWorkerPoolsDeps = {},
 ): Promise<WorkerPools> {
   const runnerUrl = env[RUNNER_LOGIN_ENV];
   const opsUrl = env[PLATFORM_OPS_ENV];
-  if (!runnerUrl || !opsUrl) throw new StartupGuardError("CONFIG");
+  const receiptUrl = env[RECEIPT_LOGIN_ENV]?.trim(); // blank counts as unset
+  // All three or no worker: a missing receipt login is a hard stop at startup, never a worker that skips or drops receipts.
+  if (!runnerUrl || !opsUrl || !receiptUrl) throw new StartupGuardError("CONFIG");
   const makePool = deps.makePool ?? ((url: string) => createPool(url));
-  const runnerPool = makePool(runnerUrl);
-  let platformOpsPool: Pool;
-  try {
-    platformOpsPool = makePool(opsUrl);
-  } catch {
-    await runnerPool.end().catch(() => undefined);
-    throw new StartupGuardError("CONFIG");
-  }
-  const close = async (): Promise<void> => {
-    await Promise.allSettled([runnerPool.end(), platformOpsPool.end()]);
+  const built: Pool[] = [];
+  const build = (url: string): Pool => {
+    try {
+      const pool = makePool(url);
+      built.push(pool);
+      return pool;
+    } catch {
+      // The driver's message can carry the URL: only the rule id leaves here.
+      throw new StartupGuardError("CONFIG");
+    }
   };
+  const close = async (): Promise<void> => {
+    await Promise.allSettled(built.map((pool) => pool.end()));
+  };
+  let runnerPool: Pool;
+  let platformOpsPool: Pool;
+  let receiptPool: Pool;
+  try {
+    runnerPool = build(runnerUrl);
+    platformOpsPool = build(opsUrl);
+    receiptPool = build(receiptUrl);
+  } catch (err) {
+    await close();
+    throw err;
+  }
   try {
     await assertPlatformOpsSession(platformOpsPool);
     await assertRunnerLoginNotSuperuser(runnerPool);
     await assertRunnerLoginRoles(runnerPool);
     await assertPlatformOpsHasNoMembers(platformOpsPool, runnerPool);
     await assertOtherRuntimeUrlsHoldNothing(env, makePool);
+    await assertReceiptLoginRoles(receiptPool);
+    await assertReceiptLoginIsolated(receiptPool);
+    await assertRunnerLoginCannotWriteReceipts(runnerPool);
   } catch (err) {
     await close();
     throw err;
   }
-  return { runnerPool, platformOpsPool, close };
+  return { runnerPool, platformOpsPool, receiptPool, close };
 }

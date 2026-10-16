@@ -66,10 +66,35 @@ export interface ResumeContext {
   /** Present at least when cause is "request_refused" — why. Optional for
    *  the other two causes, which are usually self-explanatory. */
   reason?: string;
+  /**
+   * Present only with cause "decision_resolved" (D#7 DP4b-1): the id of the option that was chosen, so the resumed role is told
+   * which way to go. An ask option id (`^[a-z][a-z0-9_]{0,31}$`); "deny" is a different cause, "decision_denied", and carries none.
+   */
+  option?: string;
 }
 
 export const RESUME_CAUSES: readonly ResumeCause[] = ["child_result", "timeout", "request_refused", "decision_resolved", "decision_denied"];
 
 export function isResumeCause(value: unknown): value is ResumeCause {
   return typeof value === "string" && (RESUME_CAUSES as readonly string[]).includes(value);
+}
+
+/** The shape of an ask option id (migration 0666's definer). */
+const RESUME_OPTION_ID = /^[a-z][a-z0-9_]{0,31}$/;
+
+/**
+ * Whether `value` is a well-formed ResumeContext: a known cause, an optional string reason, and an `option` only with
+ * "decision_resolved" and in the option-id shape. Any other key is refused, so a field added without a reviewed change here does not pass.
+ */
+export function isResumeContext(value: unknown): value is ResumeContext {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  for (const key of Object.keys(v)) if (key !== "cause" && key !== "reason" && key !== "option") return false;
+  if (!isResumeCause(v.cause)) return false;
+  if (v.reason !== undefined && typeof v.reason !== "string") return false;
+  if (v.option !== undefined) {
+    if (v.cause !== "decision_resolved") return false;
+    if (typeof v.option !== "string" || !RESUME_OPTION_ID.test(v.option) || v.option === "deny") return false;
+  }
+  return true;
 }

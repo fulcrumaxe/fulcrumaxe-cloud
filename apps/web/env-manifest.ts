@@ -103,6 +103,7 @@ export const ENV_MANIFEST: readonly EnvVar[] = [
   { name: "DATABASE_URL_EVENTS_LISTEN", scope: "web", requiredIn: NONE, secret: true, feature: "Live events", validation: pg, whenMissing: "default_used", note: "The live-event listener uses DATABASE_URL_PLATFORM_OPS; set a direct (non-pooler) URL when that one is pooled" },
   { name: "DATABASE_URL_GH_PROXY", scope: "web", requiredIn: NONE, secret: true, feature: "GitHub proxy", validation: pg, whenMissing: "feature_disabled", note: "Needed only on the deployment that serves the gh-proxy route; the route answers an error without it" },
   { name: "FX_RUNNER_LOGIN_URL", scope: "web", requiredIn: NONE, secret: true, feature: "Pipeline worker", validation: pg, whenMissing: "feature_disabled", note: "The pipeline worker cannot start, so runs do not execute" },
+  { name: "FX_RECEIPT_LOGIN_URL", scope: "web", requiredIn: NONE, secret: true, feature: "Pipeline worker", validation: pg, whenMissing: "feature_disabled", note: "The pipeline worker cannot start, so runs do not execute" },
 
   // Sessions, sign-in and the browser origin check.
   { name: "FX_SESSION_SECRET", scope: "web", requiredIn: SP, secret: true, feature: "Sign-in sessions", validation: { type: "min-chars", n: 32 }, whenMissing: "request_fails", note: "Cookies cannot be signed or verified; sign-in fails" },

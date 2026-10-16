@@ -59,6 +59,7 @@ import { createRunnerGitTicketFacade, type RunnerGitTicketFacade } from "./runne
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { sweepInvariants, type InvariantSweeper } from "./invariantSweep.js";
+import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
 import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
@@ -342,8 +343,14 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     };
     const runSweepSandboxReap = (input: SweepSandboxReapInput): Promise<SweepSandboxReapResult> =>
       sweepSandboxReap({ pool: pools.runnerPool, port: sandboxPort, stopStray: (run) => sandboxTarget.stopStraySandbox(run) }, input);
+    // D#7 DP4b-1: the ask-withdrawal sweep rides the invariant sweep's tick (the same cron, the same cross-tenant shape) on the RECEIPT pool; it never throws, so it cannot fail the invariant result.
+    const runInvariantTick = async (): Promise<Awaited<ReturnType<typeof sweepInvariants>>> => {
+      const result = await sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) });
+      await sweepAskWithdrawals({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
+      return result;
+    };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: () => sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) }), ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;

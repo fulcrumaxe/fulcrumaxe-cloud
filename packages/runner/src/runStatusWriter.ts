@@ -299,6 +299,18 @@ export async function recordRunnerNotice(
   await insertRunEvent(client, p.accountId, p.runId, p.kind, p.payload);
 }
 
+/**
+ * D#7 DP4b-1: the run's `decision.snapshot` row (the keys it was offered, each with the disposition and dial version frozen at spawn),
+ * written on the caller's client so it commits or rolls back with the run's create transaction. The payload is built by the worker's
+ * `buildDecisionSnapshot`; it holds ids, fixed words and numbers, never agent text, and goes through the same redaction as every row.
+ */
+export async function recordDecisionSnapshotEvent(
+  client: PoolClient,
+  p: { accountId: string; runId: string; payload: Record<string, unknown> },
+): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, "decision.snapshot", p.payload);
+}
+
 /** D#2 PREVIEW-RUNNER-EVENTS: one `run.stage` row. The caller has already limited `stage` to a fixed name. */
 export async function recordRunStage(pool: Pool, p: { accountId: string; runId: string; stage: string }): Promise<void> {
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "run.stage", { stage: p.stage }));

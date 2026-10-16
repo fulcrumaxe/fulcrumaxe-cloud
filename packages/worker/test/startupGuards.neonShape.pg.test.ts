@@ -12,11 +12,15 @@ import {
   StartupGuardError,
   assertPlatformOpsHasNoMembers,
   assertPlatformOpsSession,
+  assertReceiptLoginIsolated,
+  assertReceiptLoginRoles,
+  assertRunnerLoginCannotWriteReceipts,
   assertRunnerLoginNotSuperuser,
   assertRunnerLoginRoles,
   createWorkerPools,
 } from "../src/pools.js";
 import { RUNNER_LOGIN_NAME } from "./support/scanRunnerLoginReaders.js";
+import { RECEIPT_LOGIN_NAME } from "./support/scanReceiptLoginReaders.js";
 
 /**
  * Every startup guard against the HOSTED owner shape: a database whose owner is
@@ -33,6 +37,7 @@ import { RUNNER_LOGIN_NAME } from "./support/scanRunnerLoginReaders.js";
  */
 const OWNER = "fx_neon_owner";
 const RUNNER = "fx_runner";
+const RECEIPT = "fx_receipt";
 const DB = "fx_neon_guard";
 
 /**
@@ -100,6 +105,9 @@ describe("startup guards on the hosted owner shape [pg]", () => {
       // The runner login as the ops script creates it, by the owner.
       await ownerPool.query(`CREATE ROLE ${RUNNER} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT`);
       await ownerPool.query(`GRANT app_user, agent_run_writer TO ${RUNNER} WITH INHERIT TRUE`);
+      // The receipt login as the ops script creates it, by the owner (D#7 DP4b-1): app_user and receipt_writer_invoker, and nothing else.
+      await ownerPool.query(`CREATE ROLE ${RECEIPT} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT`);
+      await ownerPool.query(`GRANT app_user, receipt_writer_invoker TO ${RECEIPT} WITH INHERIT TRUE`);
     } finally {
       await ownerPool.end();
     }
@@ -125,18 +133,42 @@ describe("startup guards on the hosted owner shape [pg]", () => {
     ]);
   });
 
-  it("every guard passes: OPS-1, OPS-2, OPS-4, OPS-5 and CONFIG, through createWorkerPools itself", async () => {
+  it("every guard passes: OPS-1, OPS-2, OPS-4, OPS-5, RCPT-1, RCPT-2, RCPT-3 and CONFIG, through createWorkerPools itself", async () => {
     const platformOps = poolFor("platform_ops");
     const runner = poolFor(RUNNER);
     await expect(assertPlatformOpsSession(platformOps)).resolves.toBeUndefined(); // OPS-1
     await expect(assertRunnerLoginNotSuperuser(runner)).resolves.toBeUndefined(); // OPS-2
     await expect(assertRunnerLoginRoles(runner)).resolves.toBeUndefined(); // OPS-5
     await expect(assertPlatformOpsHasNoMembers(platformOps, runner)).resolves.toBeUndefined(); // OPS-4
+    const receipt = poolFor(RECEIPT);
+    await expect(assertReceiptLoginRoles(receipt)).resolves.toBeUndefined(); // RCPT-1
+    await expect(assertReceiptLoginIsolated(receipt)).resolves.toBeUndefined(); // RCPT-2
+    await expect(assertRunnerLoginCannotWriteReceipts(runner)).resolves.toBeUndefined(); // RCPT-3
 
-    const worker = await createWorkerPools({ [RUNNER_LOGIN_NAME]: urlFor(RUNNER), [PLATFORM_OPS_ENV]: urlFor("platform_ops") }, { makePool: quietPool });
+    const env = { [RUNNER_LOGIN_NAME]: urlFor(RUNNER), [PLATFORM_OPS_ENV]: urlFor("platform_ops"), [RECEIPT_LOGIN_NAME]: urlFor(RECEIPT) };
+    const worker = await createWorkerPools(env, { makePool: quietPool });
     await worker.close();
-    // CONFIG still refuses a missing variable.
+    // CONFIG still refuses a missing variable, the receipt login's included.
     expect(await refusedWith(createWorkerPools({ [PLATFORM_OPS_ENV]: urlFor("platform_ops") }, { makePool: quietPool }))).toBe("CONFIG");
+    const { [RECEIPT_LOGIN_NAME]: _omitted, ...withoutReceipt } = env;
+    expect(await refusedWith(createWorkerPools(withoutReceipt, { makePool: quietPool }))).toBe("CONFIG");
+  });
+
+  it("the receipt guards refuse the hosted shape's wrong logins: the owner, the runner login as the receipt login, and a receipt login that holds receipt_writer", async () => {
+    const env = (receiptUrl: string): Record<string, string> => ({ [RUNNER_LOGIN_NAME]: urlFor(RUNNER), [PLATFORM_OPS_ENV]: urlFor("platform_ops"), [RECEIPT_LOGIN_NAME]: receiptUrl });
+    // The owner holds neither app_user nor receipt_writer_invoker through USAGE: RCPT-1 refuses first.
+    expect(await refusedWith(createWorkerPools(env(urlFor(OWNER)), { makePool: quietPool }))).toBe("RCPT-1");
+    // The runner login is not a member of receipt_writer_invoker.
+    expect(await refusedWith(createWorkerPools(env(urlFor(RUNNER)), { makePool: quietPool }))).toBe("RCPT-1");
+    await with_(`GRANT receipt_writer TO ${RECEIPT}`, `REVOKE receipt_writer FROM ${RECEIPT}`, async () => {
+      expect(await refusedWith(createWorkerPools(env(urlFor(RECEIPT)), { makePool: quietPool }))).toBe("RCPT-2");
+    });
+    await with_(`GRANT receipt_writer_invoker TO ${RUNNER}`, `REVOKE receipt_writer_invoker FROM ${RUNNER}`, async () => {
+      expect(await refusedWith(createWorkerPools(env(urlFor(RECEIPT)), { makePool: quietPool }))).toBe("RCPT-3");
+    });
+    // Each grant was reversed: the proper shape starts again.
+    const w = await createWorkerPools(env(urlFor(RECEIPT)), { makePool: quietPool });
+    await w.close();
   });
 
   it("refuses when app_user, the runner login or an events login is a member of platform_ops", async () => {
@@ -191,7 +223,7 @@ describe("startup guards on the hosted owner shape [pg]", () => {
   });
 
   describe("the web app's other database URLs", () => {
-    const base = (): Record<string, string> => ({ [RUNNER_LOGIN_NAME]: urlFor(RUNNER), [PLATFORM_OPS_ENV]: urlFor("platform_ops") });
+    const base = (): Record<string, string> => ({ [RUNNER_LOGIN_NAME]: urlFor(RUNNER), [PLATFORM_OPS_ENV]: urlFor("platform_ops"), [RECEIPT_LOGIN_NAME]: urlFor(RECEIPT) });
     const good = (): Record<string, string> => ({
       ...base(),
       [APP_USER_ENV]: urlFor("app_user"),
