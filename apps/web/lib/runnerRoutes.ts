@@ -10,6 +10,7 @@ import { runnerLimitsFor } from "@fx/worker";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
+import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
@@ -36,6 +37,7 @@ const leases: RunnerLeaseOps = {
   gitTicketContext: async (input) => (await requireWorker()).gitTicketContext(input),
   signGitTicket: async (input) => (await requireWorker()).signGitTicket(input),
   planePushGrant: async (input) => (await requireWorker()).planePushGrant(input),
+  planePushPairing: async (input) => (await requireWorker()).planePushPairing(input),
   planePushSettleGrant: async (input) => (await requireWorker()).planePushSettleGrant(input),
   planePushReportContext: async (input) => (await requireWorker()).planePushReportContext(input),
   planePushRecordReport: async (input) => (await requireWorker()).planePushRecordReport(input),
@@ -67,9 +69,15 @@ function accountJobLimit(plan: string): { jobs: number; hosted: boolean } {
   return "hosted" in limits ? { jobs: limits.defaultAccountJobs, hosted: true } : { jobs: limits.maxConcurrentRunnerJobs, hosted: false };
 }
 
+/** D#598 P1f-2b: the platform commit identity, read from the hosted settings on every call (a changed or removed setting applies to the next token). Null while either is missing or malformed. */
+function planePushIdentity(): { name: string; email: string } | null {
+  const read = readPlanePushIdentity(process.env);
+  return read.ok ? read.identity : null;
+}
+
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()) };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planePushIdentity };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ENV_MANIFEST, type DeployKind, type Validation } from "../env-manifest";
 import { deployKindOf, evaluateEnv, validateValue } from "../lib/env/check";
+import { PLANE_IDENTITY_EMAIL, PLANE_IDENTITY_NAME } from "@fx/core/src/repos/planePushIdentity.js";
 import { completeEnv } from "./support/envFixtures";
 
 /** For every validation type: values that pass, and values that fail with the expected fixed code. */
@@ -49,6 +50,8 @@ const CASES: Record<Validation["type"], { validation: Validation; good: string[]
     bad: [["-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----", "not_an_ed25519_private_key"], ["plain text", "not_an_ed25519_private_key"]],
   },
   "runner-signer-id": { validation: { type: "runner-signer-id" }, good: ["job-signer-1", "a.b_c-D"], bad: [["has space", "not_a_runner_signer_id"], ["x".repeat(65), "not_a_runner_signer_id"], ["a/b", "not_a_runner_signer_id"]] },
+  "plane-identity-name": { validation: { type: "plane-identity-name" }, good: ["Fulcrumaxe Bot", "a.b_c-D 9"], bad: [["Bot <b>", "not_a_plane_identity_name"], ["n".repeat(101), "not_a_plane_identity_name"], ["Bot\nTwo", "not_a_plane_identity_name"], ["Bot ", "not_a_plane_identity_name"]] },
+  "plane-identity-email": { validation: { type: "plane-identity-email" }, good: ["bot@example.com", "a.b+c@sub.example.org"], bad: [["bot@", "not_a_plane_identity_email"], ["bo t@example.com", "not_a_plane_identity_email"], ["Bot <bot@example.com>", "not_a_plane_identity_email"], ["bot@example.com\n", "not_a_plane_identity_email"]] },
   slug: { validation: { type: "slug" }, good: ["fx-team", "a1"], bad: [["Fx-Team", "not_a_slug"], ["has space", "not_a_slug"], ["x".repeat(65), "not_a_slug"]] },
   hostname: { validation: { type: "hostname" }, good: ["fwd.example.test"], bad: [["nodots", "not_a_hostname"], ["https://fwd.example.test", "not_a_hostname"], ["UPPER.example.test", "not_a_hostname"]] },
   "stripe-restricted-key": { validation: { type: "stripe-restricted-key" }, good: ["rk_test_abc123", "rk_live_abc123"], bad: [["sk_test_abc123", "not_a_stripe_restricted_key"], ["rk_abc", "not_a_stripe_restricted_key"]] },
@@ -233,4 +236,32 @@ describe("runner job signer settings: agreement fixtures (the same table as the 
       expect(validateValue({ type: "runner-signer-id" }, id) === null).toBe(ok);
     });
   }
+});
+
+describe("the public-push identity settings (D#598 P1f-2b)", () => {
+  const NAME = "FX_PLANE_PUSH_IDENTITY_NAME";
+  const EMAIL = "FX_PLANE_PUSH_IDENTITY_EMAIL";
+
+  it("have real validation types, not any", () => {
+    expect(ENV_MANIFEST.find((v) => v.name === NAME)!.validation).toEqual({ type: "plane-identity-name" });
+    expect(ENV_MANIFEST.find((v) => v.name === EMAIL)!.validation).toEqual({ type: "plane-identity-email" });
+  });
+
+  it("accept exactly what the settings reader in core accepts (the patterns are kept equal)", () => {
+    const names = ["Fulcrumaxe Bot", "Bot ", " Bot", "Bot <b>", "n".repeat(100), "n".repeat(101), "Bot\n", "", "ü"];
+    const emails = ["bot@example.com", "bot@", "@example.com", "a b@example.com", "a@b@c.com", "bot@example.com\n", "x".repeat(65) + "@e.com", "bot@" + "d".repeat(101)];
+    for (const n of names) expect(validateValue({ type: "plane-identity-name" }, n) === null, JSON.stringify(n)).toBe(PLANE_IDENTITY_NAME.test(n) && n.trim() === n);
+    for (const e of emails) expect(validateValue({ type: "plane-identity-email" }, e) === null, JSON.stringify(e)).toBe(PLANE_IDENTITY_EMAIL.test(e));
+  });
+
+  it("the health report names a malformed value as invalid (never the value), and a missing one as disabled", () => {
+    const base = { ...completeEnv("production") };
+    const bad = evaluateEnv(ENV_MANIFEST, { ...base, [NAME]: "Bot <zq9x7>", [EMAIL]: "not an email" }, "production");
+    expect(bad.invalidOptional).toEqual(expect.arrayContaining([{ name: NAME, reason: "not_a_plane_identity_name" }, { name: EMAIL, reason: "not_a_plane_identity_email" }]));
+    expect(JSON.stringify(bad)).not.toContain("zq9x7");
+    const missing = evaluateEnv(ENV_MANIFEST, base, "production");
+    expect(missing.disabled.map((d) => d.name)).toEqual(expect.arrayContaining([NAME, EMAIL]));
+    const ok = evaluateEnv(ENV_MANIFEST, { ...base, [NAME]: "Fulcrumaxe Bot", [EMAIL]: "bot@example.com" }, "production");
+    expect([...ok.invalidOptional.map((i) => i.name), ...ok.disabled.map((d) => d.name)]).not.toContain(NAME);
+  });
 });

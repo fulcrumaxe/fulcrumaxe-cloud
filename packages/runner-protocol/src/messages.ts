@@ -332,6 +332,16 @@ export const PlanePushTokenMessage = z.object({ run_id: uuid, lease_generation: 
 /** The signed route a runner asks for its one-use public push token on. */
 export const PLANE_PUSH_TOKEN_PATH = "/api/runner/plane-push-token";
 
+/**
+ * D#598 P1f-2b: the run-end hook asks for the repository's pairing (the private paths, the two rule-file paths, the paired repo) as it is NOW. The
+ * hook asks twice by design, once to load it and once after its scan to see that it did not move, so nothing here is use-once. Nothing but the
+ * run and generation travels: the pairing is the cloud's own row.
+ */
+export const PlanePushPairingMessage = z.object({ run_id: uuid, lease_generation: leaseGeneration }).strict();
+
+/** The signed route a runner reads the live pairing on. */
+export const PLANE_PUSH_PAIRING_PATH = "/api/runner/plane-push-pairing";
+
 /** The phases a run-end hook reports, in the order they happen. */
 export const PLANE_PUSH_PHASES = ["building", "scanning", "pushed", "pr_opened", "refused", "pr_failed", "no_change"] as const;
 export const PlanePushPhase = z.enum(PLANE_PUSH_PHASES);
@@ -360,8 +370,16 @@ export const PlanePushReportMessage = z
     tip_sha: gitSha.optional(),
     pr_number: safeInt.min(1).max(2_147_483_647).optional(),
     token_revoked: z.boolean().optional(),
+    pairing_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((m, ctx) => {
+    // The digest the hook read from the pairing route, echoed so the cloud can see which pairing the push was scanned against. Required for the
+    // phases that say something exists on GitHub; the cloud compares it with its own stamp and never uses the value.
+    if ((m.phase === "pushed" || m.phase === "pr_failed" || m.phase === "pr_opened") && m.pairing_digest === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pairing_digest"], message: "pairing_digest is required for this phase" });
+    }
+  });
 export type PlanePushReportMessage = z.infer<typeof PlanePushReportMessage>;
 
 /** The signed route a runner reports a phase of its public push on. */
@@ -478,6 +496,7 @@ export const RUNNER_MESSAGES = {
   heartbeat: HeartbeatMessage,
   git_ticket: GitTicketMessage,
   plane_push_token: PlanePushTokenMessage,
+  plane_push_pairing: PlanePushPairingMessage,
   plane_push_report: PlanePushReportMessage,
   events: EventsMessage,
   done: DoneMessage,

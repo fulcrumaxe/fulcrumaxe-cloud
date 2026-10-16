@@ -1,13 +1,13 @@
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushTokenReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingReply, PlanePushTokenReply, STOP_REASONS, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
-import { planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
+import { planePushPairingRun, planePushReportRun, planePushTokenRun, toResponse, type PlanePushHostedPort, type RunnerCloudDeps, type RunnerLeaseOps } from "@fx/runner-cloud";
 import { createRunnerClaimFacade } from "../src/runnerClaims.js";
 import { createRunnerPlanePushFacade } from "../src/runnerPlanePush.js";
 import { ORIGIN, newKey, signed, type TestKey } from "../../runner-cloud/test/helpers.js";
@@ -53,13 +53,19 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
     revokeToken: async () => true,
   };
 
+  let identity: { name: string; email: string } | null = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
   const facade = () => createRunnerPlanePushFacade(writerPool, { now: () => clock });
   const ops = (): RunnerLeaseOps => ({ ...claims, ...facade() }) as unknown as RunnerLeaseOps;
-  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, now: () => new Date(clock) });
+  const deps = (): RunnerCloudDeps => ({ appUserPool: appPool, origin: ORIGIN, failRunnerLeases: null, leases: ops(), planePush: port, planePushIdentity: () => identity, now: () => new Date(clock) });
   const created = () => Math.floor(clock / 1000);
   const token = (body: unknown, nonce?: string) => toResponse(() => planePushTokenRun(deps(), signed(key, PLANE_PUSH_TOKEN_PATH, body, { created: created(), ...(nonce ? { nonce } : {}) })));
-  const report = (run: { id: string; generation: number }, body: Record<string, unknown>) =>
-    toResponse(() => planePushReportRun(deps(), signed(key, PLANE_PUSH_REPORT_PATH, { run_id: run.id, lease_generation: run.generation, ...body }, { created: created() })));
+  /** A report as the hook sends it: it echoes the digest of the pairing it read (here, the stamp on the record) unless a test says otherwise. */
+  const report = async (run: { id: string; generation: number }, body: Record<string, unknown>) => {
+    const stamped = (await planeRow())?.pairing_digest as string | undefined;
+    return toResponse(() => planePushReportRun(deps(), signed(key, PLANE_PUSH_REPORT_PATH, { run_id: run.id, lease_generation: run.generation, ...(stamped ? { pairing_digest: stamped } : {}), ...body }, { created: created() })));
+  };
+  const askPairing = (run: { id: string; generation: number }, nonce?: string) =>
+    toResponse(() => planePushPairingRun(deps(), signed(key, PLANE_PUSH_PAIRING_PATH, { run_id: run.id, lease_generation: run.generation }, { created: created(), ...(nonce ? { nonce } : {}) })));
   const askToken = (run: { id: string; generation: number }) => token({ run_id: run.id, lease_generation: run.generation });
 
   beforeAll(async () => {
@@ -75,6 +81,7 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
   });
   beforeEach(async () => {
     clock = T0;
+    identity = { name: "Fulcrumaxe Bot", email: "bot@example.com" };
     github.mints.length = 0;
     github.asked.length = 0;
     github.mintError = null;
@@ -145,7 +152,15 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       const res = await askToken(run);
       expect(res.status).toBe(200);
       const reply = PlanePushTokenReply.parse(res.body);
-      expect(reply).toEqual({ token: TOKEN, expires_at: new Date(T0 + 55 * 60_000).toISOString(), code_repo: "acme/widgets-public", branch: `fx/p-${row.id}`, base: "main" });
+      expect(reply).toEqual({
+        token: TOKEN,
+        expires_at: new Date(T0 + 55 * 60_000).toISOString(),
+        code_repo: "acme/widgets-public",
+        branch: `fx/p-${row.id}`,
+        base: "main",
+        pr: { title: `Change from fulcrumaxe run ${run.id.slice(0, 8)}`, body: expect.stringContaining(`Run: ${run.id}`) },
+        identity: { name: "Fulcrumaxe Bot", email: "bot@example.com" },
+      });
       expect(res.headers).toMatchObject({ "cache-control": "no-store" });
       expect(github.mints).toEqual(["acme/widgets-public"]);
       const [attempt, ...rest] = await attempts();
@@ -153,6 +168,42 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(attempt).toMatchObject({ plane_push_id: row.id, run_id: run.id, lease_generation: run.generation, runtime: "runner", kind: "push", attempt_no: 1, token_revoked: null, finished_at: null, outcome: null });
       expect(attempt.token_issued_at).toBeInstanceOf(Date);
       expect(await leaseEnd(run.id)).toBe(before);
+    });
+
+    it("the PR title comes from the item's row, cleaned: a hostile stored title is one clean line with no mention, no reference and no URL, and the body has none of it", async () => {
+      const run = await ready();
+      await admin.query("UPDATE work_items SET title = $2 WHERE id = $1", [A.workItemId, "Fixes #12 @victim https://evil.example/x\nsecond line"]);
+      const res = await askToken(run);
+      expect(res.status).toBe(200);
+      const reply = PlanePushTokenReply.parse(res.body);
+      expect(reply.pr.title).toBe("Fixes victim second line");
+      expect(reply.pr.body).not.toMatch(/victim|evil|second/);
+    });
+
+    it("a missing identity setting is 503 not_configured BEFORE any attempt row: the row count is unchanged, GitHub is not asked, and after the setting is restored the same run still gets its one grant", async () => {
+      const run = await ready();
+      identity = null;
+      const before = (await attempts()).length;
+      const res = await askToken(run);
+      expect(res.status).toBe(503);
+      expect(res.body).toMatchObject({ error: { code: "not_configured" } });
+      expect((await attempts()).length).toBe(before);
+      expect(github.mints).toEqual([]);
+      identity = { name: "Platform Bot", email: "platform@example.org" };
+      const ok = await askToken(run);
+      expect(ok.status).toBe(200);
+      expect(PlanePushTokenReply.parse(ok.body).identity).toEqual({ name: "Platform Bot", email: "platform@example.org" });
+      expect(await attempts()).toHaveLength(before + 1);
+    });
+
+    it("an UPPERCASE run id gets its one grant, one attempt row and a 200 (the id is lowercased before the grant), and nothing is minted twice", async () => {
+      const run = await ready();
+      const res = await token({ run_id: run.id.toUpperCase(), lease_generation: run.generation });
+      expect(res.status).toBe(200);
+      expect(PlanePushTokenReply.parse(res.body).pr.body).toContain(`Run: ${run.id}`);
+      expect(await attempts()).toHaveLength(1);
+      expect(github.mints).toHaveLength(1);
+      expect((await askToken(run)).body).toMatchObject({ error: { code: "already_issued" } });
     });
 
     it("the same signed request replayed is 409 nonce_reused; a fresh request for the same run and generation is 409 already_issued; neither mints", async () => {
@@ -389,6 +440,186 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
           return github.pushed;
         };
       }
+    });
+  });
+  describe("the pairing route (D#598 P1f-2b)", () => {
+    // The digest of acme/widgets-public with globs ["docs/ops/"] and no rule paths, computed outside this code:
+    //   printf '%s' '["acme/widgets-public",["docs/ops/"],null,null]' | sha256sum
+    const PLAIN = "0b3654573286a23ed56daef0a50f90a3baee835cae43d146654316cb6d2c8046";
+    // And with globs ["docs/ops/","scripts/private/"], identifier rules "rules/ids.txt" and plan-data rules "rules/plan.json":
+    //   printf '%s' '["acme/widgets-public",["docs/ops/","scripts/private/"],"rules/ids.txt","rules/plan.json"]' | sha256sum
+    const FULL = "76845459453f9a88ccb656f0d4d986c666aaa7d6d01da0a35333078dae3606a3";
+    const fullPairing = (over: { code_repo?: string; globs?: string[]; ids?: string | null; plan?: string | null } = {}) =>
+      admin.query(
+        `INSERT INTO repo_pairing (repo_id, account_id, code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (repo_id) DO UPDATE SET code_repo = EXCLUDED.code_repo, overlay_globs = EXCLUDED.overlay_globs, identifier_rules_path = EXCLUDED.identifier_rules_path, plan_data_rules_path = EXCLUDED.plan_data_rules_path`,
+        [A.repoId, A.accountId, over.code_repo ?? "acme/widgets-public", over.globs ?? ["docs/ops/", "scripts/private/"], over.ids === undefined ? "rules/ids.txt" : over.ids, over.plan === undefined ? "rules/plan.json" : over.plan],
+      );
+    async function readyFull(): Promise<{ id: string; generation: number }> {
+      await fullPairing();
+      await stamp();
+      return claimedRun();
+    }
+    const spent = async () => ({ attempts: (await attempts()).length, mints: github.mints.length, asked: github.asked.length });
+
+    it("answers a valid signed request 200, no-store, with the row and its digest; the digest equals the stamp and the independently computed value; GitHub sees nothing and no attempt row is written", async () => {
+      const run = await ready();
+      const res = await askPairing(run);
+      expect(res.status).toBe(200);
+      expect(res.headers).toMatchObject({ "cache-control": "no-store" });
+      expect(res.body).toEqual({ code_repo: "acme/widgets-public", overlay_globs: ["docs/ops/"], identifier_rules_path: null, plan_data_rules_path: null, pairing_digest: PLAIN });
+      expect(PlanePushPairingReply.safeParse(res.body).success).toBe(true);
+      expect((await planeRow()).pairing_digest).toBe(PLAIN);
+      expect(github.mints).toEqual([]);
+      expect(github.asked).toEqual([]);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("reads the whole row, rule paths included, and the reply parses (the digest recomputes)", async () => {
+      const run = await readyFull();
+      const res = await askPairing(run);
+      expect(res.status).toBe(200);
+      const reply = PlanePushPairingReply.parse(res.body);
+      expect(reply).toMatchObject({ overlay_globs: ["docs/ops/", "scripts/private/"], identifier_rules_path: "rules/ids.txt", plan_data_rules_path: "rules/plan.json" });
+      expect(reply.pairing_digest).toBe((await planeRow()).pairing_digest);
+      expect(reply.pairing_digest).toBe(FULL);
+    });
+
+    it("can be asked again and again (the hook asks twice by design), while the same signed request replayed is 409 nonce_reused and a spent lease is not extended", async () => {
+      const run = await ready();
+      const before = await leaseEnd(run.id);
+      const nonce = randomBytes(16).toString("base64url");
+      expect((await askPairing(run, nonce)).status).toBe(200);
+      expect((await askPairing(run)).status).toBe(200);
+      expect((await askPairing(run)).status).toBe(200);
+      const replay = await askPairing(run, nonce);
+      expect(replay.status).toBe(409);
+      expect(replay.body).toMatchObject({ error: { code: "nonce_reused" } });
+      expect(await leaseEnd(run.id)).toBe(before);
+      expect(await attempts()).toEqual([]);
+    });
+
+    it("a stale generation, an unknown run, an expired lease and a finished run are the 409 stop a heartbeat gives, with the lease's expiry unchanged", async () => {
+      const run = await ready();
+      const before = await leaseEnd(run.id);
+      const stale = await askPairing({ id: run.id, generation: run.generation + 1 });
+      expect(stale.status).toBe(409);
+      expect(StopReply.parse(stale.body)).toEqual({ continue: false, reason: "stale_generation" });
+      expect((await askPairing({ id: randomUUID(), generation: 1 })).body).toEqual({ continue: false, reason: "stale_generation" });
+      clock = before + 1000;
+      expect((await askPairing(run)).body).toEqual({ continue: false, reason: "lease_expired" });
+      clock = T0;
+      expect(await leaseEnd(run.id)).toBe(before);
+      await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE id = $1`, [run.id]);
+      expect((await askPairing(run)).body).toEqual({ continue: false, reason: "run_terminal" });
+      expect(STOP_REASONS).toContain("run_terminal");
+    });
+
+    it("is 403 not_paired for a run that is not an executor's and for an item with no record", async () => {
+      await pair();
+      await stamp();
+      const reviewer = await claimedRun({ role: "code-reviewer" });
+      const res = await askPairing(reviewer);
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ error: { code: "not_paired" } });
+      await admin.query(`UPDATE agent_runs SET status = 'cancelled' WHERE id = $1`, [reviewer.id]);
+      await admin.query("DELETE FROM plane_pushes WHERE work_item_id = $1", [A.workItemId]);
+      const bare = await claimedRun();
+      const none = await askPairing(bare);
+      expect(none.status).toBe(403);
+      expect(none.body).toMatchObject({ error: { code: "not_paired" } });
+    });
+
+    it("another account's run id is a stop, not a pairing", async () => {
+      const run = await ready();
+      const other = await seedAccount(admin, randomUUID());
+      const foreign = await toResponse(() => planePushPairingRun(deps(), signed(key, PLANE_PUSH_PAIRING_PATH, { run_id: other.workItemId, lease_generation: run.generation }, { created: created() })));
+      expect(foreign.status).toBe(409);
+      expect(foreign.body).toEqual({ continue: false, reason: "stale_generation" });
+    });
+
+    describe("after the build started, each edit is 409 pairing_changed with no pairing in the body", () => {
+      const cases: Array<[string, () => Promise<unknown>]> = [
+        ["a glob added", () => fullPairing({ globs: ["docs/ops/", "scripts/private/", "extra/"] })],
+        ["a glob removed", () => fullPairing({ globs: ["docs/ops/"] })],
+        ["the order of globs changed", () => fullPairing({ globs: ["scripts/private/", "docs/ops/"] })],
+        ["a rule path changed", () => fullPairing({ ids: "rules/other.txt" })],
+        ["a rule path cleared", () => fullPairing({ plan: null })],
+        ["code_repo changed to a different repo", () => fullPairing({ code_repo: "acme/another-public" })],
+        ["the pairing row deleted", () => admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId])],
+      ];
+      it.each(cases)("%s", async (_label, edit) => {
+        const run = await readyFull();
+        expect((await askPairing(run)).status).toBe(200);
+        await edit();
+        const res = await askPairing(run);
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code: "pairing_changed" } });
+        for (const field of ["overlay_globs", "docs/ops", "scripts/private", "rules/", "acme/"]) expect(JSON.stringify(res.body), field).not.toContain(field);
+        expect(await attempts()).toEqual([]);
+        expect(github.mints).toEqual([]);
+      });
+
+      it("changing only the letter case of code_repo still answers 200 (the digest case-folds the repo name)", async () => {
+        const run = await readyFull();
+        await fullPairing({ code_repo: "ACME/Widgets-Public" });
+        const res = await askPairing(run);
+        expect(res.status).toBe(200);
+        expect(PlanePushPairingReply.parse(res.body).code_repo).toBe("ACME/Widgets-Public");
+      });
+
+      it("an edit between the first and the second call is seen by the second, and putting the pairing back makes it 200 again (derived from the row each time)", async () => {
+        const run = await readyFull();
+        expect((await askPairing(run)).status).toBe(200);
+        await fullPairing({ globs: ["docs/ops/"] });
+        expect((await askPairing(run)).status).toBe(409);
+        await fullPairing();
+        expect((await askPairing(run)).status).toBe(200);
+      });
+
+      it("the token route says the same, spends no attempt and mints nothing", async () => {
+        const run = await readyFull();
+        await fullPairing({ globs: ["docs/ops/"] });
+        const before = await spent();
+        const res = await askToken(run);
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ error: { code: "pairing_changed" } });
+        expect(await spent()).toEqual(before);
+      });
+    });
+  });
+
+  describe("the report echoes the pairing digest (D#598 P1f-2b)", () => {
+    async function granted() {
+      const run = await ready();
+      expect((await askToken(run)).status).toBe(200);
+      return run;
+    }
+
+    it.each(["pushed", "pr_failed", "pr_opened"])("a %s report without pairing_digest is 400 and records nothing", async (phase) => {
+      const run = await granted();
+      const res = await report(run, { phase, head_sha: HEAD, tip_sha: TIP, ...(phase === "pr_opened" ? { pr_number: 9 } : {}), pairing_digest: undefined });
+      expect(res.status).toBe(400);
+      expect((await planeRow()).state).toBe("building");
+      expect(github.asked).toEqual([]);
+    });
+
+    it.each(["pushed", "pr_failed", "pr_opened"])("a %s report with a digest that differs from the stamp records refused / report_mismatch, stores no branch, sha or pull request, and GitHub is not asked", async (phase) => {
+      const run = await granted();
+      const res = await report(run, { phase, head_sha: HEAD, tip_sha: TIP, ...(phase === "pr_opened" ? { pr_number: 9 } : {}), pairing_digest: "e".repeat(64) });
+      expect(res.status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "refused", code: "report_mismatch", head_sha: null, tip_sha: null, pr_number: null, pr_url: null });
+      expect((await attempts())[0]).toMatchObject({ outcome: "report_mismatch" });
+      expect(github.asked).toEqual([]);
+    });
+
+    it("with the stamped digest it records as before, and a pairing edited after the token does not change that (the stamp is what a report is compared with)", async () => {
+      const run = await granted();
+      await pair(["docs/ops/", "scripts/private/", "later/"]);
+      expect((await report(run, { phase: "pushed", head_sha: HEAD, tip_sha: TIP })).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "pushed", head_sha: HEAD, tip_sha: TIP });
+      expect((await report(run, { phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 })).status).toBe(200);
+      expect(await planeRow()).toMatchObject({ state: "pr_opened", pr_number: 9 });
     });
   });
 });

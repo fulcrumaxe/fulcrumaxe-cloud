@@ -12,6 +12,8 @@ import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
  *   planePushGrant        the lease fence (WITHOUT extending the lease: asking for a token is not a sign of life), then the facts the route decides
  *                         on, all from our own rows, then ONE attempt row for this (run, lease generation). The unique index on that pair is what
  *                         makes the token use-once: a second request finds the row and mints nothing.
+ *   planePushPairing      D#598 P1f-2b: the repository's pairing as it is NOW, only while its digest still equals the stamp. Read-only: no attempt row, no
+ *                         grant, no GitHub. The hook calls it twice by design (load, then re-check after its scan), so it has no use-once rule.
  *   planePushSettleGrant  marks the attempt's token as issued (or, when the mint failed, finishes the attempt with the failure's code).
  *   planePushReportContext the same fence and facts for a report, plus the attempt (so the route knows whether a token was ever issued).
  *   planePushRecordReport  re-checks the fence, records the outcome the route has ALREADY verified against GitHub, and finishes the attempt.
@@ -30,6 +32,24 @@ export interface PlanePushFacts {
   branch: string;
 }
 
+/** The `repo_pairing` row, as the pairing route hands it to the hook. */
+export interface PlanePushPairing {
+  codeRepo: string;
+  overlayGlobs: string[];
+  identifierRulesPath: string | null;
+  planDataRulesPath: string | null;
+  /** The digest STAMPED at build start, which the live row was just shown to equal. */
+  pairingDigest: string;
+}
+
+export type PlanePushPairingResult =
+  | { kind: "fenced"; reason: StopReason }
+  /** The run is not an executor run on a runner, or its item has no `plane_pushes` record (so there is no stamp) for the run's own repository. */
+  | { kind: "not_paired" }
+  /** The pairing was removed, or its digest no longer equals the stamp. */
+  | { kind: "pairing_changed" }
+  | ({ kind: "pairing" } & PlanePushPairing);
+
 export type PlanePushGrantResult =
   | { kind: "fenced"; reason: StopReason }
   /** The run is not an executor run on a runner, or its item has no `plane_pushes` row for the run's own repository. */
@@ -39,12 +59,13 @@ export type PlanePushGrantResult =
   | { kind: "already_issued" }
   /** The row already has the three push attempts the schema allows. */
   | { kind: "attempts_exhausted" }
-  | ({ kind: "granted"; attemptId: string } & PlanePushFacts);
+  /** `itemTitle` is the work item's title as stored: untrusted text that only `buildPlanePushText` may turn into public text. */
+  | ({ kind: "granted"; attemptId: string; itemTitle: string } & PlanePushFacts);
 
 export type PlanePushReportContextResult =
   | { kind: "fenced"; reason: StopReason }
   | { kind: "not_paired" }
-  | { kind: "context"; plane: PlanePushFacts & { state: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null };
+  | { kind: "context"; plane: PlanePushFacts & { state: string; /** The digest stamped at build start; a report's echo is compared with it. */ pairingDigest: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null };
 
 export interface PlanePushRecordInput extends PlanePushLeaseInput {
   /** From `planePushReportContext`; the row is re-read and compared. */
@@ -70,6 +91,7 @@ export type PlanePushRecordResult = { kind: "fenced"; reason: StopReason } | { k
 
 export interface RunnerPlanePushFacade {
   planePushGrant(input: PlanePushLeaseInput): Promise<PlanePushGrantResult>;
+  planePushPairing(input: PlanePushLeaseInput): Promise<PlanePushPairingResult>;
   /** True when exactly one unsettled attempt row of this run and generation was updated; false when none matched (the caller must then not hand the token out). */
   planePushSettleGrant(input: PlanePushLeaseInput & { attemptId: string; issued: true } | PlanePushLeaseInput & { attemptId: string; issued: false; code: string }): Promise<boolean>;
   planePushReportContext(input: PlanePushLeaseInput): Promise<PlanePushReportContextResult>;
@@ -97,6 +119,26 @@ async function runFacts(client: PoolClient, input: PlanePushLeaseInput): Promise
   return { row };
 }
 
+interface PairingRow {
+  code_repo: string;
+  overlay_globs: string[];
+  identifier_rules_path: string | null;
+  plan_data_rules_path: string | null;
+}
+
+/** The repository's pairing as it is NOW, or null when there is none or its digest no longer equals the one stamped at build start. */
+async function livePairing(client: PoolClient, accountId: string, row: PlanePushRow): Promise<PlanePushPairing | null> {
+  const { rows } = await client.query<PairingRow>(
+    "SELECT code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path FROM repo_pairing WHERE repo_id = $1 AND account_id = $2",
+    [row.repoId, accountId],
+  );
+  const pair = rows[0];
+  if (!pair) return null;
+  const digest = pairingDigest({ codeRepo: pair.code_repo, overlayGlobs: pair.overlay_globs, identifierRulesPath: pair.identifier_rules_path, planDataRulesPath: pair.plan_data_rules_path });
+  if (digest !== row.pairingDigest) return null;
+  return { codeRepo: pair.code_repo, overlayGlobs: pair.overlay_globs, identifierRulesPath: pair.identifier_rules_path, planDataRulesPath: pair.plan_data_rules_path, pairingDigest: row.pairingDigest };
+}
+
 const facts = (row: PlanePushRow): PlanePushFacts => ({ id: row.id, codeRepo: row.codeRepo, branch: row.branch });
 
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
@@ -117,14 +159,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
           const { row } = found;
 
           // The pairing as it is NOW, against the digest stamped at build start. A pairing that was removed or edited is `pairing_changed`.
-          const { rows: pairs } = await client.query<{ code_repo: string; overlay_globs: string[]; identifier_rules_path: string | null; plan_data_rules_path: string | null }>(
-            "SELECT code_repo, overlay_globs, identifier_rules_path, plan_data_rules_path FROM repo_pairing WHERE repo_id = $1 AND account_id = $2",
-            [row.repoId, input.accountId],
-          );
-          const pair = pairs[0];
-          if (!pair || pairingDigest({ codeRepo: pair.code_repo, overlayGlobs: pair.overlay_globs, identifierRulesPath: pair.identifier_rules_path, planDataRulesPath: pair.plan_data_rules_path }) !== row.pairingDigest) {
-            return { kind: "pairing_changed" };
-          }
+          if (!(await livePairing(client, input.accountId, row))) return { kind: "pairing_changed" };
 
           // Serialise the attempts of one record, then look for this lease's grant before making one.
           await client.query("SELECT 1 FROM plane_pushes WHERE id = $1 AND account_id = $2 FOR UPDATE", [row.id, input.accountId]);
@@ -138,7 +173,23 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
              VALUES ($1, $2, $3, $4, 'runner', 'push', $5) RETURNING id`,
             [input.accountId, row.id, input.runId, input.leaseGeneration, attemptNo],
           );
-          return { kind: "granted", attemptId: made[0]!.id, ...facts(row) };
+          // The item's title for the public pull request text. A missing row cannot happen under the run's own foreign key; it reads as an empty
+          // title, which the text builder turns into its fixed run-id title.
+          const { rows: titles } = await client.query<{ title: string | null }>("SELECT title FROM work_items WHERE id = $1 AND account_id = $2", [row.workItemId, input.accountId]);
+          return { kind: "granted", attemptId: made[0]!.id, itemTitle: titles[0]?.title ?? "", ...facts(row) };
+        });
+      }),
+
+    planePushPairing: (input) =>
+      guarded(async () => {
+        requireLease(input);
+        return withTenant(runnerPool, input.accountId, async (client): Promise<PlanePushPairingResult> => {
+          const held = await fence(client, input);
+          if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
+          const found = await runFacts(client, input);
+          if (!found) return { kind: "not_paired" };
+          const pairing = await livePairing(client, input.accountId, found.row);
+          return pairing ? { kind: "pairing", ...pairing } : { kind: "pairing_changed" };
         });
       }),
 
@@ -179,7 +230,7 @@ export function createRunnerPlanePushFacade(runnerPool: Pool, deps: RunnerPlaneP
             [input.accountId, input.runId, input.leaseGeneration],
           );
           const attempt = rows[0] ? { id: rows[0].id, tokenIssued: rows[0].token_issued_at !== null, finished: rows[0].finished_at !== null, outcome: rows[0].outcome } : null;
-          return { kind: "context", plane: { ...facts(found.row), state: found.row.state }, attempt };
+          return { kind: "context", plane: { ...facts(found.row), state: found.row.state, pairingDigest: found.row.pairingDigest }, attempt };
         });
       }),
 

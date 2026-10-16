@@ -43,6 +43,10 @@ export function describeValidation(validation: Validation): string {
       return "Ed25519 private key (PKCS#8 PEM; a two-character `\\n` is read as a newline)";
     case "runner-signer-id":
       return "1 to 64 letters, digits, dot, underscore or dash";
+    case "plane-identity-name":
+      return "1 to 100 letters, digits, space, dot, underscore or dash";
+    case "plane-identity-email":
+      return "local@domain: letters, digits, dot, plus, underscore or dash before the @, letters, digits, dot or dash after it";
     case "slug":
       return "lowercase letters, digits, hyphens (max 64)";
     case "hostname":

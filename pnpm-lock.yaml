@@ -423,6 +423,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
       '@fx/db':
         specifier: workspace:*
         version: link:../db

@@ -15,6 +15,7 @@ const VALID: Record<RunnerMessageName, unknown> = {
   heartbeat: { run_id: UUID, lease_generation: 3 },
   git_ticket: { run_id: UUID, lease_generation: 3 },
   plane_push_token: { run_id: UUID, lease_generation: 3 },
+  plane_push_pairing: { run_id: UUID, lease_generation: 3 },
   plane_push_report: { run_id: UUID, lease_generation: 3, phase: "scanning" },
   events: { run_id: UUID, lease_generation: 3, events: [EVENT] },
   done: { run_id: UUID, lease_generation: 3, agentOutput: { verdict: "pass" } },
@@ -24,8 +25,8 @@ const VALID: Record<RunnerMessageName, unknown> = {
 };
 
 describe("the runner-to-cloud messages", () => {
-  it("are exactly hello, claim, heartbeat, git_ticket, plane_push_token, plane_push_report, events, done, register, rotate and revoke", () => {
-    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
+  it("are exactly hello, claim, heartbeat, git_ticket, plane_push_token, plane_push_pairing, plane_push_report, events, done, register, rotate and revoke", () => {
+    expect(Object.keys(RUNNER_MESSAGES).sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
   });
 
   it("accept a valid message of each kind", () => {
@@ -205,7 +206,7 @@ describe("LocalOnlyEvent", () => {
 
   it("has no message that starts, attaches to or types into a session: the cloud cannot drive a runner's agent or its tmux", () => {
     const names = Object.keys(RUNNER_MESSAGES);
-    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
+    expect(names.sort()).toEqual(["claim", "done", "events", "git_ticket", "heartbeat", "hello", "plane_push_pairing", "plane_push_report", "plane_push_token", "register", "revoke", "rotate"]);
     expect(names.filter((n) => /attach|session|tmux|terminal|input|keys|takeover|take_over|start|exec|command/i.test(n))).toEqual([]);
     // And no message has a field that could carry something to type or run.
     const fields = Object.values(RUNNER_MESSAGES).flatMap((schema) => Object.keys((schema as unknown as { shape?: Record<string, unknown> }).shape ?? {}));

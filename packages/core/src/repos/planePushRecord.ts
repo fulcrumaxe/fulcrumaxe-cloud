@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
+import { pairingDigest } from '@fulcrumaxe/runner-protocol/pairingDigest';
 
 /**
  * D#598 P1f-1: the platform's record of what it pushed to a paired PUBLIC repo for a work item (migration 0831, `plane_pushes`).
@@ -124,24 +124,11 @@ export class PlanePushRecordError extends Error {
   }
 }
 
-/** The part of a pairing the digest covers. */
-export interface PairingForDigest {
-  codeRepo: string;
-  overlayGlobs: readonly string[];
-  identifierRulesPath: string | null;
-  planDataRulesPath: string | null;
-}
-
 /**
- * A hash of the pairing as read at build start: the repo's full name (case-folded, as GitHub treats it), the overlay globs in their
- * stored order, and the two rule-file paths. The same fields the push route compares between scan and push, so the two agree on what
- * "the pairing changed" means. JSON of a fixed array shape keeps the encoding unambiguous.
+ * The pairing digest has one copy, in the runner protocol package (the pairing reply recomputes it and the runner-side code cannot import this
+ * package). Re-exported so the stamp and the routes keep one import path.
  */
-export function pairingDigest(p: PairingForDigest): string {
-  return createHash('sha256')
-    .update(JSON.stringify([p.codeRepo.toLowerCase(), [...p.overlayGlobs], p.identifierRulesPath, p.planDataRulesPath]))
-    .digest('hex');
-}
+export { pairingDigest, type PairingForDigest } from '@fulcrumaxe/runner-protocol/pairingDigest';
 
 export interface StampInput {
   accountId: string;

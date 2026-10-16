@@ -93,6 +93,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "performRetryRun",
       "performStartPreview",
       "planePushGrant",
+      "planePushPairing",
       "planePushRecordReport",
       "planePushReportContext",
       "planePushSettleGrant",

@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/db": "workspace:*",
     "@fx/decisions": "workspace:*",
     "@fx/plan-data": "workspace:*",
