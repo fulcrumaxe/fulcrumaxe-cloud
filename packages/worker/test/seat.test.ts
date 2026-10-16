@@ -70,7 +70,10 @@ describe("seat: the sandbox timeout (D-TIMEOUT)", () => {
         .map((f) => `${pkg}/${f}`),
     );
     expect(defining).toEqual(["runner/runLimitDecision.ts"]);
-    expect(readFileSync(path.join(src, "worker", "src", "seat.ts"), "utf8")).toMatch(/import \{[^}]*\bEXTENSION_SLICE_FRACTION\b[^}]*\} from "@fx\/runner"/);
+    // D#483 S5-p: the plan's arithmetic (sandboxTimeFor) moved into the runner beside the slice, so the pipeline estimate prices from it too;
+    // the seat imports that function from the runner and keeps no copy of the slice.
+    expect(readFileSync(path.join(src, "runner", "src", "runTime.ts"), "utf8")).toMatch(/import \{ EXTENSION_SLICE_FRACTION \} from "\.\/runLimitDecision\.js"/);
+    expect(readFileSync(path.join(src, "worker", "src", "seat.ts"), "utf8")).toMatch(/import \{[^}]*\bsandboxTimeFor\b[^}]*\} from "@fx\/runner"/);
   });
 
   it("R-MAX: the platform maximum is Vercel's documented 24 hours for Pro, and the largest run the bounds allow fits under it", () => {

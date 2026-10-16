@@ -3,35 +3,17 @@ import { withTenant } from '../tenancy/withTenant.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { assertRepoExists } from './internal.js';
 import {
-  effectiveModelId,
   formatCostLine,
-  medianCostSeedUsd,
-  modelIdForSeedTier,
-  seedTierForModelId,
   normalizePlanTier,
   roundUsd,
   runsPerMonthSeed,
   TOKEN_COVERAGE_CAVEAT,
 } from './costModel.js';
-import type { RoleModelId, RoleSettingsCtx, RoleSettingsEntry } from './types.js';
+import { effectiveRoleModel, loadModelRunMedians, modelRunPrice, type RoleModelResolvers } from './runPrice.js';
+import type { RoleSettingsCtx, RoleSettingsEntry } from './types.js';
 
-/**
- * What core cannot look up itself (it cannot import @fx/model-router): the
- * model the live routing table gives a role, and the role's floor. Both are
- * optional; without them a role follows its manifest default (which is the
- * routing table's Feature row) and has no floor.
- */
-export interface RoleModelResolvers {
-  routedModelFor?: (role: string) => RoleModelId | undefined;
-  floorFor?: (role: string) => RoleModelId | undefined;
-}
-
-interface LedgerMedianRow {
-  role: string;
-  model: string;
-  n: number;
-  median: string | null;
-}
+// The resolvers' type lives with the shared per-run price lookup (runPrice.ts); callers still import it from here.
+export type { RoleModelResolvers };
 
 /**
  * D#31 comment 18492898 / 18494573 (H12 re-brief): criterion 1's "lists
@@ -74,40 +56,14 @@ export async function listRoleSettings(
 
     // H12 criterion 2: "Medians are seeded from the cost-analyst's figures
     // and replaced by the tenant's own ledger medians after 10 runs."
-    // One query across every role at once, rather than one query per role.
-    const { rows: ledgerRows } = await client.query<LedgerMedianRow>(
-      `WITH run_costs AS (
-         SELECT ar.role AS role, ar.model AS model, ar.id AS run_id, COALESCE(SUM(l.usd), 0) AS usd
-           FROM agent_runs ar
-           LEFT JOIN ledger l
-             ON l.run_id = ar.id
-            AND l.account_id = ar.account_id
-            AND l.kind = 'model'
-            AND l.source IN ('customer_gateway', 'customer_anthropic')
-          WHERE ar.account_id = $1
-          GROUP BY ar.role, ar.model, ar.id
-       )
-       SELECT role, model, count(*)::int AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY usd) AS median
-         FROM run_costs
-        WHERE model IS NOT NULL
-        GROUP BY role, model`,
-      [accountId],
-    );
-    // Keyed by role and model: a median that mixed runs on other models
-    // would be stale the moment the customer picks a different one.
-    const ledgerByRoleModel = new Map(ledgerRows.map((r) => [`${r.role}\u0000${r.model}`, r]));
+    // D#483 S5-p: the lookup is the one shared with the pipeline estimate (runPrice.ts).
+    const medians = await loadModelRunMedians(client, accountId);
 
     return ROLE_MANIFEST.map((manifestEntry) => {
       const mode = modeByRole.get(manifestEntry.name) ?? 'off';
-      const routed = resolvers.routedModelFor?.(manifestEntry.name) ?? modelIdForSeedTier(manifestEntry.defaultModel);
-      const effectiveModel = effectiveModelId(
-        modelByRole.get(manifestEntry.name),
-        routed,
-        resolvers.floorFor?.(manifestEntry.name),
-      );
-      const ledger = ledgerByRoleModel.get(`${manifestEntry.name}\u0000${effectiveModel}`);
-      const useLedger = ledger !== undefined && ledger.n >= 10 && ledger.median !== null;
-      const medianCostPerRunUsd = useLedger ? Number(ledger!.median) : medianCostSeedUsd(seedTierForModelId(effectiveModel));
+      const effectiveModel = effectiveRoleModel(manifestEntry.name, modelByRole.get(manifestEntry.name), resolvers);
+      const price = modelRunPrice(medians, manifestEntry.name, effectiveModel);
+      const medianCostPerRunUsd = price.usd;
       const runsPerMonth = runsPerMonthSeed(mode, plan);
       const monthlyUsd = roundUsd(runsPerMonth * medianCostPerRunUsd);
 
@@ -121,7 +77,7 @@ export async function listRoleSettings(
           monthlyUsd,
           runsPerMonth,
           medianCostPerRunUsd,
-          medianSource: useLedger ? 'ledger' : 'seed',
+          medianSource: price.source,
           caveat: TOKEN_COVERAGE_CAVEAT,
         },
       };
