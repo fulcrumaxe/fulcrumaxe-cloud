@@ -27,6 +27,32 @@ export {
   resolveAskPolicy,
 } from "./askPolicy.js";
 export type { AskNotify, AskPolicy, AskSettingRow } from "./askPolicy.js";
+export {
+  DEFAULT_NODE_BUDGET,
+  DEFAULT_WORK_BUDGET,
+  RULE_LIMITS,
+  checkFieldPath,
+  clampRuleOutcome,
+  evaluateRules,
+  tightenAskDisposition,
+  validateRuleSet,
+} from "./rules.js";
+export type {
+  Condition,
+  EvaluateOptions,
+  Rule,
+  RuleDecision,
+  RuleError,
+  RuleErrorCode,
+  RuleFacts,
+  RuleOutcome,
+  RuleRequest,
+  RuleSet,
+  RuleValue,
+  ValidationResult,
+} from "./rules.js";
+export { globMatch } from "./ruleGlob.js";
+export { parsePointer, resolvePointer } from "./rulePointer.js";
 export type {
   CatalogueEntry,
   CustomerProximity,
