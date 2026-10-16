@@ -62,11 +62,19 @@ async function follow(accountId: string, proposalId: string, oldId: string, root
   return withTenant(pool, accountId, async (c) => (await c.query<{ proposal_follow_root: boolean }>(`SELECT proposal_follow_root($1::uuid, $2::uuid, $3::uuid)`, [proposalId, oldId, rootId])).rows[0]!.proposal_follow_root);
 }
 
-/** A retired item the way triage leaves it: closed, with a transition whose ref names `root`. */
-async function retiredItem(a: SeedRefs, repoId: string, rootRef: string): Promise<string> {
+/** A retired item the way triage leaves it: made at `triaged` and retired through the real definer, which closes it and writes the record. */
+async function retiredItem(a: SeedRefs, repoId: string, root: string): Promise<string> {
   const id = randomUUID();
   await h.admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance) VALUES ($1, $2, $3, 'issue', 'internal')`, [id, a.accountId, repoId]);
-  await withTenant(h.runWriterPool, a.accountId, (c) => recordStage(c, { workItemId: id, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${rootRef}` }));
+  await withTenant(h.runWriterPool, a.accountId, (c) => c.query(`SELECT retire_superseded_work_item($1::uuid, $2::uuid)`, [id, root]));
+  return id;
+}
+/** A closed item with the history row triage would leave and a record written by the test's superuser: the shape the definer itself refuses to make (a root in another repo). */
+async function forgedRetired(a: SeedRefs, repoId: string, root: string): Promise<string> {
+  const id = randomUUID();
+  await h.admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance) VALUES ($1, $2, $3, 'issue', 'internal')`, [id, a.accountId, repoId]);
+  await withTenant(h.runWriterPool, a.accountId, (c) => recordStage(c, { workItemId: id, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${root}` }));
+  await h.admin.query(`INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)`, [a.accountId, id, root]);
   return id;
 }
 async function plainItem(accountId: string, repoId: string): Promise<string> {
@@ -163,6 +171,8 @@ describe("S4-e2: the proposal follows its root after triage [pg]", () => {
     expect(out.status).toBe("triaged");
     const root = out.workItemId!;
     expect((await proposalRow(w.proposalId)).work_item_id).toBe(root);
+    // S4-e5: the in-between state (retired, record written, link not moved) is on the record, and the replay leaves exactly that one record.
+    expect((await h.admin.query(`SELECT root_work_item_id FROM work_item_supersedes WHERE old_work_item_id = $1`, [w.oldId])).rows).toEqual([{ root_work_item_id: root }]);
     expect(await workItemCount(w.a.accountId)).toBe(items);
     // The seed's own sample item is not part of this flow: the open items the flow made are exactly the root.
     const roots = await h.admin.query(`SELECT id FROM work_items WHERE account_id = $1 AND stage <> 'closed' AND id <> $2`, [w.a.accountId, w.a.workItemId]);
@@ -275,7 +285,7 @@ describe("S4-e2: proposal_follow_root refuses what it must [pg]", () => {
     const repo2 = randomUUID();
     await h.admin.query(`INSERT INTO repos (id, account_id, installation_id, gh_repo_id, product, execution_mode) VALUES ($1, $2, $3, $4, 'team', 'sandbox')`, [repo2, s.a.accountId, s.a.installationId, Math.floor(Math.random() * 1_000_000_000)]);
     const root2 = await plainItem(s.a.accountId, repo2);
-    const old2 = await retiredItem(s.a, s.a.repoId, root2);
+    const old2 = await forgedRetired(s.a, s.a.repoId, root2);
     await h.admin.query(`UPDATE proposals SET work_item_id = $2 WHERE id = $1`, [s.id, old2]);
     const before = await proposalRow(s.id);
     await expect(follow(s.a.accountId, s.id, old2, root2)).rejects.toThrow("root_mismatch");
@@ -286,10 +296,16 @@ describe("S4-e2: proposal_follow_root refuses what it must [pg]", () => {
     const s = await setup();
     const b = await seedAccount(h.admin, randomUUID());
     const foreignRoot = await plainItem(b.accountId, b.repoId);
-    const old2 = await retiredItem(s.a, s.a.repoId, foreignRoot);
+    // No record can name a root in another account (the record's foreign key is per account), so the only thing left to present is the old
+    // free-text ref, which proposal_follow_root no longer reads: refused as not superseded, and the row is unchanged.
+    const old2 = await plainItem(s.a.accountId, s.a.repoId);
+    await withTenant(h.runWriterPool, s.a.accountId, (c) => recordStage(c, { workItemId: old2, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${foreignRoot}` }));
+    await expect(h.admin.query(`INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)`, [s.a.accountId, old2, foreignRoot])).rejects.toMatchObject({ code: "23503" });
+    const fresh = await plainItem(s.a.accountId, s.a.repoId);
+    await expect(withTenant(h.runWriterPool, s.a.accountId, (c) => c.query(`SELECT retire_superseded_work_item($1::uuid, $2::uuid)`, [fresh, foreignRoot]))).rejects.toThrow("root_mismatch");
     await h.admin.query(`UPDATE proposals SET work_item_id = $2 WHERE id = $1`, [s.id, old2]);
     const before = await proposalRow(s.id);
-    await expect(follow(s.a.accountId, s.id, old2, foreignRoot)).rejects.toThrow("root_mismatch");
+    await expect(follow(s.a.accountId, s.id, old2, foreignRoot)).rejects.toThrow("old_not_superseded");
     expect(await proposalRow(s.id)).toEqual(before);
   });
 
