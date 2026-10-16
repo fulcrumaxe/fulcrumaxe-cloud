@@ -1,0 +1,18 @@
+{
+  "outcome": "already_decided",
+  "entry": {
+    "id": "2b9c3f40-5d6e-4f70-8182-93a40526c7d8",
+    "scope": "item",
+    "kind": "gotcha",
+    "body": "The retry test is flaky on the first run",
+    "why": "It warms a cache",
+    "author_kind": "agent",
+    "status": "approved",
+    "version": 1,
+    "content_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "created_at": "2026-10-16T07:00:00.000Z",
+    "updated_at": "2026-10-16T09:00:00.000Z",
+    "approved_at": "2026-10-16T09:00:00.000Z",
+    "expires_at": null
+  }
+}

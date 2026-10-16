@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "mixed_sources",
+    "message": "a batch can only hold cards from one source",
+    "request_id": "55555555-5555-4555-8555-555555555555"
+  },
+  "details": [{ "path": "ids", "code": "mixed_sources" }]
+}

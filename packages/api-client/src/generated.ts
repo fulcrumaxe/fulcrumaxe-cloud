@@ -2619,6 +2619,144 @@ export interface Operations {
       placement_restored: boolean;
     };
   };
+  listMemory: {
+    path: undefined;
+    query: {
+      scope?: "account" | "repo" | "item" | "role";
+      repo_id?: string;
+      item_id?: string;
+      kind?: Array<"convention" | "command" | "fact" | "gotcha" | "preference" | "decision">;
+      status?: Array<"proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded">;
+      limit?: number;
+    };
+    body: undefined;
+    response: {
+      groups: Array<{
+        scope: "account" | "repo" | "item" | "role";
+        label: string;
+        target_id: (string) | (null);
+        entries: Array<{
+          id: string;
+          scope: "account" | "repo" | "item" | "role";
+          kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+          kind_label: string;
+          status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+          status_label: string;
+          status_icon: "inbox" | "check" | "cross" | "clock" | "pause" | "trash" | "archive" | "replace" | "question";
+          title: string;
+          author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+          source: string;
+          version: number;
+          created_at: string;
+          age: string;
+          runs: number;
+          runs_label: string;
+        }>;
+      }>;
+      truncated: boolean;
+    };
+  };
+  getMemoryQueue: {
+    path: undefined;
+    query: {
+      scope?: "account" | "repo" | "item" | "role";
+      repo_id?: string;
+      item_id?: string;
+      limit?: number;
+    };
+    body: undefined;
+    response: {
+      cards: Array<{
+        entry: {
+          id: string;
+          scope: "account" | "repo" | "item" | "role";
+          kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+          body: string;
+          why: string | null;
+          author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+          status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+          version: number;
+          content_sha256: string;
+          created_at: string;
+          updated_at: string;
+          approved_at: string | null;
+          expires_at: string | null;
+        };
+        title: string;
+        kind_label: string;
+        source: string;
+        proposed_by: string;
+        evidence: string;
+        age: string;
+        open_state: "not_required" | "opened" | "unopened";
+        scope_label: string;
+      }>;
+      truncated: boolean;
+    };
+  };
+  openMemoryCard: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      opened: boolean;
+    };
+  };
+  decideMemory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      to: "approved" | "rejected";
+    };
+    response: {
+      outcome: "decided" | "already_decided";
+      entry: {
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      };
+    };
+  };
+  decideMemoryBatch: {
+    path: undefined;
+    query: undefined;
+    body: {
+      ids: Array<string>;
+      to: "approved" | "rejected";
+    };
+    response: {
+      decided: number;
+      entries: Array<{
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      }>;
+    };
+  };
 }
 
 /** Every operation by operationId. scope is the scope a token needs (null when it needs none or cannot be used). */
@@ -3832,6 +3970,61 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  listMemory: {
+    method: "GET",
+    path: "/api/v1/memory",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["scope","repo_id","item_id","kind","status","limit"],
+    hasBody: false,
+  },
+  getMemoryQueue: {
+    method: "GET",
+    path: "/api/v1/memory/queue",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["scope","repo_id","item_id","limit"],
+    hasBody: false,
+  },
+  openMemoryCard: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/open",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  decideMemory: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/decide",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  decideMemoryBatch: {
+    method: "POST",
+    path: "/api/v1/memory/decide-batch",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
   },
 } as const;
 

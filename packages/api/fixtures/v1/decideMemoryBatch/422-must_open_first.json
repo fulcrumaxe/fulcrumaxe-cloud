@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "must_open_first",
+    "message": "2 of these cards have not been opened yet; open each one first",
+    "request_id": "44444444-4444-4444-8444-444444444444"
+  },
+  "details": [{ "path": "ids", "code": "must_open_first" }]
+}
