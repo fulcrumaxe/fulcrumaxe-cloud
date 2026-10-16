@@ -295,6 +295,7 @@ export function createActions({ itemId, repoId, call = api, uuid = () => crypto.
 export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {}, ownPlan = () => null }) {
   let lastLabel = null;
   let lastLive = false;
+  let lastApprovable = 0;
   let dlg = null;
   let parts = null;
   let shownFor = null;
@@ -307,9 +308,11 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
     const l = labelOf();
     // The parent redraws when the card's label changes, and when the item gains or loses a live run (the approve button depends on it).
     const live = st.runs.some((r) => LIVE_STATUSES.includes(r.status));
-    if (l !== lastLabel || live !== lastLive) {
+    const approvable = approvals.approvableIds(st.runs).length;
+    if (l !== lastLabel || live !== lastLive || approvable !== lastApprovable) {
       lastLabel = l;
       lastLive = live;
+      lastApprovable = approvable;
       announce.textContent = l || "";
       onChange();
     }
@@ -420,6 +423,23 @@ export function createRunsPanel({ itemId, repoId, call, uuid, onChange = () => {
     liveTimers: ctl.liveTimers,
     /** True when any run read for this item is pending, running or paused: the approve button is not offered then. */
     hasLive: () => ctl.getState().runs.some((r) => LIVE_STATUSES.includes(r.status)),
+    /** How many pending runs of this item this person may approve (the card's button is offered while there is one). */
+    approvableCount: () => approvals.approvableIds(ctl.getState().runs).length,
+    /** The existing waiting sentence of the waiting run ("This run needs your approval. ..."), or null. */
+    waitingLine: () => labelOf(),
+    /**
+     * The card's button: approve every pending run of this item the person may approve, one POST each, by the same route as the row's
+     * button. Resolves { ok, text }: the words come from the copy of GET /api/runners, an error is never swallowed.
+     */
+    async approveAll() {
+      const c = approvals.copy;
+      const ids = approvals.approvableIds(ctl.getState().runs);
+      for (const id of ids) await approvals.approve(id);
+      const outs = ids.map((id) => approvals.outcomeOf(id));
+      if (ids.length === 0 || outs.includes("refused")) return { ok: false, text: c ? c.approvalRefused : GENERIC };
+      if (outs.includes("failed") || outs.includes(null)) return { ok: false, text: GENERIC };
+      return { ok: true, text: c ? c.approvalDone : APPROVED_RUNS };
+    },
     live(type, dto) {
       if (type === "run.status_changed") ctl.onRunChanged(dto && dto.data);
       else if (type === "refresh") ctl.load();
@@ -451,6 +471,10 @@ export const RUNNERS_PATH = "/api/runners";
 export const runApprovePath = (id) => "/api/runners/runs/" + encodeURIComponent(id) + "/approve";
 export const APPROVALS_POLL_MS = 30000;
 export const APPROVING = "Approving…";
+/** The server's own approvalDone sentence, for the moment its copy has not been read: the answer is never wrong. */
+const APPROVED_RUNS = "Approved. Waiting for your runner.";
+/** The Runs app's label for the control that approves a waiting run. */
+const APPROVE_RUN_LABEL = "Approve run";
 const APPROVAL_COPY = ["approval", "approvalMine", "approvalButton", "approvalDone", "approvalRefused", "approvalAuto"];
 const named = (p) => (p && typeof p.name === "string" && p.name.trim() !== "" ? p.name.trim() : "");
 const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -552,6 +576,8 @@ export function createApprovals({ call = api, onChange = () => {}, setTimer = se
     },
     entryFor: (runId) => entries.get(runId) || null,
     isBusy: (runId) => busy.has(runId),
+    /** The pending runs of the list this person may approve right now (the server said so in the approvals read). */
+    approvableIds: (runs) => runs.filter((r) => r.status === "pending" && !busy.has(r.id) && entries.has(r.id) && entries.get(r.id).canApprove).map((r) => r.id),
     outcomeOf: (runId) => outcome.get(runId) || null,
     approve,
     /** The card's pending text: the newest run of the list that is waiting for a person. */
@@ -1239,6 +1265,24 @@ export function createApprove({ call = api, onChange = () => {}, sleep = pause }
     reset(itemId = null) {
       st = { itemId, phase: "idle", text: "" };
     },
+    /** True while the note below the button belongs to a click on waiting runs rather than to a stage start. */
+    get forRuns() {
+      return st.forRuns === true;
+    },
+    /** The card's button when runner runs wait for this person: approve them all (see createRunsPanel.approveAll). Never silent. */
+    async approveRuns(item, panel) {
+      if (!item || !panel) return;
+      if (st.itemId === item.id && st.phase === "sending") return;
+      set({ itemId: item.id, phase: "sending", text: SENDING, forRuns: true });
+      let res;
+      try {
+        res = await panel.approveAll();
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        res = { ok: false, text: APPROVE_GENERIC };
+      }
+      if (st.itemId === item.id) set({ itemId: item.id, phase: res.ok ? "started" : "error", text: res.text, forRuns: true });
+    },
     async approve(item, liveRun = false) {
       if (!canApprove(item, liveRun)) return;
       if (st.itemId === item.id && (st.phase === "sending" || st.phase === "started")) return;
@@ -1260,9 +1304,22 @@ export function createApprove({ call = api, onChange = () => {}, sleep = pause }
 }
 
 /** The button and its sentence for the open card. */
-export function approveView(item, approver, liveRun = false) {
+export function approveView(item, approver, liveRun = false, waiting = null) {
   const st = approver.state;
   const mine = st.itemId === item.id ? st : { phase: "idle", text: "" };
+  // Runner runs wait for this person (`waiting` is the runs panel): the same button approves them. With none left, only the answer stays.
+  if (waiting && (waiting.approvableCount() > 0 || mine.forRuns)) {
+    const left = waiting.approvableCount();
+    return h(
+      "div",
+      { class: "pl-approve", "data-testid": "pl-approve" },
+      left > 0
+        ? h("button", { type: "button", class: "pl-approve-btn", "data-testid": "pl-approve-btn", "aria-disabled": mine.phase === "sending" ? "true" : "false", onClick: () => approver.approveRuns(item, waiting) }, item.stage === "triaged" ? APPROVE_RUN_LABEL : labelFor(item))
+        : null,
+      left > 0 && waiting.waitingLine() ? h("p", { class: "pl-muted", "data-testid": "pl-approve-hint" }, waiting.waitingLine()) : null,
+      mine.text ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-approve-note" }, mine.text) : null
+    );
+  }
   return h(
     "div",
     { class: "pl-approve", "data-testid": "pl-approve" },

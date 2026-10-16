@@ -272,6 +272,25 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
         expect(await stageOf(id)).toBe('closed_unmerged');
       });
 
+      it('closed unmerged and merged each write the timeline row the body-link path writes (from, to, webhook source, the delivery as its reference)', async () => {
+        const rowsOf = async (id: string) =>
+          (await admin.query<{ from_stage: string; to_stage: string; source: string; source_ref: string; reviewer: string | null }>(
+            'SELECT from_stage, to_stage, source, source_ref, reviewer FROM work_item_transitions WHERE work_item_id = $1 ORDER BY created_at', [id])).rows;
+        const closed = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6520, stage: 'pr_opened' });
+        await recordRunnerPr(closed, 6820);
+        await apply(mapMappedFor(botPr('pull_request.closed.unmerged.json', 6820)));
+        const merged = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6521, stage: 'pr_opened' });
+        await recordRunnerPr(merged, 6821);
+        await apply(mapMappedFor(botPr('pull_request.closed.merged.json', 6821, { merged: true, merged_at: '2026-10-16T19:11:37Z' })));
+        const a = await rowsOf(closed);
+        expect(a).toHaveLength(1);
+        expect(a[0]).toMatchObject({ from_stage: 'pr_opened', to_stage: 'closed_unmerged', source: 'webhook', reviewer: null });
+        expect(a[0]!.source_ref).not.toBe('');
+        const b = await rowsOf(merged);
+        expect(b).toHaveLength(1);
+        expect(b[0]).toMatchObject({ from_stage: 'pr_opened', to_stage: 'merged', source: 'webhook' });
+      });
+
       it('merged: the item moves to merged', async () => {
         const id = await seedWorkItem(admin, refs.accountId, refs.repoId, { ghNumber: 6502, stage: 'pr_opened' });
         await recordRunnerPr(id, 6802);
