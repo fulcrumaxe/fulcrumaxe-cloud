@@ -19,6 +19,9 @@ import { runTriageStep } from "../plan/step.js";
  *
  * Both are idempotent, so a replay after a crash between triage and the link finishes the job.
  *
+ * Then (S4-e2) the approved proposal's link, proposals.work_item_id, moves from the retired item to the root, so the Inbox row reads the root's
+ * stage and the root finds its proposal. A third idempotent step, in its own transaction, after the retire.
+ *
  * The category is not trusted: the pipeline's parser validates it against the fixed set, and junk comes back as
  * `unclassified` with nothing written. The trust decision (H07) was made when the webhook created the item as
  * internal, and the worker re-reads that before it calls this; the event below carries the author's login as an
@@ -63,6 +66,23 @@ async function backfillTitle(pool: Pool, accountId: string, workItemId: string, 
   });
 }
 
+/**
+ * D#483 S4-e2: moves the approved proposal's link from the retired item to its root, through the one definer that may. Idempotent: a
+ * proposal already linked to the root is not found by the old id, so a replay does nothing. An old item that was not retired (a halted
+ * duplicate is left alone) is skipped; the definer would refuse it, and the link then stays where it was.
+ */
+async function followRoot(pool: Pool, accountId: string, oldId: string, rootId: string): Promise<void> {
+  await withTenant(pool, accountId, async (client) => {
+    const p = await client.query<{ id: string; stage: string }>(
+      "SELECT p.id, w.stage FROM proposals p JOIN work_items w ON w.account_id = p.account_id AND w.id = p.work_item_id WHERE p.account_id = $1 AND p.state = 'approved' AND p.work_item_id = $2",
+      [accountId, oldId],
+    );
+    const row = p.rows[0];
+    if (!row || row.stage !== "closed") return;
+    await client.query("SELECT proposal_follow_root($1::uuid, $2::uuid, $3::uuid)", [row.id, oldId, rootId]);
+  });
+}
+
 export async function triageIssueItem(pool: Pool, accountId: string, input: IssueTriageInput): Promise<IssueTriageResult> {
   // Before the triage, so an issue that triage refuses or parks still shows its title on the card it keeps.
   await backfillTitle(pool, accountId, input.workItemId, input.title);
@@ -92,6 +112,9 @@ export async function triageIssueItem(pool: Pool, accountId: string, input: Issu
         }
       }
     });
+    // The proposal behind the retired item follows the root: its one link moves, nothing else about it does. A separate transaction from the
+    // retire, so a crash between the two leaves a closed `superseded:` item the replay recognises, and the replay finishes the move.
+    if (root !== input.workItemId) await followRoot(pool, accountId, input.workItemId, root);
     return {
       status: out.status,
       category: out.category,
