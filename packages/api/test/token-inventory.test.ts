@@ -26,7 +26,8 @@ describe('token-inventory: generic session-only and scope enforcement over the r
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
     platformOpsPool = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
 
-    const seeded = await seedAccountWithMember(admin, { role: 'owner' });
+    // A plan with room: this test sends one request per registry entry from one account, and the starter plan's per-tenant cap (a minute's window) is smaller than the registry now is.
+    const seeded = await seedAccountWithMember(admin, { role: 'owner', plan: 'scale' });
     accountId = seeded.accountId;
     userId = seeded.userId;
   });

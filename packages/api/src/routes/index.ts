@@ -32,6 +32,7 @@ import { planRoutes } from "./plan.js";
 import { proposalRoutes } from "./proposals.js";
 import { correctionRoutes } from "./corrections.js";
 import { runHandoffRoutes } from "./run-handoff.js";
+import { memoryRoutes } from "./memory.js";
 
 /**
  * The one array every other piece of API-1 reads from: the catch-all's
@@ -88,6 +89,7 @@ export const ROUTES: RouteEntry[] = [
   ...proposalRoutes,
   ...correctionRoutes,
   ...runHandoffRoutes,
+  ...memoryRoutes,
 ];
 
 // Fails fast (at import time, so both the test suite and `next start`

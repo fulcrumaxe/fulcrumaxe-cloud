@@ -1,0 +1,52 @@
+{
+  "groups": [
+    {
+      "scope": "repo",
+      "label": "acme/widgets",
+      "target_id": "5b1f0c7e-2d6a-4a53-9a39-1c2f3a4b5c6d",
+      "entries": [
+        {
+          "id": "0f7a1d2e-3b4c-4d5e-8f60-71829304a5b6",
+          "scope": "repo",
+          "kind": "command",
+          "kind_label": "Command",
+          "status": "approved",
+          "status_label": "Approved",
+          "status_icon": "check",
+          "title": "pnpm test --run",
+          "author_kind": "person",
+          "source": "Written by a person",
+          "version": 2,
+          "created_at": "2026-10-14T09:30:00.000Z",
+          "age": "2 days ago",
+          "runs": 2,
+          "runs_label": "Used in 2 runs"
+        },
+        {
+          "id": "1a8b2e3f-4c5d-4e6f-9071-82930415b6c7",
+          "scope": "repo",
+          "kind": "fact",
+          "kind_label": "Fact",
+          "status": "proposed",
+          "status_label": "Proposed",
+          "status_icon": "inbox",
+          "title": "The build needs Node 24",
+          "author_kind": "import",
+          "source": "Imported from CLAUDE.md",
+          "version": 1,
+          "created_at": "2026-10-15T08:00:00.000Z",
+          "age": "1 day ago",
+          "runs": 0,
+          "runs_label": "Not used yet"
+        }
+      ]
+    },
+    {
+      "scope": "account",
+      "label": "Account",
+      "target_id": null,
+      "entries": []
+    }
+  ],
+  "truncated": false
+}
