@@ -68,26 +68,87 @@ describe("sweepStaleProfiles", () => {
 describe("a signal during a real capture", () => {
   const SCRIPT = join(PACKAGE_ROOT, "test", "fixtures", "capture-signal.ts");
 
+  interface Run {
+    code: number | null;
+    stderr: string;
+    /** Milliseconds from the first signal to the exit. */
+    ms: number;
+  }
+
+  /** Starts the child, waits for its marker line on stderr (never a fixed sleep), sends the signal(s), and returns how it ended. */
+  async function signalAt(marker: string, signal: NodeJS.Signals, root: string, mode: string[], repeatAfterMs?: number): Promise<Run> {
+    const child = spawn(process.execPath, ["--import", "tsx", SCRIPT, root, ...mode], { cwd: PACKAGE_ROOT, stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    const exited = new Promise<number | null>((resolve) => child.on("close", (c) => resolve(c)));
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`the capture never wrote ${marker}: ${err.slice(0, 400)}`));
+      }, 45_000);
+      child.stderr.on("data", (d: Buffer) => {
+        err += d.toString();
+        if (err.includes(`${marker}\n`)) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      void exited.then(() => {
+        clearTimeout(timer);
+        reject(new Error(`the capture exited before ${marker}: ${err.slice(0, 400)}`));
+      });
+    });
+    await ready;
+    expect(readdirSync(root).filter((n) => n.startsWith(CAPTURE_PREFIX))).toHaveLength(1);
+    const start = Date.now();
+    child.kill(signal);
+    if (repeatAfterMs !== undefined) {
+      await new Promise((r) => setTimeout(r, repeatAfterMs));
+      child.kill(signal);
+    }
+    const code = await exited;
+    return { code, stderr: err, ms: Date.now() - start };
+  }
+  const count = (text: string, line: string): number => text.split("\n").filter((l) => l === line).length;
+
   for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     it(`${signal} closes the browser, removes the profile and exits ${code}`, async () => {
       const root = scratch();
-      const child = spawn(process.execPath, ["--import", "tsx", SCRIPT, root], { cwd: PACKAGE_ROOT, stdio: ["ignore", "pipe", "pipe"] });
-      let out = "";
-      let err = "";
-      child.stdout.on("data", (d: Buffer) => (out += d.toString()));
-      child.stderr.on("data", (d: Buffer) => (err += d.toString()));
-      const exited = new Promise<number | null>((resolve) => child.on("close", (c) => resolve(c)));
-      const deadline = Date.now() + 45_000;
-      while (!out.includes("READY")) {
-        if (Date.now() > deadline) {
-          child.kill("SIGKILL");
-          throw new Error(`the capture never became ready: ${err.slice(0, 400)}`);
-        }
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(readdirSync(root).filter((n) => n.startsWith(CAPTURE_PREFIX))).toHaveLength(1);
-      child.kill(signal);
-      expect(await exited).toBe(code);
+      const run = await signalAt("READY", signal, root, []);
+      expect(run.code).toBe(code);
+      expect(readdirSync(root)).toEqual([]);
+      // The browser is closed first, and only then is its profile removed (the close still sees the folder).
+      expect(run.stderr).toContain("CLOSED exists=true\n");
+    }, 90_000);
+
+    it(`${signal} before the browser has launched removes the profile and still exits ${code}`, async () => {
+      const root = scratch();
+      const run = await signalAt("PRELAUNCH", signal, root, ["prelaunch"]);
+      expect(run.code).toBe(code);
+      expect(readdirSync(root)).toEqual([]);
+    }, 90_000);
+
+    it(`${signal} while a launcher never returns: the launch cap removes the profile and exits ${code} without waiting for it`, async () => {
+      const root = scratch();
+      const run = await signalAt("PRELAUNCH", signal, root, ["hang", "600"]);
+      expect(run.code).toBe(code);
+      expect(readdirSync(root)).toEqual([]);
+      // It waited for the cap (not 0) and not much longer (not the 15 s default or more).
+      expect(run.ms).toBeGreaterThanOrEqual(450);
+      expect(run.ms).toBeLessThan(8_000);
+    }, 90_000);
+
+    it(`${signal} sent twice before the browser has launched is handled once: first code, profile removed, one close`, async () => {
+      const root = scratch();
+      const run = await signalAt("PRELAUNCH", signal, root, ["prelaunch"], 200);
+      expect(run.code).toBe(code);
+      expect(readdirSync(root)).toEqual([]);
+      expect(count(run.stderr, "CLOSE")).toBe(1);
+    }, 90_000);
+
+    it(`${signal} while the normal cleanup is closing the browser still exits ${code} and removes the profile`, async () => {
+      const root = scratch();
+      const run = await signalAt("CLOSING", signal, root, ["slowclose"]);
+      expect(run.code).toBe(code);
       expect(readdirSync(root)).toEqual([]);
     }, 90_000);
   }
