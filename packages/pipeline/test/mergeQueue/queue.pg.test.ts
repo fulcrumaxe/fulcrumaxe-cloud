@@ -273,7 +273,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const w = await world();
       const parent = await enqueue(w, 20, 0);
       const child = await enqueue(w, 21, 1, { dependsOn: 20 });
-      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: parent.workItemId }));
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: parent.workItemId! }));
       await take(w, "h", factsFor([parent, child]));
       expect(await row(child.id)).toMatchObject({ state: "stopped", reason: "merge_dependency_closed" });
     });
@@ -293,7 +293,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const child = await enqueue(w, 21, 1, { dependsOn: 20 });
       await tenant(w.accountId, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: 20, merged: true }));
       expect((await tenant(w.accountId, (c) => readQueue(c, w.accountId, w.repoId))).map((e) => e.prNumber)).toEqual([20, 21]);
-      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: child.workItemId }));
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: child.workItemId! }));
       expect(await tenant(w.accountId, (c) => readQueue(c, w.accountId, w.repoId))).toEqual([]);
       expect(parent.id).toBeTruthy();
     });
@@ -585,7 +585,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const w = await world();
       const a = await enqueue(w, 1, 0);
       const again = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("a"), approvedAt: at(999) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("a"), approvedAt: at(999) }),
       );
       expect(again.outcome).toBe("unchanged");
 
@@ -596,7 +596,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
 
       // Reviewed again on a new head, much later: back in the queue at the ORIGINAL position.
       const requeued = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("c"), approvedAt: at(5000) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("c"), approvedAt: at(5000) }),
       );
       expect(requeued.outcome).toBe("requeued");
       expect(requeued.entry).toMatchObject({ state: "queued", headSha: sha("c") });
@@ -608,7 +608,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const a = await enqueue(w, 1, 0);
       await take(w, "h", factsFor([a]));
       const r = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("d"), approvedAt: at(1) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("d"), approvedAt: at(1) }),
       );
       expect(r.outcome).toBe("requeued");
       expect(await inFlight(w)).toEqual([]);
@@ -619,11 +619,11 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const a = await enqueue(w, 1, 0);
       await tenant(w.accountId, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: 1, merged: true }));
       const r = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("e"), approvedAt: at(1) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("e"), approvedAt: at(1) }),
       );
       expect(r.outcome).toBe("final");
       await expect(
-        tenant(w.accountId, (c) => enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 2, headSha: sha("e"), approvedAt: at(1) })),
+        tenant(w.accountId, (c) => enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 2, headSha: sha("e"), approvedAt: at(1) })),
       ).rejects.toMatchObject({ code: "entry_pr_mismatch" });
     });
 
@@ -631,7 +631,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const w = await world();
       const a = await enqueue(w, 1, 0);
       await take(w, "h", factsFor([a]));
-      const c1 = await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: a.workItemId }));
+      const c1 = await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: a.workItemId! }));
       expect(c1).toMatchObject({ state: "cancelled", reason: "work_item_cancelled", slotHolder: null });
       expect(await inFlight(w)).toEqual([]);
     });
@@ -670,11 +670,11 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       expect(stopped).toMatchObject({ state: "stopped", reason: "branch_behind", slotHolder: null });
       // Same head again: the stop stands. A new reviewed head clears it.
       const same = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("a"), approvedAt: at(1) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("a"), approvedAt: at(1) }),
       );
       expect(same.outcome).toBe("unchanged");
       const fresh = await tenant(w.accountId, (c) =>
-        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId, prNumber: 1, headSha: sha("f"), approvedAt: at(1) }),
+        enqueueEntry(c, { accountId: w.accountId, repoId: w.repoId, workItemId: a.workItemId!, prNumber: 1, headSha: sha("f"), approvedAt: at(1) }),
       );
       expect(fresh.entry).toMatchObject({ state: "queued", reason: null });
     });
@@ -730,7 +730,7 @@ describe("D#519 MQ2 merge queue core [pg]", () => {
       const a = await enqueue(w, 1, 0);
       const b = await enqueue(w, 2, 1);
       await tenant(w.accountId, (c) => settlePullRequest(c, { accountId: w.accountId, repoId: w.repoId, prNumber: 1, merged: true }));
-      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: b.workItemId }));
+      await tenant(w.accountId, (c) => cancelWorkItemEntry(c, { accountId: w.accountId, workItemId: b.workItemId! }));
       for (const id of [a.id, b.id]) {
         // These pass every CHECK, so only the final-row guard can refuse them.
         await expect(tenant(w.accountId, (c) => c.query(`UPDATE merge_queue_entries SET head_sha = $2 WHERE id = $1`, [id, sha("9")]))).rejects.toMatchObject({ code: "23514" });

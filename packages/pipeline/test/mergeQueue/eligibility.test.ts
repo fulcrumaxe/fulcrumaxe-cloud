@@ -13,6 +13,8 @@ function entry(over: Partial<MergeQueueEntry> & { prNumber: number }): MergeQueu
     id: `00000000-0000-4000-8000-${String(seq).padStart(12, "0")}`,
     accountId: "00000000-0000-4000-8000-0000000000aa",
     repoId: "00000000-0000-4000-8000-0000000000bb",
+    entryKind: "work_item",
+    planWritebackId: null,
     workItemId: `00000000-0000-4000-8000-${String(1000 + seq).padStart(12, "0")}`,
     headSha: "a".repeat(40),
     dependsOnPrNumber: null,

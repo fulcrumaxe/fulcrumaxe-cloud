@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { MAX_CONFLICT_ROUNDS, MERGE_QUEUE_LEASE_SECONDS } from "./policy.js";
 import { eligibilityContext, pickNext } from "./eligibility.js";
-import { MergeQueueError, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
+import { MergeQueueError, type EntryKind, type MergeQueueEntry, type MergedBy, type PrFacts, type QueueState, type WorkKind } from "./types.js";
 
 /**
  * D#519 MQ2: the merge queue's persistence (migration 0824). Every function takes a `PoolClient` that is already inside a tenant
@@ -17,7 +17,7 @@ import { MergeQueueError, type MergeQueueEntry, type MergedBy, type PrFacts, typ
 
 type Queryable = Pick<PoolClient, "query">;
 
-const COLUMNS = `id, account_id, repo_id, work_item_id, pr_number, head_sha, depends_on_pr_number, approved_at, state, phase, work_kind,
+const COLUMNS = `id, account_id, repo_id, entry_kind, work_item_id, plan_writeback_id, pr_number, head_sha, depends_on_pr_number, approved_at, state, phase, work_kind,
   work_run_id, slot_holder, lease_until, slot_taken_at, refresh_count, conflict_rounds, reason, merged_by, created_at, updated_at`;
 
 /** Clears everything that only means something while an entry holds the slot or waits for work. */
@@ -30,7 +30,9 @@ interface Row {
   id: string;
   account_id: string;
   repo_id: string;
-  work_item_id: string;
+  entry_kind: EntryKind;
+  work_item_id: string | null;
+  plan_writeback_id: string | null;
   pr_number: number;
   head_sha: string;
   depends_on_pr_number: number | null;
@@ -55,7 +57,9 @@ function toEntry(r: Row): MergeQueueEntry {
     id: r.id,
     accountId: r.account_id,
     repoId: r.repo_id,
+    entryKind: r.entry_kind,
     workItemId: r.work_item_id,
+    planWritebackId: r.plan_writeback_id,
     prNumber: r.pr_number,
     headSha: r.head_sha,
     dependsOnPrNumber: r.depends_on_pr_number,
@@ -292,7 +296,7 @@ export async function takeSlot(client: Queryable, input: TakeSlotInput): Promise
   const entries = await readQueue(client, input.accountId, input.repoId);
 
   if (entries.some((e) => e.state === "in_flight")) return { taken: null, skipped: "slot_busy", reclaimed, stopped };
-  const next = pickNext(entries, eligibilityContext(entries, input.facts));
+  const next = pickNext(entries, eligibilityContext(entries, input.facts, input.now));
   if (!next) return { taken: null, skipped: "nothing_eligible", reclaimed, stopped };
 
   await client.query("SAVEPOINT merge_queue_take");
@@ -355,7 +359,9 @@ export type ReleaseForWorkResult =
   /** The caller no longer holds the slot. */
   | { ok: false; reason: "slot_lost" }
   /** A `conflict` or `renumber` round would pass MAX_CONFLICT_ROUNDS. Nothing was changed. */
-  | { ok: false; reason: "rounds_exhausted" };
+  | { ok: false; reason: "rounds_exhausted" }
+  /** A plan write-back never starts an agent run (R-598-P5b-3); the database refuses it as well. Nothing was changed. */
+  | { ok: false; reason: "not_a_work_item_entry" };
 
 /**
  * Starting any agent run for an entry (a conflict fix, a renumber, a delta review) goes through here, in the SAME transaction that
@@ -375,13 +381,15 @@ export async function releaseForWork(
     `UPDATE merge_queue_entries
         SET state = 'awaiting_work', phase = NULL, slot_holder = NULL, lease_until = NULL, slot_taken_at = NULL,
             work_kind = $4, work_run_id = $5, conflict_rounds = conflict_rounds + $6
-      WHERE account_id = $1 AND id = $2 AND state = 'in_flight' AND slot_holder = $3 AND ($6 = 0 OR conflict_rounds < $7)
+      WHERE account_id = $1 AND id = $2 AND state = 'in_flight' AND slot_holder = $3 AND entry_kind = 'work_item' AND ($6 = 0 OR conflict_rounds < $7)
       RETURNING ${COLUMNS}`,
     [input.accountId, input.entryId, input.holder, input.kind, input.runId ?? null, counts, MAX_CONFLICT_ROUNDS],
   );
   if (entry) return { ok: true, entry };
   const current = await getEntry(client, input.accountId, input.entryId);
-  if (current && current.state === "in_flight" && current.slotHolder === input.holder) return { ok: false, reason: "rounds_exhausted" };
+  if (current && current.state === "in_flight" && current.slotHolder === input.holder) {
+    return { ok: false, reason: current.entryKind === "plan_writeback" ? "not_a_work_item_entry" : "rounds_exhausted" };
+  }
   return { ok: false, reason: "slot_lost" };
 }
 
@@ -547,4 +555,103 @@ export async function recordHeadRefresh(
   );
   if (!entry) throw new MergeQueueError("bad_input");
   return { recorded: true, entry };
+}
+
+// ---- plan write-back entries (D#598 P5b, migration 0825) -------------------------------------------------------------------------
+
+export interface EnqueuePlanWritebackInput {
+  accountId: string;
+  repoId: string;
+  /** The platform's record in `plan_writebacks`. One entry per record for its whole life. */
+  planWritebackId: string;
+  prNumber: number;
+  /** The head the platform pushed. */
+  headSha: string;
+  /** The moment the platform first pushed that head. A one-time stamp, as for any entry: a coalesced push does not change it. */
+  approvedAt: Date;
+}
+
+/**
+ * Puts the platform's write-back PR in its repo's queue, with no work item. Idempotent per `planWritebackId`: a replayed step finds the
+ * entry and changes nothing. The yield rule and the head rule live in eligibility.ts; nothing here starts an agent run.
+ */
+export async function enqueuePlanWriteback(
+  client: Queryable,
+  input: EnqueuePlanWritebackInput,
+): Promise<{ entry: MergeQueueEntry; outcome: "created" | "unchanged" }> {
+  if (!Number.isInteger(input.prNumber) || input.prNumber < 1) throw new MergeQueueError("bad_input");
+  assertSha(input.headSha);
+  const created = await one(
+    client,
+    `INSERT INTO merge_queue_entries (account_id, repo_id, entry_kind, plan_writeback_id, pr_number, head_sha, approved_at)
+     VALUES ($1, $2, 'plan_writeback', $3, $4, $5, $6)
+     ON CONFLICT (account_id, plan_writeback_id) DO NOTHING
+     RETURNING ${COLUMNS}`,
+    [input.accountId, input.repoId, input.planWritebackId, input.prNumber, input.headSha, input.approvedAt],
+  );
+  if (created) return { entry: created, outcome: "created" };
+  const existing = await getEntryByPlanWriteback(client, input.accountId, input.planWritebackId);
+  if (!existing) throw new MergeQueueError("bad_input"); // deleted between the two statements; the step retries
+  if (existing.repoId !== input.repoId || existing.prNumber !== input.prNumber) throw new MergeQueueError("entry_pr_mismatch");
+  return { entry: existing, outcome: "unchanged" };
+}
+
+export async function getEntryByPlanWriteback(client: Queryable, accountId: string, planWritebackId: string): Promise<MergeQueueEntry | null> {
+  return one(client, `SELECT ${COLUMNS} FROM merge_queue_entries WHERE account_id = $1 AND plan_writeback_id = $2`, [accountId, planWritebackId]);
+}
+
+/**
+ * Step one of a coalescing push to the write-back branch: take the entry out of the queue's reach (`in_review`: not eligible, keeps its
+ * stamp) so the slot cannot be taken while the head moves. Only a `queued` entry can be held: a `stopped` entry stays stopped for a person (a
+ * push never puts it back in the queue), and one that holds the slot or is final answers null. The caller must not push on null.
+ */
+export async function holdWritebackForPush(client: Queryable, input: { accountId: string; planWritebackId: string }): Promise<MergeQueueEntry | null> {
+  return one(
+    client,
+    `UPDATE merge_queue_entries SET state = 'in_review', reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE account_id = $1 AND plan_writeback_id = $2 AND state = 'queued'
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.planWritebackId],
+  );
+}
+
+/** Step two: the push landed (`headSha` is the new recorded head) or failed (`headSha` omitted: the entry returns on its old head). */
+export async function releaseWritebackAfterPush(
+  client: Queryable,
+  input: { accountId: string; planWritebackId: string; headSha?: string },
+): Promise<MergeQueueEntry | null> {
+  if (input.headSha !== undefined) assertSha(input.headSha);
+  return one(
+    client,
+    `UPDATE merge_queue_entries SET state = 'queued', head_sha = COALESCE($3, head_sha), reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE account_id = $1 AND plan_writeback_id = $2 AND state = 'in_review'
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.planWritebackId, input.headSha ?? null],
+  );
+}
+
+/** Ends a write-back's entry: `merged` (a person merged it), `closed` (closed unmerged) or `cancelled` (the platform replaced it). Null if already final. */
+export async function endWritebackEntry(
+  client: Queryable,
+  input: { accountId: string; planWritebackId: string; how: "merged" | "closed" | "cancelled"; reason?: string },
+): Promise<MergeQueueEntry | null> {
+  if (input.how === "cancelled") {
+    const reason = input.reason ?? "writeback_replaced";
+    assertCode(reason);
+    return one(
+      client,
+      `UPDATE merge_queue_entries SET state = 'cancelled', reason = $3, ${CLEAR_SLOT_AND_WORK}
+        WHERE account_id = $1 AND plan_writeback_id = $2 AND state IN ('in_review', 'queued', 'in_flight', 'stopped')
+        RETURNING ${COLUMNS}`,
+      [input.accountId, input.planWritebackId, reason],
+    );
+  }
+  return one(
+    client,
+    `UPDATE merge_queue_entries
+        SET state = $3, merged_by = CASE WHEN $3 = 'merged' THEN 'person' ELSE NULL END, reason = NULL, ${CLEAR_SLOT_AND_WORK}
+      WHERE account_id = $1 AND plan_writeback_id = $2 AND state IN ('in_review', 'queued', 'in_flight', 'stopped')
+      RETURNING ${COLUMNS}`,
+    [input.accountId, input.planWritebackId, input.how],
+  );
 }

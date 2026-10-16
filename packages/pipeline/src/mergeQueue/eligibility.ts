@@ -1,3 +1,4 @@
+import { WRITEBACK_YIELD_MINUTES } from "./policy.js";
 import type { Eligibility, MergeQueueEntry, PrFacts } from "./types.js";
 
 /**
@@ -20,10 +21,14 @@ export interface EligibilityContext {
   byPrNumber: ReadonlyMap<number, MergeQueueEntry>;
   /** GitHub's current word on each queued entry's PR, by entry id. */
   facts: ReadonlyMap<string, PrFacts>;
+  /** Every entry of the repo the context was built from; a write-back looks here for a work item that is eligible. */
+  entries: readonly MergeQueueEntry[];
+  /** The clock the write-back's yield window is measured on (injected by tests; the real time otherwise). */
+  now: Date;
 }
 
-export function eligibilityContext(entries: readonly MergeQueueEntry[], facts: ReadonlyMap<string, PrFacts>): EligibilityContext {
-  return { byPrNumber: new Map(entries.map((e) => [e.prNumber, e])), facts };
+export function eligibilityContext(entries: readonly MergeQueueEntry[], facts: ReadonlyMap<string, PrFacts>, now: Date = new Date()): EligibilityContext {
+  return { byPrNumber: new Map(entries.map((e) => [e.prNumber, e])), facts, entries, now };
 }
 
 /**
@@ -32,11 +37,29 @@ export function eligibilityContext(entries: readonly MergeQueueEntry[], facts: R
  * back the ones behind it.
  */
 export function evaluateEntry(entry: MergeQueueEntry, ctx: EligibilityContext): Eligibility {
+  const base = evaluateOnPullRequest(entry, ctx);
+  if (!base.eligible || entry.entryKind !== "plan_writeback") return base;
+  // A plan write-back yields to the repo's work items (R-598-P5b-3), until it has waited WRITEBACK_YIELD_MINUTES since its head was
+  // first pushed. The window is measured from `approved_at`, a one-time stamp, so a coalesced push cannot restart it.
+  const yieldsUntil = entry.approvedAt.getTime() + WRITEBACK_YIELD_MINUTES * 60_000;
+  if (ctx.now.getTime() < yieldsUntil && ctx.entries.some((o) => o.entryKind === "work_item" && evaluateOnPullRequest(o, ctx).eligible)) {
+    return { eligible: false, reason: "yielding_to_work_item" };
+  }
+  return base;
+}
+
+/** The checks that depend on the entry and its pull request alone (not on the other entries of the repo). */
+function evaluateOnPullRequest(entry: MergeQueueEntry, ctx: EligibilityContext): Eligibility {
   if (entry.state !== "queued") return { eligible: false, reason: "not_queued" };
   const facts = ctx.facts.get(entry.id);
   if (!facts) return { eligible: false, reason: "pr_facts_unknown" };
   if (!facts.open) return { eligible: false, reason: "pr_not_open" };
   if (facts.draft) return { eligible: false, reason: "pr_draft" };
+  // A write-back is eligible only on the head the platform recorded, or on a head the tick verified as the platform's own refresh of it.
+  // Facts that carry no head at all are not eligible either: the check fails closed until the tick fills the head in.
+  if (entry.entryKind === "plan_writeback" && (facts.headSha === undefined || (facts.headSha !== entry.headSha && facts.refreshVerified !== true))) {
+    return { eligible: false, reason: "head_not_recorded" };
+  }
   if (entry.dependsOnPrNumber !== null) {
     const parent = ctx.byPrNumber.get(entry.dependsOnPrNumber);
     // No entry for the parent yet (still in review), or an entry that has not merged: wait. A parent that ended unmerged is its own
