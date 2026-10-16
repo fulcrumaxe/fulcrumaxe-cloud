@@ -93,7 +93,11 @@ describe('migration 0795 gives platform_ops nothing', () => {
          WHERE c.relnamespace = 'public'::regnamespace AND c.relname = 'repos' AND a.attname <> 'verified_copy_sha256' AND has_column_privilege('platform_ops', c.oid, a.attnum, p.privilege_type)
          ORDER BY 1`),
       policies: await q(`SELECT policyname || ' ' || cmd || ' ' || coalesce(qual, '') || ' ' || coalesce(with_check, '') AS x FROM pg_policies WHERE schemaname = 'public' AND tablename = 'repos' AND 'platform_ops' = ANY(roles) ORDER BY 1`),
-      ownedFunctions: await q(`SELECT p.oid::regprocedure::text AS x FROM pg_proc p WHERE p.proowner = 'platform_ops'::regrole ORDER BY 1`),
+      // 0844 (S5-f) re-creates reject_proposal with two more parameters and adds resurface_proposals, both platform_ops-owned like the other
+      // proposal definers. Those two exact signatures are the only difference allowed (reject_proposal compared by name, resurface_proposals
+      // left out); any other change to what platform_ops owns still fails this test.
+      ownedFunctions: await q(`SELECT CASE WHEN p.proname = 'reject_proposal' THEN 'reject_proposal(...)' ELSE p.oid::regprocedure::text END AS x FROM pg_proc p
+         WHERE p.proowner = 'platform_ops'::regrole AND p.oid::regprocedure::text <> 'resurface_proposals(uuid,uuid)' ORDER BY 1`),
       memberships: await q(`SELECT pg_get_userbyid(roleid) || ' ' || admin_option::text AS x FROM pg_auth_members WHERE member = 'platform_ops'::regrole ORDER BY 1`),
     };
   }

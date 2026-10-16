@@ -23,6 +23,8 @@ export interface ProposalCtx {
 
 export type ProposalState = 'new' | 'approved' | 'rejected' | 'withdrawn';
 export type ProposalOwner = 'product' | 'internal_loop';
+/** D#483 S5-f: what a rejection remembers. A rejected row decided before 0844 has no kind (null) and behaves as `never`. */
+export type RejectKind = 'not_now' | 'never';
 
 export interface ProposalRow {
   id: string;
@@ -42,8 +44,15 @@ export interface ProposalRow {
   provenance: 'internal' | 'external';
   owner_process: ProposalOwner;
   state: ProposalState;
+  /** When the decision was made. A resurfaced "Not now" keeps it, so the card can say "You said not now on <date>". */
   decided_at: string | null;
   reject_note: string | null;
+  /** `not_now` or `never` while the proposal is rejected; null otherwise (and on a row rejected before 0844). */
+  reject_kind: RejectKind | null;
+  /** When a "Not now" may come back; set exactly when `reject_kind` is `not_now`. */
+  resurface_after: string | null;
+  /** When a "Not now" came back to the inbox (state is then `new`, or later `withdrawn` or `approved`); null if it never did. */
+  resurfaced_at: string | null;
   roadmap_position: number | null;
   work_item_id: string | null;
   /** The work item's live stage (read from the work item, never copied), or null when there is no work item. */
@@ -72,12 +81,14 @@ export const REFUSAL_CODES: ReadonlySet<string> = new Set([
   'work_item_wrong_repo',
   'work_item_wrong_stage',
 ]);
+/** The definer's 22023 for a "Not now" date that is not in the future or is more than 365 days out. */
+export const INVALID_RESURFACE_DATE = 'invalid_resurface_date';
 export const PROPOSAL_PAGE_SIZE = 50;
 const CURSOR_RE = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z)\|([0-9a-f-]{36})$/i;
 
 export const PROPOSAL_COLUMNS = `p.id, p.repo_id, p.dedupe_key, p.sources, p.gh_number, p.discussion_number,
   t.task_key, t.milestone_key, m.title AS milestone_title, p.title, p.summary, p.category_hint, p.estimate_usd::float8 AS estimate_usd, p.provenance,
-  p.owner_process, p.state, p.decided_at, p.reject_note, p.roadmap_position, p.work_item_id, w.stage AS work_item_stage,
+  p.owner_process, p.state, p.decided_at, p.reject_note, p.reject_kind, p.resurface_after, p.resurfaced_at, p.roadmap_position, p.work_item_id, w.stage AS work_item_stage,
   p.created_at, p.updated_at,
   to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts`;
 export const PROPOSAL_FROM = `FROM proposals p
@@ -95,6 +106,8 @@ export function toProposalRow(r: Record<string, unknown>): ProposalRow {
   return {
     ...(rest as unknown as ProposalRow),
     decided_at: iso(r.decided_at),
+    resurface_after: iso(r.resurface_after),
+    resurfaced_at: iso(r.resurfaced_at),
     created_at: iso(r.created_at)!,
     updated_at: iso(r.updated_at)!,
   };
@@ -109,6 +122,7 @@ export function proposalTenant<T>(ctx: ProposalCtx, fn: (c: PoolClient) => Promi
 export function mapRefusal(err: unknown): never {
   const e = err as { code?: string; message?: string };
   if (e?.code === '55000' && e.message && REFUSAL_CODES.has(e.message)) throw new ProposalRefusedError(e.message);
+  if (e?.code === '22023' && e.message === INVALID_RESURFACE_DATE) throw new ProposalRefusedError(INVALID_RESURFACE_DATE);
   if (e?.code === 'P0002') throw new NotFoundError('proposal not found');
   throw err;
 }
@@ -174,16 +188,26 @@ export async function getProposal(ctx: ProposalCtx, id: string): Promise<Proposa
   return proposalTenant(ctx, (c) => readProposal(c, id));
 }
 
-/** `new` to `rejected`, with an optional note of up to 500 characters. */
-export async function rejectProposal(ctx: ProposalCtx, id: string, note: string | null): Promise<ProposalRow> {
+export interface RejectInput {
+  /** Up to 500 characters. */
+  note?: string | null;
+  /** "Not now" comes back after `resurfaceAfter`; "Never" stays rejected and keeps absorbing duplicates of the same idea. */
+  kind: RejectKind;
+  /** Only with `not_now`: a future date at most 365 days away. Omitted, it is 30 days from now. */
+  resurfaceAfter?: Date | null;
+}
+
+/** `new` to `rejected` with a kind (D#483 S5-f), an optional note of up to 500 characters and, for "Not now", the date it may come back. */
+export async function rejectProposal(ctx: ProposalCtx, id: string, input: RejectInput): Promise<ProposalRow> {
   if (!UUID_RE.test(id)) throw new NotFoundError('proposal not found');
+  const date = input.kind === 'not_now' && input.resurfaceAfter ? input.resurfaceAfter.toISOString() : null;
   return proposalTenant(ctx, async (c) => {
-    await c.query('SELECT * FROM reject_proposal($1::uuid, $2)', [id, note]).catch(mapRefusal);
+    await c.query('SELECT * FROM reject_proposal($1::uuid, $2, $3, $4::timestamptz)', [id, input.note ?? null, input.kind, date]).catch(mapRefusal);
     return readProposal(c, id);
   });
 }
 
-/** `rejected` to `new`: the decision stamp and the note are cleared. */
+/** `rejected` to `new` ("Move back to inbox", either kind): the decision stamp, the note, the kind and the date are cleared. */
 export async function restoreProposal(ctx: ProposalCtx, id: string): Promise<ProposalRow> {
   if (!UUID_RE.test(id)) throw new NotFoundError('proposal not found');
   return proposalTenant(ctx, async (c) => {

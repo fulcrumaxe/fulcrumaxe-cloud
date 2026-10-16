@@ -20003,6 +20003,32 @@
                               "null"
                             ]
                           },
+                          "reject_kind": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "not_now",
+                                  "never"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "resurface_after": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "resurfaced_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
                           "roadmap_position": {
                             "anyOf": [
                               {
@@ -20059,6 +20085,9 @@
                           "state",
                           "decided_at",
                           "reject_note",
+                          "reject_kind",
+                          "resurface_after",
+                          "resurfaced_at",
                           "roadmap_position",
                           "work_item_id",
                           "work_item_stage",
@@ -20320,6 +20349,32 @@
                             "null"
                           ]
                         },
+                        "reject_kind": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "not_now",
+                                "never"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resurface_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resurfaced_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "roadmap_position": {
                           "anyOf": [
                             {
@@ -20376,6 +20431,9 @@
                         "state",
                         "decided_at",
                         "reject_note",
+                        "reject_kind",
+                        "resurface_after",
+                        "resurfaced_at",
                         "roadmap_position",
                         "work_item_id",
                         "work_item_stage",
@@ -20615,6 +20673,32 @@
                             "null"
                           ]
                         },
+                        "reject_kind": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "not_now",
+                                "never"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resurface_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resurfaced_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "roadmap_position": {
                           "anyOf": [
                             {
@@ -20671,6 +20755,9 @@
                         "state",
                         "decided_at",
                         "reject_note",
+                        "reject_kind",
+                        "resurface_after",
+                        "resurfaced_at",
                         "roadmap_position",
                         "work_item_id",
                         "work_item_stage",
@@ -20808,8 +20895,8 @@
     "/api/v1/proposals/{id}/reject": {
       "post": {
         "operationId": "rejectProposal",
-        "summary": "Reject a proposal, with an optional note",
-        "description": "Moves a `new` proposal to `rejected`, stamped with who and when. `note` is up to 500 characters. A re-import never changes the stamp.",
+        "summary": "Reject a proposal as Not now or Never",
+        "description": "Moves a `new` proposal to `rejected`, stamped with who and when. `kind` is `not_now` or `never`. A `not_now` proposal comes back to `new` at the first import after `resurface_after` whose source (the issue, Discussion or plan task) is still open; `resurface_after` is an ISO 8601 date-time in the future and at most 365 days away, 30 days from now when omitted, and is refused with `never`. A `never` proposal stays rejected and absorbs later duplicates of the same idea. `note` is up to 500 characters. A re-import never changes a rejected proposal except to bring back a `not_now` one whose date has passed. Both kinds can be moved back with `restore`, which clears the kind and the date. Rejecting again with the same kind, date and note answers with the same proposal; a different one is refused with 409 `not_new`.",
         "security": [
           {
             "session": []
@@ -20839,6 +20926,18 @@
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "not_now",
+                      "never"
+                    ]
+                  },
+                  "resurface_after": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
                   "note": {
                     "anyOf": [
                       {
@@ -20851,6 +20950,9 @@
                     ]
                   }
                 },
+                "required": [
+                  "kind"
+                ],
                 "additionalProperties": false
               }
             }
@@ -20858,7 +20960,7 @@
         },
         "responses": {
           "200": {
-            "description": "Reject a proposal, with an optional note",
+            "description": "Reject a proposal as Not now or Never",
             "content": {
               "application/json": {
                 "schema": {
@@ -20985,6 +21087,32 @@
                             "null"
                           ]
                         },
+                        "reject_kind": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "not_now",
+                                "never"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resurface_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resurfaced_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "roadmap_position": {
                           "anyOf": [
                             {
@@ -21041,6 +21169,9 @@
                         "state",
                         "decided_at",
                         "reject_note",
+                        "reject_kind",
+                        "resurface_after",
+                        "resurfaced_at",
                         "roadmap_position",
                         "work_item_id",
                         "work_item_stage",
@@ -21054,6 +21185,16 @@
                     "proposal"
                   ],
                   "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error `invalid_resurface_date`: not in the future, or more than 365 days away.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -21144,7 +21285,7 @@
       "post": {
         "operationId": "restoreProposal",
         "summary": "Move a rejected proposal back to the inbox",
-        "description": "`rejected` to `new`; the decision stamp and note are cleared. 409 `not_rejected` otherwise.",
+        "description": "\"Move back to inbox\": `rejected` to `new` for either kind; the decision stamp, note, kind and date are cleared. 409 `not_rejected` otherwise.",
         "security": [
           {
             "session": []
@@ -21295,6 +21436,32 @@
                             "null"
                           ]
                         },
+                        "reject_kind": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "not_now",
+                                "never"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resurface_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resurfaced_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "roadmap_position": {
                           "anyOf": [
                             {
@@ -21351,6 +21518,9 @@
                         "state",
                         "decided_at",
                         "reject_note",
+                        "reject_kind",
+                        "resurface_after",
+                        "resurfaced_at",
                         "roadmap_position",
                         "work_item_id",
                         "work_item_stage",
@@ -21605,6 +21775,32 @@
                             "null"
                           ]
                         },
+                        "reject_kind": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "not_now",
+                                "never"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "resurface_after": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "resurfaced_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
                         "roadmap_position": {
                           "anyOf": [
                             {
@@ -21661,6 +21857,9 @@
                         "state",
                         "decided_at",
                         "reject_note",
+                        "reject_kind",
+                        "resurface_after",
+                        "resurfaced_at",
                         "roadmap_position",
                         "work_item_id",
                         "work_item_stage",

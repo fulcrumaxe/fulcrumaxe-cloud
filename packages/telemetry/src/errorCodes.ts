@@ -50,6 +50,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "invalid_model_key",
   "invalid_plan",
   "invalid_request",
+  "invalid_resurface_date",
   "invalid_return_url",
   "invalid_token",
   "invalid_window",

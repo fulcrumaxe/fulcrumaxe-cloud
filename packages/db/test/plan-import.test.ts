@@ -10,7 +10,7 @@ import { PG_ERROR } from './helpers/pgErrors.js';
 
 /** D#483 S3-a: the plan and proposal tables, their roles, guards and definers (0723). */
 const TABLES = ['plan_imports', 'plan_milestones', 'plan_tasks', 'proposals'] as const;
-const DEFINERS = ['plan_import_begin(uuid)', 'remove_repo_plan(uuid)', 'approve_proposal(uuid, uuid)', 'reject_proposal(uuid, text)', 'restore_proposal(uuid)', 'withdraw_approval(uuid)'];
+const DEFINERS = ['plan_import_begin(uuid)', 'remove_repo_plan(uuid)', 'approve_proposal(uuid, uuid)', 'reject_proposal(uuid, text, text, timestamptz)', 'restore_proposal(uuid)', 'withdraw_approval(uuid)'];
 
 describe('plan import and proposals (0723)', () => {
   let adminPool: Pool;
