@@ -9,6 +9,7 @@ import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
+import { pauseForDenial } from "./reservationPauses.js";
 import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
@@ -229,7 +230,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort } = {},
+  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; spendAttempt?: number } = {},
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -255,7 +256,10 @@ export async function startBuildForItem(
   const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? createMemoryPort(pool));
   // D#597 CC-3: the accepted run notes ride on this run. Their ids are pinned into the step key, so a replay of this step names the same run. A replay whose
   // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
-  const baseStep = `build:v${facts.version}:${approvalId}`;
+  // D#483 S5-k1: a start denied by a spend limit leaves a keyed `refused_spend` run, and a replay of the same key finds that run. So each later ask of the same
+  // approval (the workflow's poll while the item is paused for a limit) is a new attempt with its own key (`:s<n>`); the first ask keeps the key it always had.
+  const attempt = Number.isSafeInteger(options.spendAttempt) && options.spendAttempt! > 0 ? `:s${options.spendAttempt}` : "";
+  const baseStep = `build:v${facts.version}:${approvalId}${attempt}`;
   const prior = (await ports.findStep?.(baseStep)) ?? null;
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
@@ -280,6 +284,9 @@ export async function startBuildForItem(
       async (client): Promise<BuildStartResult> => {
         const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
+        // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
+        const pause = started.ok ? null : pauseForDenial(started.reason);
+        if (!started.ok && pause !== null) return { status: "refused", reason: pause };
         if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
         startedRunId = started.runId;
 

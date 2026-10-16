@@ -142,6 +142,14 @@ const BUILD_REAPING_REASON = "start_sandbox_reaping";
 const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
 const BUILD_SLOT_POLL_MS = 60_000;
 const BUILD_SLOT_WAIT_MS = 4 * 3_600_000;
+/**
+ * D#483 S5-k1: the start answered that a spending limit denied the run (packages/pipeline reservationPauses.ts RESERVATION_PAUSE_REASONS; a test holds the two lists equal).
+ * The item stays where it is and the workflow asks again every five minutes, up to four hours. Each ask is a new attempt (its own run key), because a denied start leaves a
+ * keyed `refused_spend` run that a replay of the same key would find again; five minutes keeps those rows to 48 in the wait.
+ */
+const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"];
+const BUILD_SPEND_POLL_MS = 300_000;
+const BUILD_SPEND_WAIT_MS = 4 * 3_600_000;
 /** C44-7: the fixed reason when a second fix on one head also changed nothing. */
 const NO_CHANGE_REPEATED = "fix_no_change_repeated";
 /** The short-Spec PM run: one run reading a repository, like the classify run. */
@@ -180,9 +188,9 @@ export async function advanceSpecStep(accountId: string, userId: string, workIte
 }
 
 /** Starts the executor and records Spec ready -> In progress once the run exists. `pinned` is the Spec version the person approved. */
-export async function advanceBuildStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string, pinned: number | null): Promise<StepOutcome> {
+export async function advanceBuildStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, actionId: string, pinned: number | null, spendAttempt?: number): Promise<StepOutcome> {
   "use step";
-  return buildBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId, pinned);
+  return buildBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, actionId, pinned, spendAttempt);
 }
 
 export async function advanceBuildOutcomeStep(accountId: string, runId: string): Promise<BuildRunOutcome> {
@@ -590,12 +598,16 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   const { accountId, userId, workItemId, actionId } = args;
 
   let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
-  // Two waits, each with its own bound. A reaper claim on the sandbox: a few backoffs. No build slot (the person's concurrency setting, D#483 S5-c1): the
+  // Three waits, each with its own bound. A reaper claim on the sandbox: a few backoffs. No build slot (the person's concurrency setting, D#483 S5-c1): the
   // item stays at Spec ready and asks again every minute, up to four hours (as many polls as the run wait below already makes in one workflow, so no new event-count risk); a start that finds no slot has run nothing and spent nothing. A halt or any other
   // refusal ends the loop at once.
   let reapingTries = 0;
   let slotWaitedMs = 0;
   let lastSlotReason: string | null = null;
+  // S5-k1: a spending limit denied the run. The item stays at Spec ready; every ask after the first is attempt 1, 2, ... (the run key).
+  let spendWaitedMs = 0;
+  let spendAttempt = 0;
+  let lastSpendReason: string | null = null;
   for (;;) {
     if (started.reason === BUILD_REAPING_REASON && reapingTries < BUILD_REAPING_BACKOFF_MS.length) {
       await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: "sandbox_reaping", attempt: reapingTries + 1 });
@@ -607,8 +619,14 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       lastSlotReason = started.reason;
       await sleep(BUILD_SLOT_POLL_MS);
       slotWaitedMs += BUILD_SLOT_POLL_MS;
+    } else if (started.reason !== null && RESERVATION_PAUSE_REASONS.includes(started.reason) && spendWaitedMs < BUILD_SPEND_WAIT_MS) {
+      if (started.reason !== lastSpendReason) await advanceLogStep("advance.build_waiting", { work_item_id: workItemId, at: "build_start", reason: started.reason });
+      lastSpendReason = started.reason;
+      await sleep(BUILD_SPEND_POLL_MS);
+      spendWaitedMs += BUILD_SPEND_POLL_MS;
+      spendAttempt++;
     } else break;
-    started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+    started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
   }
   if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");
   if (started.status !== "started" || started.runId === null) {
@@ -633,7 +651,7 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     }
     // D#599 PL-2: the run was queued on a side the item has left. The same step starts again on the new side; the wait goes on with that run.
     if (outcome.done && outcome.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
-      const again = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+      const again = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
       if (again.status === "started" && again.runId !== null && again.runId !== runId) {
         await advanceLogStep("advance.build_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again.runId, reason: PLACEMENT_CHANGED });
         runId = again.runId;

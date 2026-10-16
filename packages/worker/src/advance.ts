@@ -162,7 +162,7 @@ export interface AdvanceModuleDeps {
   /** D#483 P2, injected from apps/web the same way: the pipeline's panel, Spec and build, run with the runner pool and the run ports above. */
   panel?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts) => Promise<AdvanceStepResult>) | null;
   spec?: ((pool: Pool, accountId: string, workItemId: string, ports: AdvanceStepPorts, options: { attempt?: string }) => Promise<AdvanceStepResult>) | null;
-  build?: ((pool: Pool, accountId: string, workItemId: string, approvalId: string, ports: AdvanceStepPorts, options: { expectedVersion?: number }) => Promise<AdvanceStepResult>) | null;
+  build?: ((pool: Pool, accountId: string, workItemId: string, approvalId: string, ports: AdvanceStepPorts, options: { expectedVersion?: number; spendAttempt?: number }) => Promise<AdvanceStepResult>) | null;
   /** D#6 R4d-5b, injected from apps/web the same way: the pipeline's `publishRespec`, the next Spec version (the same text plus the file list) from the project manager's result. */
   respec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown, expectedVersion: number) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** D#597 CC-2b, injected from apps/web the same way: the pipeline's `publishAmendment`, the next Spec version (the old text plus the accepted amendments). `status` is published | already_published | refused. */
@@ -417,9 +417,9 @@ export interface AdvanceFacade {
   /**
    * D#483 P2: starts the executor for an item at `spec_ready` and records `spec_ready -> in_progress`. `approvalId` names the
    * approval (the run action). P3: `expectedVersion` is the Spec version the person approved; a newer one refuses `spec_changed`.
-   * A refused start is recorded as a `build_refused` driver event.
+   * A refused start is recorded as a `build_refused` driver event. D#483 S5-k1: `spendAttempt` is the workflow's count of asks that a spend limit denied (absent for the first ask); it keys the run so a later ask is a new start.
    */
-  advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number): Promise<AdvanceStepResult>;
+  advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult>;
   /** D#483 P2: records a build that ended without a pull request as `in_progress -> needs_human`. `code` is a fixed word. */
   advanceBuildFailed(accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string): Promise<AdvanceStepResult>;
   /**
@@ -981,19 +981,23 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   /** The refusals that mean "no build slot yet" (packages/pipeline buildSlots.ts BUILD_WAIT_REASONS; a test holds the lists equal). */
   const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
+  /** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (packages/pipeline reservationPauses.ts RESERVATION_PAUSE_REASONS; a test holds the lists equal). */
+  const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"];
 
-  async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number): Promise<AdvanceStepResult> {
+  async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };
     if (!UUID_RE.test(approvalId) || (expectedVersion !== undefined && !(Number.isSafeInteger(expectedVersion) && expectedVersion > 0))) return { status: "refused", reason: "invalid_input" };
+    if (spendAttempt !== undefined && !(Number.isSafeInteger(spendAttempt) && spendAttempt >= 0 && spendAttempt <= 1000)) return { status: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return bad;
-    const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), expectedVersion !== undefined ? { expectedVersion } : {});
+    const out = await deps.build(runnerPool, who.accountId, who.workItemId, approvalId, portsFor(who), { ...(expectedVersion !== undefined ? { expectedVersion } : {}), ...(spendAttempt !== undefined && spendAttempt > 0 ? { spendAttempt } : {}) });
     console.info(JSON.stringify({ event: "advance.build", work_item_id: who.workItemId, status: out.status, reason: out.reason ?? null, run_id: out.runId ?? null }));
     if (out.status === "started" && out.runId) await recordCorrectionsApplied(who, out.runId);
     // A build that did not start is a fact of the item (its code is a fixed word the start named).
     // A start that met a reaper claim is not a refusal of the build: the workflow waits and starts again, so no fact is recorded.
     // D#483 S5-c1: nor is a start that found no build slot: the item waits (the workflow asks again) and the wait is derived from the counts when read.
-    if (out.status === "refused" && out.reason !== undefined && out.reason !== null && BUILD_SLOT_WAIT_REASONS.includes(out.reason)) {
+    // D#483 S5-k1: nor is a start a spending limit denied: the same fact names the pause, and the pause is derived from the latest one when read.
+    if (out.status === "refused" && out.reason !== undefined && out.reason !== null && (BUILD_SLOT_WAIT_REASONS.includes(out.reason) || RESERVATION_PAUSE_REASONS.includes(out.reason))) {
       // Each poll of a wait leaves one fact (deduped per minute): the slot module counts an item as waiting only while its latest one is fresh.
       await writeEvent(who, { kind: "build_waiting", dedupeKey: `wait:${approvalId}:${Math.floor(Date.now() / 60_000)}`, code: out.reason });
     } else if (out.status === "refused" && out.reason !== "start_sandbox_reaping") {

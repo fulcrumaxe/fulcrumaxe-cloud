@@ -12,7 +12,7 @@ import type { PoolClient } from 'pg';
  *
  * What each kind means, and the code / reasons it carries:
  *   build_refused         the build could not start. code: the refusal reason (no_model, spend_refused, ...).
- *   build_waiting         one poll of a build that is waiting for a slot (S5-c1). code: the wait reason. The latest one's age says whether the item is still waiting.
+ *   build_waiting         one poll of a build that is waiting: for a slot (S5-c1) or for a spending limit (S5-k1: account_budget_reached, compute_cap_reached, item_cap_reached, run_limit_below_estimate). code: the wait reason. The latest one's age says whether the item is still waiting.
  *   review_started        reviewers were started on a head. reasons: the roles (code_reviewer, acceptance_tester, ...).
  *   security_review_required  a security review is required for this head. reasons: why (item_critical, a trigger code, reviewer_flag).
  *   review_verdicts       the verdicts of one review round. reasons: `<role>_<verdict>` per role (code_reviewer_pass).

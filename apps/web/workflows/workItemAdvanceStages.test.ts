@@ -284,6 +284,46 @@ describe("the build for an item at Spec ready", () => {
     expect(world.sleeps).toBe(1);
   });
 
+  it("S5-k1: a start a spending limit denied waits five minutes at a time with no error and no failed record, asks again as attempt 1, 2, and starts when the limit clears", async () => {
+    const w = setup({
+      item: AT_SPEC,
+      buildSequence: [{ status: "refused", reason: "account_budget_reached" }, { status: "refused", reason: "item_cap_reached" }],
+      stages: ["pr_opened"],
+    });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(3);
+    expect(world.sleeps).toBe(2);
+    expect(w.advanceBuild.mock.calls.map((c) => (c as unknown[])[3])).toEqual([undefined, 1, 2]);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(events().slice(0, 3)).toEqual(["advance.build_waiting", "advance.build_waiting", "advance.build_started"]);
+    expect(logs[0]).toMatchObject({ at: "build_start", reason: "account_budget_reached" });
+    expect(logs[1]).toMatchObject({ at: "build_start", reason: "item_cap_reached" });
+    expect(events()).not.toContain("advance.failed");
+  });
+
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a limit that never clears (%s) is given up on after four hours with its name, and the item stays approvable", async (pause) => {
+    const w = setup({ item: AT_SPEC, build: { status: "refused", reason: pause } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: `build_refused:${pause}` });
+    expect(world.sleeps).toBe(48);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(49);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(w.advanceRunOutcome).not.toHaveBeenCalled();
+  });
+
+  it("S5-k1: account_not_active is not a pause: it ends at once with its existing refusal", async () => {
+    const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "start_account_not_active" } });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_account_not_active" });
+    expect(w.advanceBuild).toHaveBeenCalledTimes(1);
+    expect(world.sleeps).toBe(0);
+  });
+
+  it("S5-k1: a halt while paused for a limit ends the wait at once", async () => {
+    const w = setup({ item: AT_SPEC, buildSequence: [{ status: "refused", reason: "compute_cap_reached" }], build: { status: "refused", reason: "item_halted" } });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(w.advanceBuild).toHaveBeenCalledTimes(2);
+    expect(world.sleeps).toBe(1);
+  });
+
   it("a refused build start (no model key, spend refused, another run live) changes nothing: the item stays at Spec ready, approvable again, and the log says why", async () => {
     const w = setup({ item: AT_SPEC, build: { status: "refused", reason: "start_no_model" } });
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_refused:start_no_model" });
