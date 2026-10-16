@@ -130,6 +130,12 @@ clean.
 the actor is `ctx.principal`), a null value means inherit, and undo is a new version. `raiseAsk` resolves its policy from these rows when
 no explicit policy is passed.
 
+`askRoutes.ts` stores escalation routes (levels, working hours, repeat) in `ask_routes` (migration 0836), append-only like the ask
+settings: `writeAskRoute` validates the whole route (`validateRoute` in `@fx/decisions`, including that a named member is an owner or
+admin now) and appends one version with its `ask_route.changed` audit row in one transaction. `removeAskRoute` appends a tombstone (no
+levels), `restoreAskRoute` appends an earlier version's content as a new version, and `resolveCurrentAskRoute` does the four-step lookup
+(repo + type, repo + `*`, account + type, account + `*`; a tombstone falls to the next step, then to the R5 default).
+
 `decisions.ts` reads and writes the `decision_settings`/`decision_receipts`
 tables: `getCurrentDialSetting`/`listDialHistory` are plain reads over
 `withTenant`-scoped connections; `writeDialSetting` inserts the next
