@@ -3137,8 +3137,9 @@ check_ops_console_role_shape() {
   fi
 }
 
-# D#601 MEM-1 (0793): the five SECURITY DEFINER entry points owned by memory_definer (propose, write, decide, edit, delete a memory entry). Prints their
-# oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of the five signatures (matched by regprocedure), pinned to
+# D#601 MEM-1 (0793) and MEM-4a1 (0835): the seven SECURITY DEFINER entry points owned by memory_definer (propose, write, decide, edit, delete a memory entry, mark one
+# opened, decide a batch). Prints their
+# oids, comma separated, when every SECURITY DEFINER function the role owns is exactly one of the seven signatures (matched by regprocedure), pinned to
 # search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant
 # option; SHAPE_FAIL:<count> when any is not; nothing when it owns none. Its three SECURITY INVOKER helpers are not definers; the table-shape check
 # below holds them to owner-only EXECUTE.
@@ -3146,7 +3147,7 @@ check_memory_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = ANY(ARRAY['public.memory_propose(text,text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_write(text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_decide(uuid,text)'::regprocedure, 'public.memory_edit(uuid,text,text,text,text,text)'::regprocedure, 'public.memory_delete(uuid,boolean)'::regprocedure]::oid[])
+      SELECT p.oid, (p.oid = ANY(ARRAY['public.memory_propose(text,text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_write(text,text,text,text,text,jsonb)'::regprocedure, 'public.memory_decide(uuid,text)'::regprocedure, 'public.memory_edit(uuid,text,text,text,text,text)'::regprocedure, 'public.memory_delete(uuid,boolean)'::regprocedure, 'public.memory_mark_opened(uuid)'::regprocedure, 'public.memory_decide_batch(uuid[],text)'::regprocedure]::oid[])
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
@@ -3158,7 +3159,7 @@ check_memory_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by memory_definer fail the exception shape (not one of its five exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by memory_definer fail the exception shape (not one of its seven exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
     return 0
   fi
   echo "$oids"
@@ -3195,6 +3196,34 @@ check_memory_table_shape() {
   fi
   if [ -n "$out" ]; then
     echo "neon-shape ($dbname): memory_entries table shape wrong: $out" >&2
+    exit 1
+  fi
+}
+
+# D#601 MEM-4a1 (0835): the shape of memory_entry_opens. Row security enabled and forced; platform_ops, partner_user and agent_run_writer hold nothing on it;
+# app_user reads it and cannot write it; the definer can neither delete a row nor move one to another entry, person or account (it may change the hash and
+# the time of an existing row, which is what a re-open does). A no-op when the table does not exist.
+check_memory_opens_table_shape() {
+  local dbname="$1" out rc=0
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    SELECT concat_ws('; ',
+      CASE WHEN NOT (c.relrowsecurity AND c.relforcerowsecurity) THEN 'row security is not enabled and forced' END,
+      CASE WHEN has_any_column_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_table_privilege('platform_ops', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN 'platform_ops holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+                OR has_any_column_privilege('agent_run_writer', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user or agent_run_writer holds a privilege on it' END,
+      CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
+      CASE WHEN has_table_privilege('memory_definer', c.oid, 'DELETE, TRUNCATE, TRIGGER')
+                OR has_column_privilege('memory_definer', c.oid, 'entry_id', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'user_id', 'UPDATE')
+                OR has_column_privilege('memory_definer', c.oid, 'account_id', 'UPDATE') THEN 'the definer can delete rows or re-point one' END)
+    FROM pg_class c WHERE c.oid = to_regclass('public.memory_entry_opens');" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'memory_entry_opens-table-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  if [ -n "$out" ]; then
+    echo "neon-shape ($dbname): memory_entry_opens table shape wrong: $out" >&2
     exit 1
   fi
 }

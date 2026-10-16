@@ -129,7 +129,7 @@ describe('memory (D#601 MEM-1)', () => {
       expect(chain.map((c) => [c.version, c.status])).toEqual([[1, 'superseded'], [2, 'superseded'], [3, 'proposed']]);
       expect(chain[0]!.body).toBe('staging key is in 1Password');
     });
-    it('a concurrent double edit leaves one winner and a typed loser', async () => {
+    it('a concurrent double edit leaves one winner and a loser that gets conflict', async () => {
       const e = await proposeMemory(as(a.accountId, aMember), { scope: 'repo', scopeRef: REPO, kind: 'fact', body: 'edit race base' });
       const results = await Promise.allSettled([
         editMemory(as(a.accountId, aAdmin), { id: e.id, body: 'edit race left' }),
@@ -138,7 +138,7 @@ describe('memory (D#601 MEM-1)', () => {
       const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect(failed[0]!.reason).toBeInstanceOf(MemoryInputError);
-      expect(['conflict', 'invalid_transition']).toContain((failed[0]!.reason as MemoryInputError).code);
+      expect((failed[0]!.reason as MemoryInputError).code).toBe('conflict');
     });
     it('maps a 23505 to conflict and an unprefixed 23514 or 22023 to a fixed invalid_message that names no constraint', () => {
       const conflict = mapMemoryDbError({ code: '23505', message: 'duplicate key value violates unique constraint "memory_entries_successor_idx"' });

@@ -267,6 +267,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "secret_detected",
   "memory_full",
   "conflict",
+  // Memory review queue (D#601 MEM-4a1): a batch that mixes sources, and one that holds a card its caller has not opened.
+  "mixed_sources",
+  "must_open_first",
   "over_run_limit",
   "invalid_proposal",
   "account_scope_person_only",
