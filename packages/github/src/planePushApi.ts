@@ -1,6 +1,6 @@
 import type { AppCredentialsSource } from "./appCredentials.js";
 import { GH_OWNER_LOGIN_RE, GH_REPO_NAME_RE } from "./eventMapper.js";
-import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, getInstallationToken, mintAppJwt, type AccessTokenRequester } from "./installationToken.js";
+import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, forgetLiveInstallationToken, getInstallationToken, mintAppJwt, type AccessTokenRequester } from "./installationToken.js";
 
 /**
  * D#598 P1c: the GitHub API calls an executor makes to the paired PUBLIC repo, and nothing else.
@@ -8,7 +8,10 @@ import { InstallationTokenCache, InstallationTokenError, MintTimeoutError, getIn
  *   mintPushToken   finds the write App's installation on that repo (`GET /repos/<o>/<n>/installation`, as the App) and mints a token
  *                   with the `plane_push` purpose: this one repository, `contents` and `pull_requests` write, and a response from
  *                   GitHub that is checked to say exactly that. An App that is not installed there is `app_not_installed`.
+ *                   The token is minted anew on every call and never enters the cache (D#598 C4), so it can be revoked after one use.
+ *   revokeToken     `DELETE /installation/token` with the token itself as the bearer: GitHub answers 204, and the token answers 401 afterwards.
  *   branchExists    `GET /git/ref/heads/<branch>`: a branch that exists is never pushed over.
+ *   branchHead      the same ref read, answering the head sha (or null for no such branch).
  *   openPullRequest `POST /pulls`, the one call that makes the pushed branch a pull request.
  *
  * The host is fixed to api.github.com (the origin can be replaced for a test server only through `apiOrigin`, which must be https).
@@ -48,7 +51,7 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
   const origin = new URL(deps.apiOrigin ?? "https://api.github.com");
   if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.username) throw new Error("planePushApi: apiOrigin must be a plain https origin");
 
-  async function call(method: "GET" | "POST", path: string, auth: string, body?: unknown): Promise<{ status: number; body: unknown }> {
+  async function call(method: "GET" | "POST" | "DELETE", path: string, auth: string, body?: unknown): Promise<{ status: number; body: unknown }> {
     let res: Response;
     try {
       res = await fetchImpl(new URL(path, origin), {
@@ -108,6 +111,36 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
         if (err instanceof MintTimeoutError || err instanceof InstallationTokenError) throw new PlanePushApiError("public_unavailable");
         throw err;
       }
+    },
+
+    /**
+     * Revokes an installation token (`DELETE /installation/token`, authenticated by the token itself). Resolves true on GitHub's 204 and
+     * on a 401 (already expired or revoked: there is nothing left to revoke, which is the state wanted). Anything else, or a failure to
+     * reach GitHub, resolves false: the caller records `token_revoked: false` and the token lapses at its own expiry. It never throws
+     * and carries the token in nothing it returns.
+     */
+    async revokeToken(token: string): Promise<boolean> {
+      try {
+        const res = await call("DELETE", "/installation/token", token);
+        if (res.status === 204 || res.status === 401) {
+          forgetLiveInstallationToken(token);
+          return true;
+        }
+        return false;
+      } catch {
+        // fx-swallow-ok: a revoke that cannot be made is reported as false; the token lapses at the host's fixed expiry
+        return false;
+      }
+    },
+
+    async branchHead(input: { codeRepo: string; branch: string; token: string }): Promise<string | null> {
+      const { owner, name } = split(input.codeRepo);
+      if (!BRANCH.test(input.branch) || input.branch.includes("..")) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/git/ref/heads/${input.branch.split("/").map(encodeURIComponent).join("/")}`, input.token);
+      if (res.status === 404) return null;
+      const sha = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { object?: { sha?: unknown } }).object?.sha : undefined;
+      if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) throw new PlanePushApiError("public_unavailable");
+      return sha;
     },
 
     async branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean> {

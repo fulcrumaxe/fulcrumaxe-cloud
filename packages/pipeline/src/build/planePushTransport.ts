@@ -53,15 +53,15 @@ export class UnsafeGitConfigError extends Error {
 }
 
 /**
- * The only settings a clone may carry (an allowlist: anything else refuses). It is what a plain `git clone` or `git init` writes,
- * plus the remote and branch bookkeeping and a commit identity. Names are compared lower-case; `<x>` is any one name.
+ * The only settings a repository handed to the transfer may carry (an allowlist: anything else refuses): what `git init --bare`
+ * writes, and nothing else. Names are compared lower-case. There is no `remote.*`, `branch.*` or `user.*` key, because the hook
+ * never uses a clone. It builds in a repository it creates itself with `git init --bare` in a fresh directory and brings objects in
+ * by explicit source (the daemon's mirror by local path, the private repo by URL through the proxy, the public tip through
+ * `fetchTip`), so none of those keys ever exists. A clone's `remote.origin.url` is the private origin and on some setups holds a
+ * credential; accepting it would mean validating a value, where this check only reads key names, and stripping `fetch` from a clone
+ * still leaves that url. The commit identity travels in GIT_AUTHOR_* and GIT_COMMITTER_* (`buildCommit`), not in `user.*`.
  */
-const ALLOWED_KEY = [
-  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/,
-  /^remote\.[^.\n]+\.(url|fetch)$/,
-  /^branch\.[^\n]+\.(remote|merge)$/,
-  /^user\.(name|email)$/,
-];
+const ALLOWED_KEY = [/^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)$/];
 
 /** Files in the git directory that change where objects, refs or config come from. Any of them refuses. */
 const REFUSED_FILES: ReadonlyArray<{ base: "gitDir" | "commonDir"; path: string; what: string }> = [
@@ -78,7 +78,7 @@ const safeName = (key: string): string => (/^[a-z0-9._-]{1,80}$/i.test(key) ? `t
  * Fails closed. Reads every config scope the helper leaves on (local and worktree; system and global are switched off, and the
  * harness's own `-c` pins are scope `command` and skipped), requires each key to be on ALLOWED_KEY, and refuses the files above.
  */
-async function assertSafeLocalConfig(repoDir: string): Promise<void> {
+export async function assertSafeLocalConfig(repoDir: string): Promise<void> {
   let listing = "";
   try {
     listing = (await git(repoDir, ["config", "--no-includes", "--null", "--show-scope", "--show-origin", "--get-regexp", "."])).toString("utf8");

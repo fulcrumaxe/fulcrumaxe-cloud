@@ -461,10 +461,11 @@ describe("the clone's own config cannot redirect the transfer", () => {
     expect(server.seen).toEqual([]);
   });
 
-  it("an ordinary clone config (remotes, branches) is accepted", async () => {
+  it("a clone's remote and branch tracking are refused (the hook never uses a clone), before any network call", async () => {
     sh(priv, "config", "--local", "remote.origin.url", "https://example.test/acme/widgets-private.git");
     sh(priv, "config", "--local", "branch.trunk.remote", "origin");
-    await expect(transport.fetchTip(priv, "acme/widgets")).resolves.toBe(publicTip);
+    await expect(transport.fetchTip(priv, "acme/widgets")).rejects.toMatchObject({ code: "unsafe_git_config" });
+    expect(server.seen).toEqual([]);
   });
 });
 
@@ -531,12 +532,14 @@ describe("the clone must pass an allowlist (config keys and files), failing clos
     expect(server.seen).toEqual([]);
   };
 
-  it("a plain fresh clone is accepted, and so is a clone with a remote, branch tracking and an identity", async () => {
+  it("a freshly created bare repository is accepted, and a plain clone is not (it carries a remote and branch tracking)", async () => {
     const clone = join(root, "fresh-clone");
     sh(root, "clone", "-q", bare, clone);
-    sh(clone, "config", "--local", "user.name", "Someone");
-    await expect(transport.fetchTip(clone, "acme/widgets")).resolves.toBe(publicTip);
-    await expect(transport.fetchTip(priv, "acme/widgets")).resolves.toBe(publicTip); // a bare git init
+    await expect(transport.fetchTip(clone, "acme/widgets")).rejects.toMatchObject({ code: "unsafe_git_config" });
+    const made = join(root, "made-bare");
+    sh(root, "init", "-q", "--bare", made);
+    await expect(transport.fetchTip(made, "acme/widgets")).resolves.toBe(publicTip);
+    await expect(transport.fetchTip(priv, "acme/widgets")).resolves.toBe(publicTip); // a plain git init
   });
 
   it("refuses an insteadOf that lives only in config.worktree (extensions.worktreeConfig)", async () => {

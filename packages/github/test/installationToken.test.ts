@@ -547,4 +547,27 @@ describe("plane_push (D#598 P1c): one paired public repo, contents and pull_requ
     await expect(pp.run()).resolves.toBe("ghs_planepush");
     expect(pp.requester).toHaveBeenCalledTimes(1);
   });
+
+  it("is never cached: two mints without any option make two requests and leave no entry, with or without fresh", async () => {
+    const m = mint(good);
+    await m.run();
+    await m.run();
+    expect(m.requester).toHaveBeenCalledTimes(2);
+    expect(m.cache.get(7, "team", "plane_push", { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } }, Date.now(), "plane_push:")).toBeUndefined();
+    const f = mint(good, { fresh: true } as never);
+    await f.run();
+    await f.run();
+    expect(f.requester).toHaveBeenCalledTimes(2);
+  });
+
+  it("fresh: true is accepted for plane_push only; any other purpose refuses before a credential is read", async () => {
+    const requester = vi.fn();
+    const appCredentials = vi.fn(creds(privateKeyPem));
+    const cache = new InstallationTokenCache();
+    await expect(
+      getInstallationToken({ installationId: 7, appKind: "team", purpose: "run", role: "x", scope: { repositories: ["widgets"], permissions: { contents: "write" } }, appCredentials, requester, cache, fresh: true }),
+    ).rejects.toMatchObject({ reason: "purpose_not_allowed" });
+    expect(appCredentials).not.toHaveBeenCalled();
+    expect(requester).not.toHaveBeenCalled();
+  });
 });

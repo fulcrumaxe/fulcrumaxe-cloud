@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { parseAcceptanceScope } from "@fx/core/src/specs/acceptanceScope.js";
 import { recordStage } from "@fx/core/src/work-items/recordStage.js";
+import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
 import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
@@ -281,6 +282,10 @@ export async function startBuildForItem(
         // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
         // that died in between finds the stamp missing and makes it.
         await attachRunNotes(pool, accountId, workItemId, started.runId, prior ? { suffix: prior.step.slice(baseStep.length) } : { ids: notes.map((n) => n.id) });
+
+        // D#598 P1f-1: on a paired repo the item gets its public-change record now, stamped with the pairing as it reads at this moment. An unpaired repo writes
+        // nothing. A replay of this step only makes sure the row exists, so a run that already moved it on is not set back.
+        if (facts.repo_id !== null) await stampPlanePush(client, { accountId, workItemId, repoId: facts.repo_id, ...(prior ? { replay: true } : {}) });
 
         if (movesToInProgress) await recordStage(client, { workItemId, toStage: "in_progress", at: new Date(), source: "control_plane", sourceRef: `build:${started.runId}`, runId: started.runId });
         return { status: "started", runId: started.runId, branch: branchFor(number) };
