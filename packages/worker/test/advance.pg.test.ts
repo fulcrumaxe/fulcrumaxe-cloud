@@ -5,6 +5,7 @@ import { insertAgentRun, writeRunStatus, type StartAgentRunInput } from "@fx/run
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { triageIssueItem } from "@fx/pipeline";
 import { createRunActionFacade } from "../src/runActions.js";
 import { createAdvanceModule, ADVANCEABLE_STAGES, ADVANCE_TERMINAL_STATUSES, type AdvanceModuleDeps, type AdvanceStartArgs, type AdvanceTriageInput } from "../src/advance.js";
 import type { RunStarter } from "../src/preview.js";
@@ -241,6 +242,30 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     expect((await t.module.advanceTriage(a.accountId, input)).status).toBe("triaged");
     expect(t.triaged).toHaveLength(1);
     expect(await t.module.advanceTriage(a.accountId, { ...input, number: 5 })).toEqual({ status: "refused", reason: "item_changed" });
+  });
+
+  // D#483 S4-e2: after triage the proposal is linked to the root, so the root (which has no issue number) is found as proposal-backed.
+  it.each([["small"], ["bug"], ["doc"]])("S4e2-3: after the real triage of a Discussion-backed %s item, the advance request for the ROOT is accepted; the retired item is not the proposal's link any more", async (category) => {
+    const a = await seedAccount(admin, randomUUID());
+    const old = await world(a, { number: false });
+    const proposalId = randomUUID();
+    await admin.query(
+      `INSERT INTO proposals (id, account_id, repo_id, dedupe_key, sources, discussion_number, title, summary, provenance, owner_process, state, work_item_id, roadmap_position, decided_at)
+       VALUES ($1, $2, $3, $4, '{github_discussion}', 52, 'From a Discussion', 'the summary', 'external', 'product', 'approved', $5, 1, now())`,
+      [proposalId, a.accountId, a.repoId, `gh:discussion:${nextNumber++}`, old],
+    );
+    const t = build({ triage: triageIssueItem });
+    const out = await t.module.advanceTriage(a.accountId, { workItemId: old, title: "T", body: "SUMMARY:\nthe summary", category, sourceEventId: `proposal:${proposalId}`, repoId: a.repoId, login: "fx-proposal-approval", number: null });
+    expect(out).toMatchObject({ status: "triaged", stage: "triaged" });
+    const root = out.workItemId!;
+    expect(root).not.toBe(old);
+    expect((await admin.query("SELECT work_item_id FROM proposals WHERE id = $1", [proposalId])).rows[0].work_item_id).toBe(root);
+    expect((await t.module.advanceLoadItem(a.accountId, root))?.proposal).toMatchObject({ id: proposalId, title: "From a Discussion" });
+    expect((await t.module.advanceLoadItem(a.accountId, old))?.proposal).toBeNull();
+    // The root has no issue number; the proposal behind it is what lets the request through (before the move this answered no_issue_link).
+    expect((await t.module.performAdvanceWorkItem(await action(a, root))).result).toBe("done");
+    expect(t.started).toHaveLength(1);
+    expect(t.started[0]).toMatchObject({ workItemId: root });
   });
 
   it("a role lowered to member between the request and the perform is refused principal_not_authorised", async () => {
