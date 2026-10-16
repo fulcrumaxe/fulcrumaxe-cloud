@@ -39,7 +39,7 @@ export class FakeApp {
   open: Record<string, (url: URL) => unknown> = {};
   constructor(
     readonly origin: string,
-    private now: () => number,
+    protected now: () => number,
     private protectedDeployment = true,
   ) {}
 
@@ -66,7 +66,7 @@ export class FakeApp {
     return res;
   };
 
-  private verify(token: string): { sid: string; sessionStart: number; lastSeenAt: number } | null {
+  protected verify(token: string): { sid: string; sessionStart: number; lastSeenAt: number } | null {
     const [head, body, sig] = token.split(".");
     if (head === undefined || body === undefined || sig !== createHmac("sha256", SIGNING_SECRET).update(`${head}.${body}`).digest("base64url")) return null;
     const c = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { sid: string; sessionStart: number; lastSeenAt: number };

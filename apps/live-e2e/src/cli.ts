@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), `workflow-routes` (the Workflow SDK route list), and `capture-session` and `sessions` (sessions-cli.ts).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), `workflow-routes` (the Workflow SDK route list), `capture-session` and `sessions` (sessions-cli.ts), and `janitor account` (janitor/cli.ts).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -20,7 +20,8 @@ import { LAST_TESTED_OUTCOMES, LastTestedError, readLastTested, recordLastTested
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV, readHostProbe, type HostProbe, type NeedsContext } from "./needs.js";
 import { FIXTURE_REPO_ENV, FIXTURE_REPO_PATTERN, resolveNetworkNeeds } from "./needs-network.js";
-import { buildPlan, describeOutcome, wantedNetworkNeeds } from "./plan.js";
+import { janitorCommand, janitorOnce, describeRefusal } from "./janitor/cli.js";
+import { buildPlan, describeJanitors, describeOutcome, wantedNetworkNeeds } from "./plan.js";
 import type { Results } from "./report.js";
 import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
 import { captureCommand, sessionsCommand, type CommandRunner } from "./sessions-cli.js";
@@ -346,6 +347,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
   if (argv[0] === "workflow-routes") return workflowRoutesCommand(argv.slice(1), io);
   if (argv[0] === "capture-session") return captureCommand(argv.slice(1), io);
   if (argv[0] === "sessions") return sessionsCommand(argv.slice(1), io);
+  if (argv[0] === "janitor") return janitorCommand(argv.slice(1), io);
   let args: Args;
   try {
     args = parseArgs(argv);
@@ -421,6 +423,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
     writeFileSync(outFile, `${JSON.stringify(plan, null, 2)}\n`);
     if (plan.routing_fallback !== null) io.stdout(`routing fell back to every pack at or below standard: ${plan.routing_fallback}`);
     for (const o of plan.packs) io.stdout(describeOutcome(o));
+    for (const line of describeJanitors(plan)) io.stdout(line);
     // The API cannot see a user row that does not exist yet, so say what this state really proves.
     for (const p of packs) {
       if (plan.selected.some((s) => s.id === p.id) && p.needs.includes("fresh-state:first-sign-in")) io.stdout(`${p.id}: fresh-state:first-sign-in (onboarding untouched)`);
@@ -432,6 +435,14 @@ export async function main(argv: string[], io: Io): Promise<number> {
     for (const r of namedRefusals) io.stderr(`REFUSED ${r.reason} (pack ${r.id})`);
     let failed = false;
     if (args.command === "run") {
+      // The account janitor (T6a) runs only when a destructive pack is about to run, and a refusal stops the run before any pack starts.
+      if (plan.janitors.account.needed) {
+        const janitor = await janitorOnce(io, target, true);
+        if (!janitor.ok) {
+          io.stderr(describeRefusal(janitor));
+          return 1;
+        }
+      }
       const outDir = dirname(outFile);
       const invocations = buildInvocations(plan, packs, target, { root: io.root, env: io.env, outDir, ...(io.cli ? { cli: io.cli } : {}) });
       const maskFile = io.env[MASK_FILE_ENV];
