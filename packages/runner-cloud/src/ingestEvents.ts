@@ -18,8 +18,9 @@ export const eventsPath = (runId: string): string => `/api/runner/runs/${runId}/
  * and a usage limit makes the follow-up run, in the worker.
  */
 export async function ingestEvents(deps: RunnerCloudDeps, req: RunnerHttpRequest, runId: string): Promise<RunnerHttpResponse> {
-  if (!UUID.test(runId)) throw new RunnerHttpError(404, "not_found", "no such run");
   const runner = await verifyRunnerRequest(deps, eventsPath(runId), req, { replay: "once" });
+  // After the signature, not before: an unsigned caller must not learn from a 404 which ids are well formed.
+  if (!UUID.test(runId)) throw new RunnerHttpError(404, "not_found", "no such run");
   const message = parseMessage(EventsMessage, parseJsonBody(req));
   if (message.run_id.toLowerCase() !== runId.toLowerCase()) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   const leases = requireLeases(deps);

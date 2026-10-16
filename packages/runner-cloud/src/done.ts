@@ -58,10 +58,11 @@ export const DISPATCH_BASE_KIND = "runner.dispatch_base";
  * job, `repos`, `spec_versions`, `work_items`); nothing the runner sent in the body names any of them.
  */
 export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, runId: string): Promise<RunnerHttpResponse> {
-  if (!UUID.test(runId)) throw new RunnerHttpError(404, "not_found", "no such run");
   // The edge caps the body in bytes already; the schema's own cap counts UTF-16 units, so the byte cap is held here too (comment 27 item 6).
   if (req.body.byteLength > MAX_BODY_BYTES) throw new RunnerHttpError(413, "body_too_large", "the request body is too large");
   const runner = await verifyRunnerRequest(deps, donePath(runId), req, { replay: "once" });
+  // After the signature, not before: an unsigned caller must not learn from a 404 which ids are well formed.
+  if (!UUID.test(runId)) throw new RunnerHttpError(404, "not_found", "no such run");
   const message = parseMessage(DoneMessage, parseJsonBody(req));
   if (message.run_id.toLowerCase() !== runId.toLowerCase()) throw new RunnerHttpError(400, "invalid_message", "the message does not match the protocol");
   const leases = requireLeases(deps);

@@ -229,6 +229,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "runner_mint_failed",
   "runner_upstream_unavailable",
   "runner_upstream_timeout",
+  // GitHub proxy route, in front of both paths: no credential at all (401), and a deployment without the proxy settings (503).
+  "missing_credentials",
+  "gh_proxy_not_configured",
   // Cloud runner approval (D#6 R2b-4a): a run approved by someone whose runner cannot take its repo, and a runner-run dial saved over a newer version.
   "runner_not_for_repo",
   "dial_changed",
