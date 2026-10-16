@@ -202,6 +202,10 @@ test.describe("D#37 WS-F2a: Runs app (mocked API)", () => {
     await expect(head).toContainText("fulcrumaxe build");
     await expect(head.locator('[data-testid="runs-chip"]')).toHaveText("Running");
     await expect(tid(page, "runs-head-usd")).toHaveText("$0.50");
+    // a sandbox run has the export control too: a download of the API's NDJSON export
+    await expect(tid(page, "runs-export")).toHaveText("Export events");
+    await expect(tid(page, "runs-export")).toHaveAttribute("href", `/api/v1/runs/${ID}/events/export`);
+    await expect(tid(page, "runs-export")).toHaveAttribute("download", `run-${ID}-events.ndjson`);
 
     const items = tid(page, "run-event");
     await expect(items).toHaveCount(9);
@@ -213,7 +217,9 @@ test.describe("D#37 WS-F2a: Runs app (mocked API)", () => {
     await expect(items.nth(1)).toContainText("[x](javascript:alert(1))");
     await expect(items.nth(3)).toContainText("<img src=x onerror=x>");
     await expect(items.nth(4)).toContainText("[x](javascript:alert)"); // the paren-free script-scheme case
-    await expect(page.locator(`${WIN} [data-testid="runs-detail"] a`)).toHaveCount(0);
+    // Event text never becomes a link; the one anchor in the detail is the app's own Export control.
+    await expect(page.locator(`${WIN} [data-testid="runs-events"] a`)).toHaveCount(0);
+    await expect(page.locator(`${WIN} [data-testid="runs-detail"] a`)).toHaveCount(1);
     await expect(page.locator(`${WIN} [data-testid="runs-detail"] img`)).toHaveCount(0);
     expect(await page.locator(`${WIN} [data-testid="runs-detail"] [onmouseover], ${WIN} [data-testid="runs-detail"] [onerror]`).count()).toBe(0);
     // The two spellings in the fixture are drawn without the tool name.

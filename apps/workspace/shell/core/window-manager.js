@@ -1831,6 +1831,10 @@ import { getItem, setItem, removeItem } from "./storage-ns.js";
       el.setAttribute('inert', '');
     }
     markAsClone(clone);
+    // A hover preview or an Alt+Tab thumbnail is a second copy of the window's DOM. Its test hooks would make every
+    // [data-testid] query (and any script that counts cards or columns) see each node twice, so the copy drops them.
+    clone.removeAttribute('data-testid');
+    clone.querySelectorAll('[data-testid]').forEach(function (n) { n.removeAttribute('data-testid'); });
     // A window nested inside the clone (none today) must not pass for live.
     clone.querySelectorAll('.fulc-window').forEach(markAsClone);
     if (clone.hasAttribute('data-no-preview')) {

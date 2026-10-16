@@ -185,7 +185,7 @@ test.describe("D#6 C42-4: every runner state in the Runs detail (contract fixtur
       }
       expect(await tid(page, "runs-cost-model").innerText()).not.toMatch(/\$0(\.00)?(?![\d.])/);
       // the head says whose plan, not "$0.00"
-      await expect(tid(page, "runs-head-usd")).toHaveText("Your plan");
+      await expect(tid(page, "runs-head-usd")).toHaveText(/Claude plan|API key/); // C-fix: the API-equivalent total, worded as the customer's plan
       // activity: the server's lines, in order, plus the lost-runner line
       const lines = (insight.lines as Array<{ text: string }>).map((l) => l.text);
       if (insight.failure_reason === "runner_lost") lines.push("Your runner stopped checking in, so this run was ended. Build again to retry.");
@@ -270,4 +270,26 @@ test.describe("D#6 C42-4: pixel check, runner run against sandbox run (Activity 
       expect(control.differing).toBeGreaterThan(same.differing);
     });
   }
+});
+
+test.describe("runner run header total and the export control (mocked API)", () => {
+  test("a subscription runner run's header shows the API-equivalent total as the customer's Claude plan, and offers the export", async ({ page }) => {
+    const { errors } = await setup(page, runnerInsight({ runner_usage: usage() }), EVENTS);
+    await expect(tid(page, "runs-head-usd")).toHaveText("API-equivalent $1.23 · on your Claude plan");
+    const link = tid(page, "runs-export");
+    await expect(link).toHaveText("Export events");
+    await expect(link).toHaveAttribute("href", `/api/v1/runs/${ID}/events/export`);
+    await expect(link).toHaveAttribute("download", `run-${ID}-events.ndjson`);
+    expect(errors).toEqual([]);
+  });
+
+  test("an own-API-key runner run says so", async ({ page }) => {
+    await setup(page, runnerInsight({ runner_usage: usage({ credential_mode: "api_key" }) }), EVENTS);
+    await expect(tid(page, "runs-head-usd")).toHaveText("$1.23 at API prices · on your own API key");
+  });
+
+  test("a run with no usage yet reads 'On your Claude plan', never $0", async ({ page }) => {
+    await setup(page, runnerInsight({ runner_usage: null }), EVENTS);
+    await expect(tid(page, "runs-head-usd")).toHaveText("On your Claude plan");
+  });
 });

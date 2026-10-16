@@ -201,6 +201,8 @@
 .pl-plan-confirm p { flex: 1 1 100%; margin: 0; }
 .pl-plan-table { border-collapse: collapse; margin: 10px 0; max-width: 100%; }
 .pl-plan-table th, .pl-plan-table td { border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); padding: 3px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+/* A column heading is one short word: it may not break inside a word ("DON E"), so the overflow-wrap:anywhere meant for the cells is switched off here; the column is then as wide as its longest word. */
+.pl-plan-table th[scope="col"] { overflow-wrap: normal; word-break: normal; hyphens: manual; }
 .pl-plan-toggle { min-height: 44px; border-color: transparent; text-align: left; font-weight: 600; }
 .pl-plan-tasks li, .pl-plan-approved li { margin: 4px 0; }
 .pl-plan-task-title { display: block; }

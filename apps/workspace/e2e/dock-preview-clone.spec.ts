@@ -21,8 +21,19 @@ test.describe("D#37 DOCK-PREVIEW-CLONE", () => {
     await page.locator('.dock-icon[data-app-id="themes"]').click();
     await expect(page.locator('.fulc-window[data-app-id="themes"]')).toBeVisible();
 
+    // An app's own test hooks must not be counted twice: mark a node in the live window (as the first-party apps do), then preview it.
+    await page.evaluate(() => {
+      const live = document.querySelector('.fulc-window[data-app-id="themes"]')!;
+      const probe = document.createElement("span");
+      probe.setAttribute("data-testid", "probe-card");
+      live.appendChild(probe);
+    });
+
     await page.locator('.dock-icon[data-app-id="themes"]').hover();
     await page.clock.runFor(PREVIEW_DELAY_PAST_MS);
+
+    await expect(page.locator('[data-testid="probe-card"]')).toHaveCount(1);
+    await expect(page.locator('.dock-preview [data-testid="probe-card"]')).toHaveCount(0);
 
     const clone = page.locator(".dock-preview .fulc-window-clone");
     await expect(clone).toHaveCount(1);
