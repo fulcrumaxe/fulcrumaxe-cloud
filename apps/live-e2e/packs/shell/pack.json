@@ -1,0 +1,16 @@
+{
+  "id": "shell",
+  "rows": ["W1", "W2"],
+  "tier": "standard",
+  "tags": ["@ui", "@api"],
+  "targets": ["staging"],
+  "destructive": false,
+  "model_spend": false,
+  "projects": ["desktop", "phone", "tablet"],
+  "needs": ["bypass", "session:owner"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/workspace/shell/**", "apps/workspace/build/**", "apps/workspace/profiles/**", "apps/web/lib/shell/**"]
+}

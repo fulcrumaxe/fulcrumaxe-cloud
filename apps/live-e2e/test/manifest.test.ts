@@ -15,10 +15,9 @@ function messageOf(fn: () => unknown): string {
 
 describe("manifest: the shipped packs", () => {
   it("loads platform and auth-negative, both smoke, both requiring bypass", () => {
-    const packs = loadPacks(join(PACKAGE_ROOT, "packs"));
+    const packs = loadPacks(join(PACKAGE_ROOT, "packs")).filter((p) => p.tier === "smoke");
     expect(packs.map((p) => p.id)).toEqual(["auth-negative", "platform"]);
     for (const p of packs) {
-      expect(p.tier).toBe("smoke");
       expect(p.needs).toContain("bypass");
       expect(p.projects).toEqual(["desktop", "phone", "tablet"]);
     }

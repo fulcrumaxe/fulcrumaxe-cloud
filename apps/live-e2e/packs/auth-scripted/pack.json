@@ -1,0 +1,16 @@
+{
+  "id": "auth-scripted",
+  "rows": ["A2", "A3", "A6"],
+  "tier": "standard",
+  "tags": ["@ui", "@api"],
+  "targets": ["staging"],
+  "destructive": true,
+  "model_spend": false,
+  "projects": ["desktop", "phone", "tablet"],
+  "needs": ["bypass", "signin:scripted"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/web/app/api/auth/github/callback/**", "apps/web/app/api/auth/invitations/**"]
+}

@@ -1,6 +1,6 @@
 {
   "_comment": "Copy of each workflow trigger's `live-e2e plan|run` argument list. The workflow itself is private-plane only; there test/workflow.test.ts asserts each list here equals what live-e2e.yml says. deploy, nightly and poll always carry a tier of smoke or higher and no --tag.",
-  "deploy": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "deploy"],
+  "deploy": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "deploy", "--pack", "shell,api-contract,auth"],
   "nightly": ["plan", "--target", "staging", "--tier", "standard", "--trigger", "nightly"],
   "poll": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "poll"],
   "weekly": ["plan", "--target", "staging", "--tier", "full", "--trigger", "weekly"],
