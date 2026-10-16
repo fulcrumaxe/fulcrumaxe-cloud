@@ -772,8 +772,8 @@ describe('mapError: criterion 4 error mapping', () => {
     expect(body.details?.map((d) => d.path).sort()).toEqual(['age', 'name']);
   });
 
-  it('each of the six H05 DenyReason values -> 409 with that exact code', () => {
-    expect(DENY_REASONS).toHaveLength(6);
+  it('each of the H05 DenyReason values (six, and the D#483 S5-d envelope one) -> 409 with that exact code', () => {
+    expect(DENY_REASONS).toHaveLength(7);
     for (const reason of DENY_REASONS) {
       const { status, body } = mapError(new DenyError(reason), 'rid-1');
       expect(status).toBe(409);

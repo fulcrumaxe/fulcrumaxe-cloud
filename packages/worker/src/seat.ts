@@ -9,6 +9,7 @@ import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } fr
 import type { RetrySeatSource } from "./retry.js";
 import { effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
 import { isClaudeModelId, type PlanId } from "@fx/spend";
+import { estimateRunModelUsd } from "@fx/core/src/role-settings/runPrice.js";
 
 /**
  * D#2 H14c-3-2d-2: the seat resolver. It reads everything for one run inside ONE tenant transaction and
@@ -115,11 +116,13 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
 
       let repoId = ownerId;
       let kind: string | null = null;
+      let hasEnvelope = false;
       if (!preview) {
-        const item = (await client.query<{ repo_id: string | null; kind: string | null }>("SELECT repo_id, kind FROM work_items WHERE id = $1 AND account_id = $2", [ownerId, accountId])).rows[0];
+        const item = (await client.query<{ repo_id: string | null; kind: string | null; envelope_id: string | null }>("SELECT repo_id, kind, envelope_id FROM work_items WHERE id = $1 AND account_id = $2", [ownerId, accountId])).rows[0];
         if (item?.repo_id == null) return refuse("no_repo");
         repoId = item.repo_id;
         kind = item.kind;
+        hasEnvelope = item.envelope_id !== null;
       }
       const repo = (
         await client.query<{ product: Product; app_kind: string | null; execution_mode: string }>(
@@ -167,6 +170,8 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       if (model === undefined) return refuse("no_model");
 
       const workItemKind = kind === "small" ? "small" : kind === "feature" ? "feature" : undefined;
+      // D#483 S5-d: a run that reserves no model money (an operator subscription run) still counts against its item's spend envelope, at this estimated price.
+      const envelopeFloorUsd = hasEnvelope ? await estimateRunModelUsd(client, { accountId, repoId, role }) : undefined;
       return {
         ok: true,
         seat: {
@@ -188,6 +193,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
             plan: account.plan,
             monthlyModelBudgetUsd,
             perSpawnCapUsd: capUsd,
+            ...(envelopeFloorUsd !== undefined && { envelopeFloorUsd }),
           },
         },
       };

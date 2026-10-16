@@ -51,6 +51,7 @@ is known (`settle.ts`).
 No figure is compiled into this package. Every rate, budget, cap and limit above is read from the plan data (`loadPlanData()` in `@fx/plan-data`, the `FX_PLAN_DATA` setting) at the moment it is used, so with the setting missing each reader throws `PlanDataMissingError` and the callers show the unavailable state instead of a default.
 - `meter.ts`: `MeterModelParams`, `MeterResult`, `meter(params)`, `MeterComputeParams`, `meterCompute(params)`
 - `reserve.ts`: `ReserveParams`, `monthToDateUsd(client, accountId, budget, now?)`, `workItemCommittedUsd(client, accountId, workItemId)`, `ReserveTransactionContractError`, `reserveWith(client, params)`, `reserve(pool, params)`
+- `envelope.ts`, `envelopeWrite.ts` (D#483 S5-d): the spend envelope of an approval. `itemEnvelopeId`, `currentEnvelope`, `envelopeSpentUsd`, `envelopeRunUsd`, `envelopeAdmits` (the one check, used by `reserve()` under a per-envelope lock and by `checkHeadroom`), `recordEnvelopeCharge`, `remainingAccountBudgetUsd`, `writeEnvelopeVersion` (refuses `over_account_budget`). An item with an envelope is held to it in place of the Feature/Small cap and denied `envelope_exceeded`.
 - `settle.ts`: `LedgerSource`, `SettleEntry`, `SettleParams`, `SettleResult`, `settleWith(client, params)`, `settle(pool, params)`, `ReleaseParams`, `releaseWith(client, params)`, `release(pool, params)`
 - `pg.ts`: `createPool(connectionString)`, `withTenant(pool, accountId, fn)`
 

@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import { backgroundBudgetUsd, foregroundBudgetUsd } from './plans.js';
 import { defaultFeatureCapUsd, defaultPerSpawnCapUsd, defaultSmallCapUsd } from './caps.js';
 import { monthToDateUsd, workItemCommittedUsd, type ReserveParams } from './reserve.js';
+import { envelopeAdmits, envelopeRunUsd, itemEnvelopeId } from './envelope.js';
 import type { Budget, ReserveResult } from './types.js';
 
 /**
@@ -19,7 +20,7 @@ import type { Budget, ReserveResult } from './types.js';
  *
  * `reserve()` and this function must stay on one arithmetic: reserve.ts's own checks are the source, this one repeats them without its writes, and
  * packages/spend/test/headroom.test.ts holds the two to the same answer over a matrix of limits (and fails if reserve() gains a check this one lacks,
- * for the checks it can see). Whoever adds a check to `reserveWith` (an envelope check, S5-d) adds it here in the same change.
+ * for the checks it can see). Whoever adds a check to `reserveWith` adds it here in the same change (the envelope check, S5-d, is the same function in both).
  */
 export type HeadroomParams = Omit<ReserveParams, 'runId'> & { runId?: string | null };
 
@@ -56,8 +57,15 @@ export async function checkHeadroom(pool: Pool, params: HeadroomParams): Promise
     // 2. The per-run limit.
     if (estimateModelUsd > perSpawnCapUsd) return { decision: 'deny', reason: 'per_spawn_cap_exceeded' };
 
+    // 3. The item's spend envelope (D#483 S5-d), the same check reserve() makes under the envelope's lock; it replaces the work item's own cap.
+    const envelopeId = params.workItemId ? await itemEnvelopeId(client, params.accountId, params.workItemId) : null;
+    if (envelopeId !== null) {
+      // reserve() also refuses a no-model run that has no run id to carry its charge; a read is asked without one, so that corner is reserve()'s alone.
+      if (!(await envelopeAdmits(client, params.accountId, envelopeId, envelopeRunUsd(params)))) return { decision: 'deny', reason: 'envelope_exceeded' };
+    }
+
     // 3. The work item's own cap.
-    if (estimateModelUsd > 0 && params.workItemId && params.workItemKind) {
+    if (envelopeId === null && estimateModelUsd > 0 && params.workItemId && params.workItemKind) {
       const cap = params.workItemKind === 'feature' ? params.featureCapUsd ?? defaultFeatureCapUsd() : params.smallCapUsd ?? defaultSmallCapUsd();
       const committed = await workItemCommittedUsd(client, params.accountId, params.workItemId);
       if (committed + estimateModelUsd > cap) return { decision: 'deny', reason: 'work_item_cap_exceeded' };

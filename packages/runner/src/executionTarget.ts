@@ -193,6 +193,7 @@ const ADMIT_DENY_REASON_SET: Readonly<Record<AdmitDenyReason, true>> = {
   model_connection_not_ok: true,
   per_spawn_cap_exceeded: true,
   work_item_cap_exceeded: true,
+  envelope_exceeded: true,
   model_budget_exceeded: true,
   compute_cap_exceeded: true,
   runner_daily_limit: true,

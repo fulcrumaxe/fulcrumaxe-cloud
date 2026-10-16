@@ -291,6 +291,9 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
     return { decision: 'deny', reason: 'per_spawn_cap_exceeded' };
   }
 
+  const envelopeId = params.workItemId ? await itemEnvelopeId(client, params.accountId, params.workItemId) : null;
+  let envelopeCharge = 0;
+
   // Lock every budget this call touches, in a fixed order, before
   // reading any aggregate below.
   const budgetsToLock: Budget[] = [];
@@ -301,9 +304,21 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
       `${params.accountId}:${budget}`,
     ]);
   }
+  // Taken last, so every caller takes its locks in the same order. Two runs on one batch envelope queue here instead of both passing.
+  if (envelopeId !== null) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${params.accountId}:envelope:${envelopeId}`]);
+  }
+
+  // 3. The item's spend envelope (D#483 S5-d); it replaces the Feature/Small cap below for an item that has one. A run that reserves no model money
+  // (a subscription run) is charged to the envelope at its estimated price as a row of its own, so with no run id to hang it on it fails closed.
+  if (envelopeId !== null) {
+    const runUsd = estimateModelUsd === 0 && params.runId === null ? null : envelopeRunUsd(params);
+    if (!(await envelopeAdmits(client, params.accountId, envelopeId, runUsd))) return { decision: 'deny', reason: 'envelope_exceeded' };
+    envelopeCharge = estimateModelUsd > 0 ? 0 : params.envelopeFloorUsd!;
+  }
 
   // 3. work-item (Feature/Small) cap.
-  if (estimateModelUsd > 0 && params.workItemId && params.workItemKind) {
+  if (envelopeId === null && estimateModelUsd > 0 && params.workItemId && params.workItemKind) {
     const cap =
       params.workItemKind === 'feature'
         ? params.featureCapUsd ?? defaultFeatureCapUsd()
@@ -364,6 +379,8 @@ export async function reserveWith(client: PoolClient, params: ReserveParams): Pr
     admitted.push({ id: rows[0]!.id, budget: computeBudget, usdReserved: estimateComputeUsd });
   }
 
+  if (envelopeId !== null && envelopeCharge > 0) await recordEnvelopeCharge(client, params.accountId, params.runId!, envelopeId, envelopeCharge);
+
   return { decision: 'admit', reservations: admitted };
 }
 
@@ -373,6 +390,7 @@ export async function reserve(pool: Pool, params: ReserveParams): Promise<Reserv
 }
 
 // Declaration-merged here, at the end of the file, so no line above moves (the marketing site cites lines of this file).
+import { envelopeAdmits, envelopeRunUsd, itemEnvelopeId, recordEnvelopeCharge } from './envelope.js';
 export interface ReserveParams {
   /**
    * Set ONLY by the runner for a run on the operator's own subscription (decided there from the operator
@@ -380,4 +398,9 @@ export interface ReserveParams {
    * model_connections row. Callers pass no model estimate with it.
    */
   modelBrokeredBy?: 'operator_subscription';
+  /**
+   * D#483 S5-d: the estimated model price of this run (S5-p's price for its role), counted against the item's spend envelope when the run reserves no
+   * model money itself (an operator subscription run). Ignored for an item with no envelope and for a run that reserves model money.
+   */
+  envelopeFloorUsd?: number;
 }

@@ -270,7 +270,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(rows.rows.every((r) => r.kind === "stage_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
   });
 
-  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a start a spending limit denied (%s) leaves a stage_waiting fact (stage build) with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached"])("S5-k1: a start a spending limit denied (%s) leaves a stage_waiting fact (stage build) with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);
     const seen: unknown[] = [];

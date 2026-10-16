@@ -73,7 +73,7 @@ export class AmbiguousCredentialsError extends ApiError {
  * H05 pass/fail's six `DenyReason` values (packages/spend/src/types.ts),
  * wrapped so a route handler that calls `reserve`/`reserveWith` and gets a
  * `deny` decision can throw one value and have it map to 409 with that
- * exact code -- criterion 4: "each of the six H05 DenyReason values -> 409
+ * exact code -- criterion 4: "each of the six H05 DenyReason values (D#483 S5-d added a seventh, envelope_exceeded) -> 409
  * with that code." No API-1 route calls `reserve` yet (that starts at
  * API-6's retry action); this class is the shared mapping every later
  * task reuses instead of re-deriving the six codes itself.
@@ -83,6 +83,7 @@ export const DENY_REASONS = [
   "model_connection_not_ok",
   "per_spawn_cap_exceeded",
   "work_item_cap_exceeded",
+  "envelope_exceeded",
   "model_budget_exceeded",
   "compute_cap_exceeded",
 ] as const;

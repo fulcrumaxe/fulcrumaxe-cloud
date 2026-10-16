@@ -12,6 +12,7 @@ import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
  *   compute_cap_exceeded     -> compute_cap_reached         the account's monthly compute allowance
  *   work_item_cap_exceeded   -> item_cap_reached            this item's own spending cap
  *   per_spawn_cap_exceeded   -> run_limit_below_estimate    the per-run limit is below what this step needs
+ *   envelope_exceeded        -> envelope_reached            the spend envelope the person set for this approval (D#483 S5-d)
  *
  * `account_not_active` is not a pause: it keeps its existing refusal (the account cannot run anything, and a poll would not change that).
  *
@@ -30,6 +31,7 @@ export const RESERVATION_DENIAL_PAUSES = Object.freeze({
   compute_cap_exceeded: "compute_cap_reached",
   work_item_cap_exceeded: "item_cap_reached",
   per_spawn_cap_exceeded: "run_limit_below_estimate",
+  envelope_exceeded: "envelope_reached",
 } as const);
 
 export type ReservationDenial = keyof typeof RESERVATION_DENIAL_PAUSES;
@@ -51,7 +53,13 @@ export const RESERVATION_PAUSE_SENTENCES: Readonly<Record<ReservationPause, stri
   compute_cap_reached: "This month's compute allowance is used up. This item starts again on its own when it renews or your plan allows more.",
   item_cap_reached: "This item reached its spending cap. Raise it in Roles > Limits.",
   run_limit_below_estimate: "This step needs more than the per-run limit in Roles > Limits.",
+  envelope_reached: "Paused: this item reached its spending limit. Raise the limit to continue, or stop the item.",
 });
+
+/** The envelope pause with the person's own figure in it. Fixed text and a number; a non-finite or negative amount falls back to the figureless sentence. */
+export function envelopeReachedSentence(amountUsd: number): string {
+  return Number.isFinite(amountUsd) && amountUsd >= 0 ? `Paused: this item reached its $${amountUsd.toFixed(2)} limit. Raise the limit to continue, or stop the item.` : RESERVATION_PAUSE_SENTENCES.envelope_reached;
+}
 
 /**
  * How often the workflow asks again while the item is paused for a limit. Each ask that is denied leaves one `refused_spend` run row (the start is

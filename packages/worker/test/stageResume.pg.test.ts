@@ -115,6 +115,31 @@ describe("the parked-stage sweep [pg]", { timeout: 60_000 }, () => {
     expect(last.rows[0]).toEqual({ code: "account_budget_reached", stage: "build" });
   });
 
+  it("S5-d: an item parked on its spend envelope is refreshed while the envelope denies the run, and resumes the pass after a new envelope version covers it (no run row from the sweep)", async () => {
+    const { a, w, approval } = await parked({ pause: "envelope_reached" });
+    await earlierAsk(a, w, keyOf(w, approval));
+    const envelopeId = randomUUID();
+    await admin.query(`INSERT INTO approval_envelopes (id, account_id, scope, amount_usd, version, created_by) VALUES ($1, $2, 'item', 1, 1, $3)`, [envelopeId, a.accountId, a.userId]);
+    await admin.query("UPDATE work_items SET envelope_id = $1 WHERE id = $2", [envelopeId, w]);
+    const envEntry: ParkedStageEntryInput = { ...entry, pauses: [...PAUSES, "envelope_reached"], pauseForDenial: (d) => (d === "envelope_exceeded" ? "envelope_reached" : DENIALS[d] ?? null) };
+    const l = limits(600);
+    const started: AdvanceStartArgs[] = [];
+    const clock = { t: Date.now() };
+    const before = await counts(a.accountId);
+    await sweeper(l, started, clock).sweepParkedStages([envEntry]);
+    expect(mine(started, w)).toEqual([]);
+    const refreshed = await counts(a.accountId);
+    expect(refreshed.runs).toBe(before.runs);
+    expect(refreshed.facts).toBeGreaterThan(before.facts);
+    expect((await admin.query("SELECT code FROM work_item_driver_events WHERE work_item_id = $1 ORDER BY seq DESC LIMIT 1", [w])).rows[0].code).toBe("envelope_reached");
+    await admin.query(`INSERT INTO approval_envelopes (id, account_id, scope, amount_usd, version, created_by) VALUES ($1, $2, 'item', 50, 2, $3)`, [envelopeId, a.accountId, a.userId]);
+    clock.t += 15 * 60_000;
+    await admin.query("UPDATE work_item_driver_events SET created_at = created_at - interval '20 minutes' WHERE work_item_id = $1", [w]);
+    await sweeper(l, started, clock).sweepParkedStages([envEntry]);
+    expect(mine(started, w)).toHaveLength(1);
+    expect(mine(started, w)[0]).toMatchObject({ workItemId: w, startAttempt: 1 });
+  });
+
   it("S5k-5: once the limit is raised the next pass starts the workflow on the same approval, with no person, at an attempt above every earlier one", async () => {
     const { a, w, approval } = await parked();
     for (const suffix of ["", ":s1", ":s2", ":s3:n0123456789abcdef"]) await earlierAsk(a, w, keyOf(w, approval, suffix));
