@@ -1349,6 +1349,10 @@ export interface Operations {
         limit_usd: number;
       };
       own_plan_api_equivalent_usd: number;
+      compute_notice: ({
+        code: "compute_allowance_80";
+        message: string;
+      }) | (null);
     };
   };
   getBudgets: {

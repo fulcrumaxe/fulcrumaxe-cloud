@@ -168,7 +168,7 @@ async function webhooksDeliveries(c: Ctx, id: string): Promise<void> {
 async function usageShow(c: Ctx): Promise<void> {
   const u = await call(c.io, c.out, c.session, "getUsage");
   const meter = (name: string, m: { spent_usd: number; reserved_usd: number; limit_usd: number }): string => `${name}: ${usd(m.spent_usd)} spent, ${usd(m.reserved_usd)} reserved, limit ${usd(m.limit_usd)}`;
-  c.out.say([`since ${u.period_start}`, meter("model", u.model), meter("foreground compute", u.foreground_compute), meter("background compute", u.background_compute), `own plan, api-equivalent: ${usd(u.own_plan_api_equivalent_usd)}`].join("\n"));
+  c.out.say([`since ${u.period_start}`, meter("model", u.model), meter("foreground compute", u.foreground_compute), meter("background compute", u.background_compute), `own plan, api-equivalent: ${usd(u.own_plan_api_equivalent_usd)}`, ...(u.compute_notice ? [u.compute_notice.message] : [])].join("\n"));
   c.out.success(u);
 }
 

@@ -4,6 +4,7 @@ import { NotFoundError } from '@fx/core/src/tenancy/errors.js';
 import { utcMonthStart } from '@fx/core/src/time.js';
 import { backgroundBudgetUsd, foregroundBudgetUsd } from './plans.js';
 import type { Budget, PlanId } from './types.js';
+import { computeNoticeFor, type ComputeNotice } from './computeNotice.js';
 
 /** `(ctx:{pool, principal}, input)`, mirroring the other read services. `pool` is the `app_user` pool. */
 export interface UsageCtx {
@@ -28,6 +29,11 @@ export interface Usage {
    * `model` or any other budget above, is not reserved, and no cap or refusal reads it.
    */
   own_plan_api_equivalent_usd: number;
+  /**
+   * D#483 S5-k3: the notice at 80% of the compute allowance, derived from the two compute budgets above on every read (never stored), or
+   * null. It is information: it pauses nothing and denies no reservation.
+   */
+  compute_notice: ComputeNotice | null;
 }
 
 export interface AccountBudgets {
@@ -105,11 +111,14 @@ export async function getUsage(ctx: UsageCtx, opts: { now?: Date } = {}): Promis
     reserved_usd: round4(sums.at(b).reserved),
     limit_usd: round4(limit),
   });
+  const foreground = usage('foreground_compute', budgets.foreground_compute_usd_month);
+  const background = usage('background_compute', budgets.background_compute_usd_month);
   return {
     period_start: periodStart.toISOString(),
     model: usage('model', budgets.model_usd_month),
-    foreground_compute: usage('foreground_compute', budgets.foreground_compute_usd_month),
-    background_compute: usage('background_compute', budgets.background_compute_usd_month),
+    foreground_compute: foreground,
+    background_compute: background,
     own_plan_api_equivalent_usd: round4(sums.ownPlanUsd),
+    compute_notice: computeNoticeFor({ foreground_compute: foreground, background_compute: background }),
   };
 }

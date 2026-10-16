@@ -83,6 +83,11 @@ export const usageResponseSchema = z.object({
   background_compute: budgetUsageSchema,
   // D#6 R2b-5a: the API-equivalent of this month's runs on the person's own machine. Information; never part of any budget above.
   own_plan_api_equivalent_usd: z.number().describe("What this month's runs on the person's own machine would have cost at API prices. Information, never spend, and not part of any budget above. The same figure the stats endpoint calls runner_api_equivalent_usd (named differently there because the stats key guard refuses keys containing plan)."),
+  // D#483 S5-k3: derived on every read, never stored; it pauses nothing.
+  compute_notice: z
+    .object({ code: z.enum(["compute_allowance_80"]), message: z.string() })
+    .nullable()
+    .describe("Set from 80% of a compute budget's cap until that budget reaches its cap, then null (the pause shows instead). A notice only: it never pauses work or denies a start. Computed from this month's usage on each read, so a higher cap or a new month removes it."),
 });
 
 /** `model_usd_month` of 0 means "not set" (the column default). */
