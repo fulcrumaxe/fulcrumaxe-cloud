@@ -32,6 +32,13 @@ export interface DeclaredEntry {
 }
 
 /**
+ * The third declaration source (D#7 DP-C5 section 5, amending DP-C2a): decision types the platform itself raises, which no role
+ * card or tool declares. `findUnresolvedDeclarations` checks them like any other. `run_extension` must appear here and in no card
+ * or tool (`packages/roles/test/declared-classes.test.ts`). No other shape is allowed.
+ */
+export const PLATFORM_DECLARATIONS: readonly string[] = ["run_extension"];
+
+/**
  * Resolves one declaration to its catalogue entry, or `undefined` when the
  * declared id isn't in `catalogue`. Catalogue ids are unique (DP1's frozen
  * list), so a resolved declaration always resolves to exactly one entry.

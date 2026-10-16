@@ -12,7 +12,8 @@
  * not a silent drift.
  *
  * `timeoutOutcomes` (D#7 DP12a-1, DP-C5 R2) lists what an unanswered ask may resolve to for the entry. Only the two internal,
- * reversible-before-build class-2 entries allow `proceed_recommended`; every other asked entry is `stop_and_flag` only, and a class-1
+ * reversible-before-build class-2 entries, and `run_extension` (D#7 DP13: proceeding means continuing a run, still through `reserve()`
+ * and the ceilings), allow `proceed_recommended`; every other asked entry is `stop_and_flag` only, and a class-1
  * entry (never asked) has none. A later class-3 entry is `stop_and_flag` only unless its own reviewed PR says otherwise and names why.
  *
  * `allowedDispositions` values use DP-C1's `ask | announce | act`
@@ -30,7 +31,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 5;
+export const CATALOGUE_VERSION = 6;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -163,6 +164,22 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "customer_data",
     timeoutOutcomes: ["stop_and_flag"],
+  },
+  {
+    // D#7 DP13: a run reaches its limit and the platform (not a role card or tool) asks whether to extend it. The extension rules always
+    // decide whether an extension is allowed at all; this dial decides whether to ask. Cautious asks, Balanced announces, Autonomous acts.
+    // Declared through `PLATFORM_DECLARATIONS` (declared.ts), never by a card or a tool.
+    id: "run_extension",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "compute already spent can't be unspent; you can stop the run at any time",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "none",
+    timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
   },
   {
     id: "publish_deprecation_notice",

@@ -46,7 +46,7 @@ interface ErrorBody {
   details?: { path: string; code: string }[];
 }
 
-const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call'];
+const CLASS_2 = ['nonbreaking_refactor_approach', 'test_strategy_choice', 'runner_run_on_member_plan', 'publish_deprecation_notice', 'start_work_small', 'start_work_bug', 'start_work_doc', 'launch_sub_item', 'tool_call', 'run_extension'];
 
 /**
  * D#7 DP10a: the Autonomy settings API, called through the real `handleApiRequest` against real Postgres (RLS, the owner/admin INSERT
@@ -142,7 +142,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(s.presets.map((p) => p.name)).toEqual(['cautious', 'balanced', 'autonomous']);
     expect(new Set(s.presets.map((p) => p.customer_role)).size).toBe(3);
     const dials = dialsByType(s);
-    expect(s.dials).toHaveLength(16);
+    expect(s.dials).toHaveLength(17);
     for (const type of CLASS_2) expect(dials[type], type).toMatchObject({ adjustable: true, source: 'default', preset: null, version: null });
     expect(dials.runner_run_on_member_plan!.disposition).toBe('announce');
     expect(dials.nonbreaking_refactor_approach!.disposition).toBe('ask');
@@ -173,7 +173,7 @@ describe('D#7 DP10a: decision settings routes', () => {
   it('preview returns exactly the class 2 dials a preset moves and writes nothing', async () => {
     const f = await fixture();
     const balanced = await (await call(f.member, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'balanced' })).json() as Preview;
-    // Defaults are ask, ask, announce, ask, then ask on the four starting-work dials; Balanced is announce on the seven it may and ask on the locked one.
+    // Defaults are ask, ask, announce, ask, then ask on the four starting-work dials; Balanced is announce on the eight it may and ask on the locked one.
     expect(balanced.moves).toEqual([
       { decision_type: 'nonbreaking_refactor_approach', from: 'ask', to: 'announce' },
       { decision_type: 'test_strategy_choice', from: 'ask', to: 'announce' },
@@ -182,6 +182,7 @@ describe('D#7 DP10a: decision settings routes', () => {
       { decision_type: 'start_work_doc', from: 'ask', to: 'announce' },
       { decision_type: 'launch_sub_item', from: 'ask', to: 'announce' },
       { decision_type: 'tool_call', from: 'ask', to: 'announce' },
+      { decision_type: 'run_extension', from: 'ask', to: 'announce' },
     ]);
     const autonomous = await (await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/preset/preview`, { preset: 'autonomous' })).json() as Preview;
     expect(autonomous.moves.map((m) => [m.decision_type, m.to])).toEqual([
@@ -193,6 +194,7 @@ describe('D#7 DP10a: decision settings routes', () => {
       ['start_work_doc', 'act'],
       ['launch_sub_item', 'act'],
       ['tool_call', 'act'],
+      ['run_extension', 'act'],
     ]);
     for (const m of [...balanced.moves, ...autonomous.moves]) expect(CLASS_2).toContain(m.decision_type);
     expect(await versions(f.repoId)).toHaveLength(0);
@@ -208,20 +210,20 @@ describe('D#7 DP10a: decision settings routes', () => {
     const s = (await res.json()) as Settings;
     expect(s.active_preset).toBe('autonomous');
     expect(s.moved!.map((m) => m.decision_type).sort()).toEqual([
-      'launch_sub_item', 'nonbreaking_refactor_approach', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
+      'launch_sub_item', 'nonbreaking_refactor_approach', 'run_extension', 'runner_run_on_member_plan', 'start_work_bug', 'start_work_doc', 'start_work_small', 'test_strategy_choice', 'tool_call',
     ]);
     const dials = dialsByType(s);
     expect(dials.nonbreaking_refactor_approach).toMatchObject({ disposition: 'act', source: 'preset', preset: 'autonomous', version: 1 });
     expect(dials.publish_deprecation_notice).toMatchObject({ disposition: 'ask', source: 'default', version: null });
     const rows = await versions(f.repoId);
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(9);
     for (const r of rows) {
       expect(CLASS_2).toContain(r.decision_type);
       expect(r.changed_by).toBe(f.admin.userId);
       expect(r.preset).toBe('autonomous');
     }
     const audit = await auditRows(f.owner.accountId);
-    expect(audit).toHaveLength(8);
+    expect(audit).toHaveLength(9);
     for (const a of audit) expect(a.actor).toBe(f.admin.userId);
     expect(audit.find((a) => a.payload.decision_type === 'runner_run_on_member_plan')!.payload).toMatchObject({ previous: 'announce', new: 'act' });
   });
@@ -232,7 +234,7 @@ describe('D#7 DP10a: decision settings routes', () => {
     await call(f.owner, 'POST', base, { preset: 'balanced' });
     const again = (await (await call(f.owner, 'POST', base, { preset: 'balanced' })).json()) as Settings;
     expect(again.moved).toEqual([]);
-    expect(await versions(f.repoId)).toHaveLength(7);
+    expect(await versions(f.repoId)).toHaveLength(8);
 
     await call(f.owner, 'POST', base, { preset: 'cautious' });
     expect((await get(f.owner, f.repoId)).active_preset).toBe('cautious');

@@ -19,6 +19,7 @@ export const DECISION_LABELS: Readonly<Record<string, string>> = {
   external_paid_api_call: "Calling a paid outside service",
   start_parent_item: "Starting a new feature, project or critical item",
   spend_past_envelope: "Spending past an item's budget",
+  run_extension: "Extending a run past its limit",
   start_after_reclassify: "Starting an item that was later judged larger",
 };
 

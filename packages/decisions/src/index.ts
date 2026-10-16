@@ -9,6 +9,7 @@ export {
 } from "./presets.js";
 export { DecisionRequestClassFieldRejectedError, decide } from "./decide.js";
 export {
+  PLATFORM_DECLARATIONS,
   UndeclaredCatalogueEntryError,
   assertDeclarationsResolve,
   findUnresolvedDeclarations,

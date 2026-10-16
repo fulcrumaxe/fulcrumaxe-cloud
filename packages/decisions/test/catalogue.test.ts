@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CATALOGUE, CATALOGUE_IDS, getCatalogueEntry } from "../src/catalogue.js";
+import { decide } from "../src/decide.js";
+import { PRESETS } from "../src/presets.js";
 import type { DecisionClass } from "../src/types.js";
 
 // The "no never-a-dial write-path flag" half of criterion 7 lives entirely
@@ -33,6 +35,7 @@ const EXPECTED_V1_IDS = [
   "publish_deprecation_notice",
   "publish_release_artifact",
   "retry_transient_step_failure",
+  "run_extension",
   "runner_run_on_member_plan",
   "spend_past_envelope",
   "start_after_reclassify",
@@ -115,9 +118,33 @@ describe("DP12a-1: timeoutOutcomes (DP-C5 R2)", () => {
     }
   });
 
-  it("exactly the two refactor/test entries allow proceed_recommended", () => {
+  it("exactly the refactor/test entries and run_extension allow proceed_recommended", () => {
     const ids = CATALOGUE.filter((e) => e.timeoutOutcomes.includes("proceed_recommended")).map((e) => e.id);
-    expect(ids.sort()).toEqual(["nonbreaking_refactor_approach", "test_strategy_choice"]);
+    expect(ids.sort()).toEqual(["nonbreaking_refactor_approach", "run_extension", "test_strategy_choice"]);
+  });
+
+  it("DP13: the presets give run_extension Cautious ask, Balanced announce, Autonomous act, with no preset change", () => {
+    const entry = getCatalogueEntry("run_extension");
+    expect(entry).toBeDefined();
+    if (!entry) return;
+    const request = { type: "run_extension", options: [], proposed: "", rationale: "" };
+    expect(PRESETS.map((p) => decide(entry, { preset: p.name }, request).disposition)).toEqual(["ask", "announce", "act"]);
+  });
+
+  it("DP13: run_extension is exactly the entry the Spec gives", () => {
+    expect(getCatalogueEntry("run_extension")).toEqual({
+      id: "run_extension",
+      class: "human_over_the_loop",
+      defaultDisposition: "ask",
+      allowedDispositions: ["act", "announce", "ask"],
+      reversal: {
+        availability: "not_reversible",
+        reason: "compute already spent can't be unspent; you can stop the run at any time",
+      },
+      customerProximity: "internal_only",
+      dataSensitivity: "none",
+      timeoutOutcomes: ["stop_and_flag", "proceed_recommended"],
+    });
   });
 
   it("class 1 is never asked, so it lists none; every asked entry can always stop and flag", () => {
