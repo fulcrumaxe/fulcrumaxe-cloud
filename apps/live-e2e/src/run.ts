@@ -17,6 +17,8 @@ import { OUTPUT_DIR_ENV_NAME, TARGET_ENV_NAME, WORKERS_ENV_NAME } from "./limits
 import type { Pack } from "./manifest.js";
 import { MASK_FILE_ENV } from "./mask.js";
 import { BYPASS_ENV, STRIPE_RESTRICTED_KEY_ENV } from "./needs.js";
+import { FIXTURE_REPO_ENV, FIXTURE_TOKEN_ENV } from "./needs-network.js";
+import { SESSION_KEY_ENV } from "./store.js";
 import type { Plan } from "./plan.js";
 import { STAGING_ONLY_TAG } from "./staging-only.js";
 import { buildResults, notRunFromPlan, scrubbedText, writeReport, type PackResult, type Results } from "./report.js";
@@ -37,8 +39,18 @@ export const HOST_ENV_NAMES = [
   MASK_FILE_ENV,
 ] as const;
 
-/** The secret each env-only need hands to a pack that declares it. */
-const NEED_ENV: Record<string, string> = { bypass: BYPASS_ENV, "stripe-test": STRIPE_RESTRICTED_KEY_ENV };
+/**
+ * What a need hands to a pack that declares it: the bypass secret, the Stripe key, the session key (so its fixtures
+ * can decrypt the store and write the refreshed cookie back) and the fixture-repo token. The probing
+ * needs that only read through the runner's own process (`model-key`, `caps-set`, ...) hand nothing.
+ */
+function needEnv(need: string): string[] {
+  if (need === "bypass") return [BYPASS_ENV];
+  if (need === "stripe-test") return [STRIPE_RESTRICTED_KEY_ENV];
+  if (need.startsWith("session:")) return [SESSION_KEY_ENV];
+  if (need === "test-repo") return [FIXTURE_TOKEN_ENV];
+  return [];
+}
 
 export interface Invocation {
   packId: string;
@@ -61,8 +73,9 @@ export function childEnv(pack: Pack, target: Target, source: Record<string, stri
   // A staging run keeps out of the production origin (the fence), so it must be told which one that is.
   if (target.name === "staging") names.push(PRODUCTION_ORIGIN_ENV);
   for (const need of pack.needs) {
-    const name = NEED_ENV[need];
-    if (name !== undefined && target.env.includes(name)) names.push(name);
+    for (const name of needEnv(need)) if (target.env.includes(name)) names.push(name);
+    // The fixture repo's NAME is not a secret (it appears in reports), so it is not a declared secret name.
+    if (need === "test-repo") names.push(FIXTURE_REPO_ENV);
   }
   for (const name of names) {
     const value = source[name];

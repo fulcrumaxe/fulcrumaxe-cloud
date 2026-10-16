@@ -22,10 +22,21 @@ export interface HostProbe {
   memAvailableBytes(): number | null;
 }
 
+/** What probing one network need found. `refuse` turns an unmet need into `REFUSED <reason>` (`caps-set`: never a skip). */
+export type NeedResult = { met: true } | { met: false; refuse?: string; detail?: string };
+
 export interface NeedsContext {
   env: Record<string, string | undefined>;
   host: HostProbe;
+  /** Network needs probed by `run` (needs-network.ts). `plan` is offline and leaves this out: those needs are then unmet. */
+  network?: Record<string, NeedResult>;
 }
+
+/**
+ * Roles for which scripted sign-in (option A, 4a) is enabled. Empty: the owner-captured sessions of option B are
+ * what is built, so `signin:scripted` is never met. The option-A trial changes this list in its own PR.
+ */
+export const SCRIPTED_SIGNIN_ROLES: readonly string[] = [];
 
 export function readHostProbe(): HostProbe {
   return {
@@ -66,15 +77,36 @@ export function isNeedMet(need: string, target: Target, ctx: NeedsContext): bool
       const mem = ctx.host.memAvailableBytes();
       return load !== null && mem !== null && load < MAX_LOAD_1M && mem >= MIN_MEM_AVAILABLE_BYTES;
     }
+    case "signin:scripted":
+      return SCRIPTED_SIGNIN_ROLES.length > 0;
     default:
-      return false;
+      return ctx.network?.[need]?.met === true;
   }
 }
 
-/** The first need (in the pack's declared order) that is not met, or null when all are. */
+/**
+ * Where a need is checked (R-441-T3-21): what a read needs comes before the read. `caps-set` (and `sandbox`, which
+ * includes it) is last, so a missing session or fixture repo is what a skipped pack reports, never `caps-set`.
+ * Everything else keeps its declared place (a stable sort).
+ */
+function needRank(need: string): number {
+  if (need === "caps-set" || need === "sandbox") return 2;
+  return need === "model-key" ? 1 : 0;
+}
+
+/** The first need that is not met, in the order above and otherwise the pack's declared order, or null when all are. */
 export function firstUnmetNeed(pack: Pack, target: Target, ctx: NeedsContext): string | null {
-  for (const need of pack.needs) {
+  const ordered = [...pack.needs].sort((a, b) => needRank(a) - needRank(b));
+  for (const need of ordered) {
     if (!isNeedMet(need, target, ctx)) return need;
   }
   return null;
+}
+
+/** The first unmet need with the refusal its probe asked for, if any (`caps-set` refuses; the others skip). */
+export function firstNeedProblem(pack: Pack, target: Target, ctx: NeedsContext): { need: string; refuse?: string; detail?: string } | null {
+  const need = firstUnmetNeed(pack, target, ctx);
+  if (need === null) return null;
+  const result = ctx.network?.[need];
+  return result !== undefined && !result.met && result.refuse !== undefined ? { need, refuse: result.refuse, ...(result.detail !== undefined ? { detail: result.detail } : {}) } : { need };
 }

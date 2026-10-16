@@ -1,5 +1,5 @@
 /**
- * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), and `workflow-routes` (the Workflow SDK route list), and `capture-session` and `sessions` (sessions-cli.ts).
+ * The `live-e2e` command line. Commands: `plan`, `run` (the same selection, then Playwright per pack), `scrub` (the upload gate), `issues` and `last-tested` (the workflow's reporting and store), `workflow-routes` (the Workflow SDK route list), and `capture-session` and `sessions` (sessions-cli.ts).
  *
  *   live-e2e plan --target <staging|production> [--tier smoke|standard|full] [--pack a,b] [--tag @x]
  *                 [--changed-from <base>..<head>] [--trigger dispatch|deploy|nightly|weekly|poll] [--out <file>]
@@ -18,8 +18,9 @@ import { loadPacks, ManifestError, TIERS, type Pack, type Tier } from "./manifes
 import { GithubError, syncIssues } from "./issues.js";
 import { LAST_TESTED_OUTCOMES, LastTestedError, readLastTested, recordLastTested, type LastTestedOutcome } from "./last-tested.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
-import { BYPASS_ENV, readHostProbe, type HostProbe } from "./needs.js";
-import { buildPlan, describeOutcome } from "./plan.js";
+import { BYPASS_ENV, readHostProbe, type HostProbe, type NeedsContext } from "./needs.js";
+import { FIXTURE_REPO_ENV, FIXTURE_REPO_PATTERN, resolveNetworkNeeds } from "./needs-network.js";
+import { buildPlan, describeOutcome, wantedNetworkNeeds } from "./plan.js";
 import type { Results } from "./report.js";
 import { buildInvocations, runPlan, spawnExecutor, type Executor } from "./run.js";
 import { captureCommand, sessionsCommand, type CommandRunner } from "./sessions-cli.js";
@@ -365,25 +366,54 @@ export async function main(argv: string[], io: Io): Promise<number> {
             repoRoot: io.repoRoot ?? resolve(io.root, "..", ".."),
             ledgerFile: join(io.root, "routing-ledger.json"),
           });
+    const needs: NeedsContext = { env: io.env, host: io.host };
     const planInput = {
       ...(routing !== undefined ? { routing } : {}),
       packs,
       target,
       named: args.packs,
-      needs: { env: io.env, host: io.host },
+      needs,
       ...(tier !== undefined ? { tier } : {}),
       ...(args.tag !== undefined ? { tag: args.tag } : {}),
       ...(args.trigger !== undefined ? { trigger: args.trigger } : {}),
       stagingOnly: listStagingOnlyTests(join(io.root, "packs")),
     };
+    // Layer 2 (T5): the origin is asked who it is once, before anything that is not prod-safe runs or is probed with a login.
+    let identity: string | null | undefined;
+    const layer2 = async (): Promise<string | null> => {
+      identity ??= identityGuard(await readDeploymentIdentity(target, target.protected ? io.env[BYPASS_ENV] : undefined, io.fetch), target);
+      return identity;
+    };
+    if (args.command === "run") {
+      // The network needs (T3) are probed only by `run`, only for packs about to start, and never against a deployment that failed layer 2.
+      const wanted = wantedNetworkNeeds(planInput);
+      const repoName = io.env[FIXTURE_REPO_ENV];
+      if (wanted.length > 0 && repoName !== undefined && repoName !== "" && !FIXTURE_REPO_PATTERN.test(repoName)) {
+        // A value that is set but wrong is a setup error, not a missing credential.
+        throw new TargetError(`environment variable ${FIXTURE_REPO_ENV} must be owner/name (letters, digits, dashes; the repo part may also have dots and underscores)`);
+      }
+      if (wanted.length > 0) {
+        const refusal = await layer2();
+        const maskFile = io.env[MASK_FILE_ENV];
+        needs.network = await resolveNetworkNeeds(wanted, {
+          target,
+          targetsDir: join(io.root, "targets"),
+          env: io.env,
+          now: (io.now ?? Date.now)(),
+          mask: new MaskRegistry({ emit: (line) => io.stdout(line), ...(maskFile ? { file: maskFile } : {}) }),
+          ...(io.fetch !== undefined ? { fetchImpl: io.fetch } : {}),
+          ...(io.githubCa !== undefined ? { githubCa: io.githubCa } : {}),
+          ...(refusal !== null ? { identityRefusal: refusal } : {}),
+        });
+      }
+    }
     let plan = buildPlan(planInput);
     if (args.command === "run") {
       // Layer 2 (T5): before any pack that is not prod-safe, ask the origin who it is. Only when one would run.
       const packById = new Map(packs.map((p) => [p.id, p]));
       if (plan.selected.some((s) => !isProdSafe(packById.get(s.id) as Pack))) {
-        const identity = await readDeploymentIdentity(target, target.protected ? io.env[BYPASS_ENV] : undefined, io.fetch);
-        const layer2 = identityGuard(identity, target);
-        if (layer2 !== null) plan = buildPlan({ ...planInput, layer2 });
+        const refusal = await layer2();
+        if (refusal !== null) plan = buildPlan({ ...planInput, layer2: refusal });
       }
     }
     const outFile = resolve(io.cwd, args.out ?? "plan.json");
@@ -391,9 +421,14 @@ export async function main(argv: string[], io: Io): Promise<number> {
     writeFileSync(outFile, `${JSON.stringify(plan, null, 2)}\n`);
     if (plan.routing_fallback !== null) io.stdout(`routing fell back to every pack at or below standard: ${plan.routing_fallback}`);
     for (const o of plan.packs) io.stdout(describeOutcome(o));
+    // The API cannot see a user row that does not exist yet, so say what this state really proves.
+    for (const p of packs) {
+      if (plan.selected.some((s) => s.id === p.id) && p.needs.includes("fresh-state:first-sign-in")) io.stdout(`${p.id}: fresh-state:first-sign-in (onboarding untouched)`);
+    }
     for (const t of plan.tests_skipped) io.stdout(`${t.pack}: test skipped on ${plan.target} (${t.reason}): ${t.test}`);
     io.stdout(`plan written to ${outFile}`);
-    const namedRefusals = plan.refused.filter((r) => r.named);
+    // A pack the caller named is an error when refused; so is any `caps` refusal: a limit above the ceiling must never pass quietly.
+    const namedRefusals = plan.refused.filter((r) => r.named || r.reason === "caps");
     for (const r of namedRefusals) io.stderr(`REFUSED ${r.reason} (pack ${r.id})`);
     let failed = false;
     if (args.command === "run") {

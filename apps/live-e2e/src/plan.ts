@@ -3,7 +3,8 @@
  * Order: layer 1 (target guard), trigger rule, needs, layer 2 (deployment identity, T5). Pure; `cli.ts` writes the result as plan.json.
  */
 import type { Pack, Tier } from "./manifest.js";
-import { firstUnmetNeed, type NeedsContext } from "./needs.js";
+import { firstNeedProblem, type NeedsContext } from "./needs.js";
+import { isNetworkNeed } from "./needs-network.js";
 import { select, triggerRule, type SelectInput, type Trigger } from "./select.js";
 import type { RouteRecord, RoutingResult } from "./routing.js";
 import type { StagingOnlyTest } from "./staging-only.js";
@@ -12,7 +13,7 @@ import { isProdSafe, targetGuard, type Target } from "./targets.js";
 export type PackOutcome =
   | { id: string; outcome: "RUN"; named: boolean }
   | { id: string; outcome: "SKIPPED-NEED"; need: string; named: boolean }
-  | { id: string; outcome: "REFUSED"; reason: string; named: boolean };
+  | { id: string; outcome: "REFUSED"; reason: string; named: boolean; detail?: string };
 
 export interface Plan {
   version: 1;
@@ -58,8 +59,9 @@ function decide(pack: Pack, named: boolean, input: PlanInput): PackOutcome {
   if (layer1 !== null) return { id: pack.id, outcome: "REFUSED", reason: layer1, named };
   const trig = triggerRule(pack, input.trigger);
   if (trig !== null) return { id: pack.id, outcome: "REFUSED", reason: trig, named };
-  const need = firstUnmetNeed(pack, input.target, input.needs);
-  if (need !== null) return { id: pack.id, outcome: "SKIPPED-NEED", need, named };
+  const problem = firstNeedProblem(pack, input.target, input.needs);
+  if (problem?.refuse !== undefined) return { id: pack.id, outcome: "REFUSED", reason: problem.refuse, named, ...(problem.detail !== undefined ? { detail: problem.detail } : {}) };
+  if (problem !== null) return { id: pack.id, outcome: "SKIPPED-NEED", need: problem.need, named };
   if (input.layer2 != null && !isProdSafe(pack)) return { id: pack.id, outcome: "REFUSED", reason: input.layer2, named };
   return { id: pack.id, outcome: "RUN", named };
 }
@@ -115,5 +117,12 @@ export function buildPlan(input: PlanInput): Plan {
 export function describeOutcome(o: PackOutcome): string {
   if (o.outcome === "RUN") return `${o.id}: RUN`;
   if (o.outcome === "SKIPPED-NEED") return `${o.id}: SKIPPED-NEED ${o.need}`;
-  return `${o.id}: REFUSED ${o.reason}`;
+  return `${o.id}: REFUSED ${o.reason}${o.detail === undefined ? "" : ` (${o.detail})`}`;
+}
+
+/** The network needs of the packs a `run` is about to start: selected, and not already refused by layer 1 or the trigger rule. */
+export function wantedNetworkNeeds(input: PlanInput): string[] {
+  const selection = select({ ...input, ...(input.routing !== undefined ? { routed: input.routing.packs } : {}) });
+  const live = selection.packs.filter((p) => targetGuard(p, input.target) === null && triggerRule(p, input.trigger) === null);
+  return [...new Set(live.flatMap((p) => p.needs).filter(isNetworkNeed))];
 }

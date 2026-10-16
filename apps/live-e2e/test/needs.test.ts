@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BYPASS_ENV, firstUnmetNeed, isNeedMet, STRIPE_RESTRICTED_KEY_ENV } from "../src/needs.js";
+import { BYPASS_ENV, firstNeedProblem, firstUnmetNeed, isNeedMet, SCRIPTED_SIGNIN_ROLES, STRIPE_RESTRICTED_KEY_ENV } from "../src/needs.js";
 import { GOOD_HOST, makePack, makeTarget, needsCtx } from "./helpers.js";
 
 describe("needs: bypass", () => {
@@ -60,5 +60,44 @@ describe("needs: first unmet, in declared order", () => {
     expect(firstUnmetNeed(pack, makeTarget(), needsCtx({}))).toBe("bypass");
     expect(firstUnmetNeed(pack, makeTarget(), needsCtx({ [BYPASS_ENV]: "x" }))).toBe("stripe-test");
     expect(firstUnmetNeed(pack, makeTarget(), needsCtx({ [BYPASS_ENV]: "x", [STRIPE_RESTRICTED_KEY_ENV]: "rk_test_1" }))).toBeNull();
+  });
+});
+
+describe("needs: checked session and test-repo first, then model-key, then caps-set (R-441-T3-21)", () => {
+  it("names the earlier need whatever order the pack declares them in", () => {
+    const t = makeTarget();
+    const ctx = { ...needsCtx({ [BYPASS_ENV]: "x" }), network: {} as never };
+    const pack = makePack({ id: "p", needs: ["caps-set", "sandbox", "model-key", "session:owner"] });
+    expect(firstUnmetNeed(pack, t, ctx)).toBe("session:owner");
+    const sessionOnly = { ...ctx, network: { "session:owner": { met: true } } as never };
+    expect(firstUnmetNeed(pack, t, sessionOnly)).toBe("model-key");
+    const keyToo = { ...ctx, network: { "session:owner": { met: true }, "model-key": { met: true } } as never };
+    expect(firstUnmetNeed(pack, t, keyToo)).toBe("caps-set");
+  });
+});
+
+describe("needs: network results", () => {
+  const t = makeTarget();
+  const withNetwork = (network: Record<string, { met: boolean; refuse?: string }>) => ({ ...needsCtx({ [BYPASS_ENV]: "x" }), network: network as never });
+
+  it("a probed need is met only when its result says so; a need without a result stays unmet", () => {
+    expect(isNeedMet("session:owner", t, withNetwork({ "session:owner": { met: true } }))).toBe(true);
+    expect(isNeedMet("session:owner", t, withNetwork({ "session:owner": { met: false } }))).toBe(false);
+    expect(isNeedMet("model-key", t, withNetwork({ "session:owner": { met: true } }))).toBe(false);
+  });
+
+  it("an unmet need that asked to refuse is reported with its reason; the others are plain skips", () => {
+    const pack = makePack({ id: "p", needs: ["session:owner", "caps-set"] });
+    const ctx = withNetwork({ "session:owner": { met: true }, "caps-set": { met: false, refuse: "caps" } });
+    expect(firstNeedProblem(pack, t, ctx)).toEqual({ need: "caps-set", refuse: "caps" });
+    expect(firstNeedProblem(pack, t, withNetwork({ "session:owner": { met: false } }))).toEqual({ need: "session:owner" });
+    expect(firstNeedProblem(pack, t, withNetwork({ "session:owner": { met: true }, "caps-set": { met: true } }))).toBeNull();
+  });
+
+  it("signin:scripted is never met while option B is what is built, whatever the environment says", () => {
+    expect(SCRIPTED_SIGNIN_ROLES).toEqual([]);
+    for (const env of [{}, { LIVE_E2E_SIGNIN_SCRIPTED: "true" }, { [BYPASS_ENV]: "x" }]) expect(isNeedMet("signin:scripted", t, needsCtx(env))).toBe(false);
+    // Not even a probe result can make it met: only the role list above does.
+    expect(isNeedMet("signin:scripted", t, withNetwork({ "signin:scripted": { met: true } }))).toBe(false);
   });
 });

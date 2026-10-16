@@ -31,6 +31,15 @@ describe("manifest: validation", () => {
     expect(validatePack(pack, "ok").id).toBe("ok");
   });
 
+  it("accepts the three fresh-state names and rejects any other, naming the pack and the need", () => {
+    for (const name of ["unpaid", "preview-unused", "first-sign-in"]) expect(isKnownNeed(`fresh-state:${name}`), name).toBe(true);
+    expect(isKnownNeed("fresh-state:paid")).toBe(false);
+    expect(isKnownNeed("fresh-state:")).toBe(false);
+    const msg = messageOf(() => validatePack(makePack({ id: "p", needs: ["fresh-state:cancelled"] }), "p"));
+    expect(msg).toContain("pack p");
+    expect(msg).toContain('unknown need "fresh-state:cancelled"');
+  });
+
   it("rejects an unknown key, naming the pack and the key", () => {
     const msg = messageOf(() => validatePack({ ...makePack({ id: "p" }), surprise: 1 }, "p"));
     expect(msg).toContain("pack p");
@@ -61,6 +70,18 @@ describe("manifest: validation", () => {
     for (const n of ["session", "session:", "sessions:owner", "", "Bypass", "bypass:x"]) {
       expect(isKnownNeed(n), n).toBe(false);
     }
+  });
+
+  it("rejects a sandbox pack that does not also declare session:owner and test-repo, naming each missing need (R-441-T3-21)", () => {
+    const full = ["session:owner", "test-repo", "model-key", "caps-set", "sandbox"];
+    expect(() => validatePack(makePack({ id: "p", needs: full }), "p")).not.toThrow();
+    const noBoth = messageOf(() => validatePack(makePack({ id: "p", needs: ["model-key", "caps-set", "sandbox"] }), "p"));
+    expect(noBoth).toContain('"session:owner"');
+    expect(noBoth).toContain('"test-repo"');
+    expect(messageOf(() => validatePack(makePack({ id: "p", needs: full.filter((n) => n !== "test-repo") }), "p"))).toContain('"test-repo"');
+    expect(messageOf(() => validatePack(makePack({ id: "p", needs: full.filter((n) => n !== "session:owner") }), "p"))).toContain('"session:owner"');
+    // Only a pack that declares `sandbox` is held to it.
+    expect(() => validatePack(makePack({ id: "p", needs: ["caps-set"] }), "p")).not.toThrow();
   });
 
   it("rejects a @ui pack that does not list all three projects, naming what is missing", () => {

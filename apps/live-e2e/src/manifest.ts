@@ -40,12 +40,16 @@ export const PARAM_NEED_PREFIXES = ["session", "github-app", "fresh-state", "api
 /** The needs this slice can evaluate from the environment or the host alone (needs.ts). */
 export const ENV_NEEDS = ["bypass", "stripe-test", "host-capacity"] as const;
 
+/** The one-shot account states a pack may start from (`fresh-state:<name>`); any other name fails the manifest check. */
+export const FRESH_STATES = ["unpaid", "preview-unused", "first-sign-in"] as const;
+
 export function isKnownNeed(need: string): boolean {
   if ((BARE_NEEDS as readonly string[]).includes(need)) return true;
   const colon = need.indexOf(":");
   if (colon <= 0) return false;
   const prefix = need.slice(0, colon);
   const arg = need.slice(colon + 1);
+  if (prefix === "fresh-state") return (FRESH_STATES as readonly string[]).includes(arg);
   return (PARAM_NEED_PREFIXES as readonly string[]).includes(prefix) && arg.length > 0;
 }
 
@@ -172,6 +176,12 @@ export function validatePack(raw: unknown, dirName: string): Pack {
   if (stringList(raw.tags) && raw.tags.includes("@ui") && Array.isArray(raw.projects)) {
     const missing = PROJECTS.filter((p) => !(raw.projects as unknown[]).includes(p));
     if (missing.length > 0) bad(`a "@ui" pack must list all three projects; missing ${missing.join(", ")}`);
+  }
+  // A `sandbox` pack's caps-set reads need the owner session and the fixture repo; without them it could only ever skip.
+  if (stringList(raw.needs) && raw.needs.includes("sandbox")) {
+    for (const required of ["session:owner", "test-repo"]) {
+      if (!raw.needs.includes(required)) bad(`a "sandbox" pack must also declare the need "${required}"`);
+    }
   }
   if (raw.model_spend === true && raw.tier !== "full") bad(`"model_spend": true is only allowed on tier "full"`);
 
