@@ -251,6 +251,9 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "unsafe_git_config",
   // Autonomy settings (D#7 DP10b): an answer-window setting saved over a newer version.
   "ask_setting_changed",
+  // Approval rules (D#7 AAP-a2): a rule set saved over a newer version, and a rollback to a version the scope never had.
+  "action_rules_changed",
+  "action_rules_version_not_found",
   // Sandbox reaper (D#2 SANDBOX-REAPER-1b): the alert codes the reconcile jobs report.
   "sandbox_cap_exceeded",
   "sandbox_total_high",

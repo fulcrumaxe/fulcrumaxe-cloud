@@ -14,6 +14,7 @@ import { modelConnectionRoutes } from "./model-connection.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
 import { decisionSettingRoutes } from "./decision-settings.js";
+import { actionRuleRoutes } from "./action-rules.js";
 import { askSettingRoutes } from "./ask-settings.js";
 import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
@@ -72,6 +73,7 @@ export const ROUTES: RouteEntry[] = [
   ...roleRoutes,
   ...decisionSettingRoutes,
   ...askSettingRoutes,
+  ...actionRuleRoutes,
   ...githubRoutes,
   ...billingRoutes,
   ...runLimitRoutes,

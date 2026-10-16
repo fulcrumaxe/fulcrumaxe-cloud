@@ -19,6 +19,10 @@ describe('token-inventory: generic session-only and scope enforcement over the r
   let platformOpsPool: Pool;
   let accountId: string;
   let userId: string;
+  // The scoped-entry cases use an account of their own: the per-tenant request cap is shared by every request of one
+  // account, and the session-only and scoped cases together now outnumber it.
+  let scopedAccountId: string;
+  let scopedUserId: string;
 
   beforeAll(async () => {
     adminPool = createPool(process.env.API_DATABASE_URL!);
@@ -30,6 +34,9 @@ describe('token-inventory: generic session-only and scope enforcement over the r
     const seeded = await seedAccountWithMember(admin, { role: 'owner', plan: 'scale' });
     accountId = seeded.accountId;
     userId = seeded.userId;
+    const scoped = await seedAccountWithMember(admin, { role: 'owner' });
+    scopedAccountId = scoped.accountId;
+    scopedUserId = scoped.userId;
   });
 
   afterAll(async () => {
@@ -105,8 +112,8 @@ describe('token-inventory: generic session-only and scope enforcement over the r
         const otherScopes = SCOPES.filter((s) => s !== entry.scope);
         const plaintext = generateToken();
         await insertApiToken(appUserPool, {
-          accountId,
-          createdBy: userId,
+          accountId: scopedAccountId,
+          createdBy: scopedUserId,
           tokenHash: hashToken(plaintext),
           displayHint: displayHint(plaintext),
           scopes: otherScopes.length > 0 ? otherScopes : ['read'],
