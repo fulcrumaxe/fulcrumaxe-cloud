@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { WORK_ITEM_STAGES } from "@fx/core/src/work-items/stages.js";
+import { BUILD_SLOT_HOLDING_STAGES, BUILD_WAIT_FRESH_SECONDS, BUILD_WAIT_NOTICE_CODES } from "@fx/core/src/work-items/activity.js";
 import {
   BUILD_SLOT_STAGES,
   BUILD_WAIT_REASONS,
@@ -84,6 +85,14 @@ describe("the lists this module shares", () => {
     };
     expect(listIn(read("../../../apps/web/workflows/workItemAdvance.ts"))).toEqual([...BUILD_WAIT_REASONS]);
     expect(listIn(read("../../worker/src/advance.ts"))).toEqual([...BUILD_WAIT_REASONS]);
+  });
+});
+
+describe("D#483: the card's wait notice repeats this module's lists (@fx/core cannot import this package)", () => {
+  it("the codes, the slot-holding stages and the freshness window are equal", () => {
+    expect([...BUILD_WAIT_NOTICE_CODES]).toEqual([...BUILD_WAIT_REASONS]);
+    expect([...BUILD_SLOT_HOLDING_STAGES]).toEqual([...BUILD_SLOT_STAGES]);
+    expect(BUILD_WAIT_FRESH_SECONDS).toBe(WAITER_WINDOW_SECONDS);
   });
 });
 

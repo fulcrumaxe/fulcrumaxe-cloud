@@ -424,6 +424,31 @@ describe("approveView", () => {
   });
 });
 
+describe("D#483: a build that waits for a build slot is not 'Started'", () => {
+  const SPEC_READY = { ...ITEM, stage: "spec_ready" };
+
+  it("an approve the worker finished as waiting shows the waiting sentence, never the started one", async () => {
+    const call = fakeCall({ action_id: "a1", state: "accepted" }, { state: "done", outcome: { advance: "waiting", reason: "one_build_per_repo_until_d598" } });
+    const a = make({ call });
+    await a.approve(SPEC_READY);
+    expect(a.state.phase).toBe("started");
+    expect(a.state.text).toBe(SENTENCES.waiting_for_slot);
+    expect(a.state.text).not.toMatch(/^Started\./);
+    expect(a.state.text).not.toMatch(/building this now/);
+  });
+
+  it("an approve the worker finished as started keeps the started sentence", async () => {
+    const call = fakeCall({ action_id: "a1", state: "accepted" }, { state: "done", outcome: { advance: "started" } });
+    const a = make({ call });
+    await a.approve(SPEC_READY);
+    expect(a.state.text).toBe(SENTENCES.started_build);
+  });
+
+  it("the waiting sentence is the one proposed for owner approval", () => {
+    expect(SENTENCES.waiting_for_slot).toBe("Approved, but the build has not started: it is waiting for a build slot. The reason is on this card, and the build starts by itself when a slot is free.");
+  });
+});
+
 describe("the source", () => {
   const src = readFileSync(join(HERE, "..", "apps", "pipeline", "pipeline-actions.js"), "utf8");
   const app = readFileSync(join(HERE, "..", "apps", "pipeline", "pipeline-app.js"), "utf8");

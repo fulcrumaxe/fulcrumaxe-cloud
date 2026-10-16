@@ -159,6 +159,7 @@ const KIND_WORDS = {
 const STATE_WORDS = { accepted: "waiting to start", claimed: "being handled", done: "done", refused: "refused", failed: "failed" };
 const RESULT_WORDS = {
   started: "the pipeline started",
+  waiting: "the build is waiting for a build slot",
   merged: "Merge gate: merged",
   ready_human_merges: "Merge gate: not merged, a person merges",
   pr_not_open: "Merge gate: the pull request is not open",
@@ -167,6 +168,9 @@ const RESULT_WORDS = {
 };
 const REASON_WORDS = {
   pr_draft: "the pull request is a draft",
+  one_build_per_repo_until_d598: "this repository builds one item at a time",
+  waiting_for_build_slot_repo: "this repository's build slots are all taken",
+  waiting_for_build_slot_account: "your account's build slots are all taken",
   head_sha_malformed: "the pull request's head could not be read",
   run_timestamp_invalid: "a review run has an invalid time",
   ci_not_green: "CI is not green",
@@ -228,7 +232,7 @@ export function noticeBanner(data) {
   if (n.kind === "check_failed") return { kind: "check_failed", title: "Couldn't check the build. ", lead: "", tail: "", reason: n.reason };
   if (n.kind === "needs_human") return { kind: "needs_human", title: "Needs a person. ", lead: "The build stopped without a pull request. The executor's own account: ", tail: "", reason: n.reason };
   // D#6 R4d-5b: the server sends the whole sentence (the runner protocol's copy); the card adds no words of its own around it.
-  if (n.kind === "no_file_list" || n.kind === "respec_failed") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
+  if (n.kind === "no_file_list" || n.kind === "respec_failed" || n.kind === "build_slot_wait") return { kind: n.kind, title: "", lead: "", tail: "", reason: n.reason };
   return null;
 }
 

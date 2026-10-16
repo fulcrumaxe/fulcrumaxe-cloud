@@ -108,9 +108,23 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait';
   reason: string;
+  /**
+   * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`one_build_per_repo_until_d598`, `waiting_for_build_slot_repo` or `waiting_for_build_slot_account`;
+   * the API route puts the sentence in) and `holder` is the item that holds the repository's slot, when the wait is for the repository's slot: its issue number
+   * (null when it has none) and its stage. Null when no such item is found, and always null for the account wait.
+   */
+  holder?: { issue_number: number | null; stage: string } | null;
 }
+
+/**
+ * D#483: the codes of a wait for a build slot, and how long a waiting fact counts as current. These repeat packages/pipeline buildSlots.ts
+ * (BUILD_WAIT_REASONS, BUILD_SLOT_STAGES, WAITER_WINDOW_SECONDS); @fx/core cannot import that package, and a test there holds the copies equal.
+ */
+export const BUILD_WAIT_NOTICE_CODES: readonly string[] = Object.freeze(['one_build_per_repo_until_d598', 'waiting_for_build_slot_repo', 'waiting_for_build_slot_account']);
+export const BUILD_SLOT_HOLDING_STAGES: readonly string[] = Object.freeze(['in_progress', 'pr_opened', 'changes_requested', 'review_passed']);
+export const BUILD_WAIT_FRESH_SECONDS = 180;
 
 /** The `COPY` key each Re-spec notice carries as its `reason` until the API route replaces it with the sentence. */
 export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasNoFileList', respec_failed: 'respecListUnreadable' } as const);
@@ -312,6 +326,35 @@ export async function readRunLines(
 }
 
 /**
+ * D#483: an item at Spec ready or Needs a person whose build is waiting for a slot. The worker leaves one waiting fact (`stage_waiting`, stage `build`; `build_waiting`
+ * before D#483 S5-k1b) on every ask of the wait, so the item is waiting while its LATEST such fact names a slot reason and is younger than three polls. A halted item
+ * is not waiting. For a repository wait the holder is the oldest other item that holds a slot on the repository. Fixed codes and numbers only.
+ */
+async function readBuildWaitNotice(client: PoolClient, workItemId: string, stage: string, halted: boolean, repoId: string | null): Promise<ActivityNotice | null> {
+  if ((stage !== 'spec_ready' && stage !== 'needs_human') || halted) return null;
+  const fact = (
+    await client.query<{ code: string | null; fresh: boolean }>(
+      `SELECT e.code, (e.created_at > now() - make_interval(secs => $2::int)) AS fresh FROM work_item_driver_events e
+        WHERE e.work_item_id = $1::uuid AND e.kind IN ('build_waiting', 'stage_waiting') AND COALESCE(e.stage, 'build') = 'build'
+        ORDER BY e.seq DESC LIMIT 1`,
+      [workItemId, BUILD_WAIT_FRESH_SECONDS],
+    )
+  ).rows[0];
+  if (!fact || !fact.fresh || fact.code === null || !BUILD_WAIT_NOTICE_CODES.includes(fact.code)) return null;
+  if (fact.code === 'waiting_for_build_slot_account' || repoId === null) return { kind: 'build_slot_wait', reason: fact.code, holder: null };
+  const holder = (
+    await client.query<{ gh_number: string | null; stage: string }>(
+      `SELECT h.gh_number, h.stage FROM work_items h
+        WHERE h.repo_id = $2::uuid AND h.id <> $1::uuid AND h.stage = ANY($3::text[])
+          AND h.account_id = (SELECT account_id FROM work_items WHERE id = $1::uuid)
+        ORDER BY h.created_at ASC, h.id ASC LIMIT 1`,
+      [workItemId, repoId, [...BUILD_SLOT_HOLDING_STAGES]],
+    )
+  ).rows[0];
+  return { kind: 'build_slot_wait', reason: fact.code, holder: holder ? { issue_number: holder.gh_number === null ? null : Number(holder.gh_number), stage: holder.stage } : null };
+}
+
+/**
  * D#6 R4d-5b (C34 section 2): why an item at Spec ready or Needs a person cannot be built (or Re-spec'd) for want of a file list. Only while the newest unerased
  * Spec has no readable list (a Re-spec that succeeds publishes a version that has one, and the notice goes). The newest of two recorded facts since that Spec was
  * written wins: a Re-spec whose list could not be read (`respec_failed`), and a build refused for the missing list (`no_file_list`). A run that ended
@@ -357,8 +400,9 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       gh_name: string | null;
       auto_merge: boolean | null;
       halted: boolean;
+      repo_id: string | null;
     }>(
-      `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
+      `SELECT w.stage, w.halted_at IS NOT NULL AS halted, w.repo_id, w.discussion_id, w.gh_number, r.gh_owner, r.gh_name,
               -- The merge gate's own rule (@fx/trust autoMergeAllowed): the JSON boolean true, and for external work also
               -- the JSON boolean false on blockExternalAutoMerge. A string "true" is not true.
               ((r.settings->'autoMerge') = 'true'::jsonb
@@ -450,10 +494,13 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       )
     ).rows[0];
     const fileListNotice = await readFileListNotice(client, workItemId, item.stage, specRow);
+    const waitNotice = pm || fileListNotice ? null : await readBuildWaitNotice(client, workItemId, item.stage, item.halted, item.repo_id);
     if (pm) {
       notice = { kind: 'not_feasible', reason: safeModelText(pm.reason, ACTIVITY_LIMITS.maxNoticeChars) };
     } else if (fileListNotice) {
       notice = fileListNotice;
+    } else if (waitNotice) {
+      notice = waitNotice;
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.

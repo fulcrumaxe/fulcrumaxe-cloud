@@ -179,6 +179,11 @@ export interface AdvanceModuleDeps {
   lightSpec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** Records a build that ended without a pull request (in_progress -> needs_human). */
   buildFailed?: ((pool: Pool, accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string) => Promise<AdvanceStepResult>) | null;
+  /**
+   * D#483, injected from apps/web: the pipeline's `readBuildWaitReason`. The reason this item's build would wait for a slot right now, or null (it would get one).
+   * Asked once when a build is approved, so the answer can say "waiting" and not "started". Advisory (no lock): the workflow's own start decides. Absent or failing, the answer is "started".
+   */
+  buildWaitReason?: ((pool: Pool, accountId: string, workItemId: string) => Promise<string | null>) | null;
   /** D#483 S5-d: raises the `spend_past_envelope` ask (receipt login) when a start is denied by the item's spend envelope. Absent, the denial still pauses the item and no ask is raised. */
   raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
   /** The execution registry `cancelRun` dispatches through. Absent, a step's cancel is a no-op that the lost-run sweep backs up. */
@@ -572,8 +577,28 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (!lifted) return refused("target_not_found");
     if (lifted.halted) return refused("item_halted");
 
+    // D#483: a build that cannot take a slot yet is not "started". The wait is recorded now as the item's own waiting fact (the card reads it; the workflow's polls
+    // keep it fresh) and the outcome says so, with the reason. A check that fails decides nothing: the workflow's start is the authority, and the answer stays "started".
+    let waitReason: string | null = null;
+    if (!respec && (verdict.action === "build" || verdict.action === "rebuild") && deps.buildWaitReason) {
+      try {
+        waitReason = await deps.buildWaitReason(runnerPool, accountId, workItemId);
+      } catch (err) {
+        reportError(err, { stage: "advance.build_wait_check" });
+        waitReason = null;
+      }
+      if (waitReason !== null && !BUILD_SLOT_WAIT_REASONS.includes(waitReason)) waitReason = null;
+      if (waitReason !== null) {
+        const code = waitReason;
+        await withTenant(runnerPool, accountId, userId, (client) =>
+          recordDriverEvent(client, accountId, { workItemId, kind: "stage_waiting", stage: "build", attempt: 0, dedupeKey: `approve_wait:${actionId}`, code }),
+        );
+      }
+    }
+
     await deps.startAdvance({ accountId, userId, workItemId, actionId, haltEpoch: lifted.halt_epoch, specVersion: item.spec_version === null ? null : Number(item.spec_version), ...(respec ? { respec: true } : {}) });
-    console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId }));
+    console.info(JSON.stringify({ event: respec ? "advance.respec_started" : "advance.started", work_item_id: workItemId, action_id: actionId, ...(waitReason === null ? {} : { waiting: waitReason }) }));
+    if (waitReason !== null) return { result: "done", outcome: { work_item_id: workItemId, advance: "waiting", reason: waitReason, reasons: [waitReason] } };
     return { result: "done", outcome: { work_item_id: workItemId, advance: "started" } };
   }
 
