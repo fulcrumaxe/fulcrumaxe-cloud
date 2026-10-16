@@ -25,3 +25,10 @@ export const MAX_CONFLICT_ROUNDS = 2;
 
 /** The repos one sweep looks at (the database function clamps it to 200). */
 export const MERGE_QUEUE_SWEEP_LIMIT = 100;
+
+/**
+ * How long a plan write-back entry yields to work items (D#598 R-598-P5b-3). While any work item's entry in the same repo is eligible,
+ * a write-back does not take the slot, so its CI run and the main-moving merge land in the quiet moments of the queue. After this
+ * many minutes since the platform first pushed its head (`approved_at`), it takes its turn by stamp like any other entry.
+ */
+export const WRITEBACK_YIELD_MINUTES = 120;

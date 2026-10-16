@@ -1,10 +1,13 @@
 /**
  * D#519 MQ2: the merge queue's entry, as the rows of `merge_queue_entries` (migration 0824) read back.
  *
- * Nothing here knows what kind of thing an entry is. Order, slot, lease and states are keyed on (account, repo, PR number,
- * approved_at); `workItemId` is carried but never read by the queue core, so a later entry kind (D#598 R-598-P5b-3, a platform
- * write-back with no work item) widens this type and the store's enqueue without touching order, eligibility or the slot.
+ * Order, slot, lease and states are keyed on (account, repo, PR number, approved_at), whatever the entry is. An entry is one of two
+ * kinds (migration 0825, D#598 R-598-P5b-3): a work item's pull request, or the platform's own plan write-back, which has no work
+ * item and never starts an agent run. Exactly one of `workItemId` and `planWritebackId` is set, by the kind.
  */
+
+export const ENTRY_KINDS = ["work_item", "plan_writeback"] as const;
+export type EntryKind = (typeof ENTRY_KINDS)[number];
 
 export const QUEUE_STATES = ["in_review", "queued", "in_flight", "awaiting_work", "stopped", "merged", "closed", "cancelled"] as const;
 export type QueueState = (typeof QUEUE_STATES)[number];
@@ -22,9 +25,13 @@ export interface MergeQueueEntry {
   id: string;
   accountId: string;
   repoId: string;
-  workItemId: string;
+  entryKind: EntryKind;
+  /** Set for a `work_item` entry, null for a `plan_writeback` one. */
+  workItemId: string | null;
+  /** Set for a `plan_writeback` entry (the platform's record in `plan_writebacks`), null for a `work_item` one. */
+  planWritebackId: string | null;
   prNumber: number;
-  /** The head the reviewers passed. */
+  /** The head the reviewers passed (a `work_item` entry), or the head the platform pushed (a `plan_writeback` one). */
   headSha: string;
   /** The open PR (same repo) this one is stacked on; the entry waits while that PR's entry is not merged. */
   dependsOnPrNumber: number | null;
@@ -53,6 +60,13 @@ export interface MergeQueueEntry {
 export interface PrFacts {
   open: boolean;
   draft: boolean;
+  /**
+   * The PR's head sha as GitHub reports it. Read only for a `plan_writeback` entry, whose head must be the sha the platform recorded
+   * (R-598-P5b-3); a write-back entry with no head here is not eligible.
+   */
+  headSha?: string;
+  /** Set by the tick (MQ3) only after it has verified a platform `head_refresh` from the recorded sha to `headSha`. */
+  refreshVerified?: boolean;
 }
 
 /** Why an entry cannot take the slot right now. */
@@ -62,12 +76,16 @@ export type IneligibleReason =
   | "pr_not_open"
   | "pr_draft"
   | "waiting_on_dependency"
-  | "dependency_closed";
+  | "dependency_closed"
+  /** A write-back whose PR head is not the sha the platform recorded (someone else pushed, or the refresh is unverified). */
+  | "head_not_recorded"
+  /** A write-back is not eligible while a work item's entry in the same repo is, for up to WRITEBACK_YIELD_MINUTES. */
+  | "yielding_to_work_item";
 
 export type Eligibility = { eligible: true } | { eligible: false; reason: IneligibleReason };
 
 /** A fixed message; no input is ever echoed. `code` is one of the codes below. */
-export type MergeQueueErrorCode = "entry_pr_mismatch" | "bad_input";
+export type MergeQueueErrorCode = "entry_pr_mismatch" | "bad_input" | "not_a_work_item_entry";
 
 export class MergeQueueError extends Error {
   constructor(public readonly code: MergeQueueErrorCode) {
