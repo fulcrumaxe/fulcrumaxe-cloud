@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { scanPlanePush, MAX_SCAN_BYTES, type PlanePushInput } from "../../src/build/planePush.js";
 import { gitCommitSource } from "../../src/build/planePushGit.js";
+import { assertSafeLocalConfig } from "../../src/build/planePushTransport.js";
 
 /**
  * The scan over a real repository: every case builds commits with git itself and
@@ -435,5 +436,61 @@ describe("hostile repository state", () => {
     t.w("src/b.ts", "const h = 'acme‐internal‐host';\n");
     const r = await t.scanIn(t.c("variants"));
     expect(r.refusals.map((x) => `${x.kind} ${x.path}`)).toEqual(["identifier_hit src/b.ts", "identifier_hit changed path #2"]);
+  });
+});
+
+/**
+ * D#598 P1f-1 (R-598-P1f-4): the transfer allowlist is what `git init --bare` writes. The hook never uses a clone, so a repository
+ * that carries a remote, branch tracking or an identity is refused. Each case is a real repository made with the real tool, and the
+ * check runs before any network call (it is called directly, so no server is involved).
+ */
+describe("the transfer allowlist (assertSafeLocalConfig)", () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), "plane-allow-"));
+  });
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  let n = 0;
+  const bare = (...extra: string[]): string => {
+    const d = join(root, `r${n++}`);
+    execFileSync("git", ["init", "-q", "--bare", d], { encoding: "utf8" });
+    for (let i = 0; i < extra.length; i += 2) execFileSync("git", ["-C", d, "config", "--local", extra[i]!, extra[i + 1]!], { encoding: "utf8" });
+    return d;
+  };
+  const refusal = async (dir: string): Promise<Error & { code?: string }> => {
+    const e = await assertSafeLocalConfig(dir).then(() => undefined, (x: unknown) => x as Error & { code?: string });
+    expect(e, "expected a refusal").toBeDefined();
+    return e!;
+  };
+
+  it("refuses a repository carrying remote.origin.url", async () => {
+    const e = await refusal(bare("remote.origin.url", "https://user:s3cret-value@example.test/acme/private.git"));
+    expect(e.code).toBe("unsafe_git_config");
+  });
+
+  it("refuses a repository carrying only remote.origin.fetch", async () => {
+    expect((await refusal(bare("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"))).code).toBe("unsafe_git_config");
+  });
+
+  it("refuses a repository carrying branch.main.remote", async () => {
+    expect((await refusal(bare("branch.main.remote", "origin"))).code).toBe("unsafe_git_config");
+  });
+
+  it("refuses a repository carrying user.name", async () => {
+    expect((await refusal(bare("user.name", "Someone"))).code).toBe("unsafe_git_config");
+  });
+
+  it("accepts what git init --bare writes, and core.ignorecase / core.precomposeunicode as macOS writes them", async () => {
+    await expect(assertSafeLocalConfig(bare())).resolves.toBeUndefined();
+    await expect(assertSafeLocalConfig(bare("core.ignorecase", "true", "core.precomposeunicode", "true"))).resolves.toBeUndefined();
+  });
+
+  it("names the key in a refusal and never its value", async () => {
+    for (const [key, value] of [["remote.origin.url", "https://x:tok-9f2a7c@example.test/p.git"], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/value-9f2a7c/*"], ["branch.main.remote", "value-9f2a7c"], ["user.name", "value-9f2a7c"]] as const) {
+      const e = await refusal(bare(key, value));
+      expect(e.message).toContain(key);
+      expect(e.message).not.toContain("9f2a7c");
+    }
   });
 });

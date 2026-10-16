@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
+import { InstallationTokenCache, getInstallationToken, PLANE_PUSH_PERMISSIONS, liveInstallationTokens, type AccessTokenRequester } from "../src/installationToken.js";
 import { createPlanePushApi, PlanePushApiError } from "../src/planePushApi.js";
 import { ghError, type GhReply, type GhRequest } from "./helpers/strictGithub.js";
 import { httpsRoundTrip, startStrictGithubServer, type LocalTlsServer } from "./helpers/localTlsServer.js";
@@ -40,15 +40,16 @@ async function setup(route: (req: GhRequest) => GhReply | undefined, requester?:
       },
       init?.body as string | undefined,
     );
-    return new Response(r.body, { status: r.status, headers: r.headers });
+    return new Response(r.status === 204 ? null : r.body, { status: r.status, headers: r.headers });
   }) as typeof fetch;
   const minted: Array<Parameters<AccessTokenRequester>[0]> = [];
   const honest: AccessTokenRequester = async (p) => {
     minted.push(p);
     return { token: "ghs_planepush1", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", ...p.permissions }, repositories: (p.repositories ?? []).map((n) => n) };
   };
-  const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester: requester ?? honest, cache: new InstallationTokenCache(), fetchImpl });
-  return { api, server: s, minted };
+  const cache = new InstallationTokenCache();
+  const api = createPlanePushApi({ appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester: requester ?? honest, cache, fetchImpl });
+  return { api, server: s, minted, cache };
 }
 
 const installed = (req: GhRequest): GhReply | undefined => (req.path === "/repos/acme/widgets/installation" ? json(200, { id: 42, app_slug: "fulcrumaxe" }) : undefined);
@@ -147,5 +148,99 @@ describe("construction", () => {
     const deps = { appCredentials: () => ({ appId: "1", privateKeyPem: "x", webhookSecret: "x" }), requester: vi.fn(), cache: new InstallationTokenCache() };
     for (const apiOrigin of ["http://127.0.0.1:9", "https://user@api.github.com", "https://api.github.com/x", "https://api.github.com/?a=1"]) expect(() => createPlanePushApi({ ...deps, apiOrigin })).toThrow("plain https origin");
     expect(() => createPlanePushApi({ ...deps, apiOrigin: "https://api.github.com" })).not.toThrow();
+  });
+});
+
+/**
+ * D#598 P1f-1: a token minted `fresh` never enters the cache, and `revokeToken` is GitHub's real revoke shape: DELETE /installation/token
+ * with the token as the bearer answers 204 with an empty body, and every later call with that token answers 401 "Bad credentials".
+ * The fake below keeps that state, so a test can only pass if the code really revoked. What cannot be faked faithfully: the timing of
+ * GitHub's own expiry (one hour) and that a revoke also stops a copy of the token held elsewhere (the fake keys on the token string).
+ */
+describe("fresh mint and revoke", () => {
+  const tokens = (n: { v: number }) => async (p: Parameters<AccessTokenRequester>[0]) => ({
+    token: `ghs_fresh${++n.v}`,
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    permissions: { metadata: "read", ...p.permissions },
+    repositories: (p.repositories ?? []).map((x) => x),
+  });
+  const cacheEntry = (c: InstallationTokenCache) => c.get(42, "team", "plane_push", { repositories: ["widgets"], permissions: PLANE_PUSH_PERMISSIONS } as never, Date.now(), "plane_push:");
+
+  /** GitHub's revoke: 204 on the first DELETE, 401 "Bad credentials" for any later use of that token. */
+  function revokingGithub() {
+    const revoked = new Set<string>();
+    return (r: GhRequest): GhReply | undefined => {
+      const bearer = /^Bearer (\S+)$/.exec(r.headers["authorization"] ?? "")?.[1];
+      if (bearer !== undefined && revoked.has(bearer)) return ghError(401, "Bad credentials");
+      if (r.method === "DELETE" && r.path === "/installation/token") {
+        if (bearer !== undefined) revoked.add(bearer);
+        return { status: 204, headers: {}, body: "" };
+      }
+      if (r.path === "/repos/acme/widgets/git/ref/heads/taken") return json(200, { ref: "refs/heads/taken", object: { sha: "a".repeat(40), type: "commit" } });
+      return installed(r);
+    };
+  }
+
+  it("two mints for one repository, with no option, make two mint requests and leave no plane_push entry in the cache", async () => {
+    const n = { v: 0 };
+    const t = await setup(installed, tokens(n));
+    await expect(t.api.mintPushToken("acme/widgets")).resolves.toBe("ghs_fresh1");
+    await expect(t.api.mintPushToken("acme/widgets")).resolves.toBe("ghs_fresh2");
+    expect(n.v).toBe(2);
+    expect(cacheEntry(t.cache)).toBeUndefined();
+  });
+
+  it("control: a run-purpose token of the same shape IS served from the cache, so the cache check above can fail", async () => {
+    const n = { v: 0 };
+    const t = await setup(installed, tokens(n));
+    const ask = () =>
+      getInstallationToken({ installationId: 7, appKind: "team", purpose: "run", role: "plane_push", scope: { repositories: ["widgets"], permissions: { contents: "write", pull_requests: "write" } }, appCredentials: () => ({ appId: "12345", privateKeyPem, webhookSecret: "unused" }), requester: async () => ({ token: `ghs_run${++n.v}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }), cache: t.cache });
+    await expect(ask()).resolves.toBe("ghs_run1");
+    await expect(ask()).resolves.toBe("ghs_run1");
+    expect(n.v).toBe(1);
+  });
+
+  it("a plane_push token is still checked for scope, and known to the live-token view until it is revoked", async () => {
+    const n = { v: 0 };
+    const t = await setup(revokingGithub(), tokens(n));
+    const token = await t.api.mintPushToken("acme/widgets");
+    expect(liveInstallationTokens()).toContain(token);
+    await expect(t.api.revokeToken(token)).resolves.toBe(true);
+    expect(liveInstallationTokens()).not.toContain(token);
+    const greedy = await setup(installed, async () => ({ token: "ghs_greedy", expiresAt: new Date(Date.now() + 3_600_000).toISOString(), permissions: { metadata: "read", contents: "write", pull_requests: "write", workflows: "write" }, repositories: ["widgets"] }));
+    await expect(greedy.api.mintPushToken("acme/widgets")).rejects.toMatchObject({ code: "token_scope_mismatch" });
+  });
+
+  it("revokeToken sends DELETE /installation/token with the token as the bearer, and the token then answers 401", async () => {
+    const n = { v: 0 };
+    const t = await setup(revokingGithub(), tokens(n));
+    const token = await t.api.mintPushToken("acme/widgets");
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "taken", token })).resolves.toBe("a".repeat(40));
+    await expect(t.api.revokeToken(token)).resolves.toBe(true);
+    const del = t.server.seen.find((s) => s.method === "DELETE")!;
+    expect(del.path).toBe("/installation/token");
+    expect(del.headers["authorization"]).toBe(`Bearer ${token}`);
+    expect(del.headers["user-agent"]).toBe("fulcrumaxe-cloud");
+    expect(del.body).toBe("");
+    // GitHub's shape after the revoke: a later call with that token is 401, which this client reports as public_unavailable.
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "taken", token })).rejects.toMatchObject({ code: "public_unavailable" });
+    expect(t.server.seen.at(-1)!.headers["authorization"]).toBe(`Bearer ${token}`);
+    // Revoking again finds nothing to revoke: 401 is the state wanted.
+    await expect(t.api.revokeToken(token)).resolves.toBe(true);
+  });
+
+  it("revokeToken reports false for a server error or a transport failure, never throws, and never carries the token", async () => {
+    const t = await setup((r) => (r.method === "DELETE" ? ghError(500, "Server Error") : undefined));
+    await expect(t.api.revokeToken("ghs_secretvalue")).resolves.toBe(false);
+    const down = createPlanePushApi({ appCredentials: () => ({ appId: "1", privateKeyPem, webhookSecret: "x" }), requester: vi.fn(), cache: new InstallationTokenCache(), fetchImpl: (async () => { throw new TypeError("fetch failed ghs_secretvalue"); }) as typeof fetch });
+    await expect(down.revokeToken("ghs_secretvalue")).resolves.toBe(false);
+  });
+
+  it("branchHead answers the sha, null for no such branch, and refuses an answer that is not a full sha", async () => {
+    const t = await setup((r) => (r.path.endsWith("/heads/odd") ? json(200, { object: { sha: "xyz" } }) : r.path.endsWith("/heads/taken") ? json(200, { object: { sha: "b".repeat(40) } }) : undefined));
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "taken", token: "ghs_x" })).resolves.toBe("b".repeat(40));
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "free", token: "ghs_x" })).resolves.toBeNull();
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "odd", token: "ghs_x" })).rejects.toMatchObject({ code: "public_unavailable" });
+    await expect(t.api.branchHead({ codeRepo: "acme/widgets", branch: "a/../b", token: "ghs_x" })).rejects.toMatchObject({ code: "public_unavailable" });
   });
 });

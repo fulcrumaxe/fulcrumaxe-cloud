@@ -163,6 +163,20 @@ export function liveInstallationTokens(nowMs: number = Date.now()): string[] {
   return [...liveTokenExpiries.keys()];
 }
 
+/**
+ * D#598 P1f-1: a token that is never cached (`fresh: true`) is still a live secret until it expires or is revoked, so the memory intake's
+ * scan must know it. These two keep that view complete without touching any cache.
+ */
+export function noteLiveInstallationToken(token: string, expiresAtMs: number, nowMs: number = Date.now()): void {
+  for (const [t, exp] of liveTokenExpiries) if (exp <= nowMs) liveTokenExpiries.delete(t);
+  liveTokenExpiries.set(token, Math.max(expiresAtMs, liveTokenExpiries.get(token) ?? 0));
+}
+
+/** A revoked token is no longer a secret worth scanning for; dropping it keeps the view small. */
+export function forgetLiveInstallationToken(token: string): void {
+  liveTokenExpiries.delete(token);
+}
+
 export class InstallationTokenCache {
   private readonly entries = new Map<string, CacheEntry>();
 
@@ -303,6 +317,12 @@ export interface GetInstallationTokenParams {
   requester: AccessTokenRequester;
   cache: InstallationTokenCache;
   now?: () => number;
+  /**
+   * D#598 P1f-1: skip the cache for both the read and the write. A fresh token is minted on every call and is never stored here, so a
+   * caller that revokes it after one use (`revokeToken`) is not handed a token someone else already holds. Only `plane_push` accepts it:
+   * any other purpose refuses (`purpose_not_allowed`), so no other path can opt out of the cache by accident.
+   */
+  fresh?: boolean;
 }
 
 /** Cached tokens are dropped 5 minutes before GitHub's own expiry, never used right up to the wire. */
@@ -374,7 +394,10 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const cached = params.cache.get(params.installationId, appKind, params.role, scope, nowMs, namespace);
+  if (params.fresh === true && params.purpose !== "plane_push") throw new InstallationTokenError("purpose_not_allowed");
+  // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
+  const fresh = params.fresh === true || params.purpose === "plane_push";
+  const cached = fresh ? undefined : params.cache.get(params.installationId, appKind, params.role, scope, nowMs, namespace);
   if (cached) return cached;
 
   const credentials = params.appCredentials(appKind);
@@ -405,6 +428,10 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   // does not state the permissions is refused, so the token is neither cached nor handed out.
   if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
   if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (fresh) {
+    noteLiveInstallationToken(minted.token, expiresAtMs);
+    return minted.token;
+  }
   params.cache.set(
     params.installationId,
     appKind,
