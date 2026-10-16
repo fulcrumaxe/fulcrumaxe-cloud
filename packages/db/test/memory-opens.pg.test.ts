@@ -365,7 +365,9 @@ describe('migration 0835 gives platform_ops nothing', () => {
     }
     await runMigrations(pool, beforeDir);
     before = await snapshot();
-    await runMigrations(pool, DEFAULT_MIGRATIONS_DIR); // applies 0835 and anything after it
+    // Apply 0835 and nothing after it: a later migration may hand platform_ops something on purpose (0844 does), and that is its own test's business.
+    copyFileSync(path.join(DEFAULT_MIGRATIONS_DIR, MIGRATION), path.join(beforeDir, MIGRATION));
+    await runMigrations(pool, beforeDir);
     after = await snapshot();
   }, 120_000);
 
