@@ -1,0 +1,33 @@
+{
+  "repo_id": "6f1c2f5e-3d8f-4f43-8d6e-8f2f6a9b1c22",
+  "can_change": true,
+  "frequency": "off",
+  "label": "Off",
+  "source": "set",
+  "version": 2,
+  "options": [
+    { "value": "daily", "label": "Every day" },
+    { "value": "weekly", "label": "Every week" },
+    { "value": "off", "label": "Off" }
+  ],
+  "changes": [
+    {
+      "version": 2,
+      "frequency": "off",
+      "label": "Off",
+      "previous_frequency": "weekly",
+      "previous_label": "Every week",
+      "changed_by": "0b8a7a52-5d0f-4e0c-9c52-3f1a6f0d2a11",
+      "changed_at": "2026-10-16T08:00:00.000Z"
+    },
+    {
+      "version": 1,
+      "frequency": "weekly",
+      "label": "Every week",
+      "previous_frequency": "daily",
+      "previous_label": "Every day",
+      "changed_by": "0b8a7a52-5d0f-4e0c-9c52-3f1a6f0d2a11",
+      "changed_at": "2026-10-15T08:00:00.000Z"
+    }
+  ]
+}
