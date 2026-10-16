@@ -323,6 +323,8 @@ export interface GetInstallationTokenParams {
    * any other purpose refuses (`purpose_not_allowed`), so no other path can opt out of the cache by accident.
    */
   fresh?: boolean;
+  /** D#598 P1f-2: told GitHub's own expiry (ms since the epoch) of a token minted fresh, so a caller can hand the real time on. Never called with the token. */
+  onExpiry?: (expiresAtMs: number) => void;
 }
 
 /** Cached tokens are dropped 5 minutes before GitHub's own expiry, never used right up to the wire. */
@@ -430,6 +432,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
   if (fresh) {
     noteLiveInstallationToken(minted.token, expiresAtMs);
+    params.onExpiry?.(expiresAtMs);
     return minted.token;
   }
   params.cache.set(

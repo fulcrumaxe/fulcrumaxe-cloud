@@ -88,6 +88,8 @@ export interface RunnerCloudDeps {
    * and nothing is written. A reviewer's `done` needs no GitHub call and works without it.
    */
   pullRequests?: RunPullRequestPort | null;
+  /** D#598 P1f-2: the GitHub access of the public-push routes. Null while it is not configured; those routes then answer 503 `not_configured`. */
+  planePush?: PlanePushHostedPort | null;
   /** Where `done` writes its one-line JSON diagnostics for a pull request failure (default: `console.warn`). Tests inject a collector. */
   log?: (line: string) => void;
   /** The clock. Tests inject a fixed one. */
@@ -118,6 +120,22 @@ export interface RunnerCloudDeps {
    * runner. Absent is "unknown".
    */
   repoVisibility?: (accountId: string, repoId: string) => Promise<"private" | "public" | "unknown">;
+}
+
+/**
+ * D#598 P1f-2: the hosted side's GitHub access to a paired PUBLIC repo (apps/web supplies it from `@fx/github`'s `createHostedPlanePush`). The only
+ * place a restricted token is minted, and the only place a runner's report is checked against GitHub. Failures are thrown with a fixed `code`
+ * (`app_not_installed`, `token_scope_mismatch`, `public_unavailable`). It holds no clone or push code and runs no process.
+ */
+export interface PlanePushHostedPort {
+  /** A fresh, never-cached token for one repository, and the time the runner may rely on it until. */
+  mintToken(codeRepo: string): Promise<{ token: string; expiresAt: Date }>;
+  /** True only if the branch head is `headSha`, its single parent is `tipSha`, and `tipSha` is in public main's history. */
+  verifyPushed(input: { codeRepo: string; branch: string; headSha: string; tipSha: string }): Promise<boolean>;
+  /** The pull request's address if it is OPEN with head ref `branch` in `codeRepo` itself, base `main` and an address in `codeRepo`; otherwise null. */
+  verifyPullRequest(input: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  /** Revokes a token this side minted and could not hand out. True when it is gone (revoked, or already invalid); never throws. */
+  revokeToken(token: string): Promise<boolean>;
 }
 
 export type FailRunnerLeases = (input: { accountId: string; runnerId: string; reason: "runner_revoked" }) => Promise<{ runIds: string[]; complete: boolean }>;
@@ -153,6 +171,45 @@ export interface RunnerLeaseOps {
   >;
   /** `git-ticket`, second half: the signed ticket, or null while the signing key or the forward host is not configured (the route then answers 503). */
   signGitTicket(input: { issuer: string; runnerId: string; accountId: string; runId: string; leaseGeneration: number; repo: { id: string; owner: string; name: string }; ref: string }): Promise<{ ticket: string; expiresAt: Date; proxyOrigin: string } | null>;
+  /**
+   * D#598 P1f-2: the public-push token and report routes (see packages/worker `RunnerPlanePushFacade`, which this package cannot import). Absent from an
+   * older worker: the routes then answer 503 `not_configured`.
+   */
+  planePushGrant?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    | { kind: "fenced"; reason: StopReason }
+    | { kind: "not_paired" }
+    | { kind: "pairing_changed" }
+    | { kind: "already_issued" }
+    | { kind: "attempts_exhausted" }
+    | { kind: "granted"; attemptId: string; id: string; codeRepo: string; branch: string }
+  >;
+  planePushSettleGrant?(
+    input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number; attemptId: string } & ({ issued: true } | { issued: false; code: string }),
+  ): Promise<boolean>;
+  planePushReportContext?(input: { accountId: string; runnerId: string; runId: string; leaseGeneration: number }): Promise<
+    | { kind: "fenced"; reason: StopReason }
+    | { kind: "not_paired" }
+    | { kind: "context"; plane: { id: string; codeRepo: string; branch: string; state: string }; attempt: { id: string; tokenIssued: boolean; finished: boolean; outcome: string | null } | null }
+  >;
+  planePushRecordReport?(input: {
+    accountId: string;
+    runnerId: string;
+    runId: string;
+    leaseGeneration: number;
+    planePushId: string;
+    outcome: {
+      state: "scanning" | "pushed" | "pr_opened" | "refused" | "pushed_pr_not_opened" | "no_public_change";
+      code?: string;
+      refusals?: ReadonlyArray<{ kind: string; place: string; rule_key: string }>;
+      headSha?: string;
+      tipSha?: string;
+      prNumber?: number;
+      prUrl?: string;
+    } | null;
+    terminal: boolean;
+    label: string;
+    tokenRevoked?: boolean;
+  }): Promise<{ kind: "fenced"; reason: StopReason } | { kind: "not_paired" } | { kind: "recorded"; recorded: boolean }>;
   /**
    * D#599 HO-2b: `done` from a run that has a live handoff finishes the handoff instead of judging the run: the parent ends handed off (it
    * has no result of its own) and the new run is made on the other side. `none` means no handoff was live and the ordinary `done` goes on;

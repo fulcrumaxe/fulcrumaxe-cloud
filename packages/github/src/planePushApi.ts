@@ -83,7 +83,7 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
   }
 
   return {
-    async mintPushToken(codeRepo: string): Promise<string> {
+    async mintPushToken(codeRepo: string, opts: { onExpiry?: (expiresAtMs: number) => void } = {}): Promise<string> {
       const { owner, name } = split(codeRepo);
       const credentials = deps.appCredentials("team");
       const jwt = await mintAppJwt(credentials.appId, credentials.privateKeyPem, deps.now);
@@ -101,6 +101,7 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
           appCredentials: deps.appCredentials,
           requester: deps.requester,
           cache: deps.cache,
+          ...(opts.onExpiry ? { onExpiry: opts.onExpiry } : {}),
           ...(deps.now ? { now: deps.now } : {}),
         });
       } catch (err) {
@@ -141,6 +142,42 @@ export function createPlanePushApi(deps: PlanePushApiDeps) {
       const sha = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { object?: { sha?: unknown } }).object?.sha : undefined;
       if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) throw new PlanePushApiError("public_unavailable");
       return sha;
+    },
+
+    /** The parents of a commit on the public repo (`GET /git/commits/<sha>`), or null when GitHub has no such commit. */
+    async commitParents(input: { codeRepo: string; sha: string; token: string }): Promise<string[] | null> {
+      const { owner, name } = split(input.codeRepo);
+      if (!/^[0-9a-f]{40}$/.test(input.sha)) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/git/commits/${input.sha}`, input.token);
+      if (res.status === 404 || res.status === 422) return null;
+      const parents = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { parents?: unknown }).parents : undefined;
+      if (!Array.isArray(parents) || !parents.every((p) => p !== null && typeof p === "object" && /^[0-9a-f]{40}$/.test(String((p as { sha?: unknown }).sha)))) throw new PlanePushApiError("public_unavailable");
+      return parents.map((p) => (p as { sha: string }).sha);
+    },
+
+    /**
+     * True when the commit is in `main`'s history (`GET /compare/main...<sha>` says the commit is `behind` main or `identical` to it). False for a
+     * commit that is ahead of or has diverged from main, and for one GitHub does not know.
+     */
+    async inMainHistory(input: { codeRepo: string; sha: string; token: string }): Promise<boolean> {
+      const { owner, name } = split(input.codeRepo);
+      if (!/^[0-9a-f]{40}$/.test(input.sha)) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/compare/main...${input.sha}`, input.token);
+      if (res.status === 404 || res.status === 422) return false;
+      const status = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { status?: unknown }).status : undefined;
+      if (typeof status !== "string") throw new PlanePushApiError("public_unavailable");
+      return status === "behind" || status === "identical";
+    },
+
+    /** A pull request on the public repo (`GET /pulls/<n>`): its head ref and repository, base ref and address, or null when there is none. */
+    async pullRequest(input: { codeRepo: string; number: number; token: string }): Promise<{ headRef: string; headRepo: string; baseRef: string; url: string; state: string } | null> {
+      const { owner, name } = split(input.codeRepo);
+      if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new PlanePushApiError("public_unavailable");
+      const res = await call("GET", `/repos/${owner}/${name}/pulls/${input.number}`, input.token);
+      if (res.status === 404) return null;
+      const b = res.status === 200 && res.body !== null && typeof res.body === "object" ? (res.body as { head?: { ref?: unknown; repo?: { full_name?: unknown } | null }; base?: { ref?: unknown }; html_url?: unknown; state?: unknown; merged?: unknown }) : undefined;
+      if (!b || typeof b.head?.ref !== "string" || typeof b.base?.ref !== "string" || typeof b.html_url !== "string") throw new PlanePushApiError("public_unavailable");
+      return { headRef: b.head.ref, headRepo: typeof b.head.repo?.full_name === "string" ? b.head.repo.full_name : "", baseRef: b.base.ref, url: b.html_url, state: b.state === "open" && b.merged !== true ? "open" : "closed" };
     },
 
     async branchExists(input: { codeRepo: string; branch: string; token: string }): Promise<boolean> {
