@@ -30,5 +30,5 @@
     { "id": "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33", "name": "Run the pg tests with the local harness", "version": 3 },
     { "id": "a91e5b08-1f7d-4c52-9a3e-6b7d8e9f0a12", "name": "Migrations are numbered in order", "version": 1 }
   ],
-  "repo_map_version": "v1"
+  "repo_map_version": "v1 · 3f9a1c07b2d4"
 }

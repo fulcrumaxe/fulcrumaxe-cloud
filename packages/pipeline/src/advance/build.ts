@@ -13,6 +13,7 @@ import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
+import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
 /**
@@ -256,6 +257,9 @@ export async function startBuildForItem(
   // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
   const baseStep = `build:v${facts.version}:${approvalId}`;
   const prior = (await ports.findStep?.(baseStep)) ?? null;
+  // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
+  // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
+  if (prior && (facts.stage === "spec_ready" || facts.stage === "needs_human") && (await ports.outcome(prior.runId)).status === "cancelled") return { status: "refused", reason: "prior_run_cancelled" };
   const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
   // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
@@ -278,6 +282,10 @@ export async function startBuildForItem(
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };
         startedRunId = started.runId;
+
+        // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record
+        // (it built no map this time and may have recalled something else). Fails closed: a failed insert rolls the start back (D#601 C2).
+        if (!prior) await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null });
 
         // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
         // that died in between finds the stamp missing and makes it.
@@ -305,6 +313,8 @@ export async function startBuildForItem(
       if (startedRunId !== null) await ports.cancel(startedRunId).catch(() => undefined);
       return { status: "refused", reason: "stage_changed" };
     }
+    // The run's inputs could not be recorded (or any other failure after the run exists): the slot transaction rolled back, so the run is stopped too.
+    if (startedRunId !== null) await ports.cancel(startedRunId).catch(() => undefined); // fx-swallow-ok: the original error is the one that surfaces
     throw err;
   }
 }

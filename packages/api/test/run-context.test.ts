@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
@@ -168,6 +168,77 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     walk(body);
     // The only strings are the run's id, its runtime and status, the basis and the closed section and tool names.
     expect(strings.sort()).toEqual([id, 'map', 'measured', 'Read', 'runner', 'succeeded'].sort());
+  });
+
+  describe('D#600 CX-8b: recalled memory and the map version from the run\'s recorded inputs', () => {
+    const MAP_HASH = 'c'.repeat(64);
+    async function entry(accountId: string, body: string, status = 'approved', version = 1): Promise<string> {
+      const r = await admin.query<{ id: string }>(
+        `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256, deleted_at)
+         VALUES ($1, 'account', NULL, 'command', $2, 'person', $3, $4, $5, CASE WHEN $3 = 'deleted' THEN now() END) RETURNING id`,
+        [accountId, body, status, version, createHash('sha256').update(body).digest('hex')],
+      );
+      return r.rows[0]!.id;
+    }
+    async function inputs(accountId: string, runId: string, ids: string[], versions: number[], mapVersion: string | null = '1', sha: string | null = MAP_HASH): Promise<void> {
+      await admin.query(`INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256) VALUES ($1, $2, $3::uuid[], $4::integer[], $5, $6)`, [accountId, runId, ids, versions, mapVersion, sha]);
+    }
+
+    it('lists the recalled entries in prompt order by name and id@version, and the map as v<format> · <12 hex of the raw-text hash>', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId);
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      const a = await entry(accountId, '  run   the pg tests\nwith the local harness', 'approved');
+      const b = await entry(accountId, '\nonly a second line');
+      await inputs(accountId, id, [b, a], [1, 1]);
+      const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+      expect(runContextResponseSchema.parse(body)).toEqual(body);
+      expect(body.recalled_memory).toEqual([
+        { id: b, name: 'account/command', version: 1 },
+        { id: a, name: 'run the pg tests', version: 1 },
+      ]);
+      expect(body.repo_map_version).toBe('v1 · cccccccccccc');
+      expect(JSON.stringify(body)).not.toContain(MAP_HASH);
+    });
+
+    it('a deleted entry reads "Deleted entry" and its text is not returned; a run with no record lists nothing', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId);
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      const gone = await entry(accountId, 'secret deploy token location', 'deleted');
+      await inputs(accountId, id, [gone], [1], null, null);
+      const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+      expect(body.recalled_memory).toEqual([{ id: gone, name: 'Deleted entry', version: 1 }]);
+      expect(body.repo_map_version).toBeNull();
+      expect(JSON.stringify(body)).not.toContain('secret');
+      const bare = await seedRun(accountId);
+      await seedLedger(accountId, bare, { basis: 'measured', first: 1, peak: 2 });
+      expect(((await (await get(bare, { accountId, userId })).json()) as RunContextPanel).recalled_memory).toEqual([]);
+    });
+
+    it('a runner run returns no memory name and no map even when a record exists', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId, { runtime: 'runner' });
+      await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      const e = await entry(accountId, 'private name');
+      await inputs(accountId, id, [e], [1]);
+      const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+      expect(body.recalled_memory).toEqual([]);
+      expect(body.repo_map_version).toBeNull();
+      expect(JSON.stringify(body)).not.toContain('private name');
+    });
+
+    it("reads another account's entry (or a purged one) by the same label as a deleted one, and never names it", async () => {
+      const a = await seedAccountWithMember(admin);
+      const b = await seedAccountWithMember(admin);
+      const id = await seedRun(a.accountId);
+      await seedLedger(a.accountId, id, { basis: 'measured', first: 1, peak: 2 });
+      const theirs = await entry(b.accountId, 'other tenant text');
+      await inputs(a.accountId, id, [theirs], [1]);
+      const body = (await (await get(id, a)).json()) as RunContextPanel;
+      expect(JSON.stringify(body)).not.toContain('other tenant text');
+      expect(body.recalled_memory).toEqual([{ id: theirs, name: 'Deleted entry', version: 1 }]);
+    });
   });
 
   it("answers 404 for an unknown id, a malformed id and another account's run (RLS forced on the ledger)", async () => {

@@ -124,10 +124,10 @@ describe("the model, per state", () => {
     const m = contextModel(readContext(MEASURED));
     expect(m.memory.tokens).toBe("930 tokens");
     expect(m.memory.items[0]).toEqual({ name: "Run the pg tests with the local harness", ref: "0d2a41c7@3", title: "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33@3" });
-    expect(m.mapVersion).toBe("v1");
+    expect(m.mapVersion).toBe("v1 · 3f9a1c07b2d4");
     const el = drawn(MEASURED);
     expect(el.byTestId("runs-ctx-memory")[0].textContent).toContain("Migrations are numbered in order");
-    expect(el.byTestId("runs-ctx-map")[0].textContent).toBe("Repo map version: v1");
+    expect(el.byTestId("runs-ctx-map")[0].textContent).toBe("Repo map version: v1 · 3f9a1c07b2d4");
   });
 
   it("a partial run: every share is marked estimated and every figure the run did not measure says Not recorded, never 0", () => {
@@ -316,5 +316,25 @@ describe("the Pipeline item links to the run", () => {
     const id = "6f0f3c52-3f0a-4a3e-9d52-2d5a7c1b9e01";
     expect(runView({ id, role: "executor", status: "succeeded", lines: [] }).id).toBe(id);
     expect(runView({ role: "executor", status: "succeeded", lines: [] }).id).toBe("");
+  });
+});
+
+describe("D#600 CX-8b: the accessibility fixes from the CX-8 review", () => {
+  it("a runner run with no ledger says where its contents are, not a bare Not recorded", () => {
+    const m = contextModel(readContext({ ...NONE, runtime: "runner" }));
+    expect(m.state).toBe("none");
+    expect(m.text).toMatch(/^Contents stayed on your machine/);
+    expect(panelText(drawn({ ...NONE, runtime: "runner" }))).not.toMatch(BAD);
+    expect(contextModel(readContext({ ...LIVE, runtime: "runner" })).text).toBe(CONTEXT_WORDS.live);
+  });
+
+  it("Retry and the loading line hand focus to the Context heading when a redraw replaces them", () => {
+    const heading = (el) => el.byTestId("runs-ctx-heading")[0];
+    for (const el of [contextSection(null, () => {}), contextSection(undefined, () => {}), drawn(MEASURED)]) {
+      expect(heading(el).attrs["data-keep-target"]).toBe("ctx");
+      expect(heading(el).attrs.tabindex).toBe("-1");
+    }
+    expect(contextSection(null, () => {}).byTestId("runs-ctx-retry")[0].attrs["data-keep"]).toBe("ctx");
+    expect(contextSection(undefined, () => {}).byTestId("runs-ctx-loading")[0].attrs["data-keep"]).toBe("ctx");
   });
 });

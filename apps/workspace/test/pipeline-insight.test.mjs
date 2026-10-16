@@ -456,3 +456,15 @@ describe("the view", () => {
     expect(panel.el.textContent).toContain(payload);
   });
 });
+
+describe("D#600 CX-8b: the context button's accessible name is unique per run", () => {
+  it("runs of one role are told apart by their place among them; a lone role keeps the short name", () => {
+    const mk = (id, role) => ({ id, role, status: "succeeded", runtime: "production", created_at: "2026-10-15T10:00:00Z", lines: [] });
+    const m = buildInsight({ runs: [mk("1", "executor"), mk("2", "code-reviewer"), mk("3", "executor")] });
+    const labels = m.runs.map((r) => r.contextLabel);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels[0]).toMatch(/, run 1 of 2$/);
+    expect(labels[2]).toMatch(/, run 2 of 2$/);
+    expect(labels[1]).toBe("What this run loaded: " + m.runs[1].role);
+  });
+});
