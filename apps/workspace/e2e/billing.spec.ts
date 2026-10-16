@@ -166,6 +166,27 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     await expect(tid(page, "bb-own-plan")).toHaveCount(0);
   });
 
+  test("D#483 S5-k3: the compute notice shows the API's own sentence, and nothing when the API sends none", async ({ page }) => {
+    const usage = {
+      period_start: "2026-09-01T00:00:00.000Z",
+      model: { spent_usd: 7.1, reserved_usd: 2.2, limit_usd: 9.9 },
+      foreground_compute: { spent_usd: 41, reserved_usd: 0, limit_usd: 50 },
+      background_compute: { spent_usd: 1, reserved_usd: 0, limit_usd: 5 },
+      own_plan_api_equivalent_usd: 0,
+    };
+    // The text is whatever the API sent: the page holds no copy of the sentence (the one table is in packages/spend).
+    const sent = "Sentence the API sent for the notice.";
+    await boot(page, { usage: { ...usage, compute_notice: { code: "compute_allowance_80", message: sent } } });
+    await expect(tid(page, "bb-compute-notice")).toHaveText(sent);
+    await expect(tid(page, "bb-spent").first()).toHaveText("$7.10");
+  });
+
+  test("D#483 S5-k3: no compute notice when the API sends null", async ({ page }) => {
+    await boot(page, { usage: { ...USAGE, compute_notice: null } });
+    await expect(tid(page, "bb-reserved-note")).toBeVisible();
+    await expect(tid(page, "bb-compute-notice")).toHaveCount(0);
+  });
+
   test("criterion 1: every number is the API's, unchanged, and none is computed", async ({ page }) => {
     const usage = {
       period_start: "2026-09-01T00:00:00.000Z",

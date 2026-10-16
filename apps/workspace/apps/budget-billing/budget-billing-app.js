@@ -497,6 +497,11 @@ export function mountBudgetBilling(host) {
       h("h2", { class: "bb-heading", id: uid + "-usage" }, "This month"),
       h("p", { class: "bb-muted" }, "Month starting " + String(state.usage.period_start).slice(0, 10) + "."),
       h("p", { class: "bb-muted", "data-testid": "bb-reserved-note" }, RESERVED_WORDS),
+      // D#483 S5-k3: the 80% compute notice. Information only: the API derives it on each read and sends the sentence, so the text is not
+      // retyped here and the notice goes away on the next load once the cap is raised or the month turns.
+      state.usage.compute_notice && typeof state.usage.compute_notice.message === "string"
+        ? h("p", { class: "bb-muted", role: "status", "data-testid": "bb-compute-notice" }, state.usage.compute_notice.message)
+        : null,
       h("div", { class: "bb-grid" }, BUDGET_VIEWS.map(budgetCard)),
       // D#6 R2b-5b: what this month's runs on the person's own machine would have cost at API prices. Information, apart from the budgets.
       Number.isFinite(state.usage.own_plan_api_equivalent_usd) && state.usage.own_plan_api_equivalent_usd > 0

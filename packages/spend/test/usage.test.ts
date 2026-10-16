@@ -85,6 +85,7 @@ describe('getUsage / getBudgets (D#31 API-7a)', () => {
       foreground_compute: { spent_usd: 3, reserved_usd: 0, limit_usd: 71 },
       background_compute: { spent_usd: 4.1234, reserved_usd: 2, limit_usd: 32 },
       own_plan_api_equivalent_usd: 0,
+      compute_notice: null,
     });
   });
 
