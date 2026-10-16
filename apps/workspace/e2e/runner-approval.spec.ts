@@ -66,6 +66,7 @@ interface Mock {
   runs: unknown[];
   isAdmin: boolean;
   approveStatus: number;
+  stage?: string;
   consentPosts: { path: string; body: unknown }[];
   dialPuts: unknown[];
   approvePosts: string[];
@@ -121,7 +122,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     // The v1 reads
     if (p === "/api/v1/repos") return json(route, 200, REPOS);
     if (p.endsWith("/settings")) return json(route, 200, SETTINGS);
-    if (p === "/api/v1/work-items") return json(route, 200, { data: [{ ...LIST.data[0], stage: "in_progress" }], next_cursor: null });
+    if (p === "/api/v1/work-items") return json(route, 200, { data: [{ ...LIST.data[0], stage: mock.stage ?? "in_progress" }], next_cursor: null });
     if (p.endsWith("/timeline")) return json(route, 200, TIMELINE);
     if (p === "/api/v1/runs") return json(route, 200, { data: u.searchParams.get("work_item_id") ? mock.runs.filter((r) => (r as { work_item_id: string | null }).work_item_id === ITEM) : mock.runs, next_cursor: null });
     if (p.endsWith("/events")) return json(route, 200, { data: [], next_cursor: "0" });
@@ -308,12 +309,13 @@ test.describe("D#6 R2b-4b: Runs app, approval", () => {
     await clean(page, errors);
   });
 
-  test("a run that belongs to a work item says it is waiting but has no button here", async ({ page }) => {
-    const { mock, errors } = await setup(page, { runs: [run(RUN_A, { work_item_id: ITEM })], approvals: [entry(RUN_A, { work_item_id: ITEM })] });
+  test("a run that belongs to a work item, whatever its role (a project manager's here), has the Approve run button too: one POST, then the done sentence", async ({ page }) => {
+    const { mock, errors } = await setup(page, { runs: [run(RUN_A, { work_item_id: ITEM, role: "project-manager" })], approvals: [entry(RUN_A, { work_item_id: ITEM, role: "project-manager" })] });
     await openRun(page);
     await expect(t(page, "runs-approval-line")).toHaveText(COPY.approvalMine);
-    await expect(t(page, "runs-approve")).toHaveCount(0);
-    expect(mock.approvePosts).toEqual([]);
+    await press(t(page, "runs-approve"));
+    await expect(t(page, "runs-approval-note")).toHaveText(COPY.approvalDone);
+    expect(mock.approvePosts).toEqual([RUN_A]);
     await clean(page, errors);
   });
 
@@ -366,6 +368,43 @@ test.describe("D#6 R2b-4b: Pipeline app, approval", () => {
     expect(mock.approvePosts).toEqual([RUN_A]);
     await expect(t(page, "pl-approve-run")).toHaveCount(0);
     await expect(t(page, "pl-pending")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("D#483: at PR opened with three review runs waiting, the card's Approve and review sends one POST per run and shows the done sentence", async ({ page }) => {
+    const runs = [mine(RUN_A, { role: "code-reviewer" }), mine(RUN_B, { role: "acceptance-tester" }), mine(RUN_C, { role: "security-reviewer" })];
+    const { mock, errors } = await setup(page, { stage: "pr_opened", runs, approvals: runs.map((r) => entry((r as { id: string }).id, { work_item_id: ITEM })) });
+    await openItem(page, 3);
+    const btn = t(page, "pl-approve-btn");
+    await expect(btn).toHaveText("Approve and review");
+    await expect(t(page, "pl-approve-hint")).toHaveText(COPY.approvalMine);
+    await btn.dblclick();
+    await expect(t(page, "pl-approve-note")).toHaveText(COPY.approvalDone);
+    expect([...mock.approvePosts].sort()).toEqual([RUN_A, RUN_B, RUN_C].sort());
+    await expect(t(page, "pl-approve-btn")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("D#483: a refused card approval shows our sentence and keeps the button for another try", async ({ page }) => {
+    const runs = [mine(RUN_A, { role: "code-reviewer" })];
+    const { mock, errors } = await setup(page, { stage: "pr_opened", runs, approvals: [entry(RUN_A, { work_item_id: ITEM })], approveStatus: 403 });
+    await openItem(page);
+    await press(t(page, "pl-approve-btn"));
+    await expect(t(page, "pl-approve-note")).toHaveText(COPY.approvalRefused);
+    expect(mock.approvePosts).toEqual([RUN_A]);
+    await expect(t(page, "pl-approve-btn")).toHaveCount(1);
+    await clean(page, errors);
+  });
+
+  test("D#483: a triaged card whose Approve and start made a waiting project-manager run offers to approve it", async ({ page }) => {
+    const runs = [mine(RUN_A, { role: "project-manager" })];
+    const { mock, errors } = await setup(page, { stage: "triaged", runs, approvals: [entry(RUN_A, { work_item_id: ITEM, role: "project-manager" })] });
+    await openItem(page);
+    await expect(t(page, "pl-approve-hint")).toHaveText(COPY.approvalMine);
+    await expect(t(page, "pl-approve-btn")).toHaveText("Approve run"); // the Runs app's label, not "Approve and start" again
+    await press(t(page, "pl-approve-btn"));
+    await expect(t(page, "pl-approve-note")).toHaveText(COPY.approvalDone);
+    expect(mock.approvePosts).toEqual([RUN_A]);
     await clean(page, errors);
   });
 

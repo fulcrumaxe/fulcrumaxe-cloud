@@ -109,14 +109,14 @@ function eventItems(events) {
 const APPROVE_FAILED = "That didn't work. Nothing was changed.";
 
 /**
- * D#6 R2b-4b: the open run's approval. The waiting or automatic line (words from the server's copy), what the last click did, and, only
- * for a run with no work item (it has no other home for the button) that this person may approve, the Approve run button. A run that
- * belongs to a work item gets its button in Pipeline; this only says it is waiting.
+ * D#6 R2b-4b: the open run's approval. The waiting or automatic line (words from the server's copy), what the last click did, and,
+ * for any runner run that this person may approve (whatever its role, with or without a work item), the Approve run button. The same
+ * run has its button in Pipeline too (D#483: a project-manager run of a triaged card had none here).
  */
 function approvalBlock(run, a, approve) {
   const line = displayText(approvalLine(run, a));
   const note = a.phase === "busy" ? "Approving…" : a.phase === "done" && !a.entry && a.copy ? a.copy.approvalDone : a.phase === "refused" && a.copy ? a.copy.approvalRefused : a.phase === "failed" ? APPROVE_FAILED : "";
-  const button = a.entry && a.entry.canApprove && a.copy && !run.work_item_id
+  const button = a.entry && a.entry.canApprove && a.copy
     ? h("button", { type: "button", class: "runs-more runs-approve", "data-testid": "runs-approve", "aria-label": a.copy.approvalButton + ": " + roleName(run.role), "aria-disabled": a.phase === "busy" ? "true" : "false", onClick: approve }, a.phase === "busy" ? "Approving…" : a.copy.approvalButton)
     : null;
   if (!line && !note && !button) return null;

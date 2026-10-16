@@ -189,8 +189,10 @@ function mountApp(contentEl, launchArg) {
   const approveSlot = h("div", { "data-testid": "pl-approve-slot" });
   function syncApprove() {
     const live = !!runs && runs.hasLive();
+    // Runner runs waiting for this person's go-ahead also make the button show: it approves them (a pending run counts as live, so canApprove alone hid it).
+    const waiting = !!runs && (runs.approvableCount() > 0 || (approver.forRuns && approver.state.itemId === (openItem && openItem.id)));
     // dom-insert-ok: approveView always returns an element
-    approveSlot.replaceChildren(...(openItem && canApprove(openItem, live) ? [approveView(openItem, approver, live)] : []));
+    approveSlot.replaceChildren(...(openItem && (waiting || canApprove(openItem, live)) ? [approveView(openItem, approver, live, waiting ? runs : null)] : []));
   }
 
   // The action buttons live in a slot of their own, like the approve button, so a redraw of the Runs section beside it

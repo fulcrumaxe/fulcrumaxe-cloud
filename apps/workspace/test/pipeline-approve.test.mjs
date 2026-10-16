@@ -462,7 +462,8 @@ describe("the source", () => {
   it("the app imports and uses it, once, only for an approvable card with no live run", () => {
     expect(app).toMatch(/from "\.\/pipeline-actions\.js"/);
     expect(app.match(/approveView\(/g)).toHaveLength(1);
-    expect(app).toMatch(/canApprove\(openItem, live\)\s*\?\s*\[approveView\(openItem, approver, live\)\]/);
+    // ... or for a card whose runner runs wait for this person (a pending run is live, which alone would hide the button)
+    expect(app).toMatch(/\(waiting \|\| canApprove\(openItem, live\)\)\s*\?\s*\[approveView\(openItem, approver, live, waiting \? runs : null\)\]/);
     // the slot is redrawn on its own: a change of "a run is live" never rebuilds the Runs section (and the focus held in it)
     expect(app).toMatch(/onChange: \(\) => \{\s*paint\(\);\s*syncApprove\(\);/);
   });
