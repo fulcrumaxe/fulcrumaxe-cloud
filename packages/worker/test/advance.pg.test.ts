@@ -401,12 +401,16 @@ describe("advance_work_item [pg]", { timeout: 60_000 }, () => {
     const w = await world(a);
     const n = Number((await admin.query("SELECT gh_number FROM work_items WHERE id = $1", [w])).rows[0].gh_number);
     await admin.query("UPDATE work_items SET stage = 'closed' WHERE id = $1", [w]);
-    await admin.query(
-      `INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)`,
-      [a.accountId, w, `superseded:${randomUUID()}`],
-    );
+    const root = await world(a);
     const input: AdvanceTriageInput = { workItemId: w, title: "t", body: "b", category: "bug", sourceEventId: "s", repoId: a.repoId, login: "o", number: n };
     const t = build();
+    // The free-text history ref alone is not the proof (S4-e5): a closed item with a `superseded:` row and no record is not a replay.
+    await admin.query(
+      `INSERT INTO work_item_transitions (account_id, work_item_id, from_stage, to_stage, at, source, source_ref) VALUES ($1, $2, 'triaged', 'closed', now(), 'control_plane', $3)`,
+      [a.accountId, w, `superseded:${root}`],
+    );
+    expect(await t.module.advanceTriage(a.accountId, input)).toEqual({ status: "refused", reason: "not_advanceable" });
+    await admin.query(`INSERT INTO work_item_supersedes (account_id, old_work_item_id, root_work_item_id) VALUES ($1, $2, $3)`, [a.accountId, w, root]);
     expect((await t.module.advanceTriage(a.accountId, input)).status).toBe("triaged");
     // A closed item that was NOT superseded by triage is not ours.
     const other = await world(a, { stage: "closed" });

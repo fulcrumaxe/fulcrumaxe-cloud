@@ -2200,11 +2200,12 @@ check_proposal_follower_exception_shape() {
 
 # D#483 S4-e2 (0843): role shape of proposal_follower. A no-op when the role does not exist. Every problem is named:
 # NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly
-# the 18 granted by 0843 (column SELECT on accounts, proposals, work_items and work_item_transitions, UPDATE on proposals.work_item_id
-# and updated_at, USAGE on public; no table-wide grant), owning exactly its one function and nothing else.
+# the 21 granted by 0843 (18) and 0851 (3): column SELECT on accounts, proposals, work_items, work_item_transitions and (0851) the three
+# columns of work_item_supersedes, UPDATE on proposals.work_item_id and updated_at, USAGE on public; no table-wide grant), owning exactly
+# its one function and nothing else.
 check_proposal_follower_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column proposals.id SELECT','column proposals.account_id SELECT','column proposals.repo_id SELECT','column proposals.state SELECT','column proposals.work_item_id SELECT','column proposals.work_item_id UPDATE','column proposals.updated_at UPDATE','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.stage SELECT','column work_item_transitions.account_id SELECT','column work_item_transitions.work_item_id SELECT','column work_item_transitions.to_stage SELECT','column work_item_transitions.source_ref SELECT','schema public USAGE'"
+  local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column proposals.id SELECT','column proposals.account_id SELECT','column proposals.repo_id SELECT','column proposals.state SELECT','column proposals.work_item_id SELECT','column proposals.work_item_id UPDATE','column proposals.updated_at UPDATE','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.stage SELECT','column work_item_transitions.account_id SELECT','column work_item_transitions.work_item_id SELECT','column work_item_transitions.to_stage SELECT','column work_item_transitions.source_ref SELECT','column work_item_supersedes.account_id SELECT','column work_item_supersedes.old_work_item_id SELECT','column work_item_supersedes.root_work_item_id SELECT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'proposal_follower'),
     held AS (
@@ -2219,7 +2220,7 @@ check_proposal_follower_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'proposal_follower', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 18 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 18 granted by 0843' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 21 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 21 granted by 0843 and 0851' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 1
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.proposal_follow_root(uuid,uuid,uuid)'::regprocedure::oid)
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
@@ -2233,6 +2234,102 @@ check_proposal_follower_role_shape() {
   problems="$out"
   if [ -n "$problems" ]; then
     echo "neon-shape ($dbname): proposal_follower role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
+# D#483 S4-e5 (0851): the SECURITY DEFINER function owned by work_item_retirer. Prints its oid when it is the one exact signature
+# (matched by regprocedure, not by name), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer
+# and nobody else but the owner (no PUBLIC, no platform_ops, no app_user), with no grant option; SHAPE_FAIL:<count> when it is not;
+# nothing when the role owns none (the generic owner check then rejects anything else).
+check_work_item_retirer_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.retire_superseded_work_item(uuid,uuid)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['agent_run_writer']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'work_item_retirer') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'work-item-retirer-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by work_item_retirer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but agent_run_writer and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#483 S4-e5 (0851): role shape of work_item_retirer. A no-op when the role does not exist. Every problem is named: NOLOGIN and
+# unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly the 23 granted
+# by 0851 (column SELECT on accounts and work_items, UPDATE on work_items.stage and updated_at, column INSERT on work_item_transitions
+# (7 columns), column SELECT and INSERT on work_item_supersedes (3 columns each), USAGE on public; no table-wide grant), owning exactly
+# its one function and nothing else.
+check_work_item_retirer_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column accounts.id SELECT','column accounts.deleted_at SELECT','column work_items.id SELECT','column work_items.account_id SELECT','column work_items.repo_id SELECT','column work_items.stage SELECT','column work_items.halted_at SELECT','column work_items.stage UPDATE','column work_items.updated_at UPDATE','column work_item_transitions.account_id INSERT','column work_item_transitions.work_item_id INSERT','column work_item_transitions.from_stage INSERT','column work_item_transitions.to_stage INSERT','column work_item_transitions.at INSERT','column work_item_transitions.source INSERT','column work_item_transitions.source_ref INSERT','column work_item_supersedes.account_id SELECT','column work_item_supersedes.old_work_item_id SELECT','column work_item_supersedes.root_work_item_id SELECT','column work_item_supersedes.account_id INSERT','column work_item_supersedes.old_work_item_id INSERT','column work_item_supersedes.root_work_item_id INSERT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'work_item_retirer'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'work_item_retirer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 23 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 23 granted by 0851' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 1
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.retire_superseded_work_item(uuid,uuid)'::regprocedure::oid)
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+      CASE WHEN has_schema_privilege('work_item_retirer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_retirer-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): work_item_retirer role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
+# D#483 S4-e5 (0851): table shape of work_item_supersedes, the guarded supersede record. Row security enabled and forced; the only
+# table-level grant to any role other than the owner is SELECT to app_user (no INSERT, UPDATE, DELETE, TRUNCATE for anyone: the one
+# writer holds column INSERT only, through its definer); exactly four policies, each for the role and command named here.
+check_work_item_supersedes_shape() {
+  local dbname="$1" out rc=0 problems
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH t AS (SELECT c.oid, c.relrowsecurity, c.relforcerowsecurity, c.relowner, c.relacl FROM pg_class c WHERE c.oid = 'public.work_item_supersedes'::regclass),
+    grants AS (SELECT pg_get_userbyid(a.grantee) AS grantee, a.privilege_type FROM t, aclexplode(t.relacl) a WHERE a.grantee <> t.relowner),
+    pol AS (SELECT p.polname::text AS polname, p.polcmd::text AS polcmd, (SELECT array_agg(pg_get_userbyid(o)::text) FROM unnest(p.polroles) o) AS roles FROM pg_policy p, t WHERE p.polrelid = t.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN NOT (SELECT relrowsecurity AND relforcerowsecurity FROM t) THEN 'row security is not enabled and forced' END,
+      CASE WHEN (SELECT count(*) FROM grants) <> 1 OR NOT EXISTS (SELECT 1 FROM grants WHERE grantee = 'app_user' AND privilege_type = 'SELECT') THEN 'table-level grants are not exactly SELECT to app_user' END,
+      CASE WHEN (SELECT count(*) FROM pol) <> 4
+              OR (SELECT count(*) FROM pol WHERE (polname, polcmd, roles) IN (
+                    ('tenant_isolation_select', 'r', ARRAY['app_user']::text[]),
+                    ('work_item_retirer_select', 'r', ARRAY['work_item_retirer']::text[]),
+                    ('work_item_retirer_insert', 'a', ARRAY['work_item_retirer']::text[]),
+                    ('proposal_follower_select', 'r', ARRAY['proposal_follower']::text[]))) <> 4
+           THEN 'policies are not exactly the four of 0851' END);" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'work_item_supersedes-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): work_item_supersedes shape wrong: $problems" >&2
     exit 1
   fi
 }

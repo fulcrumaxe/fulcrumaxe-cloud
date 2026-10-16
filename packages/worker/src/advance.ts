@@ -863,7 +863,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   async function supersededByTriage(accountId: string, workItemId: string): Promise<boolean> {
     return withTenant(runnerPool, accountId, async (client) => {
       const r = await client.query(
-        "SELECT 1 FROM work_item_transitions WHERE account_id = $1 AND work_item_id = $2 AND to_stage = 'closed' AND source_ref LIKE 'superseded:%' LIMIT 1",
+        // The guarded supersede record (migration 0851), written only by retire_superseded_work_item; never the free-text ref on a history row.
+        "SELECT 1 FROM work_item_supersedes WHERE account_id = $1 AND old_work_item_id = $2 LIMIT 1",
         [accountId, workItemId],
       );
       return r.rowCount === 1;

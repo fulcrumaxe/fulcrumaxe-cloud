@@ -1,7 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { recordStage } from "@fx/core/src/work-items/recordStage.js";
-import { WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
+import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { cleanWorkItemTitle } from "@fx/core/src/work-items/title.js";
 import { runTriageStep } from "../plan/step.js";
 
@@ -15,7 +14,8 @@ import { runTriageStep } from "../plan/step.js";
  *
  *  - the root gets the issue's `repo_id` and `gh_number` (`createDiscussion` leaves the repo null, and every seat
  *    refuses `no_repo` without it; the number is how a later PR that closes the issue finds the root), and
- *  - the webhook's own row moves `triaged -> closed` with sourceRef `superseded:<root>`, so there is one card per issue.
+ *  - the webhook's own row moves `triaged -> closed` through retire_superseded_work_item (history ref `superseded:<root>`, plus the guarded
+ *    supersede record that proposal_follow_root trusts), so there is one card per issue.
  *
  * Both are idempotent, so a replay after a crash between triage and the link finishes the job.
  *
@@ -103,11 +103,12 @@ export async function triageIssueItem(pool: Pool, accountId: string, input: Issu
       if (root !== input.workItemId) {
         const cur = await client.query<{ stage: string }>("SELECT stage FROM work_items WHERE id = $1 AND account_id = $2", [input.workItemId, accountId]);
         if (cur.rows[0]?.stage === "triaged") {
-          try {
-            await recordStage(client, { workItemId: input.workItemId, toStage: "closed", at: new Date(), source: "control_plane", sourceRef: `${SUPERSEDED_REF_PREFIX}${root}` });
-          } catch (err) {
-            // A halted duplicate is left as it is: nothing is closed behind a customer's halt.
-            if (!(err instanceof WorkItemHaltedError)) throw err;
+          // The one writer of the supersede record (migration 0851): it closes the item and writes the history row and the record in one block.
+          // A halted item is left as it is (answer "halted"): nothing is closed behind a customer's halt. A replay of the same pair answers "already".
+          const retired = await client.query<{ s: string }>("SELECT retire_superseded_work_item($1::uuid, $2::uuid) AS s", [input.workItemId, root]);
+          if (retired.rows[0]?.s === "retired") {
+            // The stage writer tells the live channel about every move it records; the definer cannot, so the same event goes out here, in the same transaction.
+            await emitDomainEvent(client, { type: "work_item.stage_changed", accountId, subjectId: input.workItemId, payload: { workItemId: input.workItemId, fromStage: "triaged", toStage: "closed" } });
           }
         }
       }

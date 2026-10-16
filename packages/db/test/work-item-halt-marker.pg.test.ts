@@ -92,7 +92,9 @@ describe('work item halt marker (0750)', () => {
           AND c.column_name IN ('stage', 'halted_at', 'halt_action_id', 'halt_epoch')`,
     );
     const by = (col: string) => rows.filter((r) => r.col === col).map((r) => r.grantee).sort();
-    const stage = by('stage');
+    // work_item_retirer (0851) closes a superseded item, so it holds UPDATE on stage and updated_at; it holds no halt column.
+    expect(by('stage')).toContain('work_item_retirer');
+    const stage = by('stage').filter((g) => g !== 'work_item_retirer');
     expect(stage.length).toBeGreaterThan(0);
     for (const col of ['halt_action_id', 'halt_epoch']) expect(by(col)).toEqual(stage);
     expect(by('halted_at').filter((g) => g !== 'work_item_halt_definer')).toEqual(stage);
