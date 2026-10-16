@@ -106,14 +106,29 @@ export interface Manager {
 }
 const tokenArg = (m: Manager): string | null => m.tokenSha256 ?? null;
 
+export async function createToken(db: Db, label: string): Promise<IssuedCredential & { id: string }> {
+  const cred = issueCredential('token');
+  const { rows } = await call(() => db.query<{ id: string }>('SELECT aap_token_create($1, $2, $3) AS id', [label, cred.sha256, cred.hint]));
+  return { ...cred, id: rows[0]!.id };
+}
+export const revokeToken = (db: Db, id: string): Promise<unknown> => call(() => db.query('SELECT aap_token_revoke($1)', [id]));
+
 export async function createInstance(db: Db, m: Manager, name: string): Promise<IssuedCredential & { id: string }> {
   const cred = issueCredential('instance');
   const { rows } = await call(() => db.query<{ id: string }>('SELECT aap_instance_create($1, $2, $3, $4) AS id', [tokenArg(m), name, cred.sha256, cred.hint]));
   return { ...cred, id: rows[0]!.id };
 }
+export const renameInstance = (db: Db, m: Manager, id: string, name: string): Promise<unknown> =>
+  call(() => db.query('SELECT aap_instance_rename($1, $2, $3)', [tokenArg(m), id, name]));
 /** Stops the credential now and cancels the instance's pending approvals. `remove` also starts the 7-day deletion record. */
 export const closeInstance = (db: Db, m: Manager, id: string, remove: boolean): Promise<unknown> =>
   call(() => db.query('SELECT aap_instance_close($1, $2, $3)', [tokenArg(m), id, remove]));
+export interface InstanceView { id: string; name: string; credentialHint: string; revokedAt: Date | null; deletedAt: Date | null; createdAt: Date }
+export async function getInstance(db: Db, m: Manager, id: string): Promise<InstanceView> {
+  const { rows } = await call(() => db.query('SELECT * FROM aap_instance_get($1, $2)', [tokenArg(m), id]));
+  const r = rows[0]!;
+  return { id: r.o_id, name: r.o_name, credentialHint: r.o_credential_hint, revokedAt: r.o_revoked_at, deletedAt: r.o_deleted_at, createdAt: r.o_created_at };
+}
 export async function authenticateInstance(db: Db, credential: string): Promise<{ instanceId: string; accountId: string }> {
   const { rows } = await call(() => db.query('SELECT * FROM aap_instance_authenticate($1)', [sha256Hex(credential)]));
   return { instanceId: rows[0]!.o_instance_id, accountId: rows[0]!.o_account_id };
@@ -184,6 +199,18 @@ export async function reportOutcome(db: Db, credential: string, id: string, outc
 /** A signed-in owner or admin answers (run inside `withTenant` with the user). Approvals stay valid for `validForS` seconds (60 to 48 hours). */
 export const decideRequest = (db: Db, id: string, approve: boolean, note: string | null, validForS: number | null): Promise<unknown> =>
   call(() => db.query('SELECT aap_approval_decide($1, $2, $3, $4)', [id, approve, note, validForS]));
+
+/**
+ * The arguments of a request, for the people who answer: run inside `withTenant` with the user. Only a signed-in owner or admin of the account
+ * gets them (`forbidden` for a member, `session_required` for a token principal, `not_found` for another account's id); app_user cannot read the
+ * sealed column directly. `purged` once the 30 days are up, with the hash and byte count that stay.
+ */
+export async function readArguments(db: Db, kek: ArgumentsKek, id: string): Promise<{ arguments: unknown; sha256: string; bytes: number } | { purged: true; sha256: string; bytes: number }> {
+  const { rows } = await call(() => db.query('SELECT * FROM aap_arguments_get($1)', [id]));
+  const r = rows[0]!;
+  if (r.o_sealed === null) return { purged: true, sha256: r.o_sha256, bytes: r.o_bytes };
+  return { arguments: JSON.parse(openArguments(kek, { accountId: r.o_account_id, approvalId: id }, r.o_sealed, r.o_kek_version)), sha256: r.o_sha256, bytes: r.o_bytes };
+}
 
 export interface AapSweepResult { expired: number; argumentsPurged: number; idempotencyPurged: number; instancesPurged: number }
 /** The worker tick's housekeeping (cross-tenant), run by the sweep login. The database's own clock decides what is due; there is no time argument. */

@@ -5,8 +5,9 @@ import { createPool } from '../src/pool.js';
 import { withTenant } from '../src/withTenant.js';
 import { findRlsViolations } from '../src/rlsInventory.js';
 import {
-  AapError, canonicalJson, cancelRequest, closeInstance, consumeRequest, createInstance, createRequest, decideRequest, envArgumentsKek,
-  getRequest, issueCredential, openArguments, reportOutcome, sealArguments, sha256Hex, type ApprovalStatus, type ArgumentsKek,
+  AapError, canonicalJson, cancelRequest, closeInstance, consumeRequest, createInstance, createRequest, createToken, decideRequest, envArgumentsKek,
+  getInstance, getRequest, issueCredential, openArguments, readArguments, renameInstance, reportOutcome, revokeToken, sealArguments, sha256Hex,
+  type ApprovalStatus, type ArgumentsKek,
 } from '../src/aap.js';
 import { seedAccount, type SeedRefs } from './helpers/seed.js';
 import { PG_ERROR } from './helpers/pgErrors.js';
@@ -105,7 +106,8 @@ describe('AAP storage (0837)', () => {
   describe('1. who can write, and who can read what', () => {
     const FUNCTIONS = [
       'aap_instance_authenticate', 'aap_instance_create', 'aap_instance_close', 'aap_request_create', 'aap_request_get', 'aap_request_consume',
-      'aap_request_outcome', 'aap_approval_decide', 'aap_request_create_idempotent', 'aap_sweep',
+      'aap_request_outcome', 'aap_approval_decide', 'aap_request_create_idempotent', 'aap_sweep', 'aap_token_create', 'aap_token_revoke', 'aap_instance_rename',
+      'aap_instance_get', 'aap_arguments_get',
     ];
     const PLAIN = ['aap_manager_account', 'aap_view', 'aap_sweep_at'];
     it('every definer is owned by aap_definer, pinned, and executable by aap_invoker alone; the helper is reachable by no one', async () => {
@@ -520,6 +522,48 @@ describe('AAP storage (0837)', () => {
     });
   });
 
+  describe('12. what app_user may do with the AAP tables', () => {
+    const COLUMNS: Record<string, string[]> = {
+      aap_instances: ['id', 'account_id', 'name', 'credential_hint', 'created_by', 'revoked_at', 'deleted_at', 'created_at'],
+      aap_provisioner_tokens: ['id', 'account_id', 'label', 'token_hint', 'created_by', 'revoked_at', 'last_used_at', 'created_at'],
+      aap_idempotency: [],
+      action_approvals: [
+        'id', 'account_id', 'instance_id', 'tool', 'server', 'arguments_kek_version', 'arguments_sha256', 'arguments_bytes', 'agent_reasoning', 'context',
+        'requested_timeout_s', 'deadline_at', 'status', 'decided_by_kind', 'decided_by', 'rule_id', 'rule_set_version', 'route_version', 'note', 'decided_at',
+        'expires_at', 'consumed_at', 'outcome', 'outcome_note', 'outcome_at', 'created_at',
+      ],
+    };
+
+    it('app_user can SELECT exactly the listed columns of each of the four tables and do nothing else: any new grant fails this', async () => {
+      for (const [table, expected] of Object.entries(COLUMNS)) {
+        const { rows } = await admin.query<{ c: string }>(
+          `SELECT attname::text AS c FROM pg_attribute WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped
+              AND has_column_privilege('app_user', $1::regclass, attname, 'SELECT') ORDER BY attname`, [table]);
+        expect(rows.map((r) => r.c), table).toEqual([...expected].sort());
+        const { rows: write } = await admin.query<{ p: string }>(
+          `SELECT p FROM unnest(ARRAY['INSERT','UPDATE','REFERENCES']) p WHERE has_any_column_privilege('app_user', $1::regclass, p)
+           UNION ALL SELECT p FROM unnest(ARRAY['INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p WHERE has_table_privilege('app_user', $1::regclass, p)`, [table]);
+        expect(write, table).toEqual([]);
+      }
+    });
+
+    it('no credential or token hash is readable by app_user, and another account sees none of an account\'s tokens', async () => {
+      const { rows } = await admin.query<{ t: string; c: string; ok: boolean }>(
+        `SELECT t, c, has_column_privilege('app_user', t, c, 'SELECT') AS ok FROM (VALUES
+           ('aap_instances','credential_sha256'),('aap_provisioner_tokens','token_sha256'),('action_approvals','arguments_sealed')) v(t, c)`);
+      expect(rows.filter((r) => r.ok)).toEqual([]);
+      const tok = await asUser(a.accountId, owner, (c) => createToken(c, 'visible to a only'));
+      const asB = await withTenant(appUserPool, b.accountId, (c) => c.query(`SELECT id FROM aap_provisioner_tokens WHERE id = $1`, [tok.id]));
+      expect(asB.rows).toEqual([]);
+      const asA = await withTenant(appUserPool, a.accountId, (c) => c.query(`SELECT id, label, token_hint FROM aap_provisioner_tokens WHERE id = $1`, [tok.id]));
+      expect(asA.rows).toEqual([{ id: tok.id, label: 'visible to a only', token_hint: tok.hint }]);
+      // nothing but the owner and the definer can write the table
+      for (const sql of [`UPDATE aap_provisioner_tokens SET revoked_at = now() WHERE id = $1`, `DELETE FROM aap_provisioner_tokens WHERE id = $1`]) {
+        await expect(withTenant(appUserPool, a.accountId, (c) => c.query(sql, [tok.id]))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      }
+    });
+  });
+
   describe('10. revoke and delete', () => {
     it('revoking stops the credential at once and cancels pending approvals in the same transaction; a new credential is a new instance', async () => {
       const { secret, id } = await instance(a);
@@ -600,11 +644,72 @@ describe('AAP storage (0837)', () => {
       expect((await row(req.id)).status).toBe('pending');
     });
 
-    it('a provisioner token is refused until 0839, and an instance credential is not a token', async () => {
-      const made = await instance(a);
-      await rejectsWith(createInstance(invokerPool, { tokenSha256: sha256Hex('anything') }, 'x'), 'unauthenticated');
-      await rejectsWith(createInstance(invokerPool, { tokenSha256: made.id }, 'x'), 'unauthenticated');
-      await rejectsWith(closeInstance(invokerPool, { tokenSha256: sha256Hex(made.secret) }, made.id, true), 'unauthenticated');
+    it('a provisioner token manages instances of its account only, and cannot raise, decide or consume', async () => {
+      const tok = await asUser(a.accountId, owner, (c) => createToken(c, 'terraform'));
+      const m = { tokenSha256: tok.sha256 };
+      const made = await createInstance(invokerPool, m, 'via token');
+      expect(await getInstance(invokerPool, m, made.id)).toMatchObject({ name: 'via token', credentialHint: made.hint, revokedAt: null });
+      await renameInstance(invokerPool, m, made.id, 'renamed');
+      expect((await getInstance(invokerPool, m, made.id)).name).toBe('renamed');
+      expect((await admin.query(`SELECT account_id, created_by, (SELECT last_used_at IS NOT NULL FROM aap_provisioner_tokens WHERE id = $2) AS used FROM aap_instances WHERE id = $1`, [made.id, tok.id])).rows[0])
+        .toEqual({ account_id: a.accountId, created_by: `token:${tok.id}`, used: true });
+      const otherToken = await asUser(b.accountId, ownerB, (c) => createToken(c, 'b'));
+      await rejectsWith(getInstance(invokerPool, { tokenSha256: otherToken.sha256 }, made.id), 'not_found');
+      await rejectsWith(closeInstance(invokerPool, { tokenSha256: otherToken.sha256 }, made.id, true), 'not_found');
+      // a token is not a credential, and a credential is not a token
+      await rejectsWith(createRequest(invokerPool, KEK, tok.secret, input()), 'unauthenticated');
+      await rejectsWith(createInstance(invokerPool, { tokenSha256: made.sha256 }, 'x'), 'unauthenticated');
+      await rejectsWith(createToken(invokerPool, 'no session'), 'session_required');
+      await closeInstance(invokerPool, m, made.id, false);
+      await rejectsWith(getRequest(invokerPool, made.secret, randomUUID()), 'unauthenticated');
+      await asUser(a.accountId, owner, (c) => revokeToken(c, tok.id));
+      await rejectsWith(createInstance(invokerPool, m, 'after revoke'), 'unauthenticated');
+      await rejectsWith(asUser(a.accountId, member, (c) => revokeToken(c, tok.id)), 'forbidden');
+    });
+
+    it('revoking another account\'s token is the same not-found as a missing one, and the token keeps working', async () => {
+      const mine = await asUser(a.accountId, owner, (c) => createToken(c, 'mine'));
+      await rejectsWith(asUser(b.accountId, ownerB, (c) => revokeToken(c, mine.id)), 'not_found');
+      await rejectsWith(asUser(b.accountId, ownerB, (c) => revokeToken(c, randomUUID())), 'not_found');
+      expect((await createInstance(invokerPool, { tokenSha256: mine.sha256 }, 'still valid')).id).toBeTruthy();
+    });
+
+    it('a session that carries an API token principal cannot create or revoke provisioner tokens', async () => {
+      const tok = await asUser(a.accountId, owner, (c) => createToken(c, 'target'));
+      await rejectsWith(withTenant(invokerPool, a.accountId, owner, randomUUID(), (c) => createToken(c, 'nope')), 'session_required');
+      await rejectsWith(withTenant(invokerPool, a.accountId, owner, randomUUID(), (c) => revokeToken(c, tok.id)), 'session_required');
+      expect((await admin.query(`SELECT revoked_at FROM aap_provisioner_tokens WHERE id = $1`, [tok.id])).rows[0].revoked_at).toBeNull();
+    });
+
+    it('only an owner or admin session can open the sealed arguments; a plain member cannot, by the function or by reading the column', async () => {
+      const { secret } = await instance(a);
+      const req = await createRequest(invokerPool, KEK, secret, input());
+      expect(await asUser(a.accountId, owner, (c) => readArguments(c, KEK, req.id))).toMatchObject({ arguments: { cmd: 'ls', flags: ['-l'] }, bytes: expect.any(Number) });
+      expect(await asUser(a.accountId, adminUser, (c) => readArguments(c, KEK, req.id))).toMatchObject({ arguments: { cmd: 'ls' } });
+      await rejectsWith(asUser(a.accountId, member, (c) => readArguments(c, KEK, req.id)), 'forbidden');
+      await rejectsWith(withTenant(invokerPool, a.accountId, owner, randomUUID(), (c) => readArguments(c, KEK, req.id)), 'session_required');
+      await rejectsWith(asUser(b.accountId, ownerB, (c) => readArguments(c, KEK, req.id)), 'not_found');
+      await rejectsWith(asUser(a.accountId, owner, (c) => readArguments(c, KEK, randomUUID())), 'not_found');
+      // the member's own table read: every column but the sealed one
+      await expect(withTenant(appUserPool, a.accountId, member, (c) => c.query(`SELECT arguments_sealed FROM action_approvals WHERE id = $1`, [req.id]))).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      const seen = await withTenant(appUserPool, a.accountId, member, (c) => c.query(`SELECT id, arguments_sha256, arguments_bytes FROM action_approvals WHERE id = $1`, [req.id]));
+      expect(seen.rows).toHaveLength(1);
+      expect((await admin.query(`SELECT has_column_privilege('app_user', 'action_approvals', 'arguments_sealed', 'SELECT') AS ok`)).rows[0].ok).toBe(false);
+      // once purged the hash and byte count are what the owner sees
+      await admin.query(`UPDATE action_approvals SET status = 'cancelled', decided_at = now() WHERE id = $1`, [req.id]);
+      await admin.query(`UPDATE action_approvals SET arguments_sealed = NULL, arguments_kek_version = NULL WHERE id = $1`, [req.id]);
+      expect(await asUser(a.accountId, owner, (c) => readArguments(c, KEK, req.id))).toMatchObject({ purged: true, sha256: expect.any(String) });
+    });
+
+    it('renaming an instance of another account is the same not-found, by token and by session, and the name is unchanged', async () => {
+      const inst = await instance(a);
+      const tokB = await asUser(b.accountId, ownerB, (c) => createToken(c, 'b'));
+      await rejectsWith(renameInstance(invokerPool, { tokenSha256: tokB.sha256 }, inst.id, 'hijacked'), 'not_found');
+      await rejectsWith(asUser(b.accountId, ownerB, (c) => renameInstance(c, {}, inst.id, 'hijacked')), 'not_found');
+      await rejectsWith(renameInstance(invokerPool, { tokenSha256: tokB.sha256 }, randomUUID(), 'x'), 'not_found');
+      expect((await admin.query(`SELECT name FROM aap_instances WHERE id = $1`, [inst.id])).rows[0].name).toBe('Test adapter');
+      await asUser(a.accountId, owner, (c) => renameInstance(c, {}, inst.id, 'renamed by its owner'));
+      expect((await admin.query(`SELECT name FROM aap_instances WHERE id = $1`, [inst.id])).rows[0].name).toBe('renamed by its owner');
     });
 
     it('another account\'s request id is the same not-found as a missing one', async () => {
