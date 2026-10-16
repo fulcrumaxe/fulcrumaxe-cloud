@@ -9,6 +9,7 @@ import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { NotFoundError } from '../src/tenancy/errors.js';
 import { withTenant } from '../src/tenancy/withTenant.js';
 import { readStackParent, setStackParent, StackLinkError } from '../src/work-items/stackParent.js';
+import { readStackParentPull } from '../src/work-items/stackParentPull.js';
 
 /** D#598 P3a against a real Postgres cluster: the write path, its typed refusals, and that it is not limited to any one repo. */
 describe('setStackParent (D#598 P3a)', () => {
@@ -129,10 +130,29 @@ describe('setStackParent (D#598 P3a)', () => {
     expect(await run(a, (c) => readStackParent(c, child))).toBeNull();
   });
 
+  it("P3b: the parent's pull request number comes from the newest run that names one, and is null when none does (any repo, any account)", async () => {
+    const parent = await item(a, secondRepo);
+    const child = await item(a, secondRepo);
+    expect(await run(a, (c) => readStackParentPull(c, child))).toBeNull();
+    await run(a, (c) => setStackParent(c, { workItemId: child, stackParentId: parent }));
+    expect(await run(a, (c) => readStackParentPull(c, child))).toEqual({ parentId: parent, parentRepoId: secondRepo, prNumber: null });
+    const review = (n: number, at: string) =>
+      admin.query(
+        `INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, dispatch_repo_id, dispatch_pr_number, created_at) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3, $4, $5)`,
+        [a.accountId, parent, secondRepo, n, at],
+      );
+    await review(30, '2026-01-01T00:00:00Z');
+    await review(31, '2026-01-02T00:00:00Z');
+    expect(await run(a, (c) => readStackParentPull(c, child))).toMatchObject({ prNumber: 31 });
+    // Another account cannot see the child at all.
+    expect(await run(b, (c) => readStackParentPull(c, child))).toBeNull();
+  });
+
   describe('no repo, plan or account gate on this path (static scan)', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const sources = [
       join(here, '../src/work-items/stackParent.ts'),
+      join(here, '../src/work-items/stackParentPull.ts'),
       join(here, '../../db/migrations/0821_work_items_stack_parent.sql'),
     ];
     // Code only: comments may explain what the path does not do.

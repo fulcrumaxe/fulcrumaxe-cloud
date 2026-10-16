@@ -111,6 +111,36 @@ describe("recorded pipeline steps", () => {
   it("D#6 R3c: the advisory reason reads as reviews passed on the person's machine, not as missing reviews", () => {
     expect(reasonWord("local_reviews_passed_advisory")).toBe("Reviews passed on your machine. A person merges this pull request.");
   });
+
+  describe("D#598 P3b: the stacked stop (C3 R-598-P5b-6)", () => {
+    const gate = (reasons) => ({ kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons, at: "t" });
+
+    it("says the fixed sentence with the parent's pull request number, and shows the number code nowhere else", () => {
+      const row = stepView(gate(["stacked_on_open_pr", "stacked_on_pr_40", "ci_not_green"]));
+      expect(row.reasons).toEqual(["This builds on #40, which hasn't merged yet.", "CI is not green"]);
+      expect(row.reasons.join(" ")).not.toMatch(/stacked_on_pr|stacked on pr|undefined|null/);
+    });
+
+    it.each([
+      ["no number was recorded", ["stacked_on_open_pr"]],
+      ["the number code is not a pull request number", ["stacked_on_open_pr", "stacked_on_pr_0"]],
+      ["the number code is not a number", ["stacked_on_open_pr", "stacked_on_pr_x"]],
+      ["the number is too long to be one", ["stacked_on_open_pr", "stacked_on_pr_12345678901"]],
+    ])("%s: a plain sentence with no number, never '#undefined' or '#null'", (_n, reasons) => {
+      const row = stepView(gate(reasons));
+      expect(row.reasons).toHaveLength(1);
+      expect(row.reasons[0]).toBe("This builds on a pull request that hasn't merged yet.");
+      expect(row.reasons.join(" ")).not.toMatch(/undefined|null|NaN|#/);
+    });
+
+    it("a number code without the stop says only what it is", () => {
+      expect(stepView(gate(["stacked_on_pr_40"])).reasons).toEqual([]);
+    });
+
+    it("a person-readable stop for the reason code alone", () => {
+      expect(reasonWord("stacked_on_open_pr")).toBe("This builds on a pull request that hasn't merged yet.");
+    });
+  });
 });
 
 describe("the Ready to merge banner reads the real state", () => {
@@ -288,6 +318,26 @@ describe("the view", () => {
     expect(text).toContain(SENTENCES.noSpec);
     expect(text).not.toMatch(/null|undefined|NaN/);
     expect(byId(panel.el, "pl-ready")).toHaveLength(0);
+  });
+
+  it("D#598 P3b page: a stacked stop shows the sentence with the parent's number, and the page text holds no null or undefined", async () => {
+    const stacked = { ...REVIEW_PASSED, steps: [{ kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons: ["stacked_on_open_pr", "stacked_on_pr_40", "auto_merge_not_allowed"], at: "2026-10-16T10:00:00Z" }] };
+    const { panel } = make(stacked);
+    panel.start("item-stacked");
+    await flush();
+    const [step] = byId(panel.el, "pl-step");
+    expect(step.textContent).toContain("Merge gate: not merged, a person merges");
+    expect(step.textContent).toContain("This builds on #40, which hasn't merged yet.");
+    expect(panel.el.textContent).not.toMatch(/null|undefined|NaN|stacked_on/);
+  });
+
+  it("D#598 P3b page: a stacked stop with no recorded number still reads as a sentence", async () => {
+    const stacked = { ...REVIEW_PASSED, steps: [{ kind: "continue_work_item", state: "done", code: null, result: "ready_human_merges", reasons: ["stacked_on_open_pr"], at: "2026-10-16T10:00:00Z" }] };
+    const { panel } = make(stacked);
+    panel.start("item-stacked-2");
+    await flush();
+    expect(byId(panel.el, "pl-step")[0].textContent).toContain("This builds on a pull request that hasn't merged yet.");
+    expect(panel.el.textContent).not.toMatch(/null|undefined|NaN|#undefined|stacked_on/);
   });
 
   it("shows the Ready to merge banner with the real auto-merge state and the PR link", async () => {

@@ -178,7 +178,18 @@ const REASON_WORDS = {
   human_merge_only: "the operator set this repository so that a person merges",
   local_reviews_passed_advisory: "Reviews passed on your machine. A person merges this pull request.",
   merge_call_refused: "GitHub refused the merge",
+  // D#598 P3b (C3 R-598-P5b-6). Read through `stackedWords`, which puts the parent's number in; this is the sentence for a stop that carries none.
+  stacked_on_open_pr: "This builds on a pull request that hasn't merged yet.",
 };
+const STACKED_PR_CODE = /^stacked_on_pr_([1-9][0-9]{0,8})$/;
+
+/** The gate's stacked stop in words: with the parent's number when the record carries it, and never a bare "#undefined". Every `stacked_on_pr_*` code is absorbed, valid or not. */
+function stackedWords(codes) {
+  const list = Array.isArray(codes) ? codes : [];
+  const n = list.map((c) => STACKED_PR_CODE.exec(String(c))).find(Boolean);
+  const stacked = list.includes("stacked_on_open_pr");
+  return { codes: list.filter((c) => !/^stacked_on_pr_/.test(String(c))), sentence: stacked && n ? "This builds on #" + n[1] + ", which hasn't merged yet." : null };
+}
 const ROLE_CODES = { code_reviewer: "code review", security_reviewer: "security review", acceptance_tester: "acceptance test", debater: "debate" };
 
 const plainCode = (code) => String(code).replace(/_/g, " ");
@@ -200,7 +211,8 @@ export function stepView(step) {
   const parts = [KIND_WORDS[step.kind] || plainCode(step.kind), STATE_WORDS[step.state] || plainCode(step.state)];
   if (step.result) parts.push(RESULT_WORDS[step.result] || plainCode(step.result));
   if (step.code) parts.push("reason: " + plainCode(step.code));
-  const reasons = Array.isArray(step.reasons) ? step.reasons.map(reasonWord) : [];
+  const stacked = stackedWords(step.reasons);
+  const reasons = stacked.codes.map((c) => (c === "stacked_on_open_pr" && stacked.sentence ? stacked.sentence : reasonWord(c)));
   return { at: step.at, text: parts.join(" · "), reasons };
 }
 

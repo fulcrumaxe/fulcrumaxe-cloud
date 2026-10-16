@@ -48,6 +48,8 @@ export interface MergeWorld {
   name: string;
   prNumber: number;
   baseRef: string;
+  /** The repository default branch GitHub reports on the PR (`base.repo.default_branch`); "main" when a fixture says nothing. */
+  defaultBranch?: string;
   headSha: string;
   /** The commit update-branch produces (the head after the refresh). */
   refreshedHeadSha: string;
@@ -194,7 +196,7 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
         mergeable,
         mergeable_state: state,
         head: { sha: w.headSha, ref: "fx/item-7", repo: { full_name: `${w.owner}/${w.name}` } },
-        base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}` } },
+        base: { ref: w.baseRef, repo: { full_name: `${w.owner}/${w.name}`, default_branch: w.defaultBranch ?? "main" } },
       });
     }
 

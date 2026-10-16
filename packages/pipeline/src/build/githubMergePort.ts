@@ -204,6 +204,7 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     const base = body.base;
     if (!isObj(head) || typeof head.sha !== "string") bad("pull.head.sha");
     if (!isObj(base) || typeof base.ref !== "string" || base.ref === "") bad("pull.base.ref");
+    if (!isObj(base.repo) || typeof base.repo.default_branch !== "string" || base.repo.default_branch === "") bad("pull.base.repo.default_branch");
     if (body.state !== "open" && body.state !== "closed") bad("pull.state");
     if (typeof body.merged !== "boolean" && body.merged !== undefined) bad("pull.merged");
     return {
@@ -213,6 +214,8 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         merged: body.merged === true,
         // Anything other than an explicit false is treated as a draft.
         draft: body.draft !== false,
+        baseRef: base.ref,
+        defaultBranch: base.repo.default_branch,
       },
       baseRef: base.ref,
     };

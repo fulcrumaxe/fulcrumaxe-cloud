@@ -42,6 +42,8 @@ export interface FakeRepoState {
   draft: boolean;
   headSha: string;
   baseRef: string;
+  /** The repository default branch GitHub reports on the PR (`base.repo.default_branch`); "main" when a fixture says nothing. */
+  defaultBranch?: string;
   files: FakeFile[];
   /** Check runs by commit sha. */
   checks: Record<string, FakeCheckRun[]>;
@@ -112,7 +114,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       s.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}`) {
-        return json(200, { number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef } });
+        return json(200, { number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef, repo: { full_name: `${s.owner}/${s.name}`, default_branch: s.defaultBranch ?? "main" } } });
       }
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}/files`) {
         if (s.filesFail) return json(s.filesFail, { message: "Server Error" });

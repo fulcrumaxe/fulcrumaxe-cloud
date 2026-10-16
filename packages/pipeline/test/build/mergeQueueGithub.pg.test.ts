@@ -195,13 +195,13 @@ describe("D#519 MQ1 port: mergeability", () => {
   it("reads a state GitHub adds later as unknown, and a response without mergeable fields as malformed", async () => {
     const http: GitHubHttp = {
       async request() {
-        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "frobnicated", head: { sha: HEAD }, base: { ref: "main" } } };
+        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "frobnicated", head: { sha: HEAD }, base: { ref: "main", repo: { default_branch: "main" } } } };
       },
     };
     expect((await portOver(http).port.getMergeability(PR)).mergeableState).toBe("unknown");
-    const bare: GitHubHttp = { async request() { return { status: 200, body: { state: "open", merged: false, draft: false, head: { sha: HEAD }, base: { ref: "main" } } }; } };
+    const bare: GitHubHttp = { async request() { return { status: 200, body: { state: "open", merged: false, draft: false, head: { sha: HEAD }, base: { ref: "main", repo: { default_branch: "main" } } } }; } };
     await expect(portOver(bare).port.getMergeability(PR)).rejects.toThrow(/malformed/);
-    const wrong: GitHubHttp = { async request() { return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: "true", mergeable_state: "clean", head: { sha: HEAD }, base: { ref: "main" } } }; } };
+    const wrong: GitHubHttp = { async request() { return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: "true", mergeable_state: "clean", head: { sha: HEAD }, base: { ref: "main", repo: { default_branch: "main" } } } }; } };
     await expect(portOver(wrong).port.getMergeability(PR)).rejects.toThrow(/malformed/);
   });
 });
@@ -336,7 +336,7 @@ describe("D#519 MQ1 port: compare", () => {
   it("a repeated file, an unknown status and a malformed count all throw", async () => {
     const http = (page: unknown): GitHubHttp => ({
       async request(req) {
-        if (req.path.endsWith("/pulls/7")) return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: HEAD }, base: { ref: "main" } } };
+        if (req.path.endsWith("/pulls/7")) return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: HEAD }, base: { ref: "main", repo: { default_branch: "main" } } } };
         return { status: 200, body: typeof page === "function" ? (page as (r: typeof req) => unknown)(req) : page };
       },
     });
@@ -357,7 +357,7 @@ describe("D#519 MQ1 port: a runner_local repository stays inside its allowlist",
   function localPort() {
     const requests: string[] = [];
     const sleeps: number[] = [];
-    const pull = { number: 7, state: "open", merged_at: null, draft: false, head: { sha: HEAD, ref: "fx/run-1", repo: { full_name: "acme/widgets" } }, base: { ref: "main", repo: { full_name: "acme/widgets" } } };
+    const pull = { number: 7, state: "open", merged_at: null, draft: false, head: { sha: HEAD, ref: "fx/run-1", repo: { full_name: "acme/widgets" } }, base: { ref: "main", repo: { full_name: "acme/widgets", default_branch: "main" } } };
     const http = {
       async request(req: { method: string; path: string }) {
         requests.push(`${req.method} ${req.path}`);

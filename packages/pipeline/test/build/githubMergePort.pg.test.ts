@@ -27,6 +27,9 @@ interface FakeState {
   merged: string[];
   /** Runs when the merge request arrives (a push racing the merge). */
   onMerge?: (s: FakeState) => void;
+  /** The PR's base branch (default "release/main") and the repository's default branch as GitHub reports it on `base.repo` (default "release/main"; null leaves the field out). */
+  baseRef?: string;
+  defaultBranch?: string | null;
 }
 
 function page<T>(all: T[], q: Record<string, string | number> | undefined): T[] {
@@ -42,7 +45,7 @@ function fakeGitHub(over: Partial<FakeState> = {}): { http: GitHubHttp; state: F
       state.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && /\/pulls\/7$/.test(path)) {
-        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: state.headSha }, base: { ref: "release/main" } } };
+        return { status: 200, body: { state: "open", merged: false, draft: false, mergeable: true, mergeable_state: "clean", head: { sha: state.headSha }, base: { ref: state.baseRef ?? "release/main", repo: state.defaultBranch === null ? {} : { default_branch: state.defaultBranch ?? "release/main" } } } };
       }
       if (req.method === "GET" && path.endsWith("/check-runs")) {
         const list = state.checks.map((c, i) => ({ head_sha: HEAD, id: i + 1, app: { id: 1 }, ...c }));
@@ -54,7 +57,7 @@ function fakeGitHub(over: Partial<FakeState> = {}): { http: GitHubHttp; state: F
       if (req.method === "GET" && path.includes("/protection/required_status_checks")) {
         return state.protection ?? { status: 404, body: { message: "Branch not protected" } };
       }
-      if (req.method === "GET" && path.includes("/rules/branches/release/main")) {
+      if (req.method === "GET" && path.includes(`/rules/branches/${state.baseRef ?? "release/main"}`)) {
         return { status: 200, body: page(state.rules, req.query) };
       }
       if (req.method === "PUT" && path.endsWith("/pulls/7/merge")) {
@@ -310,6 +313,20 @@ describe("H14c-1 runMergeGate over the real port [pg]", () => {
     const { result } = await run(f);
     expect(result).toEqual({ outcome: "merged", headSha: HEAD });
     expect(f.state.merged).toEqual([HEAD]);
+  });
+
+  it("D#598 P3b: a PR whose base is its parent's branch is never merged: no merge request reaches GitHub, and the stop names why", async () => {
+    const f = fakeGitHub({ checks: [ok("build")], baseRef: "fx/issue-41", defaultBranch: "main" });
+    const { result } = await run(f);
+    expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: ["stacked_on_open_pr"] });
+    expect(f.state.merged).toEqual([]);
+    expect(f.state.requests.some((r) => r.method === "PUT")).toBe(false);
+  });
+
+  it("D#598 P3b: GitHub's PR answer without the repository's default branch is malformed, never a pass: the read throws and nothing merges", async () => {
+    const f = fakeGitHub({ checks: [ok("build")], defaultBranch: null });
+    await expect(run(f)).rejects.toThrow(/pull\.base\.repo\.default_branch/);
+    expect(f.state.merged).toEqual([]);
   });
 
   it("a push lands between the gate's reads and the merge call: GitHub refuses the stale sha, nothing merges, the new head gets reviews", async () => {
