@@ -499,11 +499,20 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         "SELECT count(*) AS n FROM agent_runs WHERE account_id = $1 AND work_item_id = $2 AND NOT (status = ANY($3::text[]))",
         [accountId, workItemId, [...ADVANCE_TERMINAL_STATUSES]],
       );
-      return { role: role.rows[0]?.role, item: item.rows[0], live: Number(live.rows[0]?.n ?? 0) };
+      // D#483 S3 E8: the proposal behind this work item, if there is one. Its owner decides whether this product may start it.
+      const owner = await client.query<{ owner_process: string }>(
+        "SELECT owner_process FROM proposals WHERE account_id = $1 AND work_item_id = $2 LIMIT 1",
+        [accountId, workItemId],
+      );
+      return { role: role.rows[0]?.role, item: item.rows[0], live: Number(live.rows[0]?.n ?? 0), proposalOwner: owner.rows[0]?.owner_process ?? null };
     });
     if (read.role !== "owner" && read.role !== "admin") return refused("principal_not_authorised");
     const item = read.item;
     if (!item) return refused("target_not_found");
+    // E8: one process per item, at start. An item the repository's own development loop owns is never started from here, whatever route
+    // asked (the proposal approve route checks it too; this covers a direct POST /work-items/{id}/approve). Fail closed: any owner but
+    // the literal "product" refuses.
+    if (read.proposalOwner !== null && read.proposalOwner !== "product") return refused("owned_by_internal_loop");
     // Fail closed, as the intake gate does: only the exact literal "internal" is internal.
     if (item.provenance !== "internal") return refused("external_requires_human");
     if (item.repo_id === null) return refused("no_repo");

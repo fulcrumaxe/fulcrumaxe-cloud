@@ -9,6 +9,7 @@ import {
   ImportRepoNotConnectedError,
   ImportRunningError,
   PLAN_PAGE_SIZE,
+  removeRepoPlan,
   type PlanSource,
 } from "@fx/core/src/plan/index.js";
 import type { RouteEntry } from "../registry.js";
@@ -89,6 +90,10 @@ const planSchema = z.object({
   ),
   next_cursor: z.string().nullable(),
   tasks_truncated: z.boolean(),
+});
+
+const removedSchema = z.object({
+  removed: z.object({ proposals_removed: z.number().int(), tasks_removed: z.number().int(), milestones_removed: z.number().int(), imports_removed: z.number().int() }),
 });
 
 const planQuery = z.object({
@@ -203,6 +208,35 @@ export const planRoutes: RouteEntry[] = [
         full: q.format === "full",
       });
       return view as unknown as z.infer<typeof planSchema>;
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/v1/repos/{id}/plan",
+    operationId: "removeRepoPlan",
+    summary: "Remove the repository's imported plan",
+    description:
+      "Session only, owner or admin; a token is refused. Removes the imported plan: its milestones, tasks and import records, and the proposals that are still `new` or `withdrawn`. " +
+      "Approved and rejected proposals are decisions and are kept (they stop showing a task), and work items are never touched. Importing again restores everything that can be read from the repository. " +
+      "Answers 200 with what was removed. Refused while an import is running (409 `import_running`); an import that died more than 10 minutes ago is closed as interrupted and does not block it. Removing a plan that is already gone answers 200 with zero counts. " +
+      "A repository that has lost its GitHub App installation can still be cleared.",
+    principals: ["session"],
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    paramsSchema: repoParams,
+    responseSchema: removedSchema,
+    extraResponses: {
+      "403": "Error `session_required` (a token) or `insufficient_role` (below admin).",
+      "404": "Error `not_found`: the repository does not exist in this account.",
+      "409": "Error `import_running`: an import is running for this repository.",
+    },
+    async handler(ctx, input) {
+      const removed = await removeRepoPlan({ pool: ctx.pool, principal: { accountId: ctx.principal.accountId, userId: ctx.principal.userId } }, input.params.id!).catch((err: unknown) => {
+        if (err instanceof ImportRunningError) throw new ImportRunningApiError();
+        throw err;
+      });
+      return { removed };
     },
   },
 ];

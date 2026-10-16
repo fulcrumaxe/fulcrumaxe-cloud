@@ -139,8 +139,8 @@ describe('token-inventory: generic session-only and scope enforcement over the r
 
 /** API-15 / DS-3a-2 / DS-3a-3: only the five discussion and comment write routes accept a write scope so far. */
 describe('token-inventory: write scopes open only the routes that declare them', () => {
-  it('only the five discussion and comment writes declare discussions:write; only setWorkItemPriority declares work_items:write', () => {
-    expect(ROUTES.filter((r) => r.scope === 'work_items:write').map((r) => r.operationId)).toEqual(['setWorkItemPriority']);
+  it('only the five discussion and comment writes declare discussions:write; only setWorkItemPriority and the three proposal decisions declare work_items:write', () => {
+    expect(ROUTES.filter((r) => r.scope === 'work_items:write').map((r) => r.operationId).sort()).toEqual(['rejectProposal', 'restoreProposal', 'setWorkItemPriority', 'withdrawProposalApproval']);
     expect(ROUTES.filter((r) => r.scope === 'discussions:write').map((r) => r.operationId).sort()).toEqual(['createDiscussion', 'editComment', 'patchDiscussion', 'postComment', 'reviseDiscussion']);
   });
 
@@ -153,14 +153,14 @@ describe('token-inventory: write scopes open only the routes that declare them',
       'listWebhookEndpoints', 'getWebhookEndpoint', 'listWebhookDeliveries', 'listEvents', 'listRunEvents',
       'getModelConnection', 'listRepos', 'getRepo', 'getRepoSettings', 'getRepoPairing', 'listRoles', 'getUsage', 'getBudgets',
       'getRunLimits', 'getRunAction', 'exportRunEvents', 'listDiscussions', 'getDiscussion',
-      'listComments', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency',
+      'listComments', 'listProposals', 'getProposal', 'getLatestPlanImport', 'getRepoPlan', 'getRunnerConcurrency',
     ].map((id) => `${id}:read`);
     expect([...tokenRoutes].sort()).toEqual(
       [
         ...read, 'deleteToken:self', 'listAuditLog:audit:read', 'cancelRun:runs:cancel', 'cancelWorkItem:runs:cancel',
         'postComment:discussions:write', 'editComment:discussions:write',
         'createDiscussion:discussions:write', 'patchDiscussion:discussions:write', 'reviseDiscussion:discussions:write',
-        'setWorkItemPriority:work_items:write',
+        'setWorkItemPriority:work_items:write', 'rejectProposal:work_items:write', 'restoreProposal:work_items:write', 'withdrawProposalApproval:work_items:write',
         'listCorrections:read', 'createCorrection:corrections:write',
       ].sort(),
     );

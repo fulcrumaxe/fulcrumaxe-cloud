@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "not_new",
+    "message": "the proposal is not new",
+    "request_id": "33333333-3333-4333-8333-333333333333"
+  }
+}

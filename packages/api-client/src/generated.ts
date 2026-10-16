@@ -2256,6 +2256,234 @@ export interface Operations {
       tasks_truncated: boolean;
     };
   };
+  removeRepoPlan: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      removed: {
+        proposals_removed: number;
+        tasks_removed: number;
+        milestones_removed: number;
+        imports_removed: number;
+      };
+    };
+  };
+  listProposals: {
+    path: undefined;
+    query: {
+      repo_id?: string;
+      state?: "new" | "approved" | "rejected" | "withdrawn";
+      owner?: "product" | "internal_loop";
+      cursor?: string;
+    };
+    body: undefined;
+    response: {
+      proposals: Array<{
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      }>;
+      next_cursor: string | null;
+    };
+  };
+  getProposal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      proposal: {
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      };
+    };
+  };
+  approveProposal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      proposal: {
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      };
+      work_item_id: string;
+      started: boolean;
+      not_started_reason: ("no_write_install" | "not_issue_backed" | "owned_by_internal_loop") | (null);
+    };
+  };
+  rejectProposal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      note?: (string) | (null);
+    };
+    response: {
+      proposal: {
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      };
+    };
+  };
+  restoreProposal: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      proposal: {
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      };
+    };
+  };
+  withdrawProposalApproval: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      proposal: {
+        id: string;
+        repo_id: string;
+        dedupe_key: string;
+        sources: Array<string>;
+        gh_number: (number) | (null);
+        discussion_number: (number) | (null);
+        task_key: string | null;
+        milestone_key: string | null;
+        milestone_title: string | null;
+        title: string;
+        summary: string | null;
+        category_hint: string | null;
+        estimate_usd: number | null;
+        provenance: "internal" | "external";
+        owner_process: "product" | "internal_loop";
+        state: "new" | "approved" | "rejected" | "withdrawn";
+        decided_at: string | null;
+        reject_note: string | null;
+        roadmap_position: (number) | (null);
+        work_item_id: (string) | (null);
+        work_item_stage: string | null;
+        created_at: string;
+        updated_at: string;
+      };
+    };
+  };
   listCorrections: {
     path: {
       id: string;
@@ -3460,6 +3688,83 @@ export const operations = {
     idempotency: "never",
     pathParams: ["id"],
     queryParams: ["milestone","status","cursor","limit","format"],
+    hasBody: false,
+  },
+  removeRepoPlan: {
+    method: "DELETE",
+    path: "/api/v1/repos/{id}/plan",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  listProposals: {
+    method: "GET",
+    path: "/api/v1/proposals",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["repo_id","state","owner","cursor"],
+    hasBody: false,
+  },
+  getProposal: {
+    method: "GET",
+    path: "/api/v1/proposals/{id}",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  approveProposal: {
+    method: "POST",
+    path: "/api/v1/proposals/{id}/approve",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  rejectProposal: {
+    method: "POST",
+    path: "/api/v1/proposals/{id}/reject",
+    tokenAccess: true,
+    scope: "work_items:write",
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  restoreProposal: {
+    method: "POST",
+    path: "/api/v1/proposals/{id}/restore",
+    tokenAccess: true,
+    scope: "work_items:write",
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  withdrawProposalApproval: {
+    method: "POST",
+    path: "/api/v1/proposals/{id}/withdraw-approval",
+    tokenAccess: true,
+    scope: "work_items:write",
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
     hasBody: false,
   },
   listCorrections: {

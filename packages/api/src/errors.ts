@@ -347,6 +347,27 @@ export class PlanImportUnavailableError extends ApiError {
   }
 }
 
+/**
+ * D#483 S3-L2a: a proposal decision the state of the proposal or its work item does not allow. The code is the definer's
+ * own word (0723, 0753), passed through unchanged; the codes are on the telemetry allowlist by hand because the scan cannot
+ * read a variable. Nothing was written.
+ */
+const PROPOSAL_REFUSALS: Record<string, string> = {
+  not_new: "the proposal is not new",
+  not_rejected: "the proposal is not rejected",
+  not_approved: "the proposal is not approved",
+  work_started: "work has already started on the approved item",
+  owned_by_internal_loop: "this item belongs to the repository's own development loop",
+  repo_not_connected: "this repository isn't connected any more",
+  work_item_wrong_repo: "the work item belongs to another repository",
+  work_item_wrong_stage: "this issue is already in flight: its work item has moved past triaged",
+};
+export class ProposalRefusedApiError extends ApiError {
+  constructor(code: string) {
+    super(409, code, PROPOSAL_REFUSALS[code] ?? "refused");
+  }
+}
+
 /** D#31 API-4b criterion 10: the endpoint past the plan's limit
  * -> 409 `endpoint_limit_reached`. */
 export class EndpointLimitReachedError extends ApiError {

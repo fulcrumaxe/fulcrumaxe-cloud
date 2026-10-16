@@ -269,6 +269,14 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "scope_unresolved",
   "duplicate",
   "pending_full",
+  // Proposal inbox refusals (D#483 S3-L2a): thrown through a variable by ProposalRefusedApiError, so the scan cannot see them.
+  "not_new",
+  "not_rejected",
+  "not_approved",
+  "work_started",
+  "owned_by_internal_loop",
+  "work_item_wrong_repo",
+  "work_item_wrong_stage",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */
