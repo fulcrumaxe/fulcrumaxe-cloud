@@ -1303,6 +1303,158 @@ export interface Operations {
       }>;
     };
   };
+  getActionAccountRules: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
+  appendActionAccountRules: {
+    path: undefined;
+    query: undefined;
+    body: {
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+    };
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
+  rollbackActionAccountRules: {
+    path: undefined;
+    query: undefined;
+    body: {
+      to_version: number;
+    };
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
+  getActionRepoRules: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
+  appendActionRepoRules: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+    };
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
+  rollbackActionRepoRules: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      to_version: number;
+    };
+    response: {
+      repo_id: string | null;
+      source: "repo" | "account" | "none";
+      version: number;
+      rules: {
+        rules: Array<unknown>;
+        [key: string]: unknown;
+      };
+      history: Array<{
+        version: number;
+        rule_count: number;
+        rules_sha256: string;
+        restored_from_version: number | null;
+        author_name: string;
+        created_at: string;
+      }>;
+    };
+  };
   getInstallUrl: {
     path: undefined;
     query: {
@@ -3360,6 +3512,72 @@ export const operations = {
   setAskSetting: {
     method: "POST",
     path: "/api/v1/repos/{id}/ask-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getActionAccountRules: {
+    method: "GET",
+    path: "/api/v1/action-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  appendActionAccountRules: {
+    method: "POST",
+    path: "/api/v1/action-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  rollbackActionAccountRules: {
+    method: "POST",
+    path: "/api/v1/action-rules/rollback",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  getActionRepoRules: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/action-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  appendActionRepoRules: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/action-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  rollbackActionRepoRules: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/action-rules/rollback",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
