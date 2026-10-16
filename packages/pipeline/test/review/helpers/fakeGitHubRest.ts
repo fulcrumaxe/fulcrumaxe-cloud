@@ -9,6 +9,7 @@ import type { GitHubHttp, GitHubHttpRequest, GitHubHttpResponse } from "../../..
  *    `pending` with `total_count: 0` (which `isCiGreen` must not read as green);
  *  - `POST /statuses/{sha}` needs a full 40-hex sha (else 404 "No commit found for SHA"), a state in the real enum
  *    (else 422), and a description of at most 140 characters (else 422); it answers 201;
+ *  - the single-PR read carries `mergeable` (boolean, or null while GitHub computes it) and `mergeable_state`, as the real one does;
  *  - `PUT /pulls/{n}/merge` merges whatever the head is when `sha` is absent, answers 409 when a `sha` is given and the
  *    head has moved, 405 when the pull request is not mergeable, 422 for a `merge_method` outside the real enum;
  *  - branch protection answers 404 "Branch not protected" when none is set;
@@ -53,6 +54,9 @@ export interface FakeRepoState {
   rulesetRules?: Array<{ type: string; enforcement?: string }>;
   /** The branch protection read answers with this status and a "Forbidden"/"Not Found" body (a private repository on a plan without protection, or no permission). */
   protectionStatus?: number;
+  /** What the single-PR read says about mergeability (D#519 MQ1): `mergeable` is boolean, or null while GitHub computes it. Default: true / "clean". */
+  mergeable?: boolean | null;
+  mergeableState?: string;
   /** Branch protection answered as `Branch not protected` unless required contexts are set. */
   mergeStatus: number | null;
   /** Runs when the merge request arrives (a push racing the merge may change `headSha`). */
@@ -108,7 +112,7 @@ export function fakeGitHubRest(s: FakeRepoState): GitHubHttp {
       s.requests.push(req);
       const path = req.path;
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}`) {
-        return json(200, { number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef } });
+        return json(200, { number: s.prNumber, state: s.state, merged: s.merged, draft: s.draft, mergeable: s.mergeable === undefined ? true : s.mergeable, mergeable_state: s.mergeableState ?? "clean", head: { sha: s.headSha, ref: `fx/issue-7`, repo: { full_name: `${s.owner}/${s.name}` } }, base: { ref: s.baseRef } });
       }
       if (req.method === "GET" && path === `${base}/pulls/${s.prNumber}/files`) {
         if (s.filesFail) return json(s.filesFail, { message: "Server Error" });

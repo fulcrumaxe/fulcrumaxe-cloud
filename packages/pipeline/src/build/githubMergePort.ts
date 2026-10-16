@@ -5,8 +5,13 @@ import {
   type CommitStatusState,
   type MergeBlockReason,
   type MergeCallOutcome,
+  type BranchComparison,
+  type CompareStatus,
   type MergeGateGitHubPort,
+  type MergeableState,
+  type PullRequestMergeability,
   type PullRequestState,
+  type UpdateBranchOutcome,
   type RequiredAppCheck,
 } from "./mergeGate.js";
 import type { PullRequestRef } from "./types.js";
@@ -65,6 +70,13 @@ export interface GitHubMergePortDeps {
   markReadyForHumanMerge(pr: PullRequestRef, args: { headSha: string; reasons: readonly MergeBlockReason[] }): Promise<void>;
   mergeMethod?: "merge" | "squash" | "rebase";
   /**
+   * D#519 MQ1: waits between reads while GitHub is still computing `mergeable` (it answers `null`). Defaults to a real timer. The
+   * wait is short and bounded by `mergeablePollLimit` reads; a caller that must not wait in a step passes a shorter limit.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  mergeablePollLimit?: number;
+  mergeablePollIntervalMs?: number;
+  /**
    * D#6 R3c: set for a `runner_local` repo. Every read the port makes then stays inside the local-only allowlist: the pull request
    * comes from the list call (A3) filtered by the run's recorded branch, CI from the `CommitChecks` document (A9), protection from
    * the one protection call (A8), and the merge is A10. No check-run, status or rules REST path is called, and no check output is read.
@@ -72,6 +84,18 @@ export interface GitHubMergePortDeps {
    */
   local?: { http: LocalGitHubHttp; recordedBranch(pr: PullRequestRef): Promise<string> };
 }
+
+/** D#519 policy constants: how many reads (the first included) a `null` `mergeable` gets, and the wait between them. */
+export const MERGEABLE_POLL_LIMIT = 6;
+export const MERGEABLE_POLL_INTERVAL_MS = 2000;
+const MERGEABLE_STATES: ReadonlySet<string> = new Set(["clean", "behind", "dirty", "blocked", "unstable", "has_hooks", "draft", "unknown"]);
+const COMPARE_STATUSES: ReadonlySet<string> = new Set(["ahead", "behind", "diverged", "identical"]);
+/** GitHub's own 404 messages for "no classic rule" and "a rule that requires no status checks". */
+const NO_RULE_MESSAGES: ReadonlySet<string> = new Set(["Branch not protected", "Required status checks not enabled"]);
+const LOCAL_REFUSED = "not available on a runner_local repository's allowlist";
+
+/** GitHub returns at most this many files for one comparison, on its first response only. */
+export const COMPARE_FILES_CAP = 300;
 
 const PER_PAGE = 100;
 /** A hard ceiling on pages per list (10,000 items). Hitting it leaves the
@@ -139,8 +163,43 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     return { ...found, merged: typeof found.merged_at === "string" };
   }
 
+  async function readPrBody(pr: PullRequestRef): Promise<Json> {
+    return deps.local ? readPrLocal(pr, await deps.local.recordedBranch(pr)) : okBody(await get(`${await repoPath(pr)}/pulls/${pr.prNumber}`), "get pull request");
+  }
+
   async function readPr(pr: PullRequestRef): Promise<{ state: PullRequestState; baseRef: string }> {
-    const body = deps.local ? await readPrLocal(pr, await deps.local.recordedBranch(pr)) : await okBody(await get(`${await repoPath(pr)}/pulls/${pr.prNumber}`), "get pull request");
+    return parsePr(await readPrBody(pr));
+  }
+
+  /**
+   * D#519 MQ1: one read of the PR with its mergeability. The single-PR read always carries `mergeable` (boolean, or `null` while
+   * GitHub computes it) and `mergeable_state`; a response without them is malformed, not "clean". The list read a `runner_local`
+   * repo is limited to carries neither, so there `mergeable` stays `null` and nothing is classified from it.
+   */
+  async function readMergeabilityOnce(pr: PullRequestRef): Promise<PullRequestMergeability> {
+    const body = await readPrBody(pr);
+    const { state } = parsePr(body);
+    if (deps.local) return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: null, mergeableState: "unknown" };
+    if (body.mergeable !== null && typeof body.mergeable !== "boolean") bad("pull.mergeable");
+    if (typeof body.mergeable_state !== "string") bad("pull.mergeable_state");
+    const mergeableState: MergeableState = MERGEABLE_STATES.has(body.mergeable_state) ? (body.mergeable_state as MergeableState) : "unknown";
+    return { headSha: state.headSha, state: state.state, merged: state.merged, mergeable: body.mergeable, mergeableState };
+  }
+
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  /** Reads until GitHub has computed `mergeable` or the bound is spent; the last read is returned, `null` included. */
+  async function readMergeability(pr: PullRequestRef, gatedHeadSha?: string): Promise<PullRequestMergeability> {
+    const limit = Math.max(1, deps.mergeablePollLimit ?? MERGEABLE_POLL_LIMIT);
+    let m = await readMergeabilityOnce(pr);
+    for (let reads = 1; m.mergeable === null && !deps.local && reads < limit && (gatedHeadSha === undefined || m.headSha === gatedHeadSha); reads++) {
+      await sleep(deps.mergeablePollIntervalMs ?? MERGEABLE_POLL_INTERVAL_MS);
+      m = await readMergeabilityOnce(pr);
+    }
+    return m;
+  }
+
+  function parsePr(body: Json): { state: PullRequestState; baseRef: string } {
     const head = body.head;
     const base = body.base;
     if (!isObj(head) || typeof head.sha !== "string") bad("pull.head.sha");
@@ -234,6 +293,22 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     return { contexts: [...contexts].sort(), appBound, protectedBase: true, unreadable: false };
   }
 
+  /** Every rule the rulesets apply to the base branch, across all pages. */
+  async function listRules(repo: string, baseRef: string): Promise<Json[]> {
+    const rules: Json[] = [];
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await get(`${repo}/rules/branches/${segment(baseRef)}`, { per_page: PER_PAGE, page });
+      if (res.status !== 200 || !Array.isArray(res.body)) throw new Error(`GitHub branch rules: unexpected status ${res.status}`);
+      for (const rule of res.body) {
+        if (!isObj(rule)) bad("rule");
+        rules.push(rule);
+      }
+      if (res.body.length < PER_PAGE) break;
+      if (page === MAX_PAGES) throw new Error("GitHub branch rules: too many pages");
+    }
+    return rules;
+  }
+
   async function requiredContexts(pr: PullRequestRef, baseRef: string): Promise<{ contexts: string[]; appBound: RequiredAppCheck[]; protectedBase: boolean; unreadable: boolean }> {
     if (deps.local) return requiredContextsLocal(pr, baseRef);
     const repo = await repoPath(pr);
@@ -274,25 +349,18 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
     }
 
     // Rulesets that apply to the base branch.
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const res = await get(`${repo}/rules/branches/${segment(baseRef)}`, { per_page: PER_PAGE, page });
-      if (res.status !== 200 || !Array.isArray(res.body)) throw new Error(`GitHub branch rules: unexpected status ${res.status}`);
-      for (const rule of res.body) {
-        if (!isObj(rule)) bad("rule");
-        // GitHub lists only the active rulesets' rules here; a rule that says otherwise is ignored as well. Only a rule that
-        // controls how commits reach the branch counts as protection: a ruleset of `deletion` or `creation` rules alone does not.
-        if (typeof rule.enforcement === "string" && rule.enforcement !== "active") continue;
-        if (typeof rule.type === "string" && PROTECTING_RULE_TYPES.has(rule.type)) protectedBase = true;
-        if (rule.type !== "required_status_checks") continue;
-        const params = rule.parameters;
-        if (!isObj(params) || !Array.isArray(params.required_status_checks)) bad("rule.parameters");
-        for (const c of params.required_status_checks) {
-          if (!isObj(c) || typeof c.context !== "string") bad("rule.required_status_checks");
-          need(c.context, appBinding(c.integration_id, "rule.required_status_checks.integration_id"));
-        }
+    for (const rule of await listRules(repo, baseRef)) {
+      // GitHub lists only the active rulesets' rules here; a rule that says otherwise is ignored as well. Only a rule that
+      // controls how commits reach the branch counts as protection: a ruleset of `deletion` or `creation` rules alone does not.
+      if (typeof rule.enforcement === "string" && rule.enforcement !== "active") continue;
+      if (typeof rule.type === "string" && PROTECTING_RULE_TYPES.has(rule.type)) protectedBase = true;
+      if (rule.type !== "required_status_checks") continue;
+      const params = rule.parameters;
+      if (!isObj(params) || !Array.isArray(params.required_status_checks)) bad("rule.parameters");
+      for (const c of params.required_status_checks) {
+        if (!isObj(c) || typeof c.context !== "string") bad("rule.required_status_checks");
+        need(c.context, appBinding(c.integration_id, "rule.required_status_checks.integration_id"));
       }
-      if (res.body.length < PER_PAGE) break;
-      if (page === MAX_PAGES) throw new Error("GitHub branch rules: too many pages");
     }
     const appBound = [...bound.values()].sort((a, b) => a.appId - b.appId || a.context.localeCompare(b.context));
     return { contexts: [...contexts].sort(), appBound, protectedBase, unreadable: false };
@@ -421,6 +489,94 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
       // Merged only on GitHub's explicit 200 + `merged: true`.
       if (res.status === 200 && isObj(res.body) && res.body.merged === true) return { merged: true };
       return { merged: false, httpStatus: res.status };
+    },
+
+    async getMergeability(pr, opts) {
+      return readMergeability(pr, opts?.gatedHeadSha);
+    },
+
+    async updateBranch(pr, args): Promise<UpdateBranchOutcome> {
+      if (deps.local) throw new Error(`GitHub update branch: ${LOCAL_REFUSED}`);
+      // Never call the endpoint without a well-formed head to hold GitHub to: `expected_head_sha` is what makes a push after our
+      // reads a refusal instead of a merge of a head nobody reviewed.
+      if (!SHA_PATTERN.test(args.expectedHeadSha)) throw new Error("updateBranch: malformed expected head SHA");
+      const res = await deps.http.request({
+        method: "PUT",
+        path: `${await repoPath(pr)}/pulls/${pr.prNumber}/update-branch`,
+        body: { expected_head_sha: args.expectedHeadSha },
+      });
+      // 202 means GitHub took the request and will merge the base in LATER. It is not a refresh: the head is unchanged until a
+      // later read shows otherwise.
+      if (res.status === 202) return { outcome: "accepted" };
+      // 403 (the App lacks the permission or the branch is not writable) and every other status are errors: the step retries.
+      if (res.status !== 422) throw new Error(`GitHub update branch: unexpected status ${res.status}`);
+      // A head that is not `expected_head_sha` and a merge conflict both answer 422. Only a re-read tells them apart.
+      const after = await readMergeability(pr);
+      if (after.headSha !== args.expectedHeadSha) {
+        if (!SHA_PATTERN.test(after.headSha)) bad("pull.head.sha");
+        return { outcome: "head_moved", newHeadSha: after.headSha };
+      }
+      if (after.mergeable === false) return { outcome: "conflict" };
+      throw new Error("GitHub update branch: refused with an unmoved head and no conflict reported");
+    },
+
+    async compareToBase(pr, headSha, opts): Promise<BranchComparison> {
+      if (deps.local) throw new Error(`GitHub compare: ${LOCAL_REFUSED}`);
+      if (!SHA_PATTERN.test(headSha)) throw new Error("compareToBase: malformed head SHA");
+      const repo = await repoPath(pr);
+      const { baseRef } = await readPr(pr);
+      const path = `${repo}/compare/${segment(baseRef)}...${headSha}`;
+      const wantFiles = opts?.files === true;
+      // GitHub's compare pages the COMMITS with per_page/page; the files come on the first response only, capped at COMPARE_FILES_CAP
+      // for the whole comparison. So one request is made, and a list that reached the cap is reported as truncated.
+      const res = await get(path, wantFiles ? {} : { per_page: 1 });
+      const body = await okBody(res, "compare");
+      if (typeof body.status !== "string" || !COMPARE_STATUSES.has(body.status)) bad("compare.status");
+      if (!Number.isSafeInteger(body.ahead_by) || (body.ahead_by as number) < 0) bad("compare.ahead_by");
+      if (!Number.isSafeInteger(body.behind_by) || (body.behind_by as number) < 0) bad("compare.behind_by");
+      const counts = { status: body.status as CompareStatus, aheadBy: body.ahead_by as number, behindBy: body.behind_by as number };
+      if (!wantFiles) return { ...counts, files: null, filesTruncated: false };
+      if (!Array.isArray(body.files)) bad("compare.files");
+      const files: string[] = [];
+      const seen = new Set<string>();
+      for (const f of body.files) {
+        if (!isObj(f) || typeof f.filename !== "string") bad("compare.files.filename");
+        if (f.previous_filename !== undefined && typeof f.previous_filename !== "string") bad("compare.files.previous_filename");
+        if (seen.has(f.filename)) throw new Error("GitHub compare: file repeated");
+        seen.add(f.filename);
+        files.push(f.filename);
+        // A renamed file touched both paths.
+        if (typeof f.previous_filename === "string" && !seen.has(f.previous_filename)) {
+          seen.add(f.previous_filename);
+          files.push(f.previous_filename);
+        }
+      }
+      // At the cap the list may be cut short and is NOT a complete set: it is withheld (files: null) so it cannot be mistaken for one.
+      if (body.files.length >= COMPARE_FILES_CAP) return { ...counts, files: null, filesTruncated: true };
+      return { ...counts, files, filesTruncated: false };
+    },
+
+    async requiresUpToDateBranch(pr): Promise<boolean> {
+      if (deps.local) throw new Error(`GitHub branch protection strictness: ${LOCAL_REFUSED}`);
+      const repo = await repoPath(pr);
+      const { baseRef } = await readPr(pr);
+      // Classic protection. A 404 means "no rule" ONLY with GitHub's own two messages. Unlike the CI read, a 403 or any other 404
+      // is NOT "not required": an unreadable rule may well require it, so it throws and the step retries.
+      const prot = await get(`${repo}/branches/${segment(baseRef)}/protection/required_status_checks`);
+      if (prot.status === 200 && isObj(prot.body)) {
+        if (typeof prot.body.strict !== "boolean") bad("protection.strict");
+        if (prot.body.strict) return true;
+      } else if (!(prot.status === 404 && isObj(prot.body) && typeof prot.body.message === "string" && NO_RULE_MESSAGES.has(prot.body.message))) {
+        throw new Error(`GitHub branch protection: unexpected status ${prot.status}`);
+      }
+      for (const rule of await listRules(repo, baseRef)) {
+        if (typeof rule.enforcement === "string" && rule.enforcement !== "active") continue;
+        if (rule.type !== "required_status_checks") continue;
+        const params = rule.parameters;
+        if (!isObj(params) || typeof params.strict_required_status_checks_policy !== "boolean") bad("rule.parameters.strict_required_status_checks_policy");
+        if (params.strict_required_status_checks_policy) return true;
+      }
+      return false;
     },
 
     markReadyForHumanMerge: (pr, args) => deps.markReadyForHumanMerge(pr, args),

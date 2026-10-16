@@ -146,8 +146,57 @@ export interface CiSnapshot {
 
 export type MergeCallOutcome = { merged: true } | { merged: false; httpStatus: number };
 
+/** GitHub's documented `mergeable_state` values. A value GitHub adds later reads as `unknown`, which never classifies anything. */
+export type MergeableState = "clean" | "behind" | "dirty" | "blocked" | "unstable" | "has_hooks" | "draft" | "unknown";
+
+/**
+ * D#519 MQ1: the pull request as GitHub reports its mergeability. `mergeable` is `null` while GitHub is still computing it in the
+ * background; a port polls that itself (bounded) and returns `null` only when the bound was spent, which no caller may read as
+ * either answer. `behind` is reported only when the base branch requires up-to-date branches, so "is it behind" for any other repo
+ * comes from `compareToBase`, never from this.
+ */
+export interface PullRequestMergeability {
+  headSha: string;
+  state: "open" | "closed";
+  merged: boolean;
+  mergeable: boolean | null;
+  mergeableState: MergeableState;
+}
+
+/** GitHub's compare `status`: the head relative to the base branch. */
+export type CompareStatus = "ahead" | "behind" | "diverged" | "identical";
+
+/**
+ * D#519 MQ1: `GET /compare/{base}...{head}`. `behindBy` is how many commits the base branch has that the head lacks. `files` is the
+ * set of paths the head changed since the merge base (a rename lists both names), or `null` when the caller did not ask for them.
+ * GitHub returns files on one response only and at most 300 for the whole comparison. When the cap is reached `filesTruncated` is
+ * true and `files` is `null`: the set is unknown, so a caller MUST treat it as overlapping anything (never as disjoint).
+ */
+export interface BranchComparison {
+  status: CompareStatus;
+  aheadBy: number;
+  behindBy: number;
+  files: readonly string[] | null;
+  filesTruncated: boolean;
+}
+
+/**
+ * D#519 MQ1: what GitHub's update-branch endpoint amounted to. `accepted` is only the 202: GitHub merges the base into the branch
+ * LATER, so the head has not changed yet and nothing has been refreshed. `conflict` is a 422 with an unmoved head and `mergeable:
+ * false`; `head_moved` is a 422 whose re-read head differs from the `expected_head_sha` sent. Any other answer throws.
+ */
+export type UpdateBranchOutcome = { outcome: "accepted" } | { outcome: "conflict" } | { outcome: "head_moved"; newHeadSha: string };
+
 export interface MergeGateGitHubPort {
   getPullRequest(pr: PullRequestRef): Promise<PullRequestState>;
+  /** D#519 MQ1: the pull request's mergeability, with `mergeable: null` already polled (see `PullRequestMergeability`). With `gatedHeadSha`, polling stops as soon as the head differs from it (a moved head needs no mergeability). */
+  getMergeability(pr: PullRequestRef, opts?: { gatedHeadSha?: string }): Promise<PullRequestMergeability>;
+  /** D#519 MQ1: `PUT .../update-branch` with `expected_head_sha`. Asynchronous on GitHub's side (see `UpdateBranchOutcome`). */
+  updateBranch(pr: PullRequestRef, args: { expectedHeadSha: string }): Promise<UpdateBranchOutcome>;
+  /** D#519 MQ1: the base branch against `headSha`. `files` asks for the changed paths too (every page). */
+  compareToBase(pr: PullRequestRef, headSha: string, opts?: { files?: boolean }): Promise<BranchComparison>;
+  /** D#519 MQ1: whether protection or a ruleset on the base branch requires branches to be up to date. A read that cannot be made throws; it is never "not required". */
+  requiresUpToDateBranch(pr: PullRequestRef): Promise<boolean>;
   getCiSnapshot(pr: PullRequestRef, headSha: string): Promise<CiSnapshot>;
   /** Must send GitHub's `sha` parameter. */
   mergePullRequest(pr: PullRequestRef, args: { sha: string }): Promise<MergeCallOutcome>;
@@ -224,7 +273,17 @@ export type MergeBlockReason =
   | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
   | "human_merge_only"
-  | "merge_call_refused";
+  /** The residual: GitHub refused the merge and nothing below explains it. */
+  | "merge_call_refused"
+  // D#519: the merge queue's distinct stops. `merge_conflict`, `branch_behind` and `branch_protection_refused` are what the gate
+  // itself answers after a refused merge (MQ1); the rest are produced by the queue and the ordered-resource check (MQ2 to MQ5).
+  | "merge_queue_waiting"
+  | "branch_behind"
+  | "merge_conflict"
+  | "branch_protection_refused"
+  | "ordered_resource_out_of_order"
+  | "merge_dependency_closed"
+  | "history_rewritten";
 
 export type MergeGateResult =
   | { outcome: "merged"; headSha: string }
@@ -528,21 +587,47 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   if (outcome.merged === true) {
     return { outcome: "merged", headSha };
   }
-  if (outcome.httpStatus === 409 || outcome.httpStatus === 422) {
-    // A moved head is not an error. Re-read the head from GitHub (never
-    // from the refusal); if it really moved, review the new commit.
-    const after = await deps.github.getPullRequest(input.pr);
-    if (after.headSha !== headSha) {
-      // The re-read head goes to requestReviews (and into a dispatch), so it
-      // must pass the same pattern as the first read. Junk: a human decides.
-      if (typeof after.headSha !== "string" || !SHA_PATTERN.test(after.headSha)) {
-        return markHuman(deps, input.pr, headSha, ["head_sha_malformed"]);
-      }
-      await deps.requestReviews(input.pr, after.headSha);
-      return { outcome: "head_moved", staleHeadSha: headSha, newHeadSha: after.headSha };
+  // A refused merge is classified from structured re-reads (D#519 MQ1), never from GitHub's message text and never by assuming a
+  // status means one thing: 405 covers a conflict, an out-of-date branch and a protection refusal alike, and a 422 may or may not
+  // be a moved head.
+  const status = outcome.httpStatus;
+  if (status !== 405 && status !== 403 && status !== 409 && status !== 422) return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
+  // Re-read the PR from GitHub (never from the refusal). `getMergeability` has already polled a null `mergeable`.
+  const after = await deps.github.getMergeability(input.pr, { gatedHeadSha: headSha });
+  if (after.headSha !== headSha && (status === 409 || status === 422)) {
+    // A moved head is not an error: review the new commit. The re-read head goes to requestReviews (and into a dispatch), so it
+    // must pass the same pattern as the first read. Junk: a human decides.
+    if (typeof after.headSha !== "string" || !SHA_PATTERN.test(after.headSha)) {
+      return markHuman(deps, input.pr, headSha, ["head_sha_malformed"]);
     }
+    await deps.requestReviews(input.pr, after.headSha);
+    return { outcome: "head_moved", staleHeadSha: headSha, newHeadSha: after.headSha };
   }
-  return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
+  // A 409 with an unmoved head, or any refusal on a head other than the one gated, is not explained by what was read.
+  if (status === 409 || after.headSha !== headSha) return markHuman(deps, input.pr, headSha, ["merge_call_refused"]);
+  return markHuman(deps, input.pr, headSha, [await classifyRefusal(deps.github, input.pr, headSha, after)]);
+}
+
+/**
+ * D#519 MQ1: the reason for a refused merge, from the re-read `mergeable` and `mergeable_state` (and the compare, to tell an
+ * out-of-date branch from a protection rule). Fails closed: `mergeable: null` after the poll bound, an unknown state and a state that
+ * contradicts `mergeable` all stay `merge_call_refused`, and nothing here ever calls the merge endpoint again.
+ */
+async function classifyRefusal(github: MergeGateGitHubPort, pr: PullRequestRef, headSha: string, m: PullRequestMergeability): Promise<MergeBlockReason> {
+  if (m.mergeable === null) return "merge_call_refused";
+  if (m.mergeableState === "dirty") return m.mergeable === false ? "merge_conflict" : "merge_call_refused";
+  if (m.mergeableState === "behind") return "branch_behind";
+  if (m.mergeableState !== "blocked") return "merge_call_refused";
+  // Blocked. When the repo requires up-to-date branches and the head lacks base commits, the branch is what is out of date.
+  try {
+    if (await github.requiresUpToDateBranch(pr)) {
+      const cmp = await github.compareToBase(pr, headSha);
+      if (cmp.behindBy > 0) return "branch_behind";
+    }
+  } catch {
+    // fx-swallow-ok: the extra read only refines which stop this is; when it cannot be made the generic protection stop stands and nothing merges
+  }
+  return "branch_protection_refused";
 }
 
 async function markHuman(

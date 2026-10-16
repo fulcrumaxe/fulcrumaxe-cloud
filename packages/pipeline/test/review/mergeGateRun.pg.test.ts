@@ -297,6 +297,19 @@ describe("the pull request itself", () => {
     expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: ["merge_call_refused"] });
   });
 
+  it("D#519 MQ1: a refused merge that the re-read explains is recorded under its own code, not merge_call_refused", async () => {
+    for (const [repo, code] of [
+      [{ mergeStatus: 405, mergeable: false, mergeableState: "dirty" }, "merge_conflict"],
+      [{ mergeStatus: 405, mergeable: true, mergeableState: "behind" }, "branch_behind"],
+      [{ mergeStatus: 405, mergeable: true, mergeableState: "blocked" }, "branch_protection_refused"],
+    ] as const) {
+      const w = await world({ repo });
+      await passBoth(w);
+      expect(await gate(w)).toMatchObject({ outcome: "ready_human_merges", reasons: [code] });
+      expect((await events(w)).find((e) => e.kind === "merge_gate")).toMatchObject({ code: "ready_human_merges", reasons: [code] });
+    }
+  });
+
   it("a failed read of the files THROWS (the step retries), and nothing is posted or merged", async () => {
     const w = await world({ repo: { filesFail: 500 } });
     await passBoth(w);
