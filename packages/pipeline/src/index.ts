@@ -23,4 +23,5 @@ export * from "./advance/respec.js";
 export * from "./advance/amend.js";
 export * from "./prompt/assemblePrompt.js";
 export * from "./prompt/memorySlotSetting.js";
+export * from "./prompt/repoMap.js";
 export * from "./prompt/memoryRecall.js";

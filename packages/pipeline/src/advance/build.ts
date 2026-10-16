@@ -10,6 +10,7 @@ import { agentOutputBlock } from "../plan/envelope.js";
 import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
+import type { RepoMapPort } from "../prompt/repoMap.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
 /**
@@ -58,6 +59,8 @@ export interface ExecutorPromptInput {
   runNotes?: string;
   /** D#600 CX-2: recalled memory, rendered by `renderMemorySlot` (absent: none). */
   memory?: { stable?: RenderedMemory; item?: RenderedMemory };
+  /** D#600 CX-3a: the repository map (built on the cloud side, already text); absent: the prompt has no map section. */
+  map?: { version: string; text: string };
   /** D#600 CX-2: notes and corrections to carry; the same text twice is one section. */
   notes?: readonly NoteItem[];
 }
@@ -102,6 +105,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput): AssembledPro
     "8. Check that the response holds the pull request's number. If it does not, fix the request and send it again.",
     ].join("\n"),
     spec: { version, body: input.spec },
+    ...(input.map ? { map: input.map } : {}),
     memoryStable: input.memory?.stable,
     memoryItem: input.memory?.item,
     runNotes: input.runNotes,
@@ -141,6 +145,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt 
     `6. Do not push, do not change remotes, and do not call the GitHub API. When you finish, the platform publishes your commit and opens the pull request (body \`Closes #${number}\`) for you.`,
     ].join("\n"),
     spec: { version, body: input.spec },
+    ...(input.map ? { map: input.map } : {}),
     memoryStable: input.memory?.stable,
     memoryItem: input.memory?.item,
     runNotes: input.runNotes,
@@ -215,7 +220,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort } = {},
+  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort } = {},
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -245,7 +250,10 @@ export async function startBuildForItem(
   const prior = (await ports.findStep?.(baseStep)) ?? null;
   const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
-  const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(memory ? { memory } : {}) });
+  // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
+  // A runner run gets its map from the daemon's own mirror (CX-3b), so the cloud builds none for it.
+  const map = prior || !options.repoMap || facts.repo_id === null || promptRuntimeOf(executionMode) !== "sandbox" ? undefined : await options.repoMap.forRun({ accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name });
+  const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}) });
   const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
   // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
   if (!started.ok) return { status: "refused", reason: started.reason === "item_halted" || started.reason === "halted_since_approval" ? started.reason : `start_${started.reason}` };

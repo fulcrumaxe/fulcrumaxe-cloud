@@ -686,11 +686,13 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       // (ctx.installationId, resolved from the verified envelope) are detached.
       let count = 0;
       if (mapped.removedGhRepoIds.length > 0) {
-        const { rowCount } = await client.query(
+        const { rowCount, rows } = await client.query<{ id: string }>(
           `UPDATE repos SET installation_id = NULL, updated_at = now()
-             WHERE account_id = $1 AND installation_id = $2 AND product = 'team' AND gh_repo_id = ANY($3::bigint[])`,
+             WHERE account_id = $1 AND installation_id = $2 AND product = 'team' AND gh_repo_id = ANY($3::bigint[]) RETURNING id`,
           [ctx.accountId, ctx.installationId, mapped.removedGhRepoIds],
         );
+        // D#600 CX-3a: a detached repository keeps no cached repository map (same transaction).
+        await client.query('DELETE FROM repo_context_maps WHERE account_id = $1 AND repo_id = ANY($2::uuid[])', [ctx.accountId, rows.map((r) => r.id)]);
         count = rowCount ?? 0;
       }
       return { applied: 'repos_detached', count, installationId: ctx.installationId, syncRequested: mapped.addedCount > 0 };

@@ -349,11 +349,13 @@ export async function syncInstallationRepos(deps: SyncDeps, installationId: stri
     // Detach (never delete) this installation's repos that GitHub no longer lists. Runs in the
     // same transaction, under the same advisory lock and installer re-check as the writes above.
     // Only a complete listing gets here: an incomplete one threw before the write phase.
-    const gone = await client.query(
+    const gone = await client.query<{ id: string }>(
       `UPDATE repos SET installation_id = NULL, updated_at = now()
-        WHERE account_id = $1 AND installation_id = $2 AND product = $3 AND NOT (gh_repo_id = ANY($4::bigint[]))`,
+        WHERE account_id = $1 AND installation_id = $2 AND product = $3 AND NOT (gh_repo_id = ANY($4::bigint[])) RETURNING id`,
       [accountId, installationId, product, listedIds],
     );
+    // D#600 CX-3a: a detached repository keeps no cached repository map (same transaction).
+    await client.query("DELETE FROM repo_context_maps WHERE account_id = $1 AND repo_id = ANY($2::uuid[])", [accountId, gone.rows.map((r) => r.id)]);
     counts.detached = gone.rowCount ?? 0;
     // A change to the repo list tells the open Repos window to re-read (same transaction as the writes).
     if (counts.inserted + counts.updated + counts.repointed + counts.detached > 0) {

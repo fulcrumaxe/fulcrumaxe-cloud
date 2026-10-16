@@ -34,6 +34,7 @@ export * from './createRepo.js';
 export * from './issueAuthorLookup.js';
 export * from './issueReader.js';
 export * from './installationHttp.js';
+export * from './repoTreeSource.js';
 export * from './repoInstallationResolver.js';
 export * from './planQueries.js';
 export * from './planReadClient.js';

@@ -9,6 +9,7 @@ import { seedAccount, seedRepo } from "./build/helpers/seed.js";
 import { discussingItem, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 import { publishRespec } from "../src/advance/respec.js";
 import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman, startBuildForItem } from "../src/advance/build.js";
+import { createPgRepoMapCache, createRepoMapPort, type RepoMapSource } from "../src/prompt/repoMap.js";
 import { runPanelForItem, runSpecForItem, STEP_LIMIT_MS, SEAT_ROUND_TIMEOUT_MS, PM_TIMEOUT_MS, REPLAY_PANEL_TIMEOUT_MS } from "../src/advance/specFlow.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 
@@ -447,6 +448,89 @@ describe("the build", () => {
     const t = await atSpecReady();
     expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world)).toMatchObject({ status: "started" });
     expect(t.world.requests[0]!.memoryTokens).toBe(0);
+  });
+
+  describe("D#600 CX-3a: the repository map", () => {
+    const SHA = "c".repeat(40);
+    const source = (): RepoMapSource & { trees: number } => ({
+      trees: 0,
+      headSha: async () => SHA,
+      tree: async function (this: { trees: number }) {
+        this.trees += 1;
+        return { truncated: false, entries: [{ path: "package.json", type: "blob" as const, sha: "1".repeat(40) }, { path: "src/app.ts", type: "blob" as const, sha: "2".repeat(40) }] };
+      },
+      blob: async () => JSON.stringify({ name: "widgets", scripts: { test: "vitest run" } }),
+    });
+    /** The repository is connected: it has an installation, as a synced one does. */
+    async function connect(workItemId: string): Promise<string> {
+      const repo = (await h.admin.query<{ repo_id: string; account_id: string }>("SELECT repo_id, account_id FROM work_items WHERE id = $1", [workItemId])).rows[0]!;
+      const inst = randomUUID();
+      await h.admin.query("INSERT INTO installations (id, account_id, gh_installation_id, app_kind) VALUES ($1, $2, floor(random() * 2000000000)::bigint + 1, 'team')", [inst, repo.account_id]);
+      await h.admin.query("UPDATE repos SET installation_id = $2 WHERE id = $1", [repo.repo_id, inst]);
+      return repo.repo_id;
+    }
+
+    it("puts the map between the backstops and the Spec, stores it once per commit in the real table, and a second build at the same commit reads it back", async () => {
+      const t = await atSpecReady();
+      const repoId = await connect(t.workItemId);
+      const src = source();
+      const repoMap = createRepoMapPort({ open: async () => src, cache: createPgRepoMapCache(h.runWriterPool) });
+      await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      const req = t.world.requests[0]!;
+      expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "map", "spec", "output"]);
+      expect(req.prompt).toContain("REPOSITORY MAP (version 1):");
+      expect(req.prompt).toContain("test command: npm test");
+      expect(req.prompt.indexOf("REPOSITORY MAP")).toBeLessThan(req.prompt.indexOf("SPEC (version"));
+      const row = (await h.admin.query<{ commit_sha: string; map_version: string; body: string }>("SELECT commit_sha, map_version, body FROM repo_context_maps WHERE repo_id = $1", [repoId])).rows;
+      expect(row).toHaveLength(1);
+      expect(row[0]).toMatchObject({ commit_sha: SHA, map_version: "1" });
+      expect(row[0]!.body).toContain("src/app.ts");
+
+      // A second build (Build again would be the same) at the same commit makes no trees call.
+      await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [t.workItemId]);
+      await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      expect(src.trees).toBe(1);
+    });
+
+    it("a repository detached from its installation is served nothing from the cache, and its row goes with the repository when that is deleted", async () => {
+      const t = await atSpecReady();
+      const repoId = await connect(t.workItemId);
+      const cache = createPgRepoMapCache(h.runWriterPool);
+      const key = { accountId: t.accountId, repoId, commitSha: SHA, version: "1" };
+      await cache.put(key, "commit: cccccccccccc");
+      expect(await cache.get(key)).toBe("commit: cccccccccccc");
+      await h.admin.query("UPDATE repos SET installation_id = NULL WHERE id = $1", [repoId]);
+      expect(await cache.get(key)).toBeNull();
+      // A repository with no work items: deleting it takes its map with it (the foreign key), with no cleanup job.
+      const lone = randomUUID();
+      await seedRepo(h.admin, t.accountId, lone);
+      await cache.put({ ...key, repoId: lone }, "commit: cccccccccccc");
+      expect((await h.admin.query("SELECT 1 FROM repo_context_maps WHERE repo_id = $1", [lone])).rowCount).toBe(1);
+      await h.admin.query("DELETE FROM repos WHERE id = $1", [lone]);
+      expect((await h.admin.query("SELECT 1 FROM repo_context_maps WHERE repo_id = $1", [lone])).rowCount).toBe(0);
+    });
+
+    it("a map that cannot be built does not stop the build: it starts with no map section", async () => {
+      const t = await atSpecReady();
+      await connect(t.workItemId);
+      const repoMap = createRepoMapPort({ open: async () => { throw new Error("no installation"); }, cache: createPgRepoMapCache(h.runWriterPool) });
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap })).toMatchObject({ status: "started" });
+      expect(t.world.requests[0]!.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
+    });
+
+    it("a build whose effective mode is runner gets no cloud map: the repoMap port is never called and the map slot is empty", async () => {
+      const t = await atSpecReady();
+      await connect(t.workItemId);
+      await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = (SELECT repo_id FROM work_items WHERE id = $1)", [t.workItemId]);
+      let calls = 0;
+      const repoMap = { forRun: async () => { calls += 1; return { version: "1", text: "commit: should-not-appear" }; } };
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap })).toMatchObject({ status: "started" });
+      expect(calls).toBe(0);
+      const req = t.world.requests[0]!;
+      expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
+      expect(req.prompt).not.toContain("REPOSITORY MAP");
+      expect(req.prompt).not.toContain("should-not-appear");
+    });
   });
 
   it("the build is pinned to the Spec version the person approved: the same version builds, a newer one refuses spec_changed and starts nothing", async () => {

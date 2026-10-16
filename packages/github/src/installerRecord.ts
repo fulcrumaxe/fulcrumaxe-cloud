@@ -64,10 +64,12 @@ export async function recordInstallationLifecycle(
           // repos.changed is emitted on this same tenant client, so the detach and its event commit together even
           // if the outer platform_ops transaction later fails (as syncInstallationRepos does).
           await withTenant(deps.appUserPool, inst.account_id, async (tenant) => {
-            const res = await tenant.query(
-              "UPDATE repos SET installation_id = NULL, updated_at = now() WHERE account_id = $1 AND installation_id = $2",
+            const res = await tenant.query<{ id: string }>(
+              "UPDATE repos SET installation_id = NULL, updated_at = now() WHERE account_id = $1 AND installation_id = $2 RETURNING id",
               [inst.account_id, inst.id],
             );
+            // D#600 CX-3a: a detached repository keeps no cached repository map (same transaction).
+            await tenant.query("DELETE FROM repo_context_maps WHERE account_id = $1 AND repo_id = ANY($2::uuid[])", [inst.account_id, res.rows.map((r) => r.id)]);
             const detached = res.rowCount ?? 0;
             if (detached > 0) await emitDomainEvent(tenant, { type: "repos.changed", accountId: inst.account_id, subjectId: inst.id, payload: { kind, detached } });
           });
