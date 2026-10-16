@@ -41,6 +41,7 @@ const EXPECTED_V1_IDS = [
   "start_work_doc",
   "start_work_small",
   "test_strategy_choice",
+  "tool_call",
 ].sort();
 
 describe("criterion 1: catalogue entry shape, frozen v1 list", () => {

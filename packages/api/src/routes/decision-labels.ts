@@ -9,6 +9,7 @@ export const DECISION_LABELS: Readonly<Record<string, string>> = {
   nonbreaking_refactor_approach: "How to restructure code without changing what it does",
   test_strategy_choice: "How to test a change",
   runner_run_on_member_plan: "Running work on a team member's own plan",
+  tool_call: "Letting an agent run a tool",
   start_work_small: "Starting a small piece of work",
   start_work_bug: "Starting a bug fix",
   start_work_doc: "Starting a documentation change",

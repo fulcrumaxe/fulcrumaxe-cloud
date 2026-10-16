@@ -30,7 +30,7 @@ import type { CatalogueEntry } from "./types.js";
  * three presets next to this number: changing either without bumping it
  * (and updating the pin) fails that test.
  */
-export const CATALOGUE_VERSION = 4;
+export const CATALOGUE_VERSION = 5;
 
 export const CATALOGUE: readonly CatalogueEntry[] = [
   // --- class 1: automated_with_monitoring -- never asked ---
@@ -145,6 +145,23 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
     customerProximity: "internal_only",
     dataSensitivity: "none",
     // Ruling R-7-DP12a1-4: starting work belongs to the person or the auto-start toggle, never to a timeout, so stop-and-flag only.
+    timeoutOutcomes: ["stop_and_flag"],
+  },
+  {
+    // D#7 AAP-a1: an agent asks to run one tool call (a customer's own approval service or our gateway raises it). Unlike a decision
+    // request this is a real call with exact arguments, so a person's rules may approve or deny it by what the call IS, never by what the
+    // agent says about it. Cautious asks for each call; a rule can only approve when this dial resolves to `announce` or `act`. A call that
+    // ran can't be un-run, and silence is never a go-ahead: the only timeout outcome is stop-and-flag (R-7-AAP-2).
+    id: "tool_call",
+    class: "human_over_the_loop",
+    defaultDisposition: "ask",
+    allowedDispositions: ["act", "announce", "ask"],
+    reversal: {
+      availability: "not_reversible",
+      reason: "a tool call that ran can't be un-run; you can deny the next one",
+    },
+    customerProximity: "internal_only",
+    dataSensitivity: "customer_data",
     timeoutOutcomes: ["stop_and_flag"],
   },
   {
