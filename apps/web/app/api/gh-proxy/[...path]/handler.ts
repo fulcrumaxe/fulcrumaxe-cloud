@@ -6,6 +6,7 @@ import { resolveChecked, NetGuardError, type HostLookup } from "@fx/net-guard";
 import { reportError } from "@fx/telemetry";
 import { waitUntil } from "@vercel/functions";
 import {
+  createPlanePushApi,
   createRunnerGitTicketKeys,
   decideProxyRequest,
   decideRunnerGitRequest,
@@ -438,6 +439,35 @@ export function buildAccessTokenRequester(deps: {
   };
 }
 
+/**
+ * D#598 P1f-4b: a `fetch` for the publish path's own GitHub API calls (find the public repo's installation, revoke a token) that goes through the
+ * same pinned transport as every other call here: the host is checked and resolved by `resolveChecked`, the connection is pinned to the validated
+ * address, and the origin can only be api.github.com. The plane-push API builds each URL itself from a validated owner and name.
+ */
+export function buildPinnedFetch(deps: { resolveUpstream: GhProxyHandlerDeps["resolveUpstream"]; forwardPinned: PinnedRequester }): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "" || url.username !== "") throw new Error("gh-proxy: pinned fetch target not allowed");
+    const addresses = await deps.resolveUpstream(url.hostname);
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers).forEach((value, key) => {
+      headers[key.toLowerCase()] = value;
+    });
+    const body = typeof init?.body === "string" && init.body.length > 0 ? Buffer.from(init.body, "utf8") : null;
+    if (body) headers["content-length"] = String(body.byteLength);
+    const res = await deps.forwardPinned({
+      host: url.hostname,
+      address: pickAddress(addresses),
+      method: init?.method ?? "GET",
+      path: url.pathname + url.search,
+      headers,
+      body,
+    });
+    const empty = res.status === 204 || res.status === 205 || res.status === 304;
+    return new Response(empty ? null : res.bodyStream, { status: res.status, headers: res.headers });
+  }) as typeof fetch;
+}
+
 export function defaultGhProxyHandlerDeps(
   githubForward: GithubForwardConfig = loadGithubForwardConfig(process.env),
 ): GhProxyHandlerDeps {
@@ -457,6 +487,12 @@ export function defaultGhProxyHandlerDeps(
     : ticketKeys === null
       ? { problem: "FX_GIT_TICKET_PUBLIC_JWKS" }
       : { keys: ticketKeys, issuer: ticketEnv.issuer };
+  const accessTokenRequester = buildAccessTokenRequester({
+    resolveUpstream,
+    forwardPinned,
+  });
+  const appCredentials = loadAppCredentials(process.env);
+  const tokenCache = new InstallationTokenCache();
   return {
     runnerTicket,
     githubForward,
@@ -469,12 +505,11 @@ export function defaultGhProxyHandlerDeps(
     resolveUpstream,
     forwardPinned,
     resolveSandboxRun: defaultSandboxRunResolver as SandboxRunResolver,
-    appCredentials: loadAppCredentials(process.env),
-    tokenCache: new InstallationTokenCache(),
-    accessTokenRequester: buildAccessTokenRequester({
-      resolveUpstream,
-      forwardPinned,
-    }),
+    appCredentials,
+    tokenCache,
+    accessTokenRequester,
+    // D#598 P1f-4b: the publish run's mint and revoke for the paired public repository. The publish target resolver is set by the route (it needs the database).
+    planePublishApi: createPlanePushApi({ appCredentials, requester: accessTokenRequester, cache: tokenCache, fetchImpl: buildPinnedFetch({ resolveUpstream, forwardPinned }) }),
     defer: waitUntil,
   };
 }
@@ -641,7 +676,17 @@ export async function ghProxyHandler(
     return NextResponse.json({ error: "denied" }, { status: decision.status });
   }
 
-  return forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
+  try {
+    return await forwardUpstream(req, deps, { path, rawBody, decision, target: path.startsWith("/repos/") ? "api" : "git" });
+  } finally {
+    // D#598 P1f-4b: a token minted for this one request is revoked as soon as the upstream call has been made, on every outcome (answered,
+    // refused, timed out, thrown). It never leaves this process and is never reused. A revoke that fails is logged by a fixed line only; the
+    // token then lapses at GitHub's own expiry, within the hour, and covers one repository.
+    if (decision.revokeAfterUse === true) {
+      const revoked = (await deps.planePublishApi?.revokeToken(decision.installationToken)) === true;
+      if (!revoked) console.warn("gh-proxy: publish token not revoked");
+    }
+  }
 }
 
 /** A runner-path refusal as an Error, so `reportError` has something to log; its message is the closed code and nothing else. */

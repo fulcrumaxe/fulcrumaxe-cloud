@@ -3,6 +3,7 @@ import {
   decide,
   parseTarget,
   parseReceivePackRefUpdates,
+  PLANE_PUBLISH_ROLE,
   type ProxyRequest,
   type Product,
 } from "@fx/gh-policy";
@@ -15,6 +16,7 @@ import {
 } from "./installationToken.js";
 import { AppCredentialsError, type AppCredentialsSource } from "./appCredentials.js";
 import { InstallationNotWritableError } from "./writeInstallation.js";
+import { decidePlanePublishRequest, type PlanePublishDeps } from "./planePublishProxy.js";
 
 /**
  * D#2 H13b: orchestrates one proxied request from a verified sandbox
@@ -122,7 +124,7 @@ export function normalizeQuery(query: ProxyDecisionQuery): Record<string, string
   return out;
 }
 
-export interface ProxyDecisionDeps {
+export interface ProxyDecisionDeps extends Pick<PlanePublishDeps, "resolvePublishTarget" | "planePublishApi"> {
   resolveSandboxRun: SandboxRunResolver;
   appCredentials: AppCredentialsSource;
   tokenCache: InstallationTokenCache;
@@ -164,6 +166,11 @@ export type ProxyDecisionResult =
        * second time.
        */
       forwardContentEncoding: boolean;
+      /**
+       * D#598 P1f-4b: true when `installationToken` was minted for this one request alone (a `plane_publish` run). The caller revokes it as soon
+       * as the upstream call has been made, whatever its outcome, and never stores or reuses it.
+       */
+      revokeAfterUse?: boolean;
     }
   | { allow: false; status: 403 | 404 | 413 | 502; reason: string };
 
@@ -517,6 +524,28 @@ export async function decideProxyRequest(
   if (run.isPreview === true) {
     if (run.appKind !== "team_readonly") return deny(403, "installation_not_writable");
     if (!isPreviewReadRequest(target, input.method)) return deny(403, "preview_read_only");
+  }
+
+  // D#598 P1f-4b: a publish run has its own rule set, applied INSTEAD of decide() (which would refuse its public-repository requests as out of
+  // scope and does not know its role). Judged after the run is resolved and before any mint; no other role takes this branch.
+  if (run.role === PLANE_PUBLISH_ROLE) {
+    const upstream = target.kind === "git" ? GIT_UPSTREAM_HOST : API_UPSTREAM_HOST;
+    const isPulls = target.kind === "api" && input.method === "POST" && target.subpath === "/pulls";
+    const pulls = isPulls ? parseJsonObject(input.rawBody) : null;
+    const outcome = await decidePlanePublishRequest(
+      {
+        method: input.method,
+        path: input.path,
+        query,
+        sandboxName: input.sandboxName,
+        run,
+        ...(target.kind === "git" && target.endpoint === "git-receive-pack" && input.method === "POST" ? { gitRefUpdates: parseReceivePackRefUpdates(input.rawBody) } : {}),
+        ...(isPulls ? { pullRequestBody: pulls?.ok ? pulls.value : null } : {}),
+      },
+      deps,
+    );
+    if (!outcome.allow) return deny(outcome.status, outcome.reason);
+    return { allow: true, upstreamHost: upstream, installationToken: outcome.installationToken, query, forwardContentEncoding, revokeAfterUse: true };
   }
 
   const bodyFields = deriveBodyFields(

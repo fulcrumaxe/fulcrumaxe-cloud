@@ -1,6 +1,6 @@
 import type { NextRequest, NextResponse } from "next/server";
 import { loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
-import { createRunnerBoundBranchResolver, createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
+import { createPublishTargetResolver, createRunnerBoundBranchResolver, createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
 import { createPool } from "@fx/db/src/pool";
 import { defaultGhProxyHandlerDeps, ghProxyHandler, type GhProxyHandlerDeps } from "./handler";
 
@@ -66,6 +66,8 @@ function deps(): GhProxyHandlerDeps {
     built.resolveRunnerGit = createRunnerGitResolver(ghProxyPool);
     built.resolveBoundBranch = createRunnerBoundBranchResolver(ghProxyPool);
     built.cloneBudget = createRunnerCloneBudget(ghProxyPool);
+    // D#598 P1f-4b: which paired public repository and branch a publish run may name, on the same narrow login (it may execute this function too).
+    built.resolvePublishTarget = createPublishTargetResolver(ghProxyPool);
     cachedDeps = built;
   }
   return cachedDeps;

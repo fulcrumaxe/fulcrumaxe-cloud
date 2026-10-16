@@ -7,6 +7,7 @@ import { SignJWT, exportJWK, generateKeyPair, createLocalJWKSet, calculateJwkThu
 import {
   InstallationTokenCache,
   MintTimeoutError,
+  createPlanePushApi,
   decideProxyRequest,
   defaultSandboxRunResolver,
   type ProxyDecisionInput,
@@ -15,12 +16,13 @@ import {
 import { NetGuardError } from "@fx/net-guard";
 import { captureReports } from "../../../../test/captureReports";
 // Relative on purpose: the strict-GitHub and real-connect-path helpers live with the @fx/github tests (no openssl in the dev shell either).
-import { ghError } from "../../../../../../packages/github/test/helpers/strictGithub.js";
+import { checkGithubRequest, ghError } from "../../../../../../packages/github/test/helpers/strictGithub.js";
 import { httpsRoundTrip, startLocalTlsServer, startStrictGithubServer, type LocalTlsServer } from "../../../../../../packages/github/test/helpers/localTlsServer.js";
 import {
   ghProxyHandler,
   buildPinnedRequestOptions,
   buildAccessTokenRequester,
+  buildPinnedFetch,
   createNodeHttpsPinnedRequester,
   withPinnedTimeouts,
   UpstreamTimeoutError,
@@ -89,8 +91,10 @@ function req(opts: {
   xForwardedHost?: string | null;
   oidcToken?: string | null;
   body?: string;
+  contentType?: string;
 }): NextRequest {
   const headers = new Headers();
+  if (opts.contentType !== undefined) headers.set("content-type", opts.contentType);
   if (opts.host !== null) headers.set("host", opts.host ?? CONFIG_HOST);
   if (opts.xForwardedHost !== undefined && opts.xForwardedHost !== null) {
     headers.set("x-forwarded-host", opts.xForwardedHost);
@@ -1153,5 +1157,239 @@ describe("H1c: what the proxy reports when something fails, and what it leaves a
     await expect(result.bodyStream!.getReader().read()).rejects.toThrow();
     expect(reports.classes).toEqual([{ service: "test", route: "/api/gh-proxy", stage: "gh_proxy.stream", code: "ECONNRESET" }]);
     expect(reports.everything()).not.toContain(SECRET);
+  });
+});
+
+/**
+ * D#598 P1f-4b: a `plane_publish` run through the whole handler, the real decideProxyRequest, the real mint and revoke code and Node's real TLS
+ * connection path, against a local HTTPS server that behaves like GitHub where this code touches it: tokens are minted for the repositories asked
+ * for, the metadata read GitHub always adds is in the answer, `DELETE /installation/token` answers 204 and the token answers 401 afterwards, and
+ * every proxied call needs a live token (Bearer for the API, Basic `x-access-token:` for git). What it cannot show: GitHub's own behaviour for a
+ * token revoked while the response of the call it authorised is still streaming (the proxy revokes once the upstream call has been made).
+ */
+describe("D#598 P1f-4b: the publish run's per-request mint, use and revoke", () => {
+  const BRANCH = "fx/p-0b1c2d3e-0000-4000-8000-000000000001";
+  const PUBLISH_RUN = { role: "plane_publish", product: "team" as const, installationId: 99, appKind: "team", owner: "acme", repo: "widgets" };
+  const TARGET = { codeRepo: "acme-public/widgets-pub", branch: BRANCH };
+  type Event = { type: "mint" | "use" | "revoke"; token: string; what: string };
+
+  async function githubFake() {
+    const live = new Set<string>();
+    const events: Event[] = [];
+    const state = { minted: 0, revokeStatus: 204 };
+    const tokenOf = (authorization: string | undefined): string | null => {
+      const m = /^(bearer|basic) (\S+)$/i.exec(authorization ?? "");
+      if (!m) return null;
+      return m[1]!.toLowerCase() === "bearer" ? m[2]! : (Buffer.from(m[2]!, "base64").toString("utf8").split(":")[1] ?? null);
+    };
+    const server = await startLocalTlsServer({ dnsNames: ["api.github.com", "github.com"], ipAddresses: ["127.0.0.1"] }, (r) => {
+      // The strict rules are the API's; git over HTTPS authenticates with Basic, which they would call malformed.
+      const refusal = /^basic /i.test(r.headers["authorization"] ?? "") ? null : checkGithubRequest(r);
+      if (refusal) return refusal;
+      const token = tokenOf(r.headers["authorization"]);
+      const json = (status: number, value: unknown) => ({ status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(value) });
+      if (r.method === "GET" && r.path === "/repos/acme-public/widgets-pub/installation") return token?.split(".").length === 3 ? json(200, { id: 55 }) : ghError(401, "Bad credentials");
+      const mint = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(r.path);
+      if (r.method === "POST" && mint) {
+        const asked = JSON.parse(r.body) as { repositories: string[]; permissions: Record<string, string> };
+        const minted = `ghs_${mint[1]}_${++state.minted}`;
+        live.add(minted);
+        events.push({ type: "mint", token: minted, what: `${asked.repositories.join(",")} ${JSON.stringify(asked.permissions)}` });
+        return json(201, {
+          token: minted,
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          permissions: { ...asked.permissions, metadata: "read" },
+          repository_selection: "selected",
+          repositories: asked.repositories.map((name) => ({ name })),
+        });
+      }
+      if (r.method === "DELETE" && r.path === "/installation/token") {
+        if (!token || !live.has(token)) return ghError(401, "Bad credentials");
+        if (state.revokeStatus !== 204) return ghError(state.revokeStatus, "Server Error");
+        live.delete(token);
+        events.push({ type: "revoke", token, what: "" });
+        return { status: 204, headers: {}, body: "" };
+      }
+      if (!token || !live.has(token)) return ghError(401, "Bad credentials");
+      events.push({ type: "use", token, what: `${r.method} ${r.path}` });
+      if (r.path.endsWith("/info/refs")) return { status: 200, headers: { "content-type": "application/x-git-upload-pack-advertisement" }, body: "001e# service=git-upload-pack\n0000" };
+      if (r.method === "GET" && r.path.startsWith("/repos/acme-public/widgets-pub/git/ref/heads/")) return json(200, { ref: "refs/heads/x", object: { sha: "a".repeat(40) } });
+      if (r.method === "POST" && r.path === "/repos/acme-public/widgets-pub/pulls") return json(201, { number: 7, html_url: "https://github.com/acme-public/widgets-pub/pull/7" });
+      if (r.method === "GET" && r.path === "/repos/acme/widgets/issues/5") return json(200, []);
+      return ghError(404, "Not Found");
+    });
+    return { server, live, events, state };
+  }
+  type Fake = Awaited<ReturnType<typeof githubFake>>;
+
+  /** The deps for one handler call: every GitHub call (mint, lookup, revoke and the forward itself) goes through `wrap` over the real pinned transport to the fake. */
+  function publishDeps(fake: Fake, over: Partial<GhProxyHandlerDeps> = {}, run: typeof PUBLISH_RUN | null = PUBLISH_RUN, wrap?: (inner: PinnedRequester) => PinnedRequester): GhProxyHandlerDeps {
+    const resolveUpstream = async () => ["127.0.0.1"];
+    const transport = createNodeHttpsPinnedRequester({ port: fake.server.port, ca: fake.server.ca });
+    const forwardPinned: PinnedRequester = wrap ? wrap(transport) : (p) => transport(p);
+    const appCredentials = () => ({ appId: "7", privateKeyPem: realPrivateKeyPem, webhookSecret: "unused-in-these-tests" });
+    const accessTokenRequester = buildAccessTokenRequester({ resolveUpstream, forwardPinned });
+    const tokenCache = new InstallationTokenCache();
+    return fakeDeps({
+      resolveUpstream,
+      forwardPinned,
+      appCredentials,
+      accessTokenRequester,
+      tokenCache,
+      resolveSandboxRun: async () => run,
+      resolvePublishTarget: async () => TARGET,
+      planePublishApi: createPlanePushApi({ appCredentials, requester: accessTokenRequester, cache: tokenCache, fetchImpl: buildPinnedFetch({ resolveUpstream, forwardPinned }) }),
+      ...over,
+    });
+  }
+  const call = async (deps: GhProxyHandlerDeps, path: string, method = "GET", body?: string) =>
+    ghProxyHandler(req({ host: CONFIG_HOST, oidcToken: await signOidc({ sandbox_name: "pp-0b1c2d3e-0000-4000-8000-0000000000aa" }), path, method, body, ...(body ? { contentType: "application/json" } : {}) }), deps, decideProxyRequest);
+  const perToken = (fake: Fake) => {
+    const by = new Map<string, string[]>();
+    for (const e of fake.events) by.set(e.token, [...(by.get(e.token) ?? []), e.type]);
+    return [...by.values()];
+  };
+
+  let fake: Fake;
+  beforeEach(async () => {
+    fake = await githubFake();
+  });
+  afterEach(async () => {
+    await fake.server.close();
+    vi.restoreAllMocks();
+  });
+
+  it("every allowed request sees exactly one mint, one use and one revoke, in that order, and the token never reaches the answer", async () => {
+    const deps = publishDeps(fake);
+    const requests: Array<[string, string, string?]> = [
+      ["GET", "/acme/widgets/info/refs?service=git-upload-pack"],
+      ["GET", "/acme-public/widgets-pub/info/refs?service=git-receive-pack"],
+      ["GET", `/repos/acme-public/widgets-pub/git/ref/heads/${BRANCH}`],
+      ["POST", "/repos/acme-public/widgets-pub/pulls", JSON.stringify({ title: "t", head: BRANCH, base: "main", body: "b", maintainer_can_modify: false })],
+    ];
+    for (const [method, path, body] of requests) {
+      const res = await call(deps, path, method, body);
+      expect(res.status).toBe(method === "POST" ? 201 : 200);
+      const text = await res.text();
+      expect(text + JSON.stringify([...res.headers])).not.toMatch(/ghs_/);
+    }
+    expect(perToken(fake)).toEqual(requests.map(() => ["mint", "use", "revoke"]));
+    expect(fake.live.size).toBe(0);
+    // The private read is a read-only token for the private repository alone; the public requests get the fixed write set for the public one.
+    const mints = fake.events.filter((e) => e.type === "mint").map((e) => e.what);
+    expect(mints[0]).toBe('widgets {"metadata":"read","contents":"read"}');
+    expect(mints.slice(1)).toEqual(Array(3).fill('widgets-pub {"contents":"write","pull_requests":"write"}'));
+  });
+
+  it("a token is dead at GitHub once its request is answered", async () => {
+    const res = await call(publishDeps(fake), `/repos/acme-public/widgets-pub/git/ref/heads/${BRANCH}`);
+    expect(res.status).toBe(200);
+    const token = fake.events[0]!.token;
+    const replay = await httpsRoundTrip({
+      ...buildPinnedRequestOptions({ host: "api.github.com", address: "127.0.0.1", method: "GET", path: `/repos/acme-public/widgets-pub/git/ref/heads/${BRANCH}`, headers: { authorization: `Bearer ${token}`, "user-agent": "t" }, body: null }),
+      port: fake.server.port,
+      ca: fake.server.ca,
+    });
+    expect(replay.status).toBe(401);
+  });
+
+  it("revokes when the upstream call throws, and when it times out (504)", async () => {
+    // Only the forward itself (github.com) fails; the mint and the revoke (api.github.com) go through.
+    const failing = (error: Error) => (inner: PinnedRequester): PinnedRequester => (p) => (p.host === "github.com" ? Promise.reject(error) : inner(p));
+    await expect(call(publishDeps(fake, {}, PUBLISH_RUN, failing(new Error("socket hang up"))), "/acme/widgets/info/refs?service=git-upload-pack")).rejects.toThrow("socket hang up");
+    const timedOut = await call(publishDeps(fake, {}, PUBLISH_RUN, failing(new UpstreamTimeoutError("headers"))), "/acme/widgets/info/refs?service=git-upload-pack");
+    expect(timedOut.status).toBe(504);
+    expect(perToken(fake)).toEqual([["mint", "revoke"], ["mint", "revoke"]]);
+    expect(fake.live.size).toBe(0);
+  });
+
+  it("a revoke GitHub refuses is logged by a fixed line, the request is still answered, and the token is left to lapse", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fake.state.revokeStatus = 500;
+    const res = await call(publishDeps(fake), "/acme/widgets/info/refs?service=git-upload-pack");
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith("gh-proxy: publish token not revoked");
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/ghs_/);
+    expect(fake.live.size).toBe(1);
+  });
+
+  it("a denied request mints nothing, answers a generic 403, and logs a fixed reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = publishDeps(fake);
+    for (const path of ["/acme-public/widgets-pub-2/info/refs?service=git-upload-pack", "/repos/acme-public/widgets-pub/contents/README.md", "/repos/acme/widgets/issues/5"]) {
+      const res = await call(deps, path);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "denied" });
+    }
+    const reasons = warn.mock.calls.filter((c) => c[0] === "gh-proxy: denied").map((c) => (c[1] as { reason: string }).reason);
+    expect(reasons).toEqual(["publish_repo_out_of_scope", "publish_request_not_allowed", "publish_request_not_allowed"]);
+    expect(fake.events).toEqual([]);
+  });
+
+  it("a run with no resolved target mints nothing and answers the generic 403 (the body does not say why)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await call(publishDeps(fake, { resolvePublishTarget: async () => null }), "/acme/widgets/info/refs?service=git-upload-pack");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "denied" });
+    expect(warn).toHaveBeenCalledWith("gh-proxy: denied", expect.objectContaining({ reason: "publish_target_not_resolved" }));
+    expect(fake.events).toEqual([]);
+  });
+
+  it("an executor run asking for the paired public repository gets the same generic 403, with no mint", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const resolvePublishTarget = vi.fn(async () => TARGET);
+    const deps = publishDeps(fake, { resolvePublishTarget }, { ...PUBLISH_RUN, role: "executor" });
+    for (const [method, path] of [["GET", "/acme-public/widgets-pub/info/refs?service=git-receive-pack"], ["GET", `/repos/acme-public/widgets-pub/git/ref/heads/${BRANCH}`], ["POST", "/repos/acme-public/widgets-pub/pulls"]] as const) {
+      const res = await call(deps, path, method, method === "POST" ? JSON.stringify({ title: "t", head: BRANCH, base: "main" }) : undefined);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "denied" });
+    }
+    expect(warn.mock.calls.filter((c) => c[0] === "gh-proxy: denied").map((c) => (c[1] as { reason: string }).reason)).toEqual(Array(3).fill("repo_out_of_scope"));
+    expect(resolvePublishTarget).not.toHaveBeenCalled();
+    expect(fake.events).toEqual([]);
+  });
+
+  it("an executor run in its own repository is unchanged: a cached token, never revoked", async () => {
+    const deps = publishDeps(fake, {}, { ...PUBLISH_RUN, role: "executor" });
+    expect((await call(deps, "/repos/acme/widgets/issues/5")).status).toBe(200);
+    expect((await call(deps, "/repos/acme/widgets/issues/5")).status).toBe(200);
+    expect(fake.events.map((e) => e.type)).toEqual(["mint", "use", "use"]);
+    expect(fake.live.size).toBe(1);
+  });
+});
+
+describe("D#598 P1f-4b: buildPinnedFetch, the publish path's own GitHub calls", () => {
+  const pinned = () => {
+    const forwardPinned = vi.fn(async (_p: Parameters<PinnedRequester>[0]): Promise<PinnedResponse> => ({ status: 200, headers: { "content-type": "application/json" }, bodyStream: new Response('{"id":5}').body }));
+    const resolveUpstream = vi.fn(async (_host: string) => ["140.82.112.3"]);
+    return { forwardPinned, resolveUpstream, fetchPinned: buildPinnedFetch({ forwardPinned, resolveUpstream }) };
+  };
+
+  it.each(["http://api.github.com/x", "https://github.com/x", "https://api.github.com.evil.example/x", "https://api.github.com:8443/x", "https://u:p@api.github.com/x", "https://evil.example/x"])(
+    "refuses %s before any lookup or connection",
+    async (url) => {
+      const p = pinned();
+      await expect(p.fetchPinned(url)).rejects.toThrow("pinned fetch target not allowed");
+      expect(p.resolveUpstream).not.toHaveBeenCalled();
+      expect(p.forwardPinned).not.toHaveBeenCalled();
+    },
+  );
+
+  it("resolves the host through the checked lookup, pins the validated address, and passes method, path, query, headers and body", async () => {
+    const p = pinned();
+    const res = await p.fetchPinned("https://api.github.com/repos/o/n/pulls?x=1", { method: "POST", headers: { Authorization: "Bearer t", "Content-Type": "application/json" }, body: '{"a":1}' });
+    expect(await res.json()).toEqual({ id: 5 });
+    expect(p.resolveUpstream).toHaveBeenCalledWith("api.github.com");
+    const sent = p.forwardPinned.mock.calls[0]![0];
+    expect(sent).toMatchObject({ host: "api.github.com", address: "140.82.112.3", method: "POST", path: "/repos/o/n/pulls?x=1" });
+    expect(sent.headers).toMatchObject({ authorization: "Bearer t", "content-type": "application/json", "content-length": "7" });
+    expect(Buffer.from(sent.body!).toString()).toBe('{"a":1}');
+  });
+
+  it("answers a 204 as an empty response (a Response with a body and status 204 would throw)", async () => {
+    const forwardPinned = vi.fn(async (): Promise<PinnedResponse> => ({ status: 204, headers: {}, bodyStream: new Response("").body }));
+    const res = await buildPinnedFetch({ forwardPinned, resolveUpstream: async () => ["1.2.3.4"] })("https://api.github.com/installation/token", { method: "DELETE" });
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe("");
   });
 });

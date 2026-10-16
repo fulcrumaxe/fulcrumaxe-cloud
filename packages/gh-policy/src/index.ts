@@ -28,3 +28,5 @@ export type {
   RefUpdate,
   TokenScope,
 } from "./types.js";
+export { decidePlanePublish, PLANE_PUBLISH_BASE, PLANE_PUBLISH_DENY_REASONS, PLANE_PUBLISH_ROLE } from "./planePublish.js";
+export type { PlanePublishDecision, PlanePublishDenyReason, PlanePublishRequest } from "./planePublish.js";

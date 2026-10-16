@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_publish_read"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -258,6 +258,12 @@ export const MERGE_GATE_PERMISSIONS: Readonly<Record<string, "read" | "write">> 
  * permission the mint response may carry beyond these two (see `assertPlanePushToken`).
  */
 export const PLANE_PUSH_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write", pull_requests: "write" });
+
+/**
+ * D#598 P1f-4b: the only permissions a `plane_publish_read` token ever asks for: reads of the contents of ONE private repository, for the publish
+ * run's fetch of the item branch. Never a write, and never the issue, pull request or Discussion reads a `plan_read` token carries.
+ */
+export const PLANE_PUBLISH_READ_PERMISSIONS: Readonly<Record<string, "read">> = Object.freeze({ metadata: "read", contents: "read" });
 
 /** The only permission keys a `runner_git` token may ask for. GitHub itself refuses a push that touches .github/workflows/** for want of `workflows`. */
 const RUNNER_GIT_PERMISSION_KEYS: readonly string[] = ["metadata", "contents"];
@@ -306,6 +312,20 @@ export function assertPlanePushToken(minted: Pick<MintedAccessToken, "permission
   if (!metadataOk || !writes || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
+/**
+ * D#598 P1f-4b: GitHub's answer to a `plane_publish_read` mint must say the token covers exactly the one repository asked for and holds
+ * `contents` (and the implicit `metadata`) at `read` and nothing else.
+ */
+export function assertPlanePublishReadToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const entries = Object.entries(perms);
+  const readOnly = entries.every(([k, v]) => v === "read" && k in PLANE_PUBLISH_READ_PERMISSIONS) && perms.contents === "read";
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  if (!readOnly || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
 export interface GetInstallationTokenParams {
   installationId: number;
   /** From the `installations` row, never from the request. Anything but the value the purpose requires is refused. */
@@ -319,8 +339,8 @@ export interface GetInstallationTokenParams {
   now?: () => number;
   /**
    * D#598 P1f-1: skip the cache for both the read and the write. A fresh token is minted on every call and is never stored here, so a
-   * caller that revokes it after one use (`revokeToken`) is not handed a token someone else already holds. Only `plane_push` accepts it:
-   * any other purpose refuses (`purpose_not_allowed`), so no other path can opt out of the cache by accident.
+   * caller that revokes it after one use (`revokeToken`) is not handed a token someone else already holds. Only `plane_push` and
+   * `plane_publish_read` accept it: any other purpose refuses (`purpose_not_allowed`), so no other path can opt out of the cache by accident.
    */
   fresh?: boolean;
   /** D#598 P1f-2: told GitHub's own expiry (ms since the epoch) of a token minted fresh, so a caller can hand the real time on. Never called with the token. */
@@ -375,6 +395,13 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(PLANE_PUSH_PERMISSIONS);
     appKind = params.appKind;
     namespace = "plane_push:";
+  } else if (params.purpose === "plane_publish_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
+    // D#598 P1f-4b: one private repository, contents read. Minted anew for every proxied request of a publish run and never cached.
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: PLANE_PUBLISH_READ_PERMISSIONS };
+    allowed = Object.keys(PLANE_PUBLISH_READ_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "plane_publish_read:";
   } else if (params.purpose === "plan_read" && (params.appKind === "team_readonly" || params.appKind === "team")) {
     // D#483 S3: a one-repository, fixed, read-only set. An installation-wide token has no business here.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -396,9 +423,11 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  if (params.fresh === true && params.purpose !== "plane_push") throw new InstallationTokenError("purpose_not_allowed");
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_publish_read";
+  if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
-  const fresh = params.fresh === true || params.purpose === "plane_push";
+  // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
+  const fresh = params.fresh === true || neverCached;
   const cached = fresh ? undefined : params.cache.get(params.installationId, appKind, params.role, scope, nowMs, namespace);
   if (cached) return cached;
 
@@ -430,6 +459,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   // does not state the permissions is refused, so the token is neither cached nor handed out.
   if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
   if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (params.purpose === "plane_publish_read") assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
   if (fresh) {
     noteLiveInstallationToken(minted.token, expiresAtMs);
     params.onExpiry?.(expiresAtMs);
