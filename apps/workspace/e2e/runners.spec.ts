@@ -138,17 +138,15 @@ async function clean(page: Page, errors: string[]) {
   expect(text).not.toContain(SERVER_TEXT);
   expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i); // no id stands in for a name
 }
+async function applyTheme(page: Page, theme: string) {
+  await page.evaluate(async (id) => {
+    const m = await import(new URL("core/theme-manager.js", document.baseURI).href);
+    await m.FULCTheme.apply(id);
+  }, theme);
+}
 async function axeSeriousOrCritical(page: Page, scope: string) {
-  const found: string[] = [];
-  for (const theme of THEMES) {
-    await page.evaluate(async (id) => {
-      const m = await import(new URL("core/theme-manager.js", document.baseURI).href);
-      await m.FULCTheme.apply(id);
-    }, theme);
-    const res = await new AxeBuilder({ page }).include(scope).exclude(`${WIN} .window-titlebar`).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
-    found.push(...res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `[${theme}] ${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`));
-  }
-  return found;
+  const res = await new AxeBuilder({ page }).include(scope).exclude(`${WIN} .window-titlebar`).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
+  return res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`);
 }
 
 test.describe("D#605 FL-9: the fleet page", () => {
@@ -359,7 +357,9 @@ test.describe("D#605 FL-9: the fleet page", () => {
     await clean(page, errors);
   });
 
-  test("keyboard: every control is a focusable button or field (none uses the disabled attribute), and the list and the sheet pass axe under every theme", async ({ page }) => {
+  // One test per theme: eight themes, three axe scans each, in one test cost more than the test timeout when the machine is busy. Each theme
+  // still gets every scan; none is dropped.
+  for (const theme of THEMES) test(`keyboard: every control is a focusable button or field (none uses the disabled attribute), and the list and the sheet pass axe under ${theme}`, async ({ page }) => {
     const none = { allowed: false, reason: NOT_MINE };
     await setup(page, {
       runners: [
@@ -370,6 +370,7 @@ test.describe("D#605 FL-9: the fleet page", () => {
       account: { limit: 16, capacity: 8, running: 1, runner_count: 3, runner_limit: 3 },
     });
     await open(page);
+    await applyTheme(page, theme);
     expect(await page.locator(`${WIN} button[disabled], ${WIN} input[disabled]`).count()).toBe(0);
     expect(await page.locator(`${WIN} button[tabindex="-1"]`).count()).toBe(0);
     await expect(t(page, "runners-limit-note")).toBeVisible();

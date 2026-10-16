@@ -73,8 +73,14 @@ async function setup(page: Page, insight: unknown, events: unknown[], row: Recor
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
   });
   await page.goto("/");
+  // A new page's pointer rests at the top-left corner, and the browser can repeat a mouse move there after a layout; the shell's top-left hot corner
+  // opens the window overview after 400 ms of that. Park the pointer mid-screen before the shell is up, so no click here depends on having beaten the dwell.
+  await page.mouse.move(300, 300);
   await page.waitForFunction(() => (window as unknown as { currentStep?: string }).currentStep === "DESKTOP", null, { timeout: 30_000 });
-  await page.locator('.dock-icon[data-app-id="runs"]').click();
+  // Pages of one context share the saved window layout, and the shell restores it 200 ms after the desktop is up. A dock click that lands after
+  // that restore finds the Runs window already open and focused, and the dock then minimises it. Launching through the window manager goes to the
+  // window when it is there and opens it when it is not, whichever of the two comes first.
+  await page.evaluate(() => (window as unknown as { FULCWM: { open: (id: string) => void } }).FULCWM.open("runs"));
   await expect(page.locator(WIN)).toBeVisible();
   await expect(page.locator(WIN)).not.toHaveClass(/opening/);
   await expect(tid(page, "runs-row")).toHaveCount(1);
