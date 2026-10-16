@@ -2570,6 +2570,71 @@ check_runner_notice_lister_role_shape() {
   fi
 }
 
+# D#483 S5-k1b (0845): the one SECURITY DEFINER function owned by stage_resume_lister, the cross-tenant list of items parked at a stage
+# (0845). Prints its oid when it is exactly 'work_item_list_parked_stage(text,text[],text[],integer,integer)' (matched by regprocedure),
+# pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer and nobody else but the owner (no PUBLIC, no
+# platform_ops, no app_user), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
+check_stage_resume_lister_exception_shape() {
+  local dbname="$1" row rc=0 oids bad
+  row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
+    SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
+      SELECT p.oid, (p.oid = 'public.work_item_list_parked_stage(text,text[],text[],integer,integer)'::regprocedure
+        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
+        AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['agent_run_writer']
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0)) AS ok
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'stage_resume_lister') x;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
+    echo "SHAPE_FAIL:psql failed for check 'stage-resume-lister-function-shape' on $dbname (exit $rc): $row"
+    return 0
+  fi
+  IFS='|' read -r oids bad <<<"$row"
+  if [ "$bad" != "0" ]; then
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by stage_resume_lister fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but agent_run_writer and the owner, or a grant option)"
+    return 0
+  fi
+  echo "$oids"
+}
+
+# D#483 S5-k1b (0845): role shape of stage_resume_lister. A no-op when the role does not exist. Every problem is named: NOLOGIN
+# and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges exactly the 12
+# granted by 0845 (column SELECT on work_items and work_item_driver_events, USAGE on public; nothing table-wide), owning exactly its one function and
+# nothing else.
+check_stage_resume_lister_role_shape() {
+  local dbname="$1" out rc=0 problems
+  local expected="'column work_items.id SELECT','column work_items.account_id SELECT','column work_items.stage SELECT','column work_items.halted_at SELECT','column work_item_driver_events.account_id SELECT','column work_item_driver_events.work_item_id SELECT','column work_item_driver_events.kind SELECT','column work_item_driver_events.code SELECT','column work_item_driver_events.stage SELECT','column work_item_driver_events.seq SELECT','column work_item_driver_events.created_at SELECT','schema public USAGE'"
+  out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
+    WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'stage_resume_lister'),
+    held AS (
+      SELECT 'table ' || c.relname || ' ' || a.privilege_type AS x FROM pg_class c, aclexplode(c.relacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'column ' || c.relname || '.' || t.attname || ' ' || a.privilege_type
+        FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid, aclexplode(t.attacl) a, r WHERE a.grantee = r.oid
+      UNION ALL SELECT 'schema ' || n.nspname || ' ' || a.privilege_type FROM pg_namespace n, aclexplode(n.nspacl) a, r WHERE a.grantee = r.oid AND n.nspname = 'public'),
+    mine AS (SELECT p.oid FROM pg_proc p, r WHERE p.proowner = r.oid)
+    SELECT concat_ws('; ',
+      CASE WHEN r.rolcanlogin OR r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls THEN 'privileged attribute' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = r.oid AND member <> 'fx_migrator'::regrole) THEN 'has a member besides the migration role' END,
+      CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
+                OR pg_has_role('fx_migrator', 'stage_resume_lister', 'USAGE') THEN 'fx_migrator holds a live membership' END,
+      CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 12 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 12 granted by 0845' END,
+      CASE WHEN (SELECT count(*) FROM mine) <> 1
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.work_item_list_parked_stage(text,text[],text[],integer,integer)'::regprocedure::oid)
+              OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+      CASE WHEN has_schema_privilege('stage_resume_lister', 'public', 'CREATE') THEN 'still has CREATE on public' END)
+    FROM r;" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "neon-shape ($dbname): psql failed for check 'stage_resume_lister-shape' (exit $rc): $out" >&2
+    exit 1
+  fi
+  problems="$out"
+  if [ -n "$problems" ]; then
+    echo "neon-shape ($dbname): stage_resume_lister role shape wrong: $problems" >&2
+    exit 1
+  fi
+}
+
 # D#597 CC-8 (0776): the four SECURITY DEFINER functions owned by invariant_sweep_definer. Prints their oids when each is exactly one of the four
 # signatures (matched by regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds agent_run_writer and nobody else but
 # the owner (no PUBLIC, no platform_ops, no app_user), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not.

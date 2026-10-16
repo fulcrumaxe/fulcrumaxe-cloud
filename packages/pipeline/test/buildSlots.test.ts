@@ -109,6 +109,7 @@ describe("no plan tier can set a limit (import-graph)", () => {
       }
     };
     visit(join(here, "../src/advance/buildSlots.ts"));
-    expect(seen.size).toBe(1);
+    // D#483 S5-k1b: the one relative file is the waiting-stage table (stage names and positions; it imports only the driver-event vocabulary), walked by the same rule above.
+    expect([...seen].map((f) => f.slice(f.lastIndexOf("/") + 1)).sort()).toEqual(["buildSlots.ts", "waitingStages.ts"]);
   });
 });

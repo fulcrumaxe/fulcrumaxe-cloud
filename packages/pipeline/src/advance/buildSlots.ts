@@ -3,6 +3,7 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toQueueRank } from "@fx/core/src/work-items/priority.js";
 import { compareQueueOrder } from "@fx/core/src/work-items/queueOrder.js";
 import { effectiveModeSql, isRunnerMode } from "@fx/runner";
+import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 
 /**
  * D#483 S5-c1: build slots from the person's own concurrency setting.
@@ -89,8 +90,9 @@ export const BUILD_SLOT_POLL_SECONDS = 60;
 export const WAITER_WINDOW_SECONDS = 3 * BUILD_SLOT_POLL_SECONDS;
 
 /**
- * Items waiting for a slot, derived from the wait itself: at a start stage, not halted, whose LATEST `build_waiting` fact (one per poll, written by
- * the worker when the start found no slot) is a slot reason and younger than the window. D#483 S5-k1: the same fact also names a spend pause
+ * Items waiting for a slot, derived from the wait itself: at a start stage, not halted, whose LATEST waiting fact (one per poll, written by the worker
+ * when the start found no slot; `stage_waiting` for the build stage since D#483 S5-k1b, `build_waiting` before it, and the latest of the two counts) is a slot
+ * reason and younger than the window. A fact of another stage (`classify`, `spec`, ...) never counts here. D#483 S5-k1: the same fact also names a spend pause
  * (`account_budget_reached` and the other three); an item paused for a limit holds no slot back from the items behind it. A build that failed (Needs a person), a workflow that died, a give-up or a
  * start all stop the polls, so the item stops counting within the window and never holds a free slot back.
  */
@@ -100,15 +102,36 @@ const waiterSql = (): string => `
     FROM work_items w
     JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
    WHERE w.account_id = $1 AND w.id <> $2
-     AND w.stage IN ('spec_ready', 'needs_human') AND w.halted_at IS NULL
+     AND w.stage = ANY($7::text[]) AND w.halted_at IS NULL
      AND EXISTS (
-       SELECT 1 FROM work_item_driver_events e
-        WHERE e.account_id = w.account_id AND e.work_item_id = w.id AND e.kind = 'build_waiting'
+       SELECT 1 FROM (
+         SELECT x.code, x.stage, x.created_at FROM work_item_driver_events x
+          WHERE x.account_id = w.account_id AND x.work_item_id = w.id AND x.kind IN ('build_waiting', 'stage_waiting')
+          ORDER BY x.seq DESC LIMIT 1
+       ) e
+        WHERE COALESCE(e.stage, 'build') = $6::text
           AND e.created_at > now() - make_interval(secs => $4::int)
           AND e.code = ANY($5::text[])
-          AND e.seq = (SELECT max(x.seq) FROM work_item_driver_events x WHERE x.account_id = w.account_id AND x.work_item_id = w.id AND x.kind = 'build_waiting')
      )
    LIMIT 500`;
+
+export interface SlotWaiterRow {
+  id: string;
+  priority: number;
+  queue_rank: string | null;
+  created_at: Date;
+  repo_id: string;
+  mode: string;
+  repo_held: string;
+}
+
+/**
+ * The items (other than `exceptItemId`) whose LATEST waiting fact names `stage` and a slot reason and is fresh, sitting at that stage's positions. Only the build
+ * stage waits for a slot today; the stage argument is what keeps a fact of another stage (a classify wait) from counting here, and the reverse (a test fixes both).
+ */
+export async function listSlotWaiters(client: PoolClient, accountId: string, exceptItemId: string, stage: WaitingStage): Promise<SlotWaiterRow[]> {
+  return (await client.query<SlotWaiterRow>(waiterSql(), [accountId, exceptItemId, [...BUILD_SLOT_STAGES], WAITER_WINDOW_SECONDS, [...BUILD_WAIT_REASONS], stage, [...WAITING_STAGE_POSITIONS[stage]]])).rows;
+}
 
 interface ItemRow {
   id: string;
@@ -160,9 +183,7 @@ export async function decideBuildSlot(client: PoolClient, accountId: string, wor
     : 0;
 
   const me = { id: item.id, priority: item.priority, queueRank: toQueueRank(item.queue_rank), createdAt: item.created_at };
-  const waiters = (
-    await client.query<{ id: string; priority: number; queue_rank: string | null; created_at: Date; repo_id: string; mode: string; repo_held: string }>(waiterSql(), [accountId, workItemId, [...BUILD_SLOT_STAGES], WAITER_WINDOW_SECONDS, [...BUILD_WAIT_REASONS]])
-  ).rows.filter((w) => compareQueueOrder({ id: w.id, priority: w.priority, queueRank: toQueueRank(w.queue_rank), createdAt: w.created_at }, me) < 0);
+  const waiters = (await listSlotWaiters(client, accountId, workItemId, "build")).filter((w) => compareQueueOrder({ id: w.id, priority: w.priority, queueRank: toQueueRank(w.queue_rank), createdAt: w.created_at }, me) < 0);
 
   return decideSlot({
     limits,

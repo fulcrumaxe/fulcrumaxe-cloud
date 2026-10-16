@@ -10,6 +10,7 @@ import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
+import { attemptKey } from "./attemptKeys.js";
 import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
@@ -258,8 +259,7 @@ export async function startBuildForItem(
   // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
   // D#483 S5-k1: a start denied by a spend limit leaves a keyed `refused_spend` run, and a replay of the same key finds that run. So each later ask of the same
   // approval (the workflow's poll while the item is paused for a limit) is a new attempt with its own key (`:s<n>`); the first ask keeps the key it always had.
-  const attempt = Number.isSafeInteger(options.spendAttempt) && options.spendAttempt! > 0 ? `:s${options.spendAttempt}` : "";
-  const baseStep = `build:v${facts.version}:${approvalId}${attempt}`;
+  const baseStep = attemptKey(`build:v${facts.version}:${approvalId}`, options.spendAttempt ?? 0);
   const prior = (await ports.findStep?.(baseStep)) ?? null;
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.

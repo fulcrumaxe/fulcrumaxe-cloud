@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 
 /**
  * D#483 S5-k1: named pauses for the reservation denials that exist today.
@@ -14,9 +15,9 @@ import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
  *
  * `account_not_active` is not a pause: it keeps its existing refusal (the account cannot run anything, and a poll would not change that).
  *
- * Nothing records "this item is paused". Each poll of the wait leaves one `build_waiting` driver fact whose code is the pause (the same fact
- * the slot wait leaves), and the pause is DERIVED from the item's latest such fact: it is a pause only while that fact is fresh, the item is
- * still at a start stage and is not halted. A start that succeeds moves the item on, a different wait writes a different latest fact, a give-up
+ * Nothing records "this item is paused". Each ask of the wait leaves one waiting driver fact (`stage_waiting`, stage `build`, since D#483 S5-k1b; `build_waiting` before it) whose code is the
+ * pause (the same fact the slot wait leaves), and the pause is DERIVED from the item's latest such fact: it is a pause only while that fact is fresh,
+ * the item is still at a start stage and is not halted. A start that succeeds moves the item on, a different wait writes a different latest fact, a give-up
  * stops the polls, and in every case the pause is gone within the window without anyone clearing it. The wait never changes the item's stage
  * and never writes `halted_at` (a person's halt is a separate thing).
  *
@@ -58,27 +59,36 @@ export const RESERVATION_PAUSE_SENTENCES: Readonly<Record<ReservationPause, stri
  * apps/web workItemAdvance BUILD_SPEND_POLL_MS; a test holds the two together.
  */
 export const RESERVATION_POLL_SECONDS = 300;
-/** A pause counts only while its latest `build_waiting` fact is younger than this: three polls. */
-export const RESERVATION_PAUSE_WINDOW_SECONDS = 3 * RESERVATION_POLL_SECONDS;
+/**
+ * D#483 S5-k1b: how often the parked-stage sweep looks again at an item whose workflow gave up waiting (apps/web vercel.json; a test holds the two together).
+ * The sweep refreshes the item's waiting fact on every pass while a limit still denies the start, so the fact is never older than one pass.
+ */
+export const RESERVATION_SWEEP_SECONDS = 900;
+/** A pause counts only while its latest waiting fact is younger than this: three sweep passes (45 minutes). A workflow in its wait refreshes it every five minutes, a parked item every fifteen. */
+export const RESERVATION_PAUSE_WINDOW_SECONDS = 3 * RESERVATION_SWEEP_SECONDS;
+/** A fact at least this old (two asks of the wait) has no live workflow behind it: the sweep may resume the item. */
+export const RESERVATION_ORPHAN_AFTER_SECONDS = 2 * RESERVATION_POLL_SECONDS;
 
 /**
- * The pause an item is in right now, or null. Derived at read time from the item's latest `build_waiting` fact (see the header); takes no lock,
- * so it is a fair picture and not a promise. For the wait sentences S6-b shows.
+ * The pause an item is in right now at one stage (the build by default), or null. Derived at read time from the item's latest waiting fact, of either kind
+ * (`stage_waiting`, or the `build_waiting` that S5-k1 wrote, which reads as the build stage); takes no lock, so it is a fair picture and not a promise.
+ * The fact counts only while it names THIS stage, the item still sits at one of that stage's positions and is not halted. For the wait sentences S6-b shows.
  */
-export async function readReservationPause(pool: Pool, accountId: string, workItemId: string): Promise<ReservationPause | null> {
+export async function readReservationPause(pool: Pool, accountId: string, workItemId: string, stage: WaitingStage = "build"): Promise<ReservationPause | null> {
   return withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<{ code: string | null }>(
       `SELECT e.code
          FROM work_items w
          JOIN LATERAL (
-           SELECT x.code, x.created_at FROM work_item_driver_events x
-            WHERE x.account_id = w.account_id AND x.work_item_id = w.id AND x.kind = 'build_waiting'
+           SELECT x.code, x.stage, x.created_at FROM work_item_driver_events x
+            WHERE x.account_id = w.account_id AND x.work_item_id = w.id AND x.kind IN ('build_waiting', 'stage_waiting')
             ORDER BY x.seq DESC LIMIT 1
          ) e ON true
         WHERE w.id = $2 AND w.account_id = $1
-          AND w.stage IN ('spec_ready', 'needs_human') AND w.halted_at IS NULL
+          AND w.stage = ANY($4::text[]) AND w.halted_at IS NULL
+          AND COALESCE(e.stage, 'build') = $5::text
           AND e.created_at > now() - make_interval(secs => $3::int)`,
-      [accountId, workItemId, RESERVATION_PAUSE_WINDOW_SECONDS],
+      [accountId, workItemId, RESERVATION_PAUSE_WINDOW_SECONDS, [...WAITING_STAGE_POSITIONS[stage]], stage],
     );
     const code = rows[0]?.code;
     return isReservationPause(code) ? code : null;

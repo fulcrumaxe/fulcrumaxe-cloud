@@ -28,9 +28,13 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/handoff-sweep")).toEqual([{ path: "/api/cron/handoff-sweep", schedule: "* * * * *" }]);
   });
 
+  it("the parked-stage sweep (D#483 S5-k1b) runs every 15 minutes, behind its own pending-work marker: a limit pause is picked up within one pass of the limit rising", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/stage-resume-sweep")).toEqual([{ path: "/api/cron/stage-resume-sweep", schedule: "*/15 * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);
-    for (const path of [...Object.keys(EXPECTED), "/api/cron/runner-sweeper"]) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
+    for (const path of [...Object.keys(EXPECTED), "/api/cron/runner-sweeper", "/api/cron/stage-resume-sweep"]) expect(config.crons.find((c) => c.path === path)?.schedule).not.toBe("* * * * *");
   });
 });

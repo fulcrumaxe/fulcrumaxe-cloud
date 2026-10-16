@@ -256,7 +256,7 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     expect(await none.advanceBuildFailed(a.accountId, w, randomUUID(), "run_failed")).toEqual({ status: "refused", reason: "build_unavailable" });
   });
 
-  it("S5-c1: a start that found no build slot leaves one build_waiting fact per poll-minute (no build_refused), so the waiter is live only while it polls", async () => {
+  it("S5-c1: a start that found no build slot leaves one stage_waiting fact (stage build) per poll-minute (no build_refused), so the waiter is live only while it polls", async () => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);
     const t = build({ build: (async () => ({ status: "refused", reason: "one_build_per_repo_until_d598" })) as never });
@@ -267,10 +267,10 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
     // Two polls in one minute are one fact (a minute boundary between them may make it two).
     expect(rows.rowCount).toBeLessThanOrEqual(2);
-    expect(rows.rows.every((r) => r.kind === "build_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
+    expect(rows.rows.every((r) => r.kind === "stage_waiting" && r.code === "one_build_per_repo_until_d598")).toBe(true);
   });
 
-  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a start a spending limit denied (%s) leaves a build_waiting fact with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
+  it.each(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"])("S5-k1: a start a spending limit denied (%s) leaves a stage_waiting fact (stage build) with that name, not a build_refused, and the attempt reaches the pipeline", async (pause) => {
     const a = await seedAccount(admin, randomUUID());
     const w = await item(a);
     const seen: unknown[] = [];
@@ -278,13 +278,13 @@ describe("advance: panel, Spec and build [pg]", { timeout: 60_000 }, () => {
     const who = { accountId: a.accountId, userId: a.userId, workItemId: w, haltEpoch: 0 };
     const approval = randomUUID();
     expect(await t.module.advanceBuild(who, approval, undefined, 3)).toEqual({ status: "refused", reason: pause });
-    const rows = await admin.query("SELECT kind, code FROM work_item_driver_events WHERE work_item_id = $1", [w]);
-    expect(rows.rows).toEqual([{ kind: "build_waiting", code: pause }]);
+    const rows = await admin.query("SELECT kind, code, stage, attempt FROM work_item_driver_events WHERE work_item_id = $1", [w]);
+    expect(rows.rows).toEqual([{ kind: "stage_waiting", code: pause, stage: "build", attempt: 3 }]);
     expect(seen[0]).toEqual({ spendAttempt: 3 });
     // The first ask carries no attempt; a bad one is refused before any work.
     await t.module.advanceBuild(who, approval);
     expect(seen[1]).toEqual({});
-    for (const bad of [-1, 1.5, 1001]) expect(await t.module.advanceBuild(who, approval, undefined, bad)).toEqual({ status: "refused", reason: "invalid_input" });
+    for (const bad of [-1, 1.5, 100_001]) expect(await t.module.advanceBuild(who, approval, undefined, bad)).toEqual({ status: "refused", reason: "invalid_input" });
     expect(seen).toHaveLength(2);
   });
 

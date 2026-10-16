@@ -597,7 +597,9 @@ async function rebuildPhase(args: AdvanceStartArgs, pinned: number | null, repo:
 async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promise<Result> {
   const { accountId, userId, workItemId, actionId } = args;
 
-  let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned);
+  // D#483 S5-k1b: a restart by the parked-stage sweep begins at the next unused attempt, never the unsuffixed key (that key's run is the first `refused_spend` one).
+  let spendAttempt = Number.isSafeInteger(args.startAttempt) && args.startAttempt! > 0 ? args.startAttempt! : 0;
+  let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
   // Three waits, each with its own bound. A reaper claim on the sandbox: a few backoffs. No build slot (the person's concurrency setting, D#483 S5-c1): the
   // item stays at Spec ready and asks again every minute, up to four hours (as many polls as the run wait below already makes in one workflow, so no new event-count risk); a start that finds no slot has run nothing and spent nothing. A halt or any other
   // refusal ends the loop at once.
@@ -606,7 +608,6 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
   let lastSlotReason: string | null = null;
   // S5-k1: a spending limit denied the run. The item stays at Spec ready; every ask after the first is attempt 1, 2, ... (the run key).
   let spendWaitedMs = 0;
-  let spendAttempt = 0;
   let lastSpendReason: string | null = null;
   for (;;) {
     if (started.reason === BUILD_REAPING_REASON && reapingTries < BUILD_REAPING_BACKOFF_MS.length) {
@@ -629,6 +630,12 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
   }
   if (isHaltReason(started.reason)) return haltedEnd(args, "build_start");
+  // D#483 S5-k1b: the four hours are up and a spending limit still denies the start. That is not a failure: the item stays at Spec ready with its approval, nothing is
+  // stamped, and the parked-stage sweep (every 15 minutes) starts the build again, with no person, when the limit allows it. Any other refusal ends as it did.
+  if (started.status !== "started" && started.reason !== null && RESERVATION_PAUSE_REASONS.includes(started.reason)) {
+    await advanceLogStep("advance.paused", { work_item_id: workItemId, at: "build_start", reason: started.reason, attempt: spendAttempt });
+    return { status: "paused", detail: `build_paused:${started.reason}` };
+  }
   if (started.status !== "started" || started.runId === null) {
     // Nothing was spent and the item did not move: it stays at Spec ready, where it can be approved again. The refusal is
     // recorded as a fact of the item (by the worker).

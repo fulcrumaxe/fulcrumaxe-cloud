@@ -106,6 +106,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "signGitTicket",
       "sweepComputeSettle",
       "sweepInvariants",
+      "sweepParkedStages",
       "sweepRunHandoffs",
       "sweepRunnerLeases",
       "sweepRunnerNotices",
