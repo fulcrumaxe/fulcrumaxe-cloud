@@ -49,6 +49,15 @@ describe('checkHeadroom: the read-only twin of reserve()', () => {
     ]);
   };
 
+  const attachEnvelope = async (accountId: string, workItemId: string, amount: number): Promise<void> => {
+    const userId = randomUUID();
+    const envelopeId = randomUUID();
+    await admin.query('INSERT INTO users (id, email) VALUES ($1, $2)', [userId, `${userId}@example.test`]);
+    await admin.query(`INSERT INTO account_members (account_id, user_id, role) VALUES ($1, $2, 'owner')`, [accountId, userId]);
+    await admin.query(`INSERT INTO approval_envelopes (id, account_id, scope, amount_usd, version, created_by) VALUES ($1, $2, 'item', $3, 1, $4)`, [envelopeId, accountId, amount, userId]);
+    await admin.query('UPDATE work_items SET envelope_id = $1 WHERE id = $2', [envelopeId, workItemId]);
+  };
+
   const fgCap = foregroundBudgetUsd('starter');
   const base: Params = { plan: 'starter', estimateModelUsd: 10, monthlyModelBudgetUsd: 600, perSpawnCapUsd: 40 };
 
@@ -95,6 +104,25 @@ describe('checkHeadroom: the read-only twin of reserve()', () => {
         const r = randomUUID();
         await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'local', 'running')`, [r, a, w]);
         await spendUsd(a, r, 55);
+      },
+    },
+    {
+      name: 'envelope_exceeded (D#483 S5-d: the item\'s spend envelope, which replaces the item cap)',
+      expected: { decision: 'deny', reason: 'envelope_exceeded' },
+      withItem: true,
+      params: { ...base, estimateModelUsd: 12, workItemKind: 'small' },
+      setup: async (a, w) => attachEnvelope(a, w, 10),
+    },
+    {
+      name: 'admit: inside the envelope even where the item cap would have refused',
+      expected: { decision: 'admit' },
+      withItem: true,
+      params: { ...base, estimateModelUsd: 12, workItemKind: 'small' },
+      setup: async (a, w) => {
+        await attachEnvelope(a, w, 12);
+        const r = randomUUID();
+        await admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'local', 'running')`, [r, a, w]);
+        await spendUsd(a, r, 0);
       },
     },
     {

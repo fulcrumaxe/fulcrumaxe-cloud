@@ -98,6 +98,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "model_connection_not_ok",
   "per_spawn_cap_exceeded",
   "work_item_cap_exceeded",
+  "envelope_exceeded",
   "model_budget_exceeded",
   "compute_cap_exceeded",
   // Run handoff (D#599 HO-2a): the refusals of POST /runs/{id}/handoff and its cancel, thrown through a variable (the runner-cloud service's code), so the scan cannot see them.

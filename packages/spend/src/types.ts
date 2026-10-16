@@ -66,6 +66,7 @@ export type DenyReason =
   | 'model_connection_not_ok'
   | 'per_spawn_cap_exceeded'
   | 'work_item_cap_exceeded'
+  | 'envelope_exceeded'
   | 'model_budget_exceeded'
   | 'compute_cap_exceeded';
 

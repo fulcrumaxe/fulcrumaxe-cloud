@@ -111,3 +111,13 @@ export function modelRunPrice(medians: ModelRunMedians, role: string, effectiveM
   if (m !== undefined && m.n >= MEDIAN_MIN_RUNS) return { usd: m.median, source: 'ledger' };
   return { usd: medianCostSeedUsd(seedTierForModelId(effectiveModel)), source: 'seed' };
 }
+
+/**
+ * D#483 S5-d: the model part of ONE run of a role for a repo, from the lookup above. The spend envelope counts a run that reserves no model money (an operator
+ * subscription run) at this price, labelled estimated. Must run inside a `withTenant` transaction for `accountId`.
+ */
+export async function estimateRunModelUsd(client: PoolClient, input: { accountId: string; repoId: string; role: string; resolvers?: RoleModelResolvers }): Promise<number> {
+  const override = (await client.query<{ model: string | null }>('SELECT model FROM role_settings WHERE repo_id = $1 AND role = $2', [input.repoId, input.role])).rows[0]?.model;
+  const usd = modelRunPrice(await loadModelRunMedians(client, input.accountId), input.role, effectiveRoleModel(input.role, override, input.resolvers)).usd;
+  return Number.isFinite(usd) && usd > 0 ? usd : 0;
+}

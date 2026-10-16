@@ -13,6 +13,7 @@ import {
   RESERVATION_SWEEP_SECONDS,
   isReservationPause,
   pauseForDenial,
+  envelopeReachedSentence,
 } from "../src/advance/reservationPauses.js";
 import { BUILD_WAIT_REASONS } from "../src/advance/buildSlots.js";
 
@@ -26,6 +27,7 @@ describe("the four denials and their names", () => {
     expect(pauseForDenial("compute_cap_exceeded")).toBe("compute_cap_reached");
     expect(pauseForDenial("work_item_cap_exceeded")).toBe("item_cap_reached");
     expect(pauseForDenial("per_spawn_cap_exceeded")).toBe("run_limit_below_estimate");
+    expect(pauseForDenial("envelope_exceeded")).toBe("envelope_reached");
   });
 
   it("every denial named here is one the runner's closed refusal set really carries (a renamed denial fails here, not in production)", () => {
@@ -41,7 +43,7 @@ describe("the four denials and their names", () => {
 
   it("the pause names do not collide with the slot wait names (one fact kind carries both)", () => {
     for (const p of RESERVATION_PAUSE_REASONS) expect((BUILD_WAIT_REASONS as readonly string[]).includes(p)).toBe(false);
-    expect(new Set(RESERVATION_PAUSE_REASONS).size).toBe(4);
+    expect(new Set(RESERVATION_PAUSE_REASONS).size).toBe(5);
   });
 });
 
@@ -93,5 +95,18 @@ describe("the lists and numbers the workflow and the worker repeat", () => {
 
   it("the pause code fits what a driver fact accepts", () => {
     for (const p of RESERVATION_PAUSE_REASONS) expect(p).toMatch(/^[a-z][a-z0-9_]{0,63}$/);
+  });
+});
+
+describe("S5-d: the envelope sentence", () => {
+  it("carries the person's own figure, to the cent, and never a raw number format", () => {
+    expect(envelopeReachedSentence(0.5)).toBe("Paused: this item reached its $0.50 limit. Raise the limit to continue, or stop the item.");
+    expect(envelopeReachedSentence(0.7)).toContain("$0.70 limit");
+  });
+  it("falls back to the figureless sentence for a bad amount (no NaN or undefined on screen)", () => {
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      expect(envelopeReachedSentence(bad)).toBe(RESERVATION_PAUSE_SENTENCES.envelope_reached);
+    }
+    expect(envelopeReachedSentence(Number.NaN)).not.toMatch(/NaN|undefined|null/);
   });
 });

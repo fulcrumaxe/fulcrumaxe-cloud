@@ -12,6 +12,8 @@ import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
+import { envelopeRunUsd } from "@fx/spend";
+import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import type { ContextSection } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
@@ -177,6 +179,8 @@ export interface AdvanceModuleDeps {
   lightSpec?: ((pool: Pool, accountId: string, workItemId: string, output: unknown) => Promise<{ status: string; reason?: string; version?: number }>) | null;
   /** Records a build that ended without a pull request (in_progress -> needs_human). */
   buildFailed?: ((pool: Pool, accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string) => Promise<AdvanceStepResult>) | null;
+  /** D#483 S5-d: raises the `spend_past_envelope` ask (receipt login) when a start is denied by the item's spend envelope. Absent, the denial still pauses the item and no ask is raised. */
+  raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
   /** The execution registry `cancelRun` dispatches through. Absent, a step's cancel is a no-op that the lost-run sweep backs up. */
   registry?: ExecutionTargetRegistry | null;
   /** D#483 P3, injected from apps/web the same way: the review stage's pipeline pieces. Absent, the review steps answer `review_unavailable`. */
@@ -789,7 +793,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       throw err;
     }
     console.info(JSON.stringify({ event: "advance.run_started", work_item_id: req.workItemId, step: req.step, role: req.role, run_id: started.runId, refused: started.refused ?? null }));
-    if (started.refused) return { ok: false, reason: started.refused };
+    if (started.refused) {
+      // D#483 S5-d: a start the item's spend envelope denied asks the person once per envelope version. The ask never changes the answer: a failure to raise it is logged.
+      if (started.refused === "envelope_exceeded" && deps.raiseEnvelopeAsk) {
+        try {
+          await deps.raiseEnvelopeAsk({ accountId: req.accountId, workItemId: req.workItemId, runUsd: envelopeRunUsd(seat.seat.spend) ?? 0 });
+        } catch (err) {
+          reportError(err, { stage: "advance.envelope_ask" });
+        }
+      }
+      return { ok: false, reason: started.refused };
+    }
     return { ok: true, runId: started.runId };
   }
 
@@ -999,7 +1013,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   /** How long after a limit pause is first seen the sweep first looks: a workflow's own wait is four hours, so the sweep's first look is just after it (apps/web BUILD_SPEND_WAIT_MS). */
   const STAGE_RESUME_FIRST_LOOK_MS = 4 * 3_600_000;
   /** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (packages/pipeline reservationPauses.ts RESERVATION_PAUSE_REASONS; a test holds the lists equal). */
-  const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate"];
+  const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached"];
 
   async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };

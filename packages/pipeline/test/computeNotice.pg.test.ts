@@ -175,8 +175,8 @@ describe("S5k3-6: each sentence is read from one table, never retyped in a compo
   const TABLES = new Set(["packages/pipeline/src/advance/reservationPauses.ts", "packages/spend/src/computeNotice.ts"]);
   const isTestFile = (f: string): boolean => /(^|\/)(test|tests|e2e|archive|__tests__)\//.test(f) || /\.(test|spec)\.[a-z]+$/.test(f);
 
-  it("the four pause sentences and the notice sentence are all present, and none is empty", () => {
-    expect(Object.keys(SENTENCES)).toHaveLength(5);
+  it("the five pause sentences and the notice sentence are all present, and none is empty", () => {
+    expect(Object.keys(SENTENCES)).toHaveLength(6);
     for (const v of Object.values(SENTENCES)) expect(v.length).toBeGreaterThan(20);
   });
 
