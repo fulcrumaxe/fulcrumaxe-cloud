@@ -61,6 +61,7 @@ import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { sweepInvariants, type InvariantSweeper } from "./invariantSweep.js";
 import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
+import { purgeAap } from "./aapPurge.js";
 import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
 import { createRunnerClaimFacade, type RunnerClaimFacade } from "./runnerClaims.js";
@@ -350,6 +351,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runInvariantTick = async (): Promise<Awaited<ReturnType<typeof sweepInvariants>>> => {
       const result = await sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) });
       await sweepAskWithdrawals({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
+      await purgeAap({ pool: pools.receiptPool, ready: pools.aapReady, warn: (line) => console.warn(line) });
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);

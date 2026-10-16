@@ -14,7 +14,7 @@ export const AAP_LIMITS = Object.freeze({ argumentsBytes: 65536, reasoningBytes:
 
 const CODES = [
   'unauthenticated', 'not_found', 'already_consumed', 'not_approved', 'approval_expired', 'not_consumed', 'outcome_already_recorded',
-  'already_decided', 'session_required', 'forbidden', 'invalid_request',
+  'idempotency_conflict', 'already_decided', 'session_required', 'forbidden', 'invalid_request',
 ] as const;
 export type AapErrorCode = (typeof CODES)[number] | 'sealing_unavailable';
 
@@ -99,7 +99,7 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-// ---- instances ------------------------------------------------------------------------------------------------------
+// ---- instances and tokens ------------------------------------------------------------------------------------------------------
 /** A provisioner token (sha256 of the presented secret) or, when omitted, the signed-in owner/admin session the client runs under. */
 export interface Manager {
   tokenSha256?: string;
@@ -141,6 +141,7 @@ export interface CreateRequestInput {
   requestedTimeoutS?: number;
   /** The caller's resolved deadline (the smaller of the requested timeout and the customer's window); at most 14 days ahead. */
   deadlineAt: Date;
+  idempotencyKey?: string;
 }
 const bytes = (s: string): number => Buffer.byteLength(s, 'utf8');
 
@@ -163,10 +164,14 @@ export async function createRequest(db: Db, kek: ArgumentsKek, credential: strin
     // fx-swallow-ok: the key is missing or malformed; the named refusal below carries no key detail
     throw new AapError('sealing_unavailable');
   }
-  return view(db, 'aap_request_create($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)', [
+  const args = [
     sha256Hex(credential), approvalId, input.tool, input.server, sealed.sealed, sealed.kekVersion, sha256Hex(argsJson), bytes(argsJson),
     input.agentReasoning ?? null, contextJson, input.requestedTimeoutS ?? null, input.deadlineAt,
-  ]);
+  ];
+  if (input.idempotencyKey === undefined) return view(db, 'aap_request_create($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)', args);
+  // The key's fingerprint is over the parsed fields (sorted keys), not the bytes the caller sent.
+  const fields = canonicalJson({ tool: input.tool, server: input.server, arguments: input.arguments ?? null, agent_reasoning: input.agentReasoning ?? null, context: input.context ?? null, timeout: input.requestedTimeoutS ?? null });
+  return view(db, 'aap_request_create_idempotent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)', [...args, input.idempotencyKey, sha256Hex(fields)]);
 }
 export const getRequest = (db: Db, credential: string, id: string): Promise<ApprovalView> => view(db, 'aap_request_get($1, $2, false)', [sha256Hex(credential), id]);
 export const cancelRequest = (db: Db, credential: string, id: string): Promise<ApprovalView> => view(db, 'aap_request_get($1, $2, true)', [sha256Hex(credential), id]);
@@ -179,3 +184,11 @@ export async function reportOutcome(db: Db, credential: string, id: string, outc
 /** A signed-in owner or admin answers (run inside `withTenant` with the user). Approvals stay valid for `validForS` seconds (60 to 48 hours). */
 export const decideRequest = (db: Db, id: string, approve: boolean, note: string | null, validForS: number | null): Promise<unknown> =>
   call(() => db.query('SELECT aap_approval_decide($1, $2, $3, $4)', [id, approve, note, validForS]));
+
+export interface AapSweepResult { expired: number; argumentsPurged: number; idempotencyPurged: number; instancesPurged: number }
+/** The worker tick's housekeeping (cross-tenant), run by the sweep login. The database's own clock decides what is due; there is no time argument. */
+export async function sweepAap(db: Db, limit = 200): Promise<AapSweepResult> {
+  const { rows } = await db.query('SELECT * FROM aap_sweep($1)', [limit]);
+  const r = rows[0]!;
+  return { expired: r.o_expired, argumentsPurged: r.o_arguments_purged, idempotencyPurged: r.o_idempotency_purged, instancesPurged: r.o_instances_purged };
+}

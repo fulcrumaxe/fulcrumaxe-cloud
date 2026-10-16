@@ -1131,16 +1131,16 @@ check_sandbox_net_role_shape() {
 # Called as check_invoker_exception_shape <db> <role> <invoker> <quoted, comma-separated exact function names>. Prints the oids, comma
 # separated, when every definer the role owns is one of the named functions, pinned to search_path=pg_catalog, public, pg_temp, with an
 # explicit ACL whose only grantees besides the owner are the invoker (no PUBLIC, no grant option); SHAPE_FAIL:<count> when any is not;
-# nothing when the role owns none (the generic owner check then rejects anything else).
+# nothing when the role owns none of them. Only the named functions are judged, so one call per invoker role; a definer named by no call is
+# rejected by the generic owner check.
 check_invoker_exception_shape() {
   local dbname="$1" role="$2" invoker="$3" names="$4" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.proname IN ($names)
-        AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
+      SELECT p.oid, (p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = '$invoker'::regrole)
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND (a.grantee <> '$invoker'::regrole OR a.is_grantable))) AS ok
-      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
+      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND p.proname IN ($names) AND pg_get_userbyid(p.proowner) = '$role') x;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ] || [ "$(awk -F'|' '{print NF; exit}' <<<"$row")" != "2" ]; then
     echo "SHAPE_FAIL:psql failed for check '$role-function-shape' on $dbname (exit $rc): $row"
     return 0
