@@ -12,6 +12,9 @@ export interface Components {
       path: string;
       code: string;
     }>;
+    data?: {
+      [key: string]: unknown;
+    };
   };
 }
 
@@ -1775,6 +1778,122 @@ export interface Operations {
       default_total: number;
       default_per_repo: number;
       accepted: boolean;
+    };
+  };
+  getAccountBuildConcurrency: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      value: number;
+      start_value: number;
+      history_count: number;
+    };
+  };
+  putAccountBuildConcurrency: {
+    path: undefined;
+    query: undefined;
+    body: {
+      max_builds: number;
+      accept?: boolean;
+      preview_hash?: string;
+    };
+    response: {
+      value: number;
+      start_value: number;
+      history_count: number;
+      changed: boolean;
+    };
+  };
+  previewAccountBuildConcurrency: {
+    path: undefined;
+    query: undefined;
+    body: {
+      max_builds: number;
+    };
+    response: {
+      scope: "account" | "repo";
+      repo_id: string | null;
+      kind: "raise" | "lower" | "same";
+      from: number;
+      to: number;
+      items: number;
+      unpriced_items: number;
+      effective_limit_old: number;
+      effective_limit_new: number;
+      clear_minutes_old: number;
+      clear_minutes_new: number;
+      extra_per_hour_cents?: number;
+      extra_per_day_cents?: number;
+      queue_total_cents?: number;
+      basis: "history" | "seed" | "none";
+      notes: Array<{
+        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "one_build_per_repo_until_d598" | "limited_by_repos";
+        text: string;
+      }>;
+      preview_hash: string;
+    };
+  };
+  getRepoBuildConcurrency: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      value: number;
+      start_value: number;
+      applied_limit: number;
+      clamp_reason: ("one_build_per_repo_until_d598") | (null);
+    };
+  };
+  putRepoBuildConcurrency: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      max_builds: number;
+      accept?: boolean;
+      preview_hash?: string;
+    };
+    response: {
+      value: number;
+      start_value: number;
+      applied_limit: number;
+      clamp_reason: ("one_build_per_repo_until_d598") | (null);
+      changed: boolean;
+    };
+  };
+  previewRepoBuildConcurrency: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      max_builds: number;
+    };
+    response: {
+      scope: "account" | "repo";
+      repo_id: string | null;
+      kind: "raise" | "lower" | "same";
+      from: number;
+      to: number;
+      items: number;
+      unpriced_items: number;
+      effective_limit_old: number;
+      effective_limit_new: number;
+      clear_minutes_old: number;
+      clear_minutes_new: number;
+      extra_per_hour_cents?: number;
+      extra_per_day_cents?: number;
+      queue_total_cents?: number;
+      basis: "history" | "seed" | "none";
+      notes: Array<{
+        code: "nothing_waiting" | "same_total" | "unpriced_items" | "cannot_price" | "one_build_per_repo_until_d598" | "limited_by_repos";
+        text: string;
+      }>;
+      preview_hash: string;
     };
   };
   putRepoRunnerRouting: {
@@ -3784,6 +3903,72 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  getAccountBuildConcurrency: {
+    method: "GET",
+    path: "/api/v1/account/build-concurrency",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  putAccountBuildConcurrency: {
+    method: "PUT",
+    path: "/api/v1/account/build-concurrency",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  previewAccountBuildConcurrency: {
+    method: "POST",
+    path: "/api/v1/account/build-concurrency/preview",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  getRepoBuildConcurrency: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/build-concurrency",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  putRepoBuildConcurrency: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/build-concurrency",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  previewRepoBuildConcurrency: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/build-concurrency/preview",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
     queryParams: [],
     hasBody: true,
   },

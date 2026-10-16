@@ -36,6 +36,7 @@ const errorJsonSchema = {
         properties: { path: { type: "string" }, code: { type: "string" } },
       },
     },
+    data: { type: "object", additionalProperties: true },
   },
 };
 

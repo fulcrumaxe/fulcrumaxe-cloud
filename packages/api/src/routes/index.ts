@@ -21,6 +21,7 @@ import { githubRoutes } from "./github.js";
 import { billingRoutes } from "./billing.js";
 import { runLimitRoutes } from "./run-limits.js";
 import { runnerConcurrencyRoutes } from "./runner-concurrency.js";
+import { buildConcurrencyRoutes } from "./build-concurrency.js";
 import { runnerRoutingRoutes } from "./runner-routing.js";
 import { auditLogRoutes } from "./audit-log.js";
 import { runActionRoutes } from "./run-actions.js";
@@ -80,6 +81,7 @@ export const ROUTES: RouteEntry[] = [
   ...billingRoutes,
   ...runLimitRoutes,
   ...runnerConcurrencyRoutes,
+  ...buildConcurrencyRoutes,
   ...runnerRoutingRoutes,
   ...auditLogRoutes,
   ...runActionRoutes,

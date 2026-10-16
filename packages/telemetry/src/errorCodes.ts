@@ -235,6 +235,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   // Cloud runner approval (D#6 R2b-4a): a run approved by someone whose runner cannot take its repo, and a runner-run dial saved over a newer version.
   "runner_not_for_repo",
   "dial_changed",
+  // Build concurrency (D#483 S5-c2): a raise without its accepted cost preview, a preview that changed, a lost version race, and a busy account lock.
+  "preview_required",
+  "preview_stale",
+  "setting_changed",
+  "setting_busy",
   // Item pull request branch binding (D#599 PL-2b-2): the proxy and the ticket route refused a branch the run is not bound to.
   "runner_branch_unbound",
   "ticket_branch_unbound",

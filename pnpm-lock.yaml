@@ -298,6 +298,9 @@ importers:
       '@fx/model-router':
         specifier: workspace:*
         version: link:../model-router
+      '@fx/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@fx/plan-data':
         specifier: workspace:*
         version: link:../plan-data
@@ -323,9 +326,6 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
-      '@fx/pipeline':
-        specifier: workspace:*
-        version: link:../pipeline
       '@fx/runner':
         specifier: workspace:*
         version: link:../runner

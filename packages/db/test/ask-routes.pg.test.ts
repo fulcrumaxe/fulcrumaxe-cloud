@@ -414,6 +414,7 @@ describe('ask_routes (0836)', () => {
       'decision_ask_setting.changed',
       'ask_route.changed',
       'discovery_setting.changed',
+      'build_concurrency.changed',
     ];
 
     it('audit_write accepts every expected action', async () => {
