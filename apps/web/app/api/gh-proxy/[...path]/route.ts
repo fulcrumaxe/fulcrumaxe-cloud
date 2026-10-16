@@ -1,4 +1,4 @@
-import type { NextRequest, NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { loadGithubForwardConfig, type GithubForwardConfig } from "@fx/runner";
 import { createPublishTargetResolver, createRunnerBoundBranchResolver, createRunnerCloneBudget, createRunnerGitResolver, createRunResolver } from "@fx/github";
 import { createPool } from "@fx/db/src/pool";
@@ -73,8 +73,24 @@ function deps(): GhProxyHandlerDeps {
   return cachedDeps;
 }
 
+/** The two credentials this route knows: a runner's ticket and a sandbox's OIDC token. Names match handler.ts. */
+const CREDENTIAL_HEADERS = ["fx-git-ticket", "vercel-sandbox-oidc-token"] as const;
+
 async function dispatch(req: NextRequest): Promise<NextResponse> {
-  return ghProxyHandler(req, deps());
+  // Before any work, including building the handler's dependencies (which needs this deployment's settings and a database login): a caller
+  // with neither credential (a session cookie, a customer token, a bogus bearer, nothing) is refused with a fixed code. This route also ships
+  // in the main app, where those settings are absent, and the dependency build used to throw there as an empty 500.
+  if (CREDENTIAL_HEADERS.every((h) => req.headers.get(h) === null)) {
+    return NextResponse.json({ error: "missing_credentials" }, { status: 401 });
+  }
+  let built: GhProxyHandlerDeps;
+  try {
+    built = deps();
+  } catch {
+    // fx-swallow-ok: deps() has already logged the cause loudly (it does on every request); the caller gets a fixed code and no detail
+    return NextResponse.json({ error: "gh_proxy_not_configured" }, { status: 503 });
+  }
+  return ghProxyHandler(req, built);
 }
 
 // D#2 Correction C28 §3 item 7: every method decide() (gh-policy's

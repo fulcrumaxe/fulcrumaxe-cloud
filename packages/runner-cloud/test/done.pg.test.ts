@@ -865,7 +865,18 @@ describe("done route [pg]", () => {
       expect((await s.call({ body: { run_id: s.runId, lease_generation: 1, context_ledger: { ...ledger, tool_output_bytes: { "/etc/passwd": 1 } } } })).status).toBe(400);
       const huge = signed(key, donePath(s.runId), {}, { rawBody: Buffer.alloc(MAX_BODY_BYTES + 1, 0x20) });
       expect((await toResponse(() => doneRun(h.deps({ leases }), huge, s.runId))).status).toBe(413);
-      expect((await toResponse(() => doneRun(h.deps({ leases }), huge, "not-a-uuid"))).status).toBe(404);
+      const badId = signed(key, donePath("not-a-uuid"), { run_id: s.runId, lease_generation: 1 });
+      expect((await toResponse(() => doneRun(h.deps({ leases }), badId, "not-a-uuid"))).status).toBe(404);
+      expect(begun).toEqual([]);
+    });
+
+    it("checks the signature before it looks at the run id: an unsigned or wrongly signed caller gets 401, never a 404 that sorts ids", async () => {
+      const body = { run_id: randomUUID(), lease_generation: 1 };
+      const good = signed(key, donePath("not-a-uuid"), body);
+      const { signature: _s, "signature-input": _i, ...unsigned } = good.headers;
+      const run = (r: RunnerHttpRequest) => toResponse(() => doneRun(h.deps({ leases }), r, "not-a-uuid"));
+      expect((await run({ ...good, headers: unsigned })).status).toBe(401);
+      expect((await run(signed(newKey(), donePath("not-a-uuid"), body))).status).toBe(401);
       expect(begun).toEqual([]);
     });
 

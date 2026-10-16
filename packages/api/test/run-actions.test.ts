@@ -246,6 +246,22 @@ describe('D#31 API-6a-2: run-action routes', () => {
     await expectNothingWritten(m.accountId);
   });
 
+  it('a runs:cancel token cancelling an unknown run id with no body is 404 not_found; a body on this bodyless route is the generic 400 (not a missing-run answer)', async () => {
+    const m = await member();
+    const t = await tokenFor(m, ['runs:cancel']);
+    const unknown = `/runs/${randomUUID()}/cancel`;
+    const res = await call(t, 'POST', unknown);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as ErrBody).error.code).toBe('not_found');
+    const withBody = await handleApiRequest(
+      new Request(`http://localhost/api/v1${unknown}`, { method: 'POST', headers: { authorization: `Bearer ${t}`, 'content-type': 'application/json' }, body: '{}' }),
+      appUserPool, platformOpsPool, ROUTES,
+    );
+    expect(withBody.status).toBe(400);
+    expect(((await withBody.json()) as ErrBody).error.code).toBe('invalid_request');
+    await expectNothingWritten(m.accountId);
+  });
+
   it('a malformed, an unknown and another account\'s id all get the same 404 body, and nothing is written', async () => {
     const a = await member();
     const b = await member();

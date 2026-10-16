@@ -550,6 +550,15 @@ describe("lease routes [pg]", () => {
       expect((await send(batch([event(0)]), "not-a-uuid" as typeof RUN)).status).toBe(404);
     });
 
+    it("checks the signature before it looks at the run id: an unsigned or wrongly signed caller gets 401, never a 404 that sorts ids", async () => {
+      const bad = "not-a-uuid" as typeof RUN;
+      const good = req(eventsPath(bad), batch([event(0)]));
+      const { signature: _s, "signature-input": _i, ...unsigned } = good.headers;
+      expect((await run(() => ingestEvents(deps(), { ...good, headers: unsigned }, bad))).status).toBe(401);
+      expect((await run(() => ingestEvents(deps(), req(eventsPath(bad), batch([event(0)]), newKey()), bad))).status).toBe(401);
+      expect(calls.filter((c) => c.method === "events")).toEqual([]);
+    });
+
     describe("a batch that ended the run on the usage limit (D#6 C43-6)", () => {
       const pause = async () => (await h.admin.query<{ s: number | null }>("SELECT EXTRACT(EPOCH FROM (claim_paused_until - now()))::float8 AS s FROM runner_capacity WHERE runner_id = $1", [runnerId])).rows[0]?.s ?? null;
       const limit = (seq: number, extra: object = {}) => ({ seq, ts: "2026-10-10T12:00:00.000Z", type: "usage_limit_reached", ...extra });

@@ -2,6 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 import { ALLOWED_METHODS } from "@fx/gh-policy";
 
+/** A 503 with the one closed code and nothing else in the body. */
+async function expectNotConfigured(pending: Promise<Response>): Promise<boolean> {
+  const res = await pending;
+  expect(res.status).toBe(503);
+  expect(await res.json()).toEqual({ error: "gh_proxy_not_configured" });
+  return true;
+}
+
 /**
  * Fix round 1 (suggestion, D#2 C27): route.ts's own `deps()` caching
  * logic in isolation -- every real dependency (config load, resolver,
@@ -33,7 +41,7 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
   function fakeReq(): NextRequest {
     // Never read before deps() throws (test 1) or by the mocked
     // ghProxyHandler (test 2) -- an opaque stand-in is enough.
-    return {} as unknown as NextRequest;
+    return { headers: new Headers({ "fx-git-ticket": "t" }) } as unknown as NextRequest;
   }
 
   it("logs loudly and fails closed on EVERY request while the env var stays unset -- not just the first", async () => {
@@ -48,8 +56,8 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const route = await import("./route");
 
-    await expect(route.GET(fakeReq())).rejects.toThrow("DATABASE_URL_GH_PROXY must be set");
-    await expect(route.GET(fakeReq())).rejects.toThrow("DATABASE_URL_GH_PROXY must be set");
+    expect(await expectNotConfigured(route.GET(fakeReq()))).toBe(true);
+    expect(await expectNotConfigured(route.GET(fakeReq()))).toBe(true);
 
     // The bug this fixes: the second call used to skip the throw (and the
     // log) entirely, because `cachedDeps` was already truthy from the
@@ -109,7 +117,7 @@ describe("gh-proxy route.ts: DATABASE_URL_GH_PROXY fail-closed caching (fix roun
       vi.spyOn(console, "error").mockImplementation(() => {});
 
       const route = await import("./route");
-      await expect(route.GET(fakeReq())).rejects.toThrow("DATABASE_URL_GH_PROXY must be set");
+      expect(await expectNotConfigured(route.GET(fakeReq()))).toBe(true);
       expect(createPool).not.toHaveBeenCalled();
     } finally {
       if (saved === undefined) delete process.env.DATABASE_URL_PLATFORM_OPS;
