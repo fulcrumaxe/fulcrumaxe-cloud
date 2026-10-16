@@ -413,6 +413,7 @@ describe('ask_routes (0836)', () => {
       'run_limits.changed',
       'decision_ask_setting.changed',
       'ask_route.changed',
+      'discovery_setting.changed',
     ];
 
     it('audit_write accepts every expected action', async () => {

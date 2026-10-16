@@ -255,6 +255,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "unsafe_git_config",
   // Autonomy settings (D#7 DP10b): an answer-window setting saved over a newer version.
   "ask_setting_changed",
+  // Discovery frequency (D#483 S5-g1): a setting saved over a newer version.
+  "discovery_changed",
   // Approval rules (D#7 AAP-a2): a rule set saved over a newer version, and a rollback to a version the scope never had.
   "action_rules_changed",
   "action_rules_version_not_found",

@@ -1,0 +1,14 @@
+{
+  "repo_id": "6f1c2f5e-3d8f-4f43-8d6e-8f2f6a9b1c22",
+  "can_change": true,
+  "frequency": "daily",
+  "label": "Every day",
+  "source": "default",
+  "version": null,
+  "options": [
+    { "value": "daily", "label": "Every day" },
+    { "value": "weekly", "label": "Every week" },
+    { "value": "off", "label": "Off" }
+  ],
+  "changes": []
+}

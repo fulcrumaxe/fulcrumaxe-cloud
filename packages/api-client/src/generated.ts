@@ -1303,6 +1303,64 @@ export interface Operations {
       }>;
     };
   };
+  getDiscoverySetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      repo_id: string;
+      can_change: boolean;
+      frequency: string;
+      label: string;
+      source: "default" | "set";
+      version: (number) | (null);
+      options: Array<{
+        value: string;
+        label: string;
+      }>;
+      changes: Array<{
+        version: number;
+        frequency: string;
+        label: string;
+        previous_frequency: string;
+        previous_label: string;
+        changed_by: string;
+        changed_at: string;
+      }>;
+    };
+  };
+  setDiscoverySetting: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      frequency: "daily" | "weekly" | "off";
+    };
+    response: {
+      repo_id: string;
+      can_change: boolean;
+      frequency: string;
+      label: string;
+      source: "default" | "set";
+      version: (number) | (null);
+      options: Array<{
+        value: string;
+        label: string;
+      }>;
+      changes: Array<{
+        version: number;
+        frequency: string;
+        label: string;
+        previous_frequency: string;
+        previous_label: string;
+        changed_by: string;
+        changed_at: string;
+      }>;
+    };
+  };
   getActionAccountRules: {
     path: undefined;
     query: undefined;
@@ -3512,6 +3570,28 @@ export const operations = {
   setAskSetting: {
     method: "POST",
     path: "/api/v1/repos/{id}/ask-settings",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getDiscoverySetting: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/discovery",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  setDiscoverySetting: {
+    method: "PUT",
+    path: "/api/v1/repos/{id}/discovery",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

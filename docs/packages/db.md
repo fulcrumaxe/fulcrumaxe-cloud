@@ -137,6 +137,10 @@ admin now) and appends one version with its `ask_route.changed` audit row in one
 levels), `restoreAskRoute` appends an earlier version's content as a new version, and `resolveCurrentAskRoute` does the four-step lookup
 (repo + type, repo + `*`, account + type, account + `*`; a tombstone falls to the next step, then to the R5 default).
 
+`discoverySettings.ts` stores how often a repo is re-discovered (`daily`, `weekly` or `off`) in `discovery_settings` (migration 0849) as
+append-only versions: `writeDiscoverySetting` appends one version and its audit row in one transaction (owner or admin only, the actor is
+`ctx.principal`). No row means `daily`, setting the value already in force writes nothing, and undo is a new version.
+
 `actionRules.ts` stores the customer's approval rules for tool calls in `action_rules` (migration 0847) as append-only versions per
 account or repo: `appendRuleSet` validates the set with `validateRuleSet` (refusing with the validator's own codes) and appends one version
 plus its audit row in one transaction, `rollbackRuleSet` appends a copy of an earlier version, and `resolveActionRules` returns the repo's
