@@ -9,9 +9,10 @@
  */
 import type { Job } from "@fulcrumaxe/runner-protocol";
 import path from "node:path";
-import { assertGitVersion, createGit, GitPathError, type GitDeps } from "./git.js";
+import { assertGitVersion, createGit, GitPathError, type GitCapture, type GitDeps } from "./git.js";
 import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
+import { LISTING_CAP, readRepoMap } from "./repoMap.js";
 import { sweepSnapshots } from "./snapshot.js";
 import { publishBranch, PUSH_BRANCH_PREFIX, pushPlan, workspaceHead, type PushLease, type Published } from "./push.js";
 
@@ -42,12 +43,24 @@ export interface GitPath {
    * follows it) is used as it is. Any other commit is replaced by its merge-base with that HEAD (`fromDefault`); with no merge-base the answer is `not_default_branch`. Optional: a path without a mirror gives none.
    */
   nixSource?(job: GitJob, sha: string): Promise<NixSource>;
+  /**
+   * D#600 CX-3b: the repository map of the commit `sha`, built from the repo's mirror (nothing leaves the machine). Null when it cannot be built; a run
+   * never waits on, or fails for, its map. Optional: a path without a mirror (path A) gives none.
+   */
+  repoMap?(job: GitJob, sha: string): Promise<{ version: string; text: string } | null>;
 }
 
-export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl" | "signal"> {}
+export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl" | "signal"> {
+  /** Like `capture` with a large output limit (8 MB), for the tree listing behind the repository map. Absent: the map is read through `capture` and a big tree is cut. */
+  captureLarge?: GitCapture;
+}
+
+/** What the ordinary capture keeps of an output (the engine's `runCapture` default, 64 K). */
+const SMALL_CAPTURE_CHARS = 64 * 1024;
 
 export function createGitPath(deps: GitPathDeps): GitPath {
   const git = createGit(deps);
+  const listingGit = deps.captureLarge === undefined ? git : createGit({ ...deps, capture: deps.captureLarge });
   const mirrors: Mirrors = createMirrors({ git, mirrorsRoot: deps.mirrorsRoot, stateDir: deps.stateDir, ...(deps.signal === undefined ? {} : { signal: deps.signal }), ...(deps.keepClear === undefined ? {} : { keepClear: deps.keepClear }), ...(deps.remoteUrl === undefined ? {} : { remoteUrl: deps.remoteUrl }) });
   // Where a push's snapshot of the workspace's git files is made: the runner's private state, which the agent's sandbox never reaches.
   const snapshotsRoot = path.join(deps.stateDir, "git-snapshots");
@@ -75,6 +88,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       return mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
+    repoMap: (job, sha) => readRepoMap({ listing: listingGit, small: git, listingCap: deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP }, mirrors.dir(job.repo), sha),
     async nixSource(job, sha) {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return { kind: "not_default_branch" };
       const dir = mirrors.dir(job.repo);

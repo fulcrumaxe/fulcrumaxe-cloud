@@ -17,11 +17,12 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type ContextSection, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
+import { repoMapDigest } from "../job/repoMap.js";
 import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
@@ -87,6 +88,8 @@ export interface JobHandlerDeps {
   onNixDetail?: (detail: NixDetail) => void;
   /** D#6 C44-4: told the closed detail when the repo has a lockfile and the job allows no npm registry host. The job still runs. */
   onDepsDetail?: (detail: DepsDetail) => void;
+  /** D#600 CX-3b: told a closed word when a job that would get a repository map does not (`no_mirror`: this git path has no mirror to read; `unavailable`: the mirror could not give the tree). The job still runs. */
+  onRepoMapSkip?: (reason: "no_mirror" | "unavailable") => void;
   /** D#6 C44-4 (G-C44-7): the host-side dependency install, run before the agent's sandbox starts for a test-running role with an allowed npm registry. Absent: no install is done. */
   depsInstall?: DepsInstaller;
   /** The directory of the per-repo package stores (the host sandbox's `packageStoreRoot`); the install uses the job's own store in it. Absent: no install is done. */
@@ -206,6 +209,25 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
   }
 
   /**
+   * D#600 CX-3b. A first run of an executor gets the repository map of the commit it starts from, built here from the repo's mirror and carried in the
+   * prompt; a fix round, a review and every other role get none (as on the cloud side). Every failure leaves the run without a map: it is never a
+   * reason to refuse or delay a run. Nothing of the map leaves this machine but its byte count and sha256, in the ledger's `map` section.
+   */
+  async function prepareMap(job: Job, git: GitPath, base: string, held: { map?: { version: string; text: string } }): Promise<void> {
+    if (job.role !== "executor" || job.continues !== null) return;
+    if (git.repoMap === undefined) return deps.onRepoMapSkip?.("no_mirror");
+    let map: { version: string; text: string } | null = null;
+    try {
+      map = await git.repoMap(job, base);
+    } catch {
+      // fx-swallow-ok: a map that cannot be built is left out; the error text could hold a path
+      map = null;
+    }
+    if (map === null) return deps.onRepoMapSkip?.("unavailable");
+    held.map = map;
+  }
+
+  /**
    * D#6 C44-4. A test-running role in a repo with a lockfile: with no npm registry host in the job's domains the job still runs with one fixed line (the install
    * cannot download); with one, the runner installs on the host before the agent starts (`depsInstall.ts`, no repo code), marks `deps_installed` or
    * `deps_install_failed`, and the agent gets one fixed line. Neither outcome fails the run.
@@ -315,6 +337,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     try {
       const started: { base?: string } = {};
       const promptNotes: string[] = [];
+      const repoMapHeld: { map?: { version: string; text: string } } = {};
       let result: RunJobResult;
       let notReady: string | undefined;
       try {
@@ -347,6 +370,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             mark("workspace_ready");
             started.base = (await git.prepare(job, claimed, workspace)).base;
             mark("cloned");
+            await prepareMap(job, git, started.base, repoMapHeld);
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
             if (grant !== undefined) await prepareNix(job, git, grant, started.base, promptNotes);
             await prepareDeps(job, workspace, promptNotes, stopRun, mark);
@@ -354,7 +378,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const allowed = grant === undefined ? granted : withAllowances(granted, grant);
           usedPort = allowed;
-          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
@@ -416,7 +440,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
       const stoppedAfterPush = lease.ended();
       if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
-      const sent = await sendDone(claimed, result, lease);
+      const sent = await sendDone(claimed, result, lease, repoMapHeld.map === undefined ? [] : [{ code: "map", ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }]);
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {
@@ -481,9 +505,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     return sent;
   }
 
-  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>): Promise<JobResult> {
-    // Integers, enums and hashes only (C8 section 6); no section list yet (the cloud's assembler supplies sections in D#600 CX-2).
-    const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger);
+  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>, sections: readonly ContextSection[] = []): Promise<JobResult> {
+    // Integers, enums and hashes only (C8 section 6). The one section the runner knows is the repository map it built (D#600 CX-3b): a byte count and the
+    // text's sha256, never a path or any of the text. The other sections are the cloud's, which sent the prompt.
+    const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger, sections);
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger });
       if (reply.kind === "done") {
