@@ -2666,15 +2666,15 @@ check_work_item_placement_definer_role_shape() {
   fi
 }
 
-# D#483 S4-a (0839): the SECURITY DEFINER functions owned by proposal_verification_definer. Prints their oids, comma
-# separated, when each is its one exact signature (matched by regprocedure, not by name), pinned to search_path=pg_catalog,
+# D#483 S4-a (0839), S4-d (0861): the SECURITY DEFINER functions owned by proposal_verification_definer. Prints their oids, comma
+# separated, when each is one of its two exact signatures (proposal_record_verification, proposal_requeue_verification) (matched by regprocedure, not by name), pinned to search_path=pg_catalog,
 # public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no platform_ops), with no grant option;
 # SHAPE_FAIL:<count> when any is not; nothing when the role owns none (the generic owner check then rejects anything else).
 check_proposal_verification_definer_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid IN ('public.proposal_record_verification(uuid,text,text,uuid,jsonb,jsonb)'::regprocedure)
+      SELECT p.oid, (p.oid IN ('public.proposal_record_verification(uuid,text,text,uuid,jsonb,jsonb)'::regprocedure, 'public.proposal_requeue_verification(uuid)'::regprocedure)
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
@@ -2686,7 +2686,7 @@ check_proposal_verification_definer_exception_shape() {
   fi
   IFS='|' read -r oids bad <<<"$row"
   if [ "$bad" != "0" ]; then
-    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by proposal_verification_definer fail the exception shape (not its one exact signature, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
+    echo "SHAPE_FAIL:$bad SECURITY DEFINER function(s) owned by proposal_verification_definer fail the exception shape (not one of its two exact signatures, a loose search_path, EXECUTE for anyone but app_user and the owner, or a grant option)"
     return 0
   fi
   echo "$oids"
@@ -2695,7 +2695,7 @@ check_proposal_verification_definer_exception_shape() {
 # D#483 S4-a (0839): role shape of proposal_verification_definer. A no-op when the role does not exist. Every problem
 # is named: NOLOGIN and unprivileged, no member but the migration role and no live membership for it, a member of no role, privileges
 # exactly the 35 granted by 0839 (column SELECT and the five verification columns' UPDATE on proposals, column SELECT and INSERT plus DELETE on
-# proposal_evidence and proposal_claims, column SELECT on accounts, USAGE on public; nothing else table-wide), owning exactly its one function.
+# proposal_evidence and proposal_claims, column SELECT on accounts, USAGE on public; nothing else table-wide), owning exactly its two functions (0839, 0861).
 check_proposal_verification_definer_role_shape() {
   local dbname="$1" out rc=0 problems
   local expected="'column proposals.id SELECT','column proposals.account_id SELECT','column proposals.repo_id SELECT','column proposals.state SELECT','column proposals.provenance SELECT','column proposals.owner_process SELECT','column proposals.verify_attempts SELECT','column proposals.verification UPDATE','column proposals.verified_at UPDATE','column proposals.verified_sha UPDATE','column proposals.verify_attempts UPDATE','column proposals.verified_run_id UPDATE','column proposal_evidence.account_id SELECT','column proposal_evidence.proposal_id SELECT','column proposal_evidence.account_id INSERT','column proposal_evidence.repo_id INSERT','column proposal_evidence.proposal_id INSERT','column proposal_evidence.kind INSERT','column proposal_evidence.ref INSERT','column proposal_evidence.excerpt INSERT','column proposal_evidence.commit_sha INSERT','table proposal_evidence DELETE','column proposal_claims.account_id SELECT','column proposal_claims.proposal_id SELECT','column proposal_claims.proposal_id INSERT','column proposal_claims.account_id INSERT','column proposal_claims.text INSERT','column proposal_claims.verdict INSERT','column proposal_claims.checked_sha INSERT','column proposal_claims.checked_at INSERT','column proposal_claims.refute_code INSERT','table proposal_claims DELETE','column accounts.id SELECT','column accounts.deleted_at SELECT','schema public USAGE'"
@@ -2714,10 +2714,10 @@ check_proposal_verification_definer_role_shape() {
                 OR pg_has_role('fx_migrator', 'proposal_verification_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
       CASE WHEN (SELECT count(*) FROM held) <> 35 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 35 granted by 0839' END,
-      CASE WHEN (SELECT count(*) FROM mine) <> 1
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.proposal_record_verification(uuid,text,text,uuid,jsonb,jsonb)'::regprocedure]::oid[]))
+      CASE WHEN (SELECT count(*) FROM mine) NOT BETWEEN 1 AND 2
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> ALL (ARRAY['public.proposal_record_verification(uuid,text,text,uuid,jsonb,jsonb)'::regprocedure, 'public.proposal_requeue_verification(uuid)'::regprocedure]::oid[]))
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
+              OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its two functions (0839, 0861) and nothing else' END,
       CASE WHEN has_schema_privilege('proposal_verification_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
     FROM r;" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then

@@ -90,6 +90,35 @@ describe("POST /api/github/webhook", () => {
     expect(handle).not.toHaveBeenCalled();
   });
 
+  // D#483 S4-d: an outsider's issue would be written as a proposal, so a delivery that does not verify must reach nothing: not the handler, not the
+  // database pools, not the permission lookup, not the repository read.
+  it("S4-d: a forged, tampered or unsigned issues.opened is refused with 401 before the handler, the pools, the permission lookup or the repository read", async () => {
+    const touched = vi.fn();
+    const trap = new Proxy({}, { get: () => touched }) as never;
+    const lookup = vi.fn(async () => null);
+    const loop = vi.fn(async () => false);
+    const deps = fakeDeps({ appUserPool: trap, platformOpsPool: trap, issueAuthorPermission: lookup, repoHasEngineLoop: loop });
+    const handle = neverCalled();
+    const body = JSON.stringify({ action: "opened", issue: { number: 9, title: "t", body: "b", user: { login: "stranger" }, author_association: "OWNER" }, installation: { id: 1 }, repository: { id: 2, full_name: "a/b" } });
+    const tampered = body.replace('"number":9', '"number":10');
+    expect(tampered).not.toBe(body);
+    const attempts: Array<[string, NextRequest]> = [
+      ["wrong secret", requestWithBody(body, { signature: sign(body, "an-attackers-secret"), event: "issues" })],
+      ["signed, then altered", requestWithBody(tampered, { signature: sign(body), event: "issues" })],
+      ["no digest prefix", requestWithBody(body, { signature: sign(body).replace("sha256=", ""), event: "issues" })],
+      ["empty digest", requestWithBody(body, { signature: "sha256=", event: "issues" })],
+      ["unsigned", requestWithBody(body, { signature: null, event: "issues" })],
+    ];
+    for (const [, req] of attempts) {
+      const res = await githubWebhookHandler(req, deps, handle);
+      expect(res.status).toBe(401);
+    }
+    expect(handle).not.toHaveBeenCalled();
+    expect(touched).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
+    expect(loop).not.toHaveBeenCalled();
+  });
+
   // H2-5 (the one authorized assertion change): an unconfigured kind's webhooks now get a generic 401, not a 500.
   it("rejects when the webhook secret is not configured, with a generic 401 that doesn't name the secret, and never calls handle", async () => {
     const handle = neverCalled();

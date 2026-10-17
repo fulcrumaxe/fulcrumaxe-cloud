@@ -55,6 +55,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `discovery_settings` | `0849_discovery_settings.sql` | tenant | yes |
 | `setup_requests` | `0856_setup_requests.sql` | tenant (`app_user` SELECT, INSERT and a column-limited UPDATE; owner or admin to propose or decide; no DELETE) | yes |
 | `discovery_runs` | `0859_discovery_runs.sql` | tenant (`app_user` SELECT, a four-column INSERT and column-scoped state UPDATE; no DELETE) | yes |
+| `proposal_intake_events` | `0861_proposal_intake.sql` | tenant (`app_user` SELECT and a four-column INSERT; no UPDATE or DELETE) | yes |
 | `idempotency_keys` | `0600_api_core.sql` | tenant | yes |
 | `stripe_webhook_events` | `0606_derived_account_status.sql` | platform-wide (`platform_ops`-only policy; no grant to `app_user`/`partner_user`) | yes |
 | `sitekit_entitlements` | `0679_sitekit_billing.sql` | tenant (`app_user` SELECT only; the Stripe webhook writes as `platform_ops`) | yes |

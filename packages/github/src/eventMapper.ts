@@ -17,6 +17,8 @@ import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
 import { installationDiscoveryRef } from './installDiscovery.js';
+import { decideOwnerProcess } from '@fx/core/src/plan/ownerProcess.js';
+import { applyIssueChange, fencedIssueSummary, proposalTitle, proposeFromIssue, type IssueChange, type ProposeOutcome } from './issueProposal.js';
 
 /**
  * D#2 H13a body criterion 2: the 8 events this webhook handles.
@@ -104,8 +106,6 @@ export interface LookedUpPermission {
   permission: RepoPermission;
 }
 
-const PERMISSION_RANK: Readonly<Record<RepoPermission, number>> = { none: 0, read: 1, triage: 2, write: 3, maintain: 4, admin: 5 };
-
 export interface WebhookAuthor {
   login: string | null | undefined;
   authorAssociation: string | null | undefined;
@@ -120,6 +120,11 @@ export interface MapEventInput {
    * `GithubWebhookDbDeps.issueAuthorPermission`). On an organization repo even the org owner's issue arrives as MEMBER, or
    * CONTRIBUTOR when the membership is private, so `author_association` alone could never trust anyone there. Whatever the
    * permission is, the usual rule decides: admin and maintain are trusted, write only with the `allowWritePermission` opt-in.
+   *
+   * D#483 S4-d: when a lookup is wired the answer is AUTHORITATIVE, in both directions. `undefined` means no lookup is wired (the
+   * association decides, as for every other event); `null` means one is wired but gave no usable answer (an error, no answer, or a
+   * different login than the payload's), which fails closed to no permission. The association text is then never what trusts an
+   * author: an `OWNER` claim with a lookup answering `read` is an outsider.
    */
   authorPermission?: LookedUpPermission | null;
 }
@@ -187,6 +192,25 @@ export interface InstallationReposEvent {
   addedCount: number;
 }
 
+/**
+ * D#483 S4-d: `issues.opened` by an author without admin or maintain permission. The issue becomes a proposal (external, fenced,
+ * verification pending), never a work item. `owner` is filled in by the delivery before it is applied (it needs a read of the
+ * repository); a mapped event without it is not applied.
+ */
+export interface ProposeIssueEvent {
+  kind: 'propose_issue';
+  ghNumber: number;
+  title: string;
+  summary: string | null;
+  owner?: 'product' | 'internal_loop';
+}
+
+/** D#483 S4-d: `issues.closed`, `.reopened` and `.edited` for the proposal an outside author's issue became (no proposal: nothing changes). */
+export interface IssueProposalChangeEvent {
+  kind: 'issue_proposal_change';
+  change: IssueChange;
+}
+
 /** Every event mapped to "no work_items/run action" -- still a real
  * mapping decision (criterion 2), not an unhandled case. */
 export interface IgnoredEvent {
@@ -196,6 +220,8 @@ export interface IgnoredEvent {
 
 export type MappedEvent =
   | CreateWorkItemEvent
+  | ProposeIssueEvent
+  | IssueProposalChangeEvent
   | TransitionPrEvent
   | RecordPrPushEvent
   | RouteMcpConfigEvent
@@ -211,7 +237,7 @@ type Actor = { login: string | null } | null;
  * regex-scanned for a bounded digit reference. */
 export interface GithubIssuePayload {
   action: string;
-  issue: { number: number; title?: unknown; user: Actor; author_association: string | null };
+  issue: { number: number; title?: unknown; body?: unknown; user: Actor; author_association: string | null };
 }
 export interface GithubIssueCommentPayload {
   action: string;
@@ -286,13 +312,17 @@ function trustOf(
   allowWritePermission: boolean,
   lookedUp?: LookedUpPermission | null,
 ): { trust: AuthorTrust; canCreateWork: boolean } {
-  // The author's REAL repository permission, asked of GitHub for this delivery, replaces the association's guess, but
-  // only for the very login the payload names (a mismatch is ignored) and never to LOWER what the association says.
+  // The author's REAL repository permission, asked of GitHub for this delivery. When a lookup was wired (not undefined) its answer decides, and
+  // only for the very login the payload names (a mismatch, or no answer, is no permission at all). The association is the fallback only
+  // where no lookup exists.
   const fromAssociation = authorAssociationToRepoPermission(author.authorAssociation);
-  const useLookup = lookedUp != null && !!author.login && lookedUp.login.toLowerCase() === author.login.toLowerCase() && PERMISSION_RANK[lookedUp.permission] > PERMISSION_RANK[fromAssociation];
+  let permission: RepoPermission = fromAssociation;
+  if (lookedUp !== undefined) {
+    permission = lookedUp !== null && !!author.login && lookedUp.login.toLowerCase() === author.login.toLowerCase() ? lookedUp.permission : 'none';
+  }
   const input: ClassifyAuthorInput = {
     login: author.login,
-    repoPermission: useLookup ? lookedUp!.permission : fromAssociation,
+    repoPermission: permission,
     allowlist,
     allowWritePermission,
   };
@@ -315,8 +345,18 @@ export function mapEvent(
   switch (eventName) {
     case 'issues': {
       const p = payload as GithubIssuePayload;
+      const n = p.issue.number;
+      if (!Number.isSafeInteger(n) || n < 1 || n > 2147483647) {
+        return { kind: 'ignored', reason: `issue.${String(p.action).slice(0, 40)}: no usable issue number` };
+      }
+      if (p.action === 'closed' || p.action === 'reopened') {
+        return { kind: 'issue_proposal_change', change: { change: p.action, ghNumber: n } };
+      }
+      if (p.action === 'edited') {
+        return { kind: 'issue_proposal_change', change: { change: 'edited', ghNumber: n, title: proposalTitle(p.issue.title, n), summary: fencedIssueSummary(p.issue.body) } };
+      }
       if (p.action !== 'opened') {
-        return { kind: 'ignored', reason: `issue.${p.action}: only 'opened' creates a work item in H13a` };
+        return { kind: 'ignored', reason: `issue.${String(p.action).slice(0, 40)}: only opened, edited, closed and reopened act` };
       }
       const { trust, canCreateWork: allowed } = trustOf(
         { login: p.issue.user?.login, authorAssociation: p.issue.author_association },
@@ -325,9 +365,10 @@ export function mapEvent(
         input.authorPermission,
       );
       if (!allowed) {
-        return { kind: 'ignored', reason: 'issue.opened: untrusted author, H07 gate refuses work creation' };
+        // D#483 S4-d: an author without admin or maintain permission (by the permission lookup, never the association text) is a proposal.
+        return { kind: 'propose_issue', ghNumber: n, title: proposalTitle(p.issue.title, n), summary: fencedIssueSummary(p.issue.body) };
       }
-      return { kind: 'create_work_item', workItemKind: 'issue', ghNumber: p.issue.number, title: cleanWorkItemTitle(p.issue.title), trust, canCreateWork: allowed };
+      return { kind: 'create_work_item', workItemKind: 'issue', ghNumber: n, title: cleanWorkItemTitle(p.issue.title), trust, canCreateWork: allowed };
     }
 
     case 'discussion': {
@@ -509,6 +550,9 @@ export interface ApplyEventCtx {
 export type ApplyResult =
   | { applied: 'created'; workItemId: string }
   | { applied: 'transitioned'; workItemId: string; recorded: boolean }
+  | { applied: 'proposed'; created: boolean }
+  | { applied: 'proposal_rate_limited' }
+  | { applied: 'proposal_changed'; count: number }
   | { applied: 'pr_push_recorded'; workItemId: string; recorded: boolean }
   | { applied: 'mcp_config_routed' }
   | { applied: 'repo_names_written'; count: number }
@@ -618,6 +662,16 @@ export async function applyMappedEvent(client: PoolClient, ctx: ApplyEventCtx, m
       );
       return { applied: 'created', workItemId: rows[0]!.id };
     }
+
+    case 'propose_issue': {
+      // Never reached without an owner: the delivery resolves it (a read of the repository) or ignores the event.
+      if (!mapped.owner) return { applied: 'skipped', reason: 'issue.opened: owner process unknown, left for the next discovery' };
+      const out: ProposeOutcome = await proposeFromIssue(client, ctx.accountId, ctx.repoId, { ghNumber: mapped.ghNumber, title: mapped.title, summary: mapped.summary, owner: mapped.owner });
+      return out.outcome === 'proposal_rate_limited' ? { applied: 'proposal_rate_limited' } : { applied: 'proposed', created: out.created };
+    }
+
+    case 'issue_proposal_change':
+      return { applied: 'proposal_changed', count: await applyIssueChange(client, ctx.repoId, mapped.change) };
 
     case 'transition_pr': {
       // CWE-863: a fork PR from an untrusted author must never drive a stage transition.
@@ -762,12 +816,19 @@ export interface GithubWebhookDbDeps {
   syncRepos?: (installationId: string) => Promise<unknown>;
   warn?: (message: string) => void;
   /**
-   * D#483 P1: the issue author's real repository permission, asked of GitHub (the retry author check's lookup), for an
-   * `issues.opened` whose `author_association` is not OWNER. Called after the tenant is resolved and before the event is
-   * mapped, for that delivery only; nothing is stored or reused. Absent, or any failure (a throw, no answer, a different
-   * login than the payload's), changes nothing: the association alone decides, as before (fail closed).
+   * D#483 P1, S4-d: the issue author's real repository permission, asked of GitHub (the retry author check's lookup), for every
+   * `issues.opened`, an OWNER claim included. Called after the tenant is resolved and before the event is mapped, for that delivery
+   * only; nothing is stored or reused. When it is wired its answer decides in both directions (an association saying OWNER does not
+   * outrank a lookup saying read). Any failure (a throw, no answer, a different login than the payload's) is no permission: the
+   * author is not trusted and the issue becomes a proposal. Absent (no lookup wired, tests only): the association decides.
    */
   issueAuthorPermission?: (input: { repoId: string; owner: string; name: string; number: number }) => Promise<LookedUpPermission | null>;
+  /**
+   * D#483 S4-d: whether the repository's default branch holds the engine loop's project file, which decides who owns a proposal
+   * (`internal_loop` or `product`, S3 rule E6). Asked only for an issue that is about to become a proposal. Absent, or any failure:
+   * the proposal is not written now and the next discovery reads the issue.
+   */
+  repoHasEngineLoop?: (input: { repoId: string; owner: string; name: string }) => Promise<boolean>;
   /**
    * D#483 S4-c: called after the delivery's transaction (and, for added repositories, the repo sync) with the discoveries this
    * delivery queued, so a runner can start them. Queuing itself needs no hook: it is written by the delivery, once per repository and
@@ -853,22 +914,24 @@ export async function handleGithubWebhookEvent(
     return { handled: false, reason: 'unknown_tenant' };
   }
 
-  let authorPermission: LookedUpPermission | null = null;
+  const [repoOwner, repoName] = (envelope.repoFullName ?? '').split('/');
+  let authorPermission: LookedUpPermission | null | undefined;
   if (eventName === 'issues' && deps.issueAuthorPermission) {
     const p = payload as GithubIssuePayload;
-    const [owner, name] = (envelope.repoFullName ?? '').split('/');
-    if (p.action === 'opened' && p.issue?.author_association !== 'OWNER' && owner && name && tenant.repoId && Number.isSafeInteger(p.issue?.number)) {
+    authorPermission = null;
+    if (p.action === 'opened' && repoOwner && repoName && tenant.repoId && Number.isSafeInteger(p.issue?.number)) {
       try {
-        authorPermission = await deps.issueAuthorPermission({ repoId: tenant.repoId, owner, name, number: p.issue.number });
+        authorPermission = await deps.issueAuthorPermission({ repoId: tenant.repoId, owner: repoOwner, name: repoName, number: p.issue.number });
       } catch {
-        // fx-swallow-ok: fail closed by design; a fixed line is logged (no login, no repository, no driver text) and the association alone decides
-        (deps.warn ?? console.warn)('github webhook: author permission lookup failed; the association decides');
+        // fx-swallow-ok: fail closed by design; a fixed line is logged (no login, no repository, no driver text) and the author is not trusted
+        (deps.warn ?? console.warn)('github webhook: author permission lookup failed; the author is not trusted');
         authorPermission = null;
       }
     }
   }
 
-  const mapped = mapEvent(eventName, payload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission });
+  let mapped = mapEvent(eventName, payload, { allowlist: deps.allowlist ?? [], allowWritePermission: deps.allowWritePermission, authorPermission });
+  if (mapped.kind === 'propose_issue') mapped = await withProposalOwner(deps, tenant.repoId, repoOwner, repoName, mapped);
 
   const result = await withTenant(deps.appUserPool, tenant.accountId, (client) =>
     applyMappedEvent(
@@ -891,6 +954,19 @@ export async function handleGithubWebhookEvent(
   await queueDiscoveryForDelivery(deps, tenant, eventName, payload, deliveryId);
 
   return { handled: true, result };
+}
+
+/** S4-d: fills in who owns the proposal (S3 rule E6), or turns the event into an ignored one when that cannot be read (fail closed). */
+async function withProposalOwner(deps: GithubWebhookDbDeps, repoId: string, owner: string | undefined, name: string | undefined, mapped: ProposeIssueEvent): Promise<MappedEvent> {
+  if (!deps.repoHasEngineLoop || !owner || !name || !repoId) return { kind: 'ignored', reason: 'issue.opened: owner process not readable, left for the next discovery' };
+  try {
+    const hasLoop = await deps.repoHasEngineLoop({ repoId, owner, name });
+    return { ...mapped, owner: decideOwnerProcess({ repoHasEngineLoop: hasLoop, kind: 'issue' }) };
+  } catch {
+    // fx-swallow-ok: fail closed; a fixed line is logged (no repository, no issue text) and the next discovery reads the issue
+    (deps.warn ?? console.warn)('github webhook: reading the repository owner process failed; left for the next discovery');
+    return { kind: 'ignored', reason: 'issue.opened: owner process not readable, left for the next discovery' };
+  }
 }
 
 /**

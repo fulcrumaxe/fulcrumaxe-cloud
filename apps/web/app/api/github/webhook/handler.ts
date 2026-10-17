@@ -17,6 +17,7 @@ import {
 import { buildSyncRepos } from "../../../../lib/github/repoSync";
 import { intakeAllowlist } from "../../../../lib/github/intakeTrust";
 import { issueAuthorPermission } from "../../../../lib/github/issueAuthorPermission";
+import { repoHasEngineLoop } from "../../../../lib/github/repoHasEngineLoop";
 import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 
 /**
@@ -106,6 +107,7 @@ export function defaultGithubWebhookDeps(): GithubWebhookHandlerDeps {
     hooks,
     allowlist: intakeAllowlist() ?? undefined,
     issueAuthorPermission,
+    repoHasEngineLoop,
     syncRepos: buildSyncRepos({
       platformOpsPool: cachedPlatformOpsPool,
       appUserPool: cachedAppUserPool,

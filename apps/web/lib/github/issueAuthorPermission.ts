@@ -7,12 +7,13 @@ import { getAuthorCheck } from "./authorCheck";
  * as GitHub resolves it now) and that login's repository permission with a read-only installation token.
  *
  * On an organization repo even the org owner's issue arrives as MEMBER, or CONTRIBUTOR when the membership is private, so
- * the payload's `author_association` alone could never trust anyone there. The webhook asks only for an `issues.opened`
- * whose association is not OWNER, and uses the answer for that one delivery.
+ * the payload's `author_association` alone could never trust anyone there. D#483 S4-d: the webhook asks for every
+ * `issues.opened`, an OWNER claim included, and uses the answer for that one delivery. The answer decides in both
+ * directions; the association text is never what trusts an author.
  *
  * Fail closed: no check built, a missing issue, or any throw (GitHub down, over the cap, a failed token mint) answers
- * null or throws, and the webhook then lets the association alone decide. The whole lookup is bounded so a slow GitHub
- * cannot hold a webhook delivery open.
+ * null or throws, and the webhook then treats the author as untrusted (the issue becomes a proposal, never work). The
+ * whole lookup is bounded so a slow GitHub cannot hold a webhook delivery open.
  */
 export const LOOKUP_DEADLINE_MS = 8_000;
 
