@@ -53,7 +53,10 @@ class FakeGithub {
     if (!m || m[1] !== REPO) return ghError(404, "Not Found");
     const body = req.body === "" ? {} : (JSON.parse(req.body) as Record<string, unknown>);
     const issue = m[2] === undefined ? undefined : this.issues.find((i) => i.number === Number(m[2]));
-    if (m[2] === undefined && req.method === "GET") return json(200, this.issues.filter((i) => i.state === "open" && i.labels.includes("live-e2e")));
+    if (m[2] === undefined && req.method === "GET") {
+      const want = new URLSearchParams(req.query ?? "").get("labels") ?? "";
+      return json(200, this.issues.filter((i) => i.state === "open" && want.split(",").every((l) => i.labels.includes(l))));
+    }
     if (m[2] === undefined && req.method === "POST") {
       const made: Issue = { number: this.issues.length + 1, title: String(body["title"]), body: String(body["body"]), labels: body["labels"] as string[], state: "open", comments: [] };
       this.issues.push(made);
@@ -475,6 +478,28 @@ describe("sessions keep-alive, status, forget", () => {
     expect(fake.issues[0]?.state).toBe("closed");
     expect(fake.issues[0]?.comments).toEqual(["The session is usable again."]);
     expect(fake.issues[1]?.state).toBe("open");
+  });
+
+  it("a new lapse leaves one scrubbed team-log line; the same lapse the next run adds none; no team-log issue means a summary line and no failure", async () => {
+    const fake = new FakeGithub();
+    server = await startStrictGithubServer(fake.route);
+    const { io, file } = setup({ GITHUB_TOKEN: TOKEN, GITHUB_API_URL: `https://127.0.0.1:${server.port}` });
+    const withGh: Io = { ...io, githubCa: server.ca };
+    await putRole(file, "staging", keyBytes, "owner", mk(5 * D, 30 * H));
+    const summary = `${tmpDir()}/summary.md`;
+    const argv = ["sessions", "keep-alive", "--target", "staging", "--repo", REPO, "--run-url", "https://example.test/run/9", "--summary", summary];
+    // No team-log issue yet: the line lands in the job summary.
+    expect(await main(argv, withGh)).toBe(0);
+    expect(readFileSync(summary, "utf8")).toContain("live-e2e: red target=staging tier=none trigger=keepalive packs=session:owner run=https://example.test/run/9");
+    // Close the lapse issue and open the log: a fresh lapse is reported there.
+    fake.issues[0]!.state = "closed";
+    fake.issues.push({ number: 9, title: "Team log", body: "", labels: ["team-log"], state: "open", comments: [] });
+    expect(await main(argv, withGh)).toBe(0);
+    expect(fake.issues[1]?.comments).toHaveLength(1);
+    expect(fake.issues[1]?.comments[0]).toMatch(/^\[\d\d:\d\d\] live-e2e: red target=staging tier=none trigger=keepalive packs=session:owner run=https:\/\/example\.test\/run\/9$/);
+    // The same lapse again: the lapse issue is unchanged, so the log gets nothing more.
+    expect(await main(argv, withGh)).toBe(0);
+    expect(fake.issues[1]?.comments).toHaveLength(1);
   });
 
   it("an outage opens no issue (error says nothing about the session), and a role never captured gets none either", async () => {

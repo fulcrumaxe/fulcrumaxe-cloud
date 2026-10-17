@@ -119,16 +119,26 @@ describe("select: every workflow trigger's argument list selects at least every 
     expect(smokeIds.length).toBeGreaterThan(0);
   });
 
-  for (const [trigger, argv] of Object.entries(fixture)) {
-    if (trigger.startsWith("_")) continue;
-    it(`${trigger}: non-empty argument list, selects every smoke pack`, () => {
+  // One key per job-and-trigger pair: `<job>.<trigger>` when a job has several triggers, else the trigger alone.
+  const KEYS = ["smoke.dispatch", "standard.dispatch", "full.dispatch", "deploy", "poll", "nightly", "weekly"];
+  const entries = Object.entries(fixture).filter(([k]) => !k.startsWith("_"));
+
+  it("has exactly one entry per job-and-trigger pair, no more and no fewer", () => {
+    expect(entries.map(([k]) => k).sort()).toEqual([...KEYS].sort());
+  });
+
+  for (const [key, argv] of entries) {
+    it(`${key}: non-empty argument list, trigger and tier match the key, selects every smoke pack`, () => {
       const list = argv as string[];
       expect(list.length).toBeGreaterThan(0);
       const args = parseArgs(list);
+      const [first, second] = key.split(".");
+      const trigger = second ?? first;
       expect(args.trigger).toBe(trigger);
+      if (second !== undefined) expect(args.tier).toBe(first);
       const sel = select({ packs: real, ...(args.tier !== undefined ? { tier: args.tier } : {}), named: args.packs, ...(args.tag !== undefined ? { tag: args.tag } : {}) });
       expect(ids(sel)).toEqual(expect.arrayContaining(smokeIds));
-      if (["deploy", "nightly", "poll"].includes(trigger)) expect(args.tag).toBeUndefined();
+      if (["deploy", "nightly", "poll"].includes(trigger as string)) expect(args.tag).toBeUndefined();
     });
   }
 });

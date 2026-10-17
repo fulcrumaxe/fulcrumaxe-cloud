@@ -1,8 +1,10 @@
 {
-  "_comment": "Copy of each workflow trigger's `live-e2e plan|run` argument list. The workflow itself is private-plane only; there test/workflow.test.ts asserts each list here equals what live-e2e.yml says. deploy, nightly and poll always carry a tier of smoke or higher and no --tag.",
+  "_comment": "Copy of each workflow job-and-trigger pair's `live-e2e plan|run` argument list, one key per pair: <job>.<trigger> where a job has more than one trigger (smoke, standard and full each take a dispatch), else the trigger alone. The workflow itself is private-plane only; there test/workflow.test.ts asserts the set of lists in live-e2e.yml equals the set here, in both directions. The public select tests read every entry. deploy, nightly and poll always carry a tier of smoke or higher and no --tag.",
+  "smoke.dispatch": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "dispatch"],
+  "standard.dispatch": ["plan", "--target", "staging", "--tier", "standard", "--trigger", "dispatch"],
+  "full.dispatch": ["plan", "--target", "staging", "--tier", "full", "--trigger", "dispatch"],
   "deploy": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "deploy", "--pack", "shell,api-contract,auth"],
-  "nightly": ["plan", "--target", "staging", "--tier", "standard", "--trigger", "nightly"],
   "poll": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "poll"],
-  "weekly": ["plan", "--target", "staging", "--tier", "full", "--trigger", "weekly"],
-  "dispatch": ["plan", "--target", "staging", "--tier", "smoke", "--trigger", "dispatch"]
+  "nightly": ["plan", "--target", "staging", "--tier", "standard", "--trigger", "nightly"],
+  "weekly": ["plan", "--target", "staging", "--tier", "full", "--trigger", "weekly"]
 }

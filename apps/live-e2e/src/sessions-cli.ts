@@ -19,7 +19,7 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Io } from "./cli.js";
-import { GithubError, syncSessionIssues, syncStoreIssue } from "./issues.js";
+import { GithubError, postTeamLog, syncSessionIssues, syncStoreIssue } from "./issues.js";
 import { MASK_FILE_ENV, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV } from "./needs.js";
 import { captureSession, isLapsed, keepAlive, sessionStatus } from "./sessions.js";
@@ -313,10 +313,19 @@ export async function sessionsCommand(argv: string[], io: Io): Promise<number> {
     }
     if (gh !== undefined) {
       await syncStoreIssue(false, { ...gh, why: "", recapture: "" });
-      await syncSessionIssues(
+      const actions = await syncSessionIssues(
         reports.filter((r) => r.state !== "error").map((r) => ({ role: r.role, state: r.state, lapsed: isLapsed(r.state) })),
         { ...gh, captureCommand: capture },
       );
+      // A new lapse, or a changed reason, leaves one scrubbed team-log line. A lapse that is unchanged since the last
+      // run (the keep-alive runs every few hours) adds nothing, as it adds nothing to the issue.
+      const lapsed = actions.filter((a) => (a.action === "created" || a.action === "commented") && a.pack.startsWith("session:")).map((a) => a.pack);
+      if (lapsed.length > 0) {
+        await postTeamLog(
+          { target: target.name, tier: "none", trigger: "keepalive", packs: lapsed, runUrl: gh.runUrl },
+          { ...gh, scrub: { registry: registryFor(io, false), env: io.env }, ...(io.now !== undefined ? { now: io.now } : {}), summary },
+        );
+      }
     }
     return 0;
   } catch (err) {
