@@ -123,3 +123,9 @@ export async function recordEnvelopePauseAsk(client: PoolClient, input: { workIt
   const { rows } = await client.query<{ recorded: boolean }>('SELECT envelope_pause_ask_record($1::uuid, $2::uuid, $3::integer, $4::uuid) AS recorded', [input.workItemId, input.envelopeId, input.version, input.askId]);
   return rows[0]!.recorded;
 }
+
+/** Remembers that a rule denied the spend past (item, envelope version), through envelope_pause_receipt_record (0866): the deny receipt must exist. True when this call wrote it. */
+export async function recordEnvelopePauseReceipt(client: PoolClient, input: { workItemId: string; envelopeId: string; version: number; receiptId: string }): Promise<boolean> {
+  const { rows } = await client.query<{ recorded: boolean }>('SELECT envelope_pause_receipt_record($1::uuid, $2::uuid, $3::integer, $4::uuid) AS recorded', [input.workItemId, input.envelopeId, input.version, input.receiptId]);
+  return rows[0]!.recorded;
+}

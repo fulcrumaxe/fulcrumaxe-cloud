@@ -5,7 +5,7 @@ import { raiseAsk } from "@fx/db/src/decisionAsks.js";
 import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId, recordEnvelopePauseAsk } from "@fx/spend";
+import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId, recordEnvelopePauseAsk, recordEnvelopePauseReceipt } from "@fx/spend";
 
 /**
  * D#483 S5-d: the `spend_past_envelope` ask. When a run's start is denied because it would pass its item's spend envelope, the person is asked once per item
@@ -83,7 +83,8 @@ export function createEnvelopeAsk(receiptPool: Pool) {
           ruleId: decision.ruleId,
         });
         if (receipt.store !== "decision_receipts") throw new Error("envelope deny receipt was not durable");
-        await client.query("INSERT INTO envelope_pause_asks (account_id, work_item_id, envelope_id, envelope_version, receipt_id) VALUES ($1, $2, $3, $4, $5)", [accountId, workItemId, envelopeId, envelope.version, receipt.id]);
+        // envelope_pause_receipt_record (0866) is the only writer of the receipt-shaped memory row, and refuses unless that deny receipt exists.
+        await recordEnvelopePauseReceipt(client, { workItemId, envelopeId, version: envelope.version, receiptId: receipt.id });
         return "denied_by_rule";
       }
       const askId = await raiseAsk(client, {
