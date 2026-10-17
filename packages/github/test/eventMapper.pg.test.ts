@@ -786,11 +786,13 @@ describe('applyMappedEvent (D#2 H13a, C18 + C7 + C25)', () => {
       expect((await run(org('COLLABORATOR'), { issueAuthorPermission: lookup('write'), allowWritePermission: true })).items).toEqual([{ provenance: 'internal' }]);
     });
 
-    it('an OWNER is trusted without any lookup', async () => {
-      const look = lookup('none');
-      const { items } = await run(org('OWNER'), { issueAuthorPermission: look });
-      expect(items).toEqual([{ provenance: 'internal' }]);
-      expect(look).not.toHaveBeenCalled();
+    it('an OWNER claim is looked up like any other and decides nothing by itself (D#483 S4-d): real permission admin creates the work item, read does not', async () => {
+      const trusted = lookup('admin');
+      expect((await run(org('OWNER'), { issueAuthorPermission: trusted })).items).toEqual([{ provenance: 'internal' }]);
+      expect(trusted).toHaveBeenCalledTimes(1);
+      const outsider = lookup('read');
+      expect((await run(org('OWNER'), { issueAuthorPermission: outsider })).items).toEqual([]);
+      expect(outsider).toHaveBeenCalledTimes(1);
     });
 
     it('fails closed: a throw, no answer, or an answer for a different login changes nothing', async () => {

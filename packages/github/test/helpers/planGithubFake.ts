@@ -16,6 +16,7 @@ import { startStrictGithubServer, type LocalTlsServer } from "./localTlsServer.j
  *     route needs, else 403 "Resource not accessible by integration" (as an installation token without it gets);
  *   - GET /repos/{o}/{n}/contents/{path}: raw media type answers the bytes, the JSON media type answers metadata, a missing
  *     file is a JSON 404;
+ *   - GET /repos/{o}/{n}/issues/{number}: one issue with its author's `user.login`; 404 for a number that names no issue;
  *   - GET /repos/{o}/{n}/issues: the list holds issues AND pull requests (a pull request carries a `pull_request` key with
  *     `merged_at`), per_page is cut at 100, and a `Link` header with rel="next" and rel="last" is sent while pages remain;
  *   - POST /graphql: `Authorization: Bearer` only, JSON body; a failure is HTTP 200 with an `errors` array. A repository the
@@ -351,6 +352,16 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
       if (role === undefined) return ghError(404, "Not Found");
       const legacy = { admin: "admin", maintain: "write", write: "write", triage: "read", read: "read", none: "none" }[role];
       return jsonReply(200, { permission: legacy, role_name: role, user: { login } });
+    }
+
+    // GET /repos/{o}/{n}/issues/{number}: one issue, with the author's login as GitHub resolves it. Needs issues read; a number that is not an issue is a 404.
+    const one = new RegExp(`^${repoBase}/issues/([0-9]+)$`).exec(req.path);
+    if (one) {
+      const denied = needs(cred.permissions, "issues");
+      if (denied) return denied;
+      if (state.faults.issuesStatus) return ghError(state.faults.issuesStatus, "Server Error");
+      const found = state.items.find((i) => i.number === Number(one[1]));
+      return found ? jsonReply(200, itemJson(found)) : ghError(404, "Not Found");
     }
 
     if (req.path === `${repoBase}/issues`) {
