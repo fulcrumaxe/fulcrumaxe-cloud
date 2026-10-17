@@ -371,3 +371,59 @@ describe("loadReviewContext and loadSpecText", () => {
     expect(await loadSpecText(h.runWriterPool, w.accountId, w.workItemId, 2)).toEqual({ version: 2, body });
   });
 });
+
+describe("D#598 P3b: a stacked child's pull request is never merged by the gate (any repository, no pairing, no plan test)", () => {
+  async function parentWithPull(w: World, prNumber: number | null): Promise<string> {
+    const { workItemId: parentId } = await discussingItem(h.runWriterPool, w.accountId, { title: "Parent", body: "The parent.", category: "feature", repoId: w.repoId });
+    await h.admin.query("UPDATE work_items SET repo_id = $2, gh_number = 6, stage = 'pr_opened' WHERE id = $1", [parentId, w.repoId]);
+    if (prNumber !== null) {
+      await h.admin.query(
+        "INSERT INTO agent_runs (account_id, work_item_id, role, runtime, status, envelope, head_sha, dispatch_repo_id, dispatch_pr_number) VALUES ($1, $2, 'code-reviewer', 'production', 'succeeded', $3::jsonb, $4, $5, $6)",
+        [w.accountId, parentId, JSON.stringify({ verdict: "pass" }), OTHER, w.repoId, prNumber],
+      );
+    }
+    await h.admin.query("UPDATE work_items SET stack_parent_id = $2 WHERE id = $1", [w.workItemId, parentId]);
+    return parentId;
+  }
+
+  it("the child's PR targets its parent's branch: every reviewer passed and auto-merge is on, yet no merge request is sent; the stop names the parent's pull request", async () => {
+    const w = await world({ repo: { baseRef: "fx/issue-6", defaultBranch: "main" } });
+    await passBoth(w);
+    await parentWithPull(w, 40);
+    const out = await gate(w);
+    expect(out).toMatchObject({ outcome: "ready_human_merges" });
+    expect(out.outcome === "ready_human_merges" && out.reasons.slice(0, 2)).toEqual(["stacked_on_open_pr", "stacked_on_pr_40"]);
+    expect(w.gh.merges).toEqual([]);
+    expect(w.gh.requests.some((r) => r.method === "PUT")).toBe(false);
+    const gateEvent = (await events(w)).find((e) => e.kind === "merge_gate");
+    expect(gateEvent).toMatchObject({ code: "ready_human_merges" });
+    expect(gateEvent!.reasons.slice(0, 2)).toEqual(["stacked_on_open_pr", "stacked_on_pr_40"]);
+  });
+
+  it("a parent whose runs name no pull request: the stop holds and carries no number", async () => {
+    const w = await world({ repo: { baseRef: "fx/issue-6", defaultBranch: "main" } });
+    await passBoth(w);
+    await parentWithPull(w, null);
+    const out = await gate(w);
+    expect(out.outcome === "ready_human_merges" && out.reasons).toContain("stacked_on_open_pr");
+    expect(out.outcome === "ready_human_merges" && out.reasons.some((r) => r.startsWith("stacked_on_pr_"))).toBe(false);
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("a base that is not the default branch and no stack link at all (a person retargeted the PR): the same stop, no number", async () => {
+    const w = await world({ repo: { baseRef: "release", defaultBranch: "main" } });
+    await passBoth(w);
+    const out = await gate(w);
+    expect(out).toMatchObject({ outcome: "ready_human_merges" });
+    expect(out.outcome === "ready_human_merges" && out.reasons).toEqual(["stacked_on_open_pr"]);
+    expect(w.gh.merges).toEqual([]);
+  });
+
+  it("once the PR targets the default branch again (after the parent merged and the child was retargeted) the gate merges as before", async () => {
+    const w = await world({ repo: { baseRef: "main", defaultBranch: "main" } });
+    await passBoth(w);
+    await parentWithPull(w, 40);
+    expect(await gate(w)).toMatchObject({ outcome: "merged", reasons: [] });
+    expect(w.gh.merges).toEqual([{ sha: HEAD, method: "squash" }]);
+  });
+});

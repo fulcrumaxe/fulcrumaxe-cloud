@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
+import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
 import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
@@ -169,6 +170,8 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
       isAutoMergeAllowed: async () => autoMergeAllowed({ provenance: ctx.provenance }, { autoMerge: ctx.autoMerge, blockExternalAutoMerge: ctx.blockExternalAutoMerge }),
       // The driver reviews the head itself; nothing is dispatched from inside the gate.
       requestReviews: async () => undefined,
+      // D#598 P3b: the parent's pull request number, for the sentence on a stacked stop. Our rows only; no GitHub call.
+      stackParentPullNumber: async () => (await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId)))?.prNumber ?? null,
     },
     // D#6 M1G-a: read from the environment now, on this request. A malformed setting locks every repo; an unknown repo id
     // counts as locked while any id is listed.

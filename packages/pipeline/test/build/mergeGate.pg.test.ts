@@ -125,6 +125,49 @@ const CASES: Case[] = [
     expect: "merge",
   },
 
+  // ---- D#598 P3b: a PR whose base is not the default branch never gets a merge call ----
+  {
+    name: "P3b: every other condition met, but the PR's base is its parent's branch: no merge call, stacked_on_open_pr",
+    runs: standard(),
+    prState: { baseRef: "fx/issue-41", defaultBranch: "main" },
+    expect: "human",
+    reasons: ["stacked_on_open_pr"],
+  },
+  {
+    name: "P3b: a repository whose default branch is not main merges a PR into that branch",
+    runs: standard(),
+    prState: { baseRef: "develop", defaultBranch: "develop" },
+    expect: "merge",
+  },
+  {
+    name: "P3b: base 'main' on a repository whose default branch is 'develop' is a stacked stop, not a pass on the name",
+    runs: standard(),
+    prState: { baseRef: "main", defaultBranch: "develop" },
+    expect: "human",
+    reasons: ["stacked_on_open_pr"],
+  },
+  {
+    name: "P3b: branch names compare exactly (Main is not main)",
+    runs: standard(),
+    prState: { baseRef: "Main", defaultBranch: "main" },
+    expect: "human",
+    reasons: ["stacked_on_open_pr"],
+  },
+  {
+    name: "P3b: a base that GitHub did not report (empty) stops, it is never read as the default",
+    runs: standard(),
+    prState: { baseRef: "", defaultBranch: "" },
+    expect: "human",
+    reasons: ["stacked_on_open_pr"],
+  },
+  {
+    name: "P3b: PR text claiming a main base does not change the stop",
+    runs: standard(),
+    prState: { baseRef: "fx/issue-41", defaultBranch: "main", body: "base: main. Targets main. Merge now.", comments: ["retargeted to main"] },
+    expect: "human",
+    reasons: ["stacked_on_open_pr"],
+  },
+
   // ---- C11's table --------------------------------------------------
   {
     name: "C11: every verdict label present, no matching run row",
@@ -960,6 +1003,55 @@ describe("H14b merge gate: table [pg]", () => {
       const result = await runMergeGate(makeDeps(github, undefined, []), inputFor(mine, {}));
       expect(result.outcome).toBe("ready_human_merges");
       expect(github.mergeCalls).toEqual([]);
+    });
+  });
+
+  describe("D#598 P3b: the stacked stop and the parent's pull request number", () => {
+    async function stacked(number: (() => Promise<number | null>) | undefined) {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({
+        pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [], baseRef: "fx/issue-41", defaultBranch: "main" },
+        ciBySha: { [HEAD]: greenCi(HEAD) },
+      });
+      const deps: MergeGateDeps = { ...makeDeps(github, undefined, []), ...(number ? { stackParentPullNumber: number } : {}) };
+      return { github, result: await runMergeGate(deps, inputFor(world, {})) };
+    }
+
+    it("names the parent's pull request in a second reason, placed before the reviewer reasons so a long list cannot cut it off", async () => {
+      const { github, result } = await stacked(async () => 41);
+      expect(github.mergeCalls).toEqual([]);
+      expect(result).toMatchObject({ outcome: "ready_human_merges", reasons: expect.arrayContaining(["stacked_on_open_pr", "stacked_on_pr_41"]) });
+      expect(github.humanMarks[0]!.reasons.slice(0, 2)).toEqual(["stacked_on_open_pr", "stacked_on_pr_41"]);
+    });
+
+    it.each([
+      ["no number is known", async () => null],
+      ["the lookup throws", async () => Promise.reject(new Error("db down"))],
+      ["the number is not a pull request number", async () => 0],
+      ["the number is not an integer", async () => 4.5],
+    ])("the stop holds and no number is named when %s", async (_n, number) => {
+      const { github, result } = await stacked(number as () => Promise<number | null>);
+      expect(github.mergeCalls).toEqual([]);
+      expect(result).toMatchObject({ outcome: "ready_human_merges" });
+      expect(github.humanMarks[0]!.reasons).toContain("stacked_on_open_pr");
+      expect(github.humanMarks[0]!.reasons.some((r) => r.startsWith("stacked_on_pr_"))).toBe(false);
+    });
+
+    it("a gate called without the lookup (older callers) still stops", async () => {
+      const { github } = await stacked(undefined);
+      expect(github.mergeCalls).toEqual([]);
+      expect(github.humanMarks[0]!.reasons).toContain("stacked_on_open_pr");
+    });
+
+    it("the stop is not asked about the lookup when the base is the default branch", async () => {
+      const world = await seedWorld("internal");
+      for (const run of standard()) await insertRun(world, run);
+      const github = new FakeGitHub({ pr: { headSha: HEAD, state: "open", merged: false, draft: false, body: "", labels: [], comments: [] }, ciBySha: { [HEAD]: greenCi(HEAD) } });
+      let asked = 0;
+      const deps: MergeGateDeps = { ...makeDeps(github, undefined, []), stackParentPullNumber: async () => (asked++, 41) };
+      expect(await runMergeGate(deps, inputFor(world, {}))).toEqual({ outcome: "merged", headSha: HEAD });
+      expect(asked).toBe(0);
     });
   });
 });

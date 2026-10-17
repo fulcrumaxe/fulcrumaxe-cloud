@@ -7,6 +7,8 @@ import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/w
 import { isBuildableKind } from "@fx/discussions";
 import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
+import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
+import { decideStackStart, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
@@ -74,6 +76,8 @@ export interface ExecutorPromptInput {
   map?: { version: string; text: string };
   /** D#600 CX-2: notes and corrections to carry; the same text twice is one section. */
   notes?: readonly NoteItem[];
+  /** D#598 P3b: the item builds on its stack parent's open pull request. The sandbox run starts from this branch at exactly this commit and opens its pull request against the branch. Absent: the default branch, as always. */
+  stackBase?: { branch: string; sha: string };
 }
 
 /**
@@ -91,6 +95,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput): AssembledPro
   const { owner, name, number, version } = input;
   const branch = branchFor(number);
   const repo = `${owner}/${name}`;
+  const stack = input.stackBase;
   return assemblePrompt({
     roleLine: `You are the executor. Implement GitHub issue #${number} of ${repo} exactly as the Spec below says, and open a pull request.`,
     boundary: [
@@ -100,10 +105,20 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput): AssembledPro
     ].join("\n"),
     backstops: [
     "Steps:",
-    "1. Note the default branch you are on: BASE=$(git rev-parse --abbrev-ref HEAD)",
-    input.rebuild === true
-      ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the default branch, not from it: git checkout -B ${branch} "$BASE"`
-      : `2. Create the branch: git checkout -b ${branch}`,
+    ...(stack
+      ? [
+          `1. This work builds on a pull request that has not merged yet. Its branch is ${stack.branch} and its head must be ${stack.sha}. Fetch it and check, in one command: git fetch origin "+refs/heads/${stack.branch}:refs/remotes/origin/${stack.branch}" && test "$(git rev-parse origin/${stack.branch})" = "${stack.sha}"`,
+          "   If that command fails, do not change anything and do not open a pull request: finish with verdict fail and a summary that says the branch it builds on has moved.",
+          `   Then: BASE=${stack.branch}`,
+        ]
+      : ["1. Note the default branch you are on: BASE=$(git rev-parse --abbrev-ref HEAD)"]),
+    stack
+      ? input.rebuild === true
+        ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the branch you build on, not from it: git checkout -B ${branch} "origin/$BASE"`
+        : `2. Create the branch from it: git checkout -b ${branch} "origin/$BASE"`
+      : input.rebuild === true
+        ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the default branch, not from it: git checkout -B ${branch} "$BASE"`
+        : `2. Create the branch: git checkout -b ${branch}`,
     "3. Implement the change with tests. Keep it small and in the project's existing style.",
     "4. Run the project's tests until they pass (see package.json or the project's own README for the command).",
     `5. Commit as the bot (add new files first): git -c user.name="${BOT_NAME}" -c user.email="${BOT_EMAIL}" commit -am "<message>"`,
@@ -183,12 +198,14 @@ interface BuildFacts {
   repo_id: string | null;
   /** The stored `frontmatter -> 'acceptance_files'` of the version read (D#6 R4d-5a). */
   acceptance_files: unknown;
+  /** D#598 P3a/P3b: the item this one builds on, or null. */
+  stack_parent_id: string | null;
 }
 
 async function readFacts(pool: Pool, accountId: string, workItemId: string): Promise<BuildFacts | null> {
   return withTenant(pool, accountId, async (client) => {
     const { rows } = await client.query<BuildFacts>(
-      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode, w.repo_id
+      `SELECT w.stage, w.provenance, w.gh_number, r.gh_owner, r.gh_name, d.kind, s.version, s.body, s.id AS spec_version_id, s.acceptance_files, ${effectiveModeSql("w", "r")} AS execution_mode, w.repo_id, w.stack_parent_id
          FROM work_items w
          LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
          LEFT JOIN discussions d ON d.account_id = w.account_id AND d.id = w.discussion_id
@@ -218,7 +235,35 @@ async function recallMemory(pool: Pool, accountId: string, repoId: string | null
   return { ...(first.text ? { stable: first } : {}), ...(second.text ? { item: second } : {}) };
 }
 
-export type BuildStartResult = { status: "started"; runId: string; branch: string } | { status: "refused"; reason: string };
+/**
+ * D#598 P3b: where a stacked item's run starts. Fails closed at every step: a runner run (the platform checks the branch out and opens the
+ * pull request itself, against the default branch) is refused, so is a parent with no recorded pull request, a start with no way to read
+ * GitHub, and any read that throws. Only `decideStackStart`'s answer lets a run start, and only with a branch and a commit it verified equal.
+ */
+async function resolveStackBase(
+  pool: Pool,
+  accountId: string,
+  workItemId: string,
+  facts: BuildFacts,
+  executionMode: string,
+  port: StackBasePort | undefined,
+): Promise<{ ok: true; base: { branch: string; sha: string } | null } | { ok: false; reason: StackStartRefusal }> {
+  if (isRunnerMode(executionMode)) return { ok: false, reason: "stack_runtime_unsupported" };
+  const parent = await withTenant(pool, accountId, (client) => readStackParentPull(client, workItemId));
+  if (parent === null || parent.prNumber === null) return { ok: false, reason: "stack_parent_no_pull_request" };
+  if (port === undefined || facts.repo_id === null || !facts.gh_owner || !facts.gh_name) return { ok: false, reason: "stack_base_unavailable" };
+  let read: StackParentFacts;
+  try {
+    read = await port.readParent({ repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, prNumber: parent.prNumber });
+  } catch {
+    // fx-swallow-ok: a read that cannot be made is a refusal with a fixed code, never a start from the default branch
+    return { ok: false, reason: "stack_parent_unreadable" };
+  }
+  const decided = decideStackStart(read);
+  return decided.ok ? { ok: true, base: decided.base } : { ok: false, reason: decided.reason };
+}
+
+export type BuildStartResult ={ status: "started"; runId: string; branch: string } | { status: "refused"; reason: string };
 
 /**
  * `approvalId` names the approval (the run action) that asked for the build. It is part of the run's key, so a replay of
@@ -231,7 +276,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; spendAttempt?: number } = {},
+  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; spendAttempt?: number; stackBase?: StackBasePort } = {},
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -269,7 +314,15 @@ export async function startBuildForItem(
   // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
   // A runner run gets its map from the daemon's own mirror (CX-3b), so the cloud builds none for it.
   const map = prior || !options.repoMap || facts.repo_id === null || promptRuntimeOf(executionMode) !== "sandbox" ? undefined : await options.repoMap.forRun({ accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name });
-  const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}) });
+  // D#598 P3b: an item with a stack parent starts from the parent's open pull request head, or is refused with a reason. A replay of a step that already
+  // started its run reads nothing (the run exists and its prompt is not used again). Same rules for every repository: no pairing, plan or account test here.
+  let stackBase: { branch: string; sha: string } | undefined;
+  if (facts.stack_parent_id !== null && !prior) {
+    const stack = await resolveStackBase(pool, accountId, workItemId, facts, executionMode, options.stackBase);
+    if (!stack.ok) return { status: "refused", reason: stack.reason };
+    if (stack.base !== null) stackBase = stack.base;
+  }
+  const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}) });
 
   // D#483 S5-c1: an item moves into `in_progress` only by taking a build slot, under the account's advisory lock. The run starts INSIDE that lock, so
   // two starts at once cannot both pass a limit that has room for one, and a start that finds no slot has started nothing (no run, no spend). An item

@@ -82,7 +82,7 @@ export function fakeGitHubLocal(s: FakeRepoState & { runBranch?: string }): Loca
         title: "A pull request title, never read",
         body: "A pull request body, never read",
         head: { sha: s.headSha, ref: branch, repo: { full_name: full } },
-        base: { ref: s.baseRef, repo: { full_name: full } },
+        base: { ref: s.baseRef, repo: { full_name: full, default_branch: s.defaultBranch ?? "main" } },
       },
     ]);
   }

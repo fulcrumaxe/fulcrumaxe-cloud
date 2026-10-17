@@ -83,6 +83,10 @@ export interface PullRequestState {
   state: "open" | "closed";
   merged: boolean;
   draft: boolean;
+  /** D#598 P3b: the branch the PR merges INTO, and the repository's default branch, both as GitHub reports them on the PR. The gate merges
+   * only when they are equal; a port that cannot read either throws (it is never "the default"). */
+  baseRef: string;
+  defaultBranch: string;
 }
 
 export interface CheckRunState {
@@ -217,6 +221,9 @@ export interface MergeGateDeps {
    * head being gated has no reviewer rows at all: request the reviews on
    * that SHA (H14c wires this to `dispatchReviewers`). */
   requestReviews(pr: PullRequestRef, newHeadSha: string): Promise<void>;
+  /** D#598 P3b: the number of the open pull request this one builds on (the stack parent's), for the sentence a person reads. Absent or
+   * null: not known; the stop still holds. A throw is read as not known: it can only change the wording, never the stop. */
+  stackParentPullNumber?(input: { accountId: string; workItemId: string }): Promise<number | null>;
 }
 
 export interface MergeGateInput {
@@ -273,6 +280,10 @@ export type MergeBlockReason =
   | "local_reviews_passed_advisory"
   | "auto_merge_not_allowed"
   | "human_merge_only"
+  /** D#598 P3b (C3 R-598-P5b-6): the PR's base is not the repository's default branch, so it builds on a pull request that has not merged. */
+  | "stacked_on_open_pr"
+  /** Rides with `stacked_on_open_pr` when the parent's pull request number is known: the number the page puts in its sentence. */
+  | `stacked_on_pr_${number}`
   /** The residual: GitHub refused the merge and nothing below explains it. */
   | "merge_call_refused"
   // D#519: the merge queue's distinct stops. `merge_conflict`, `branch_behind` and `branch_protection_refused` are what the gate
@@ -568,6 +579,19 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   // A closed or merged PR is not ours to mark or merge.
   if (pr.state !== "open" || pr.merged) return { outcome: "pr_not_open", headSha: String(headSha) };
   if (pr.draft !== false) reasons.push("pr_draft");
+  // D#598 P3b: a PR whose base is not the default branch is never merged here. Merging it would put the child into its parent's branch,
+  // not into main. Strict equality on two strings GitHub reported: a missing, empty or different value is a stop (fail closed). After
+  // D#519 MQ3 the queue keeps a stacked child waiting and retargets it, so on the normal path this does not fire; it is the backstop.
+  if (typeof pr.baseRef !== "string" || pr.baseRef === "" || pr.baseRef !== pr.defaultBranch) {
+    reasons.push("stacked_on_open_pr");
+    let parentPr: number | null = null;
+    try {
+      parentPr = (await deps.stackParentPullNumber?.({ accountId: input.accountId, workItemId: input.workItemId })) ?? null;
+    } catch {
+      // fx-swallow-ok: the number only words the sentence; the stop above already holds and nothing merges
+    }
+    if (typeof parentPr === "number" && Number.isSafeInteger(parentPr) && parentPr > 0) reasons.push(`stacked_on_pr_${parentPr}`);
+  }
   if (typeof headSha !== "string" || !SHA_PATTERN.test(headSha)) {
     // Without a well-formed SHA there is nothing to bind verdicts or CI to.
     reasons.push("head_sha_malformed");

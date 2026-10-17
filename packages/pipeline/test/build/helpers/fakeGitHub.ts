@@ -17,7 +17,10 @@ import type { PullRequestRef } from "../../../src/build/types.js";
  * than merely never being handed them. CI is keyed by commit SHA, the way
  * GitHub's checks API is.
  */
-export interface FakePullRequest extends PullRequestState {
+export interface FakePullRequest extends Omit<PullRequestState, "baseRef" | "defaultBranch"> {
+  /** GitHub always sends both (the real contract: `base.ref` and `base.repo.default_branch`). A fixture that says neither is a PR into the default branch, "main". */
+  baseRef?: string;
+  defaultBranch?: string;
   body: string;
   labels: string[];
   comments: string[];
@@ -76,7 +79,7 @@ export class FakeGitHub implements MergeGateGitHubPort {
 
   async getPullRequest(_pr: PullRequestRef): Promise<PullRequestState> {
     // A copy carrying the hostile fields: the gate must not read them.
-    return { ...this.pr, labels: [...this.pr.labels], comments: [...this.pr.comments] } as PullRequestState;
+    return { ...this.pr, baseRef: this.pr.baseRef ?? "main", defaultBranch: this.pr.defaultBranch ?? "main", labels: [...this.pr.labels], comments: [...this.pr.comments] } as PullRequestState;
   }
 
   async getCiSnapshot(_pr: PullRequestRef, headSha: string): Promise<CiSnapshot> {
