@@ -1,13 +1,12 @@
 import { z } from "zod";
 import type { PoolClient } from "pg";
 import { estimateItem, firstRunReservationUsd, type ItemEstimate } from "@fx/pipeline/estimate";
-import { envelopeDefaultMarginPct } from "@fx/plan-data";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
 import { assertRepoIdShape } from "@fx/core/src/repos/read.js";
 import { approveProposalBatch, StartUnavailableError, UUID_RE, type PlanEnvelope, type ProposalToApprove } from "@fx/core/src/plan/index.js";
 import { NotFoundError } from "@fx/core/src/tenancy/errors.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { EnvelopeWriteError, remainingAccountBudgetUsd, setWorkItemEnvelope, writeEnvelopeVersion } from "@fx/spend";
+import { EnvelopeWriteError, effectiveMargin, remainingAccountBudgetUsd, setWorkItemEnvelope, writeEnvelopeVersion } from "@fx/spend";
 import type { RouteEntry } from "../registry.js";
 import { AmountRequiredError, ApiError, EnvelopeBelowFirstRunError, OverAccountBudgetError, RunActionsUnavailableError } from "../errors.js";
 import { UNAVAILABLE_TEXT } from "./run-actions.js";
@@ -21,8 +20,8 @@ import { proposalCtx, proposalSchema, refuse, startFiler } from "./proposal-shar
  *   POST /proposals/{id}/approve                  (proposals.ts) now also creates the item's own `item` envelope
  *
  * Every price is `estimateItem` (S5-p), the only place one is computed; `proposals.estimate_usd` is never used (it runs 3 to 4 times low).
- * The pre-fill is `total_usd x (1 + margin)`, capped at what the account can still spend this month. The margin is the plan data's
- * `envelope.defaultMarginPct`; with none the pre-fill is the bare estimate (S5-e2 adds the person's own setting).
+ * The pre-fill is `total_usd x (1 + margin)`, capped at what the account can still spend this month. The margin is the account's own setting (S5-e2),
+ * else the plan data's `envelope.defaultMarginPct`; with neither the pre-fill is the bare estimate.
  *
  * A proposal that cannot be priced (`basis: "none"`: a question, or no category) has no pre-fill. The approve then needs an explicit `amount_usd`
  * and answers 400 `amount_required` without it, before anything is written; so does a batch holding one.
@@ -58,7 +57,7 @@ export interface PricedSet {
   totalUsd: number;
   /** At least one proposal has `basis: "none"`: there is no pre-fill and the caller must give an amount. */
   needsAmount: boolean;
-  /** The plan data's margin, or null (the pre-fill is then the bare estimate). */
+  /** The account's own margin setting, else the plan data's, or null (the pre-fill is then the bare estimate). */
   marginPct: number | null;
   remainingUsd: number;
   firstRunUsd: number;
@@ -77,7 +76,7 @@ export async function priceProposals(client: PoolClient, input: { accountId: str
     items,
     totalUsd: round4(items.reduce((sum, i) => sum + (i.estimate.basis === "none" ? 0 : i.estimate.total_usd), 0)),
     needsAmount,
-    marginPct: envelopeDefaultMarginPct(),
+    marginPct: (await effectiveMargin(client, accountId)).marginPct,
     remainingUsd: await remainingAccountBudgetUsd(client, accountId),
     firstRunUsd: await firstRunReservationUsd(client, { accountId, repoId }),
   };

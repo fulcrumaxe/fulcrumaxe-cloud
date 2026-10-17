@@ -3249,6 +3249,88 @@ export interface Operations {
       }>;
     };
   };
+  putEnvelope: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      amount_usd: number;
+    };
+    response: {
+      envelope_id: string;
+      scope: "item" | "batch";
+      version: number;
+      amount_usd: number;
+      from_amount_usd: number;
+      from_version: number;
+    };
+  };
+  getAutostartEnvelope: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      envelope_id: (string) | (null);
+      version: (number) | (null);
+      amount_usd: number;
+      enabled: boolean;
+      week_starts_at: string;
+      renews_at: string;
+      spent_this_week_usd: number;
+      remaining_this_week_usd: number;
+      off_sentence: string | null;
+      note: string;
+    };
+  };
+  putAutostartEnvelope: {
+    path: undefined;
+    query: undefined;
+    body: {
+      amount_usd: (number) | (null);
+      confirm?: boolean;
+    };
+    response: {
+      envelope_id: (string) | (null);
+      version: (number) | (null);
+      amount_usd: number;
+      enabled: boolean;
+      week_starts_at: string;
+      renews_at: string;
+      spent_this_week_usd: number;
+      remaining_this_week_usd: number;
+      off_sentence: string | null;
+      note: string;
+      changed: boolean;
+    };
+  };
+  getEnvelopeMargin: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      margin_pct: number | null;
+      source: "setting" | "plan_data" | "none";
+      plan_default_pct: number | null;
+      version: (number) | (null);
+      history_count: number;
+    };
+  };
+  putEnvelopeMargin: {
+    path: undefined;
+    query: undefined;
+    body: {
+      margin_pct: number;
+    };
+    response: {
+      margin_pct: number | null;
+      source: "setting" | "plan_data" | "none";
+      plan_default_pct: number | null;
+      version: (number) | (null);
+      history_count: number;
+      changed: boolean;
+    };
+  };
   listCorrections: {
     path: {
       id: string;
@@ -4920,6 +5002,61 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "required",
     pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  putEnvelope: {
+    method: "PUT",
+    path: "/api/v1/envelopes/{id}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getAutostartEnvelope: {
+    method: "GET",
+    path: "/api/v1/account/autostart-envelope",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  putAutostartEnvelope: {
+    method: "PUT",
+    path: "/api/v1/account/autostart-envelope",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  getEnvelopeMargin: {
+    method: "GET",
+    path: "/api/v1/account/envelope-margin",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  putEnvelopeMargin: {
+    method: "PUT",
+    path: "/api/v1/account/envelope-margin",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
     queryParams: [],
     hasBody: true,
   },

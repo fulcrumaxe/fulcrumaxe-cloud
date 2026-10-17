@@ -1,0 +1,12 @@
+{
+  "envelope_id": null,
+  "version": null,
+  "amount_usd": 0,
+  "enabled": false,
+  "week_starts_at": "2026-10-12T00:00:00.000Z",
+  "renews_at": "2026-10-19T00:00:00.000Z",
+  "spent_this_week_usd": 0,
+  "remaining_this_week_usd": 0,
+  "off_sentence": "Set a weekly auto-start limit to let small, doc and bug items start on their own",
+  "note": "The weekly auto-start limit renews every Monday at 00:00 UTC. What is not spent does not carry over."
+}

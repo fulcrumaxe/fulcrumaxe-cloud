@@ -27,26 +27,46 @@ export async function currentEnvelope(client: PoolClient, accountId: string, env
   return rows[0] ? { amountUsd: Number(rows[0].amount_usd), version: rows[0].version } : null;
 }
 
-/** The envelope's spend, as one SQL expression over $1 = account, $2 = envelope (see the file header). Counts a charge only while its run started or may still start. */
+/** The envelope's spend, as one SQL expression over $1 = account, $2 = envelope, $3 = the instant spend is counted from (see the file header and `spendSince`). Counts a charge only while its run started or may still start. */
 const SPENT_SQL = `SELECT COALESCE(SUM(x.usd), 0) AS sum FROM (
        SELECT l.usd FROM ledger l
          JOIN agent_runs r ON r.account_id = l.account_id AND r.id = l.run_id
          JOIN work_items w ON w.account_id = r.account_id AND w.id = r.work_item_id
-        WHERE l.account_id = $1 AND w.envelope_id = $2
+        WHERE l.account_id = $1 AND w.envelope_id = $2 AND l.created_at >= $3::timestamptz
        UNION ALL
        SELECT s.usd_reserved FROM spend_reservations s
          JOIN agent_runs r ON r.account_id = s.account_id AND r.id = s.run_id
          JOIN work_items w ON w.account_id = r.account_id AND w.id = r.work_item_id
-        WHERE s.account_id = $1 AND s.state = 'open' AND w.envelope_id = $2
+        WHERE s.account_id = $1 AND s.state = 'open' AND w.envelope_id = $2 AND s.created_at >= $3::timestamptz
        UNION ALL
        SELECT c.usd FROM envelope_run_charges c
          JOIN agent_runs r ON r.account_id = c.account_id AND r.id = c.run_id
-        WHERE c.account_id = $1 AND c.envelope_id = $2 AND NOT (r.status = 'refused_spend' OR (r.status = 'cancelled' AND r.started_at IS NULL))
+        WHERE c.account_id = $1 AND c.envelope_id = $2 AND c.created_at >= $3::timestamptz AND NOT (r.status = 'refused_spend' OR (r.status = 'cancelled' AND r.started_at IS NULL))
      ) x`;
 
+/**
+ * D#483 S5-e2: the Monday 00:00 UTC at or before `now`, the start of the week the weekly auto-start envelope is counted over. Pure; uses no local time zone.
+ * The next one is `weekStartUtc(now) + 7 days`.
+ */
+export function weekStartUtc(now: Date): Date {
+  const day = (now.getUTCDay() + 6) % 7; // Monday = 0
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - day));
+}
+
+/**
+ * The instant an envelope's spend is counted from. A weekly auto-start envelope renews every Monday 00:00 UTC and nothing rolls over, so only spend from
+ * this week counts against its amount; an item or batch envelope counts all of its spend (`-infinity`). An envelope with no row counts all (and then
+ * fails closed on its missing amount).
+ */
+export async function spendSince(client: PoolClient, accountId: string, envelopeId: string, now: Date): Promise<string> {
+  const { rows } = await client.query<{ scope: EnvelopeScope }>('SELECT scope FROM approval_envelopes WHERE account_id = $1 AND id = $2 LIMIT 1', [accountId, envelopeId]);
+  return rows[0]?.scope === 'weekly_autostart' ? weekStartUtc(now).toISOString() : '-infinity';
+}
+
 /** What the envelope has spent or holds right now, for display. The admission check below never uses this number: it compares inside the database. */
-export async function envelopeSpentUsd(client: PoolClient, accountId: string, envelopeId: string): Promise<number> {
-  const { rows } = await client.query<{ sum: string }>(`SELECT sum::text FROM (${SPENT_SQL}) t`, [accountId, envelopeId]);
+export async function envelopeSpentUsd(client: PoolClient, accountId: string, envelopeId: string, now: Date = new Date()): Promise<number> {
+  const since = await spendSince(client, accountId, envelopeId, now);
+  const { rows } = await client.query<{ sum: string }>(`SELECT sum::text FROM (${SPENT_SQL}) t`, [accountId, envelopeId, since]);
   return Number(rows[0]!.sum);
 }
 
@@ -68,13 +88,14 @@ export function envelopeRunUsd(p: { estimateModelUsd?: number; estimateComputeUs
  * True when the run fits the envelope. The sum and the compare are done by the database in numeric, with the run's amount passed as a whole number of
  * ten-thousandths, so a settled $0.10 plus a $0.20 run fits a $0.30 envelope exactly. An envelope with no row, or a run with no price, is a no (fail closed).
  */
-export async function envelopeAdmits(client: PoolClient, accountId: string, envelopeId: string, runUsd: number | null): Promise<boolean> {
+export async function envelopeAdmits(client: PoolClient, accountId: string, envelopeId: string, runUsd: number | null, now: Date = new Date()): Promise<boolean> {
   if (runUsd === null || !Number.isFinite(runUsd)) return false;
+  const since = await spendSince(client, accountId, envelopeId, now);
   const { rows } = await client.query<{ ok: boolean }>(
-    `SELECT (spent.sum * 10000 + $3::bigint <= cur.amount_usd * 10000) AS ok
+    `SELECT (spent.sum * 10000 + $4::bigint <= cur.amount_usd * 10000) AS ok
        FROM (SELECT amount_usd FROM approval_envelopes WHERE account_id = $1 AND id = $2 ORDER BY version DESC LIMIT 1) cur,
             (${SPENT_SQL}) spent`,
-    [accountId, envelopeId, tenThousandths(runUsd)],
+    [accountId, envelopeId, since, tenThousandths(runUsd)],
   );
   return rows[0]?.ok === true;
 }
