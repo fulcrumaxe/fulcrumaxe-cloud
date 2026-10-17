@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isAllowedErrorCode } from "@fx/telemetry";
-import * as scanModule from "../../src/build/planePush.js";
-import { PLANE_REFUSAL_CODES, PlaneRouteError, type RepoPairing, routeAndPush, routeFor, type PlaneRouteDeps, type PlaneRouteInput, type PublicApi } from "../../src/build/planePushRoute.js";
-import { git, gitCommitSource } from "../../src/build/planePushGit.js";
-import { createGitTransport, type PublicGitTransport } from "../../src/build/planePushTransport.js";
+import * as scanModule from "../../../runner-protocol/src/planePush/planePush.js";
+import { PLANE_REFUSAL_CODES, PlaneRouteError, type RepoPairing, routeAndPush, routeFor, type PlaneRouteDeps, type PlaneRouteInput, type PublicApi } from "../../../runner-protocol/src/planePush/planePushRoute.js";
+import { git, gitCommitSource } from "../../../runner-protocol/src/planePush/planePushGit.js";
+import { createGitTransport, type PublicGitTransport } from "../../../runner-protocol/src/planePush/planePushTransport.js";
 import { startGitHttpServer, type GitHttpServer } from "./helpers/gitHttpServer.js";
 
-vi.mock("../../src/build/planePush.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/build/planePush.js")>();
+vi.mock("../../../runner-protocol/src/planePush/planePush.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../runner-protocol/src/planePush/planePush.js")>();
   return { ...actual, scanPlanePush: vi.fn(actual.scanPlanePush) };
 });
 
@@ -319,7 +319,7 @@ describe("the push-time checks (the review carry-overs)", () => {
   });
 
   it("refuses when the scan did not report this commit, or reported a base other than the freshly fetched tip", async () => {
-    const real = (await vi.importActual<typeof import("../../src/build/planePush.js")>("../../src/build/planePush.js")).scanPlanePush;
+    const real = (await vi.importActual<typeof import("../../../runner-protocol/src/planePush/planePush.js")>("../../../runner-protocol/src/planePush/planePush.js")).scanPlanePush;
     const scan = vi.mocked(scanModule.scanPlanePush);
     for (const tweak of [(r: scanModule.PlanePushResult) => ({ ...r, scanned: undefined }), (r: scanModule.PlanePushResult) => ({ ...r, scanned: { commit: r.scanned!.commit, base: privateBase } }), (r: scanModule.PlanePushResult) => ({ ...r, scanned: { commit: privateBase, base: r.scanned!.base } })]) {
       scan.mockImplementationOnce(async (i) => tweak(await real(i)) as scanModule.PlanePushResult);

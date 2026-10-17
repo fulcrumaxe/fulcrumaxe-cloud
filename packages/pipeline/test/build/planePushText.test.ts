@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildPlanePushText } from "@fx/core/src/repos/planePushText.js";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
-import { PlaneRouteError, routeAndPush, type PlaneRouteDeps, type PlaneRouteInput } from "../../src/build/planePushRoute.js";
+import { PlaneRouteError, routeAndPush, type PlaneRouteDeps, type PlaneRouteInput } from "../../../runner-protocol/src/planePush/planePushRoute.js";
 
 /**
  * D#598 P1f-2b, Gate 2 on the real consumer: the text and identity the token route returns are fed to the real `routeAndPush` input check

@@ -154,11 +154,11 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
   });
 
   it("by source: the module imports nothing and reads no environment, clock, file or random source", () => {
-    const source = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "repos", "planePushText.ts"), "utf8");
+    const source = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "runner-protocol", "src", "planePush", "planePushText.ts"), "utf8");
     expect(source).not.toMatch(/^\s*import\s/m);
     expect(source).not.toMatch(/\bprocess\b|\bDate\b|Math\.random|\brequire\s*\(|\bfetch\s*\(/);
     // Built-output rule: neither module reads a file or a path at run time, so moving the built output changes nothing about them.
-    const identity = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "repos", "planePushIdentity.ts"), "utf8");
+    const identity = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "runner-protocol", "src", "planePush", "planePushIdentity.ts"), "utf8");
     for (const module of [source, identity]) expect(module).not.toMatch(/^\s*import\s|\bprocess\b|__dirname|import\.meta|readFileSync|\bfs\b/m);
   });
 
@@ -175,7 +175,7 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
       }
     };
     for (const top of ["packages", "apps"]) walk(path.join(root, top));
-    expect(importers.sort()).toEqual(["packages/pipeline/src/build/planePushRoute.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/replies.ts"]);
+    expect(importers.sort()).toEqual(["packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts"]);
   });
 });
 
@@ -218,7 +218,7 @@ describe("readPlanePushIdentity", () => {
     if (!read.ok) throw new Error("expected ok");
     expect(PLANE_IDENTITY_NAME.test(read.identity.name)).toBe(true);
     expect(PLANE_IDENTITY_EMAIL.test(read.identity.email)).toBe(true);
-    const route = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "pipeline", "src", "build", "planePushRoute.ts"), "utf8");
+    const route = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "runner-protocol", "src", "planePush", "planePushRoute.ts"), "utf8");
     expect(route).toContain("const IDENTITY = PLANE_IDENTITY_NAME;");
     expect(route).toContain("const EMAIL = PLANE_IDENTITY_EMAIL;");
     expect(route).toContain("const GIT_SAFE_LINE = PLANE_TITLE_LINE;");

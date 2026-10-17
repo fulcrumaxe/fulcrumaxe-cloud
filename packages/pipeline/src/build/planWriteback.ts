@@ -20,7 +20,7 @@ import {
   releaseWritebackAfterPush,
   stopEntry,
 } from "../mergeQueue/store.js";
-import { compileOverlay } from "./planePush.js";
+import { compileOverlay } from "@fulcrumaxe/runner-protocol/planePush";
 import { PLAN_UPDATE_BRANCH_PREFIX, WritebackGitHubError, type WritebackGitHub } from "./planWritebackGitHub.js";
 import {
   getWriteback,
