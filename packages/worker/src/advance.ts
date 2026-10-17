@@ -7,6 +7,7 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { IllegalStageTransitionError, WorkItemHaltedError as StageHaltedError } from "@fx/core/src/work-items/stages.js";
 import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverEventInput } from "@fx/core/src/work-items/driverEvents.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
 import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
@@ -593,6 +594,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
     if (!lifted) return refused("target_not_found");
     if (lifted.halted) return refused("item_halted");
+    // D#598 P8a: an open setup request (or a withdrawn one nobody has advanced past) holds the item until a person acts on it; derived from the requests, never stamped.
+    const setupHold = await withTenant(runnerPool, accountId, userId, (client) => setupHoldFor(client, workItemId));
+    if (setupHold) return refused(setupHold);
 
     // D#483: a build that cannot take a slot yet is not "started". The wait is recorded now as the item's own waiting fact (the card reads it; the workflow's polls
     // keep it fresh) and the outcome says so, with the reason. A check that fails decides nothing: the workflow's start is the authority, and the answer stays "started".
@@ -981,6 +985,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
     if (halt?.halted) return { status: "refused", reason: "item_halted" };
     if (halt && halt.halt_epoch !== who.haltEpoch) return { status: "refused", reason: "halted_since_approval" };
+    const setupHold = await withTenant(runnerPool, who.accountId, who.userId, (client) => setupHoldFor(client, who.workItemId));
+    if (setupHold) return { status: "refused", reason: setupHold };
     return null;
   }
 

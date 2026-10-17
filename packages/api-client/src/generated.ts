@@ -1364,6 +1364,158 @@ export interface Operations {
       }>;
     };
   };
+  listSetupRequests: {
+    path: undefined;
+    query: {
+      state?: "open" | "all";
+      work_item_id?: string;
+      repo_id?: string;
+    };
+    body: undefined;
+    response: {
+      requests: Array<{
+        id: string;
+        repo_id: string;
+        work_item_id: string | null;
+        kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+        title: string;
+        target: string;
+        env_name: string | null;
+        reason: string;
+        provider_url: string | null;
+        check: ("env_var_present") | (null);
+        state: "open" | "done" | "withdrawn";
+        origin: "agent" | "derived";
+        created_by: string | null;
+        created_at: string;
+        resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+        resolved_by: string | null;
+        resolved_at: string | null;
+        check_reason: string | null;
+        check_ran_at: string | null;
+      }>;
+      truncated: boolean;
+    };
+  };
+  createSetupRequest: {
+    path: undefined;
+    query: undefined;
+    body: {
+      kind: "env_var" | "app_not_installed" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      repo_id: string;
+      work_item_id?: (string) | (null);
+      target: string;
+      env_name?: (string) | (null);
+      reason: string;
+      provider_url?: (string) | (null);
+      check?: ("env_var_present") | (null);
+    };
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+    };
+  };
+  getSetupRequest: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+    };
+  };
+  withdrawSetupRequest: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+    };
+  };
+  markSetupRequestDone: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      id: string;
+      repo_id: string;
+      work_item_id: string | null;
+      kind: "env_var" | "app_not_installed" | "parity_drift" | "parent_pr_closed" | "branch_pushed_by_person" | "overlay_path_missing";
+      title: string;
+      target: string;
+      env_name: string | null;
+      reason: string;
+      provider_url: string | null;
+      check: ("env_var_present") | (null);
+      state: "open" | "done" | "withdrawn";
+      origin: "agent" | "derived";
+      created_by: string | null;
+      created_at: string;
+      resolution: ("marked_done" | "check_passed" | "condition_cleared" | "withdrawn") | (null);
+      resolved_by: string | null;
+      resolved_at: string | null;
+      check_reason: string | null;
+      check_ran_at: string | null;
+    };
+  };
   getActionAccountRules: {
     path: undefined;
     query: undefined;
@@ -3718,6 +3870,61 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  listSetupRequests: {
+    method: "GET",
+    path: "/api/v1/setup-requests",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["state","work_item_id","repo_id"],
+    hasBody: false,
+  },
+  createSetupRequest: {
+    method: "POST",
+    path: "/api/v1/setup-requests",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  getSetupRequest: {
+    method: "GET",
+    path: "/api/v1/setup-requests/{id}",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  withdrawSetupRequest: {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/withdraw",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  markSetupRequestDone: {
+    method: "POST",
+    path: "/api/v1/setup-requests/{id}/done",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
   },
   getActionAccountRules: {
     method: "GET",
