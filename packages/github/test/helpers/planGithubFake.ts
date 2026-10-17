@@ -34,6 +34,8 @@ export interface FakeItem {
   /** Present for a pull request. `merged_at` null means not merged. */
   pull?: { merged_at: string | null };
   labels?: string[];
+  /** `updated_at` (ISO). Default: derived from the number, so a higher number is more recently updated. */
+  updatedAt?: string;
 }
 
 export interface FakeDiscussion {
@@ -41,6 +43,8 @@ export interface FakeDiscussion {
   title: string;
   body: string;
   closed: boolean;
+  /** `updatedAt` (ISO). Default: derived from the number plus a day, so Discussions and issues interleave. */
+  updatedAt?: string;
   /** The Discussion's author (default `someone`). */
   login?: string;
   /** `isMinimized` is true for a comment a maintainer hid (spam, off-topic and so on); default false. */
@@ -164,9 +168,12 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
     return null;
   }
 
+  const stampOf = (n: number): string => new Date(Date.UTC(2026, 0, 1) + n * 3_600_000).toISOString();
   function itemJson(i: FakeItem): Record<string, unknown> {
     return {
       number: i.number,
+      updated_at: i.updatedAt ?? stampOf(i.number),
+      created_at: stampOf(i.number),
       title: i.title,
       body: i.body,
       state: i.state,
@@ -211,6 +218,32 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
     }
     if (!perms["discussions"]) {
       return jsonReply(200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository with the name 'acme/widgets'." }] });
+    }
+    if (op === "DiscoveryRecentDiscussions") {
+      // GitHub validates the selection against the schema: `Discussion` has no `isMinimized` (only a Discussion's COMMENTS do).
+      const nodes = /\bnodes\s*\{([\s\S]*?)\}\s*\}\s*\}\s*\}\s*$/.exec(q)?.[1] ?? "";
+      const known = new Set(["number", "title", "body", "closed", "createdAt", "updatedAt", "author", "login", "id", "url"]);
+      for (const word of nodes.match(/[A-Za-z_]\w*/g) ?? []) {
+        if (!known.has(word)) return jsonReply(200, { data: null, errors: [{ type: "undefinedField", path: ["query", "repository", "discussions", "nodes", word], message: `Field '${word}' doesn't exist on type 'Discussion'` }] });
+      }
+      const first = Number(vars.first);
+      if (!Number.isInteger(first) || first < 1 || first > 100) return jsonReply(200, { data: null, errors: [{ type: "BAD_USER_INPUT", message: "Requesting more than 100 records is not supported" }] });
+      const onlyOpen = /states:\s*\[\s*OPEN\s*\]/.test(q);
+      const field = /orderBy:\s*\{[^}]*field:\s*(UPDATED_AT|CREATED_AT)/.exec(q)?.[1] ?? "UPDATED_AT";
+      const dir = /direction:\s*(ASC|DESC)/.exec(q)?.[1] ?? "DESC";
+      const when = (d: FakeDiscussion): number => Date.parse(field === "UPDATED_AT" ? (d.updatedAt ?? stampOf(d.number)) : stampOf(d.number));
+      const rows = state.discussions
+        .filter((d) => !onlyOpen || !d.closed)
+        .sort((a, b) => (dir === "DESC" ? -1 : 1) * (when(a) - when(b) || a.number - b.number))
+        .slice(0, first);
+      return jsonReply(200, {
+        data: {
+          repository: {
+            hasDiscussionsEnabled: state.discussionsEnabled,
+            discussions: { nodes: rows.map((d) => ({ number: d.number, title: d.title, body: d.body, closed: d.closed, updatedAt: d.updatedAt ?? stampOf(d.number), author: { login: d.login ?? "someone" } })) },
+          },
+        },
+      });
     }
     if (op === "PlanDiscussions") {
       const first = Math.min(100, Number(vars.first ?? 30));
@@ -325,8 +358,11 @@ export async function startPlanGithub(state: FakeGithubState): Promise<PlanGithu
       if (denied) return denied;
       if (state.faults.issuesStatus) return ghError(state.faults.issuesStatus, "Server Error");
       const wanted = url.searchParams.get("state") ?? "open";
+      const sortBy = url.searchParams.get("sort") ?? "created";
+      if (!["created", "updated", "comments"].includes(sortBy) || !["open", "closed", "all"].includes(wanted)) return jsonReply(422, { message: "Validation Failed", status: "422" });
       const direction = url.searchParams.get("direction") === "asc" ? 1 : -1;
-      const items = state.items.filter((i) => wanted === "all" || i.state === wanted).sort((a, b) => (a.number - b.number) * direction);
+      const key = (i: FakeItem): number => (sortBy === "updated" ? Date.parse(i.updatedAt ?? stampOf(i.number)) : i.number);
+      const items = state.items.filter((i) => wanted === "all" || i.state === wanted).sort((a, b) => (key(a) - key(b) || a.number - b.number) * direction);
       const { items: pageItems, link } = pageOf(req, url.searchParams, items.map(itemJson));
       return jsonReply(200, pageItems, link ? { link } : {});
     }

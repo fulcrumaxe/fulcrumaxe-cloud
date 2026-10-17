@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { createPool } from "@fx/db/src/pool";
+import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
 import {
   defaultStripeClient,
   handleStripeWebhookRequest,
@@ -37,6 +38,7 @@ import {
  *    understated `content-length` must not bypass the cap).
  */
 let cachedPlatformOpsPool: Pool | undefined;
+let cachedAppUserPool: Pool | undefined;
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -55,6 +57,16 @@ export function defaultStripeWebhookDeps(): StripeWebhookDeps {
     webhookSecret: stripeWebhookSecretFromEnv(),
     platformOpsPool: cachedPlatformOpsPool,
     livemode: stripeKeyIsLive(stripeSecretKeyFromEnv()),
+    // D#483 S4-c (P6): an activation queues the account's install discovery. The queue is written in a tenant session, so it needs
+    // the app_user URL the rest of the app already requires; without it the hook is absent and the webhook is unchanged.
+    ...(process.env.DATABASE_URL_APP_USER
+      ? {
+          onSubscriptionActivated: async ({ accountId, subscriptionId }: { accountId: string; subscriptionId: string }) => {
+            cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
+            await queueDiscoveries(cachedAppUserPool, accountId, { kind: "account" }, "activation", subscriptionId);
+          },
+        }
+      : {}),
   };
 }
 

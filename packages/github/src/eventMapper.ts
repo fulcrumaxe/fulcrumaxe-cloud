@@ -13,8 +13,10 @@ import { cleanWorkItemTitle } from '@fx/core/src/work-items/title.js';
 import { recordDriverEvent } from '@fx/core/src/work-items/driverEvents.js';
 import { IllegalStageTransitionError } from '@fx/core/src/work-items/stages.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
+import { queueDiscoveries, type QueuedDiscovery } from '@fx/db/src/discoveryRuns.js';
 import { withPlatformOps } from '@fx/core/src/tenancy/withPlatformOps.js';
 import { syncFailureTag } from './syncFailureTag.js';
+import { installationDiscoveryRef } from './installDiscovery.js';
 
 /**
  * D#2 H13a body criterion 2: the 8 events this webhook handles.
@@ -766,6 +768,12 @@ export interface GithubWebhookDbDeps {
    * login than the payload's), changes nothing: the association alone decides, as before (fail closed).
    */
   issueAuthorPermission?: (input: { repoId: string; owner: string; name: string; number: number }) => Promise<LookedUpPermission | null>;
+  /**
+   * D#483 S4-c: called after the delivery's transaction (and, for added repositories, the repo sync) with the discoveries this
+   * delivery queued, so a runner can start them. Queuing itself needs no hook: it is written by the delivery, once per repository and
+   * delivery. A throw here never fails the delivery.
+   */
+  onDiscoveryQueued?: (accountId: string, runs: readonly QueuedDiscovery[]) => Promise<unknown>;
 }
 
 export type HandleWebhookResult =
@@ -880,5 +888,46 @@ export async function handleGithubWebhookEvent(
     }
   }
 
+  await queueDiscoveryForDelivery(deps, tenant, eventName, payload, deliveryId);
+
   return { handled: true, result };
+}
+
+/**
+ * D#483 S4-c: `installation` created and `installation_repositories` added queue one discovery per product repository (a
+ * replayed delivery has the same id and queues nothing). A failure here is logged as a fixed line and never fails the delivery.
+ */
+async function queueDiscoveryForDelivery(
+  deps: GithubWebhookDbDeps,
+  tenant: { accountId: string; installationId: string },
+  eventName: GithubWebhookEventName,
+  payload: GithubWebhookPayload,
+  deliveryId: string,
+): Promise<void> {
+  const ids = (list: unknown): number[] =>
+    Array.isArray(list) ? list.map((r) => (r as { id?: unknown } | null)?.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) : [];
+  let trigger: 'installation_created' | 'repos_added';
+  let ghRepoIds: number[] | undefined;
+  if (eventName === 'installation' && (payload as GithubInstallationPayload).action === 'created') {
+    trigger = 'installation_created';
+    const listed = ids((payload as GithubInstallationPayload).repositories);
+    ghRepoIds = listed.length > 0 ? listed : undefined;
+  } else if (eventName === 'installation_repositories' && (payload as GithubInstallationRepositoriesPayload).action === 'added') {
+    trigger = 'repos_added';
+    ghRepoIds = ids((payload as GithubInstallationRepositoriesPayload).repositories_added);
+    if (ghRepoIds.length === 0) return;
+  } else {
+    return;
+  }
+  try {
+    // installation_created uses the installation's own reference, shared with the install callback (which queues after its repo sync),
+    // so whichever of the two runs second queues nothing again. A repos_added delivery keeps its delivery id.
+    const ghInstallationId = (payload as { installation?: { id?: unknown } }).installation?.id;
+    const ref = trigger === 'installation_created' && typeof ghInstallationId === 'number' && Number.isSafeInteger(ghInstallationId) ? installationDiscoveryRef(ghInstallationId) : deliveryId;
+    const runs = await queueDiscoveries(deps.appUserPool, tenant.accountId, { kind: 'installation', installationId: tenant.installationId, ...(ghRepoIds ? { ghRepoIds } : {}) }, trigger, ref);
+    if (runs.length > 0 && deps.onDiscoveryQueued) await deps.onDiscoveryQueued(tenant.accountId, runs);
+  } catch {
+    // fx-swallow-ok: the delivery already committed; a fixed line is logged (no repository, no id) and the next trigger or sweep discovers
+    (deps.warn ?? console.warn)('github webhook: queuing discovery failed');
+  }
 }

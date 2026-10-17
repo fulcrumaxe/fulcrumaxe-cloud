@@ -67,7 +67,31 @@ export const DISCUSSION_COMMENTS_QUERY = `query PlanDiscussionComments($owner: S
   }
 }`;
 
-export const ALLOWED_GRAPHQL_DOCUMENTS: ReadonlySet<string> = new Set([REPO_HEAD_QUERY, DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY]);
+/**
+ * D#483 S4-c: the install and payment discovery's one page of the repository's OPEN Discussions, most recently updated first.
+ * GitHub's `Repository.discussions` takes `states` and `orderBy` itself, so the 50 newest open ones are one request and nothing is
+ * filtered by guesswork afterwards. The selection holds no `isMinimized`: that field exists on a Discussion's COMMENTS (a
+ * Minimizable type), not on a Discussion, and asking for it on a Discussion is a schema error; this read touches no comments.
+ */
+export const DISCOVERY_DISCUSSIONS_QUERY = `query DiscoveryRecentDiscussions($owner: String!, $name: String!, $first: Int!) {
+  repository(owner: $owner, name: $name) {
+    hasDiscussionsEnabled
+    discussions(first: $first, states: [OPEN], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        body
+        closed
+        updatedAt
+        author {
+          login
+        }
+      }
+    }
+  }
+}`;
+
+export const ALLOWED_GRAPHQL_DOCUMENTS: ReadonlySet<string> = new Set([REPO_HEAD_QUERY, DISCUSSIONS_PAGE_QUERY, DISCUSSION_COMMENTS_QUERY, DISCOVERY_DISCUSSIONS_QUERY]);
 
 export class GraphqlDocumentRefused extends Error {
   constructor(reason: string) {

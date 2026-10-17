@@ -17,6 +17,12 @@ export interface StripeWebhookDeps {
   priceMap?: PriceMap;
   /** Price id -> site-kit product. Tests inject one; production builds it from `STRIPE_PRICE_ID_SITEKIT_*`. */
   sitekitPriceMap?: SitekitPriceMap;
+  /**
+   * D#483 S4-c (P6): called once, after the commit, when a signed event moved an account from unsubscribed or cancelled to active
+   * (the first paid activation, or a resubscription). Production queues the account's install discovery here. A replayed event
+   * never calls it, and a throw never fails the webhook.
+   */
+  onSubscriptionActivated?: (activation: { accountId: string; subscriptionId: string }) => Promise<void>;
 }
 
 export interface WebhookResponse {

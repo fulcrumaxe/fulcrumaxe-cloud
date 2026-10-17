@@ -31,6 +31,9 @@ const STRIPE_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /** Statuses that end the subscription (`unpaid` too: the owner's rule is that Stripe moving it there sooner wins). */
+/** The subscription's own statuses that mean it is paying (or in a paid-for trial). */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing']);
+
 const ENDED_STATUSES: ReadonlySet<string> = new Set(['canceled', 'incomplete_expired', 'unpaid']);
 
 /** `accounts.id` is a uuid: a non-UUID `client_reference_id` is ignored, not a Postgres error. */
@@ -40,7 +43,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DUPLICATE_CANCELABLE_STATUSES: ReadonlySet<string> = new Set(['active', 'trialing', 'past_due']);
 
 type Outcome =
-  | { ok: true; deduped: boolean; reason?: string; unknownPrice?: { priceId: string | null } }
+  | { ok: true; deduped: boolean; reason?: string; unknownPrice?: { priceId: string | null }; activated?: { accountId: string; subscriptionId: string }; live?: { accountId: string; subscriptionId: string } }
   | { ok: false; reason: string; duplicate?: { accountId: string; survivorId: string; survivorCustomerId: string | null; duplicateCustomerId: string } };
 
 function idOf(value: string | { id: string } | null | undefined): string | null {
@@ -166,6 +169,14 @@ export async function syncSubscriptionEvent(event: Stripe.Event, deps: StripeWeb
     // After commit, so a rolled-back write is never logged.
     console.error(`billing_unknown_price ${outcome.unknownPrice.priceId ?? 'none'}`);
   }
+  if (outcome.ok && outcome.activated && deps.onSubscriptionActivated) {
+    // After commit. A failure here never fails the webhook (Stripe would redeliver an event that is already recorded as processed).
+    try {
+      await deps.onSubscriptionActivated(outcome.activated);
+    } catch (err) {
+      reportError(err, { stage: "billing.on_activated", route: "/api/stripe/webhook" });
+    }
+  }
   if (!outcome.ok && outcome.duplicate) {
     const cancelled = await cancelDuplicate(deps, { ...outcome.duplicate, duplicateId: subscription.id });
     if (!cancelled) return respond(503, { error: 'stripe_unavailable' });
@@ -265,7 +276,10 @@ async function applySubscriptionInTx(
     }
   }
   // A later fetch already landed: applying this one would move standing backwards.
-  if (row.stale_fetch) return { outcome: { ok: true, deduped: false, reason: 'stale_fetch' }, applied: false };
+  if (row.stale_fetch) {
+    const live = LIVE_STATUSES.has(subscription.status) ? { live: { accountId, subscriptionId: subscription.id } } : {};
+    return { outcome: { ok: true, deduped: false, reason: 'stale_fetch', ...live }, applied: false };
+  }
 
   const plan = resolution.known ? resolution.plan : null;
   if (session) {
@@ -308,6 +322,16 @@ async function applySubscriptionInTx(
     params.push(NO_REFUNDS_POLICY_VERSION);
   }
   await client.query(`UPDATE accounts SET ${sets.join(', ')} WHERE id = $1`, params);
+  // D#483 S4-c (P6): this write moved the SUBSCRIPTION itself to active or trialing (it was another status, none, or a different
+  // subscription before; recovering from past_due is not one). Derived from the subscription's own stored status, not the account's derived status, so an account that
+  // pays while paused or with a broken model key still reports it; the discovery run then decides, when it starts, whether the
+  // account is active. Several events of one activation (checkout, invoice, subscription update) report it once, and a replayed event
+  // (deduped before this point) not at all.
+  // Already paying on this very subscription (active, trialing, or past due and recovering) is not a new activation.
+  const wasLive = row.stripe_subscription_id === subscription.id && row.stripe_subscription_status !== null && (LIVE_STATUSES.has(row.stripe_subscription_status) || row.stripe_subscription_status === 'past_due');
+  const nowLive = LIVE_STATUSES.has(status);
+  const activated = nowLive && !wasLive ? { accountId, subscriptionId: subscription.id } : undefined;
+  const live = nowLive ? { accountId, subscriptionId: subscription.id } : undefined;
 
   let unknownPrice: { priceId: string | null } | undefined;
   if (!resolution.known) {
@@ -315,7 +339,7 @@ async function applySubscriptionInTx(
     await recordUnknownPrice(client, accountId, resolution.priceId, subscription.id);
   }
 
-  return { outcome: { ok: true, deduped: false, ...(unknownPrice ? { reason: 'unknown_price', unknownPrice } : {}) }, applied: true };
+  return { outcome: { ok: true, deduped: false, ...(unknownPrice ? { reason: 'unknown_price', unknownPrice } : {}), ...(activated ? { activated } : {}), ...(live ? { live } : {}) }, applied: true };
 }
 
 async function recordUnknownPrice(
@@ -379,6 +403,14 @@ export interface ApplyFetchedResult {
   reason?: string;
   /** A second live subscription next to the one on file. The webhook cancels it; the reconciler holds a read-only key and only reports it. */
   duplicate?: boolean;
+  /** D#483 S4-c: this write made the subscription active (see `onSubscriptionActivated`); the caller may queue the discovery. */
+  activated?: { accountId: string; subscriptionId: string };
+  /**
+   * The fetched subscription is active or trialing and the account row is current with it (written now, or already newer). The
+   * reconciler queues the discovery for it every lap: the queue is idempotent per subscription, so this backfills a lost webhook or a
+   * hook that threw, and queues nothing twice.
+   */
+  live?: { accountId: string; subscriptionId: string };
 }
 
 /**
@@ -418,7 +450,7 @@ export async function applyFetchedSubscription(
   const { outcome } = result;
   if (outcome.ok && outcome.unknownPrice) console.error(`billing_unknown_price ${outcome.unknownPrice.priceId ?? 'none'}`);
   if (!outcome.ok) return { applied: false, reason: outcome.reason, ...(outcome.duplicate ? { duplicate: true } : {}) };
-  return { applied: result.applied, ...(outcome.reason ? { reason: outcome.reason } : {}) };
+  return { applied: result.applied, ...(outcome.reason ? { reason: outcome.reason } : {}), ...(outcome.activated ? { activated: outcome.activated } : {}), ...(outcome.live ? { live: outcome.live } : {}) };
 }
 
 /** The fetch-start clock: Postgres's `now()` as text (microseconds kept), never an event or local time. */
