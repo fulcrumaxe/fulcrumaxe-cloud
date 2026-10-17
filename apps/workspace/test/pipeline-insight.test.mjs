@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  PHASES, REFRESH_MS, SENTENCES, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -185,6 +185,30 @@ describe("the notice banner", () => {
   });
 });
 
+describe("D#7 DP8-f1: halted and waiting on an answer", () => {
+  it("draws each state alone, both, and neither", () => {
+    expect(stateFlags({ ...OK, halted: true, waiting_on_answer: false }).map((f) => f.kind)).toEqual(["halted"]);
+    expect(stateFlags({ ...OK, halted: false, waiting_on_answer: true }).map((f) => f.kind)).toEqual(["waiting_on_answer"]);
+    expect(stateFlags({ ...OK, halted: true, waiting_on_answer: true }).map((f) => f.kind)).toEqual(["halted", "waiting_on_answer"]);
+    expect(stateFlags({ ...OK, halted: false, waiting_on_answer: false })).toEqual([]);
+    expect(buildInsight({ ...OK, halted: true, waiting_on_answer: true }).flags).toHaveLength(2);
+  });
+
+  it("uses the approved wording for the waiting state", () => {
+    expect(FLAG_WORDS.waiting_on_answer).toBe("Waiting for your answer");
+  });
+
+  it("anything but a real true draws nothing, and an older server that sends neither field draws nothing", () => {
+    for (const v of [undefined, null, "true", 1, 0, "", {}]) expect(stateFlags({ ...OK, halted: v, waiting_on_answer: v })).toEqual([]);
+    const old = { ...OK };
+    delete old.halted;
+    delete old.waiting_on_answer;
+    expect(stateFlags(old)).toEqual([]);
+    expect(stateFlags(null)).toEqual([]);
+    expect(stateFlags(undefined)).toEqual([]);
+  });
+});
+
 describe("buildInsight over every state", () => {
   it("nothing recorded: no runs, no panel, no Spec, no steps, nothing running", () => {
     const m = buildInsight(EMPTY);
@@ -225,8 +249,11 @@ class FakeEl extends FakeNode {
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addEventListener(t, f) { this.on[t] = f; }
-  appendChild(c) { this.kids.push(c); return c; }
-  replaceChildren(...c) { this.kids = c; }
+  appendChild(c) { this.kids.push(c); if (c instanceof FakeEl) c.parent = this; return c; }
+  replaceChildren(...c) { this.kids.forEach((k) => k instanceof FakeEl && (k.parent = null)); this.kids = c; c.forEach((k) => k instanceof FakeEl && (k.parent = this)); }
+  contains(n) { return n === this || this.kids.some((k) => k instanceof FakeEl && k.contains(n)); }
+  querySelectorAll(sel) { const m = /^\[([\w-]+)\]$/.exec(sel); return findAll(this, (e) => e !== this && !!m && e.getAttribute(m[1]) !== null); }
+  focus() { globalThis.document.activeElement = this; }
   get textContent() { return this.kids.map((k) => (k instanceof FakeEl ? k.textContent : k.text)).join(""); }
 }
 const findAll = (el, test, out = []) => (test(el) && out.push(el), el.kids.forEach((k) => k instanceof FakeEl && findAll(k, test, out)), out);
@@ -239,7 +266,7 @@ describe("the view", () => {
     vi.useFakeTimers();
     timers = [];
     vi.stubGlobal("Node", FakeNode);
-    vi.stubGlobal("document", { hidden: false, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -344,14 +371,108 @@ describe("the view", () => {
     expect(byId(panel.el, "pl-needs-human")).toHaveLength(0);
   });
 
+  describe("D#7 DP8-f1: the state flags", () => {
+    afterEach(() => vi.unstubAllGlobals());
+    const drawn = async (over) => {
+      const { panel } = make({ ...OK, ...over });
+      panel.start("item-flags");
+      await flush();
+      return panel;
+    };
+
+    it("halted alone draws only the halted flag", async () => {
+      const panel = await drawn({ halted: true, waiting_on_answer: false });
+      expect(byId(panel.el, "pl-flag-halted")).toHaveLength(1);
+      expect(byId(panel.el, "pl-flag-halted")[0].textContent).toBe(FLAG_WORDS.halted);
+      expect(byId(panel.el, "pl-flag-waiting_on_answer")).toHaveLength(0);
+    });
+
+    it("waiting alone draws 'Waiting for your answer' and no halted flag", async () => {
+      const panel = await drawn({ halted: false, waiting_on_answer: true });
+      expect(byId(panel.el, "pl-flag-waiting_on_answer")[0].textContent).toBe("Waiting for your answer");
+      expect(byId(panel.el, "pl-flag-halted")).toHaveLength(0);
+    });
+
+    it("both draw side by side, and neither leaves the live region empty", async () => {
+      const both = await drawn({ halted: true, waiting_on_answer: true });
+      expect(byId(both.el, "pl-flags")).toHaveLength(1);
+      expect(byId(both.el, "pl-flag-halted")).toHaveLength(1);
+      expect(byId(both.el, "pl-flag-waiting_on_answer")).toHaveLength(1);
+      const none = await drawn({ halted: false, waiting_on_answer: false });
+      expect(byId(none.el, "pl-flags")).toHaveLength(1);
+      expect(byId(none.el, "pl-flags")[0].textContent).toBe("");
+      expect(byId(none.el, "pl-flag-halted")).toHaveLength(0);
+      expect(byId(none.el, "pl-flag-waiting_on_answer")).toHaveLength(0);
+    });
+
+    it("never draws a raw id, null or undefined, in any of the four states", async () => {
+      for (const [halted, waiting_on_answer] of [[true, false], [false, true], [true, true], [false, false]]) {
+        const panel = await drawn({ halted, waiting_on_answer });
+        const flags = byId(panel.el, "pl-flags").map((f) => f.textContent).join("");
+        expect(flags).not.toMatch(/null|undefined|NaN|waiting_on_answer|[0-9a-f]{8}-[0-9a-f]{4}/);
+      }
+    });
+
+    it("keeps one polite live region across refreshes and writes the flag text into it", async () => {
+      let n = 0;
+      const answers = [{ ...OK, halted: false, waiting_on_answer: false }, { ...OK, halted: false, waiting_on_answer: true }, { ...OK, halted: true, waiting_on_answer: true }, { ...OK, halted: false, waiting_on_answer: false }];
+      const { panel } = make(() => answers[Math.min(n++, answers.length - 1)]);
+      panel.start("item-live");
+      await flush();
+      const [region] = byId(panel.el, "pl-flags");
+      expect(region.getAttribute("role")).toBe("status");
+      expect(region.getAttribute("aria-live")).toBe("polite");
+      expect(region.textContent).toBe("");
+      const texts = [];
+      for (let i = 0; i < 3; i++) {
+        timers[0].fn();
+        await flush();
+        expect(byId(panel.el, "pl-flags")).toHaveLength(1);
+        expect(byId(panel.el, "pl-flags")[0]).toBe(region);
+        texts.push(region.textContent);
+      }
+      expect(texts).toEqual([FLAG_WORDS.waiting_on_answer, FLAG_WORDS.halted + FLAG_WORDS.waiting_on_answer, ""]);
+    });
+
+    it("keeps focus on the Needs you button when the card redraws", async () => {
+      vi.stubGlobal("window", { FULCWM: { open: vi.fn() }, FULCApps: { get: (id) => (id === NEEDS_YOU_APP ? {} : undefined) } });
+      let n = 0;
+      const { panel } = make(() => ({ ...OK, halted: false, waiting_on_answer: true, runs: n++ ? OK.runs.slice(0, 2) : OK.runs }));
+      panel.start("item-focus");
+      await flush();
+      const [before] = byId(panel.el, "pl-flag-needs-you");
+      before.focus();
+      expect(document.activeElement).toBe(before);
+      timers[0].fn();
+      await flush();
+      const [after] = byId(panel.el, "pl-flag-needs-you");
+      expect(after).not.toBe(before);
+      expect(document.activeElement).toBe(after);
+    });
+
+    it("links the waiting flag to Needs you only while that app is registered, and the link opens it", async () => {
+      const open = vi.fn();
+      vi.stubGlobal("window", { FULCWM: { open }, FULCApps: { get: (id) => (id === NEEDS_YOU_APP ? {} : undefined) } });
+      const linked = await drawn({ halted: false, waiting_on_answer: true });
+      const [btn] = byId(linked.el, "pl-flag-needs-you");
+      expect(btn.textContent).toBe("Needs you");
+      btn.on.click();
+      expect(open).toHaveBeenCalledWith(NEEDS_YOU_APP);
+      vi.stubGlobal("window", { FULCWM: { open }, FULCApps: { get: () => undefined } });
+      const unlinked = await drawn({ halted: false, waiting_on_answer: true });
+      expect(byId(unlinked.el, "pl-flag-needs-you")).toHaveLength(0);
+      expect(byId(unlinked.el, "pl-flag-waiting_on_answer")).toHaveLength(1);
+    });
+  });
+
   it("an unchanged answer does not redraw at all, and opening the item again starts from the defaults", async () => {
     const { panel } = make(OK);
     panel.start("item-1");
     await flush();
-    const before = panel.el.kids[0];
+    const before = byId(panel.el, "pl-ins-run")[0];
     timers[0].fn();
     await flush();
-    expect(panel.el.kids[0]).toBe(before); // same answer: not redrawn
+    expect(byId(panel.el, "pl-ins-run")[0]).toBe(before); // same answer: not redrawn
     // The person closes the running review (the click handler runs before the browser toggles).
     const runs = byId(panel.el, "pl-ins-run");
     runs[5].open = true;
@@ -379,10 +500,10 @@ describe("the view", () => {
     runs[5].kids[0].on.click(); // and closes the running review
     byId(panel.el, "pl-spec")[0].open = false;
     byId(panel.el, "pl-spec")[0].kids[0].on.click();
-    const before = panel.el.kids[0];
+    const before = byId(panel.el, "pl-ins-run")[0];
     timers[0].fn();
     await flush();
-    expect(panel.el.kids[0]).not.toBe(before); // redrawn
+    expect(byId(panel.el, "pl-ins-run")[0]).not.toBe(before); // redrawn
     const after = byId(panel.el, "pl-ins-run");
     expect(after.map((e) => e.open)).toEqual([false, false, false, false, true, false]);
     expect(byId(panel.el, "pl-spec")[0].open).toBe(true);
