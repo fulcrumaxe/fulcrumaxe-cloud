@@ -5,6 +5,7 @@
 import { KEY_MAX_AGE_DAYS, loadRegistration } from "../config.js";
 import type { CommandContext } from "../context.js";
 import { loadRunnerKey } from "../keys.js";
+import { CANARY_BLOCK_HINT, readCanaryState } from "../instructionCanaryState.js";
 import { isPaused, loadSettings } from "../runnerSettings.js";
 
 const DAY_MS = 86_400_000;
@@ -37,5 +38,11 @@ export async function statusCommand(ctx: CommandContext): Promise<number> {
   ctx.out(`Key:             ok, ${ageDays} days old (re-register before ${KEY_MAX_AGE_DAYS})`);
   const settings = loadSettings(ctx.stateDir);
   ctx.out(`Claiming:        ${isPaused(ctx.stateDir) ? "paused by you; run: fx-runner resume" : "on"} (at most ${settings.ceilingTotal} jobs, ${settings.ceilingHeavy} heavy)`);
+  const canary = readCanaryState(ctx.stateDir);
+  if (canary?.status === "blocked" && canary.reason !== undefined) {
+    ctx.out(`Instruction files: BLOCKED (${canary.reason}); ${CANARY_BLOCK_HINT[canary.reason]}`);
+    return 1;
+  }
+  ctx.out(canary?.status === "passed" ? `Instruction files: ok, a repo's CLAUDE.md is not loaded (CLI ${canary.binary_version ?? "unknown"}, checked ${canary.checked_at})` : "Instruction files: not checked yet; fx-runner run checks before its first claim");
   return 0;
 }

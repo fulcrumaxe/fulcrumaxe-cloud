@@ -4,6 +4,7 @@ import type { SessionPlan } from "../job/runJob.js";
 import type { InterruptibleRuntime } from "../sandbox/hostSandbox.js";
 import type { JobLimits } from "../sandbox/jobLimits.js";
 import type { ProtectedPaths } from "../sandbox/sandboxSettings.js";
+import type { InstructionCanaryResult } from "../instructionCanaryState.js";
 import type { GitCapture } from "./git.js";
 
 /** Runs a program in `cwd` with exactly this environment and no shell; ends its whole process group on the time limit or the signal; keeps the last `tailChars` of its output. */
@@ -32,6 +33,13 @@ export interface EngineKit {
   locate(searchPath: string): string;
   /** `fx-runner doctor`: what the installed agent CLI at `binaryPath` answers about itself. It makes no model request. */
   inspect(input: { binaryPath: string; envOptions: CleanEnvOptions; stateDir: string; loginMode: "subscription" | "api_key" | undefined }): Promise<EngineReport>;
+  /**
+   * D#601 MEM-7: runs the agent CLI once in a directory holding a canary instruction file, with the engine's own arguments, and says whether the file was
+   * loaded. One short model turn. `argv` keys the stored answer, so a change of arguments checks again. Absent: no such check is wired.
+   */
+  instructionCanary?(input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions }): Promise<InstructionCanaryResult>;
+  /** The key a stored `instructionCanary` pass is tied to (a fingerprint of the engine's argument list). Present when `instructionCanary` is. */
+  instructionCanaryKey?(): string;
   /** The runtime for one job, from the `sandbox` block the host tier built for it. */
   makeRuntime(input: {
     binaryPath: string;

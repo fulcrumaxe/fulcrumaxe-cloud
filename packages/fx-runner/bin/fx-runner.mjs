@@ -19,7 +19,7 @@ import { createClaudeKit } from "../src/engines/claude/kit.js";
 import { createSandboxHost } from "../src/sandbox/probeHost.js";
 import { vmBuildHost } from "../scripts/vm-host.mjs";
 
-const engine = createClaudeKit(spawn);
+const engine = createClaudeKit(spawn, { instructionCanary: true });
 const shellVars = [];
 if (process.env.ANTHROPIC_API_KEY) shellVars.push("ANTHROPIC_API_KEY");
 if (process.env.ANTHROPIC_AUTH_TOKEN) shellVars.push("ANTHROPIC_AUTH_TOKEN");

@@ -13,6 +13,7 @@ import { RUNNER_VERSION } from "../../src/version.js";
 import { loadRegistration, saveRegistration } from "../../src/config.js";
 import { writeApiKey } from "../../src/credentials.js";
 import type { CommandContext } from "../../src/context.js";
+import { claimBlockReason, readCanaryState } from "../../src/instructionCanaryState.js";
 import { createClaudeKit } from "../../src/engines/claude/kit.js";
 import { generateRunnerKey, saveRunnerKey } from "../../src/keys.js";
 import { PINNED_JOB_KEYS, keyringFor, originHash } from "../../src/keyring.js";
@@ -445,6 +446,39 @@ describe("5. the composed daemon: a signal stops the job within 5 seconds and re
     expect(readdirSync(stateDir).filter((n) => /mirror/i.test(n))).toEqual([]);
     expect(process.listenerCount("SIGTERM")).toBe(0);
   }, 60_000);
+});
+
+describe("6b. the instruction-file canary holds claiming (D#601 MEM-7)", () => {
+  const claimBodies = (): unknown[] => cloud.seen.filter((s) => s.path === "/api/runner/claim").map((s) => s.body);
+  const withCanary = (result: { ok: true } | { ok: false; reason: "instruction_file_loaded" }): Partial<RunHost> => ({
+    engine: { ...createClaudeKit(spawn), instructionCanary: async () => result, instructionCanaryKey: () => "test-key" },
+  });
+
+  it("a build that loads the file: the claim declares no room, a job the cloud hands over anyway is refused unstarted, the named reason is said and stored for `status`", async () => {
+    const job = signedJob({ issued_at: new Date(Date.now() - 60_000).toISOString(), expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+    cloud.enqueue(job);
+    const run = start({ host: withCanary({ ok: false, reason: "instruction_file_loaded" }) });
+    await until(() => claims() >= 1);
+    expect(claimBodies()[0]).toMatchObject({ capacity: { light: { limit: 0 }, heavy: { limit: 0 } } });
+    // Stop only after the loop has answered the handed-over job, or a stop that lands mid-claim reads "discarded" instead of "refused".
+    await until(() => run.out.some((line) => line.includes("(class_full)")));
+    await stop(run);
+    const said = (await run.done).out.join("\n");
+    expect(said).toContain("instruction_file_loaded");
+    expect(said).toContain(`refused ${job.job.run_id} (class_full)`);
+    // Nothing of the run reached the cloud: no heartbeat, events or done.
+    expect(cloud.seen.filter((s) => /\/(heartbeat|events|done)$/.test(s.path))).toEqual([]);
+    expect(readCanaryState(stateDir)).toMatchObject({ status: "blocked", reason: "instruction_file_loaded" });
+    expect(claimBlockReason(stateDir)).toBe("instruction_file_loaded");
+  }, 30_000);
+
+  it("a passing check stores the pass and holds nothing", async () => {
+    const run = start({ host: withCanary({ ok: true }) });
+    await until(() => claims() >= 1);
+    await stop(run);
+    expect(readCanaryState(stateDir)).toMatchObject({ status: "passed" });
+    expect(claimBlockReason(stateDir)).toBeUndefined();
+  }, 30_000);
 });
 
 describe("6. the claim gate in the composed daemon (D#6 R4a-6, C16 section 1.3)", () => {

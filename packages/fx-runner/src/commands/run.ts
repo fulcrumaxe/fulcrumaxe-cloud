@@ -28,6 +28,7 @@ import { createAdmission } from "../daemon/admission.js";
 import { createUsageGate } from "../daemon/usageGate.js";
 import { createFootprintStore } from "../daemon/footprints.js";
 import { realResourceProbe, type ResourceProbe } from "../daemon/resources.js";
+import { CANARY_BLOCK_HINT, claimBlockReason, ensureInstructionCanary } from "../instructionCanaryState.js";
 import { isPaused, loadSettings } from "../runnerSettings.js";
 import { budgetsOf, capUnenforced, setUpJobLimits, UNENFORCED_LINE, type JobLimits } from "../sandbox/jobLimits.js";
 import { createJobsInHand } from "../daemon/jobsInHand.js";
@@ -322,6 +323,19 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       ctx.out(`fx-runner: toolchain: ${described.line}`);
       for (const warning of described.warnings) ctx.out(`fx-runner: ${warning}`);
       if (vmStatTimer !== undefined) await refreshVmStat();
+      // D#601 MEM-7: before the first claim, prove this build keeps a repo's instruction file out of runs. A block is stored, shown by `status`, and holds claiming.
+      if (host.engine.instructionCanary !== undefined && host.engine.instructionCanaryKey !== undefined) {
+        const version = (await host.engine.inspect({ binaryPath, envOptions, stateDir, loginMode: undefined }).catch(() => undefined))?.version;
+        const blocked = await ensureInstructionCanary({
+          stateDir,
+          binaryPath,
+          binaryVersion: version,
+          argv: host.engine.instructionCanaryKey(),
+          now: ctx.now,
+          check: () => host.engine.instructionCanary!({ binaryPath, credentials, envOptions }),
+        });
+        if (blocked !== undefined) ctx.out(`fx-runner: ${blocked}: ${CANARY_BLOCK_HINT[blocked]}`);
+      }
       const first = await gate.check();
       if (!first.open) ctx.out(`fx-runner: the sandbox does not work on this machine (${first.reason}); no job will be claimed until it does. Run: fx-runner doctor`);
       lastReason = first.open ? undefined : first.reason;
@@ -342,7 +356,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
           footprints: createFootprintStore(stateDir),
           settings: () => capUnenforced(loadSettings(stateDir), enforced),
           heavyBudgetBytes: () => budgetsOf(loadSettings(stateDir)).heavy.memoryBytes,
-          paused: () => isPaused(stateDir),
+          paused: () => isPaused(stateDir) || claimBlockReason(stateDir) !== undefined,
           usage: () => usage.state(),
           now: () => clock.now().getTime(),
         }),

@@ -55,6 +55,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/footprints.ts": ["fs", "path"], // D#6 C43-4: the learned per-repo, per-role memory estimates: lstat and a bounded read of one small file in the state directory, written through the private-file writer
   "src/sandbox/jobLimits.ts": ["path"], // D#6 C43-5: path joins and an absolute-path check; every program (systemd-run, systemctl, env) runs through the injected capture or the engine's own start
   "src/runnerSettings.ts": ["fs", "path"], // D#6 C43-4: the concurrency settings file and the claiming-pause marker in the state directory: lstat, a bounded read, the private-file writer and one removal
+  "src/instructionCanaryState.ts": ["fs", "path"], // D#601 MEM-7: lstat and a read of one small result file in the state directory, written through the private-file writer
   "src/daemon/ledger.ts": ["crypto", "fs", "path"], // the job-id ledger file: random temp-file names, one 0600 file, its directory
   "src/job/depsRegistry.ts": ["fs", "path"], // D#6 C44-4: one lstat of the workspace's lockfile names, never followed, to tell whether the repo has a lockfile
   "src/daemon/depsInstall.ts": ["fs", "path"], // D#6 C44-4: the host-side install: lstat and a no-follow read of the lockfile and two settings files, removal of node_modules trees (no link followed), the 0700 scratch directories; the package manager runs through the injected install capture
@@ -79,6 +80,7 @@ export const ALLOWED_BUILTINS: Readonly<Record<string, readonly string[]>> = {
   "src/daemon/workspaceGit.ts": ["fs", "path"], // lstat of the agent-written `.git`: nothing in it is followed
   "src/engines/claude/capture.ts": ["child_process"],
   "src/engines/claude/engine.ts": ["child_process", "path"],
+  "src/engines/claude/instructionCanary.ts": ["crypto", "fs", "os", "path"], // D#601 MEM-7: a random canary token, a 0700 scratch directory holding a canary CLAUDE.md and two empty settings files (removed after the check), and the temp directory location; the CLI is started only through runCaptureWithInput in capture.ts
   "src/engines/claude/filePermissions.ts": ["path"],
   "src/engines/claude/pin.ts": ["crypto", "fs", "path"], // crypto: a random name for the flags-cache temp file, made with an exclusive create
   "src/engines/claude/session.ts": ["crypto", "fs", "path"], // crypto: random temp-file names for the index write
@@ -198,7 +200,7 @@ function spawnValueProblem(node: ts.Identifier, file: string): boolean {
       ts.isCallExpression(parent.parent) &&
       parent.parent.arguments[0] === parent &&
       ts.isIdentifier(parent.parent.expression) &&
-      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground" || parent.parent.expression.text === "runInstall");
+      (parent.parent.expression.text === "runCapture" || parent.parent.expression.text === "runForeground" || parent.parent.expression.text === "runInstall" || parent.parent.expression.text === "runCaptureWithInput");
     return !(seamLeft || runCaptureArg);
   }
   return true;
