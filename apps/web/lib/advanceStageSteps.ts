@@ -1,4 +1,4 @@
-import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult } from "@fx/worker";
+import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -94,6 +94,17 @@ export async function buildOutcomeBody(worker: AdvanceWorker | null, accountId: 
   const out: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
   const summary = out.envelope?.summary;
   return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}) };
+}
+
+export type DecisionWorker = Pick<AdvanceFacade, "advanceDecision">;
+
+/**
+ * D#7 DP4b-2: after a succeeded executor run (the build, or a fix round), reads the decisions it reported or asked about. One fixed word back, never model
+ * text: `parked` ends the workflow (an ask is waiting for a person), a halt ends it the halted way, anything else lets it carry on as before.
+ */
+export async function decisionBody(worker: DecisionWorker | null, who: StepWho, runId: string): Promise<DecisionStepCode> {
+  if (!worker) return "none";
+  return worker.advanceDecision(who.accountId, who.userId, who.workItemId, who.haltEpoch, runId);
 }
 
 /** The item's stage now, or null (gone, or no worker). */

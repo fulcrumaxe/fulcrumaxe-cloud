@@ -28,6 +28,8 @@ Sources:
 
 **`decision_request`.** An envelope field beside `next_role_request`: `{ type, options, proposed, rationale }` or `null`, checked by `isDecisionRequestField()` (`src/decision-request.ts`). A role supplies the facts of a decision and never its class, so a `class` key is refused by name. The orchestrator resolves the request against the decision policy; this package holds none. A card names the decision types it may raise with a `decision_types: [...]` frontmatter line, which a static guard reads and which never reaches the role.
 
+**`decisions_taken`.** The companion field (D#7 DP4b-2): `[{ type, options, chosen, rationale }]` or `null`, checked by `isDecisionsTakenField()`. It reports decisions a role took itself, where `decision_request` reports a stop to ask. Same shape rules and the same refusal of a `class` key; `chosen` replaces `proposed`, the rationale is at most 1 KiB, and more than 50 entries is refused whole. `type` is the per-run key the orchestrator offered, never a catalogue id.
+
 ## Data it touches
 
 None directly — `ROLE_MANIFEST` and `TOOL_REGISTRY` are static, in-code tables, not database-backed. See `../data-model.md` for where a tenant's per-role mode override (`role_settings`) actually lives.

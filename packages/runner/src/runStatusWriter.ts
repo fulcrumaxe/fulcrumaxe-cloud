@@ -311,6 +311,44 @@ export async function recordDecisionSnapshotEvent(
   await insertRunEvent(client, p.accountId, p.runId, "decision.snapshot", p.payload);
 }
 
+/** The fixed refusal words of a `decision_request.refused` row (D#7 R-7-DP4b-4 and -7); `recordDecisionRefusedEvent` refuses any other. */
+export const DECISION_REFUSAL_CODES = [
+  "invariant_named",
+  "decision_key_unknown",
+  "decision_type_not_declared",
+  "decision_snapshot_missing",
+  "decision_snapshot_mismatch",
+  "decision_fields_malformed",
+  "run_not_succeeded",
+  "decided_without_asking",
+] as const;
+export type DecisionRefusalCode = (typeof DECISION_REFUSAL_CODES)[number];
+
+/**
+ * D#7 DP4b-2: one `decision_request.refused` row, the record that a decision field of a run's envelope was dropped. The payload is a fixed code and,
+ * only when the agent's word has the shape of a per-run key (`d1` to `d99`), that key. No other agent text is stored, so the row cannot carry any.
+ */
+export async function recordDecisionRefusedEvent(
+  client: PoolClient,
+  p: { accountId: string; runId: string; code: DecisionRefusalCode; key?: string },
+): Promise<void> {
+  if (!(DECISION_REFUSAL_CODES as readonly string[]).includes(p.code)) throw new Error("decision_refusal_code_unknown");
+  const key = p.key !== undefined && /^d[1-9][0-9]?$/.test(p.key) ? p.key : undefined;
+  await insertRunEvent(client, p.accountId, p.runId, "decision_request.refused", { code: p.code, ...(key === undefined ? {} : { key }) });
+}
+
+/**
+ * D#7 DP4b-2: the ids-only rows the call site leaves for a decision it took part in. `decision.announced` (a taken decision under an `announce` dial, for
+ * the customer's feed), `decision.ask_raised` (an ask was raised; the account stream's producer) and `decision.intake` (the run's decision fields were
+ * handled: the marker that makes a replay write nothing twice, carrying the step's fixed result word).
+ */
+export async function recordDecisionIdsEvent(
+  client: PoolClient,
+  p: { accountId: string; runId: string; kind: "decision.announced" | "decision.ask_raised" | "decision.intake"; payload: Record<string, string | number> },
+): Promise<void> {
+  await insertRunEvent(client, p.accountId, p.runId, p.kind, p.payload);
+}
+
 /** D#2 PREVIEW-RUNNER-EVENTS: one `run.stage` row. The caller has already limited `stage` to a fixed name. */
 export async function recordRunStage(pool: Pool, p: { accountId: string; runId: string; stage: string }): Promise<void> {
   await withTenant(pool, p.accountId, (client) => insertRunEvent(client, p.accountId, p.runId, "run.stage", { stage: p.stage }));

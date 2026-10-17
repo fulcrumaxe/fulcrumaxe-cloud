@@ -68,6 +68,13 @@ key outside those four) is refused with a named code. The orchestrator, not the
 role, resolves the request; this package holds no policy and must not import
 `@fx/decisions`.
 
+`decisions_taken` is its companion (DP4b-2): `[{ type, options, chosen, rationale }] | null`,
+the decisions a role took itself and reports, parsed by `parseDecisionsTakenField()` and
+checked by `isDecisionsTakenField()`. The same rules apply (`class` refused by name, options
+as for a request), with `chosen` in place of `proposed`, a rationale of at most 1 KiB and at
+most 50 entries; more than 50 is refused whole. `type` in both fields is the per-run key the
+orchestrator offered, never a catalogue id.
+
 A role card names the decision types it may raise with a single-line
 `decision_types: [id, id]` key in its frontmatter. That line is read by the
 static guard in `test/declared-classes.test.ts` and never reaches the role: the

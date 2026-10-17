@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AdvanceFixRequest, AdvanceItem, AdvanceRoundInput, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, Worker } from "@fx/worker";
+import type { AdvanceFixRequest, AdvanceItem, AdvanceRoundInput, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, DecisionStepCode, Worker } from "@fx/worker";
 import type { InstallationHttp, InstallationHttpRequest } from "@fx/github";
 import { decideRound, maxFixRounds } from "@fx/pipeline";
 
@@ -65,6 +65,8 @@ interface World {
   mode?: "runner_local" | "runner_verified" | "sandbox";
   recorded?: { number: number; branch: string } | null;
   /** D#6 R5b-2a: the worker's answer to "may the reviewers start?", per call (1-based). It may change the world (a push, a mode change) as the real check's wait would. */
+  /** What the decision step answers after a succeeded fix round (D#7 DP4b-2); `none` when absent. */
+  decision?: DecisionStepCode;
   verifiedGate?: (call: number, input: { prNumber: number; headSha: string; seenHead: string | null }) => { state: string; waitMs?: number; executionMode?: string; reason?: string };
 }
 
@@ -131,6 +133,7 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceVerifiedReviewGate: vi.fn(async (_who: unknown, input: { prNumber: number; headSha: string; seenHead: string | null }) => (w.verifiedGate ? w.verifiedGate(++gateCalls, input) : { state: "dispatch" })),
     advanceBuild: vi.fn(),
     advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
+    advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => w.decision ?? "none"),
     advancePrFound: vi.fn(async () => ({ status: "recorded", stage: "pr_opened" })),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });
@@ -811,6 +814,58 @@ describe("fix rounds", () => {
     const out = await workItemAdvanceWorkflow(ARGS);
     expect(out).toEqual({ status: "needs_human", detail: "review_rounds_used" });
     expect(t.worker.advanceStartFix.mock.calls.length).toBeGreaterThanOrEqual(maxFixRounds());
+  });
+});
+
+describe("D#7 DP4b-2: the decision read after a succeeded fix round", () => {
+  const needsFix = (role: string, head: string) =>
+    head === H1 && role === "code-reviewer"
+      ? { status: "succeeded", envelope: { verdict: "needs-fix", findings: ["src/a.ts:3 - off by one - use <="], summary: "one problem" } }
+      : { status: "succeeded", envelope: { verdict: "pass", findings: [], summary: "fine" } };
+  const fixing = (over: Partial<World> = {}) => fresh({ verdict: needsFix, rounds: [{ decision: "fix", round: 0, nextRound: 1 }, { decision: "all_passed", round: 1 }], ...over });
+
+  it("is asked exactly once, with the fix run's id, before the next review round", async () => {
+    const t = setup(fixing());
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceDecision).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceDecision).toHaveBeenCalledWith(ACCOUNT, ARGS.userId, ITEM, 0, "fix-1");
+    const asked = t.worker.advanceDecision.mock.invocationCallOrder[0]!;
+    expect(t.worker.advanceStartFix.mock.invocationCallOrder[0]!).toBeLessThan(asked);
+    // Every reviewer of the new head started after the decision read.
+    const secondRound = t.worker.advanceStartRun.mock.invocationCallOrder.filter((_o, i) => t.worker.advanceStartRun.mock.calls[i]![0].headSha === H2);
+    expect(secondRound.length).toBeGreaterThan(0);
+    for (const o of secondRound) expect(o).toBeGreaterThan(asked);
+  });
+
+  it("is never asked for the reviewers' runs, nor for a fix round that did not succeed", async () => {
+    const clean = setup(fresh());
+    await workItemAdvanceWorkflow(ARGS);
+    expect(clean.worker.advanceDecision).not.toHaveBeenCalled();
+    for (const status of ["failed", "timed_out", "cancelled"]) {
+      const t = setup(fixing({ fixOutcome: { status, done: true, envelope: null } }));
+      await workItemAdvanceWorkflow(ARGS);
+      expect(t.worker.advanceDecision, status).not.toHaveBeenCalled();
+    }
+  });
+
+  it("parked: one stopped fact against the fix run, the workflow ends before another review starts, and no failed build is recorded", async () => {
+    const t = setup(fixing({ decision: "parked" }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "waiting_on_answer" });
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "decision:fix-1", code: "waiting_on_answer", runId: "fix-1" });
+    expect(t.started.filter((s) => s.headSha === H2)).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceBuildFailed).not.toHaveBeenCalled();
+  });
+
+  it.each<DecisionStepCode>(["item_halted", "halted_since_approval"])("%s ends the halted way", async (decision) => {
+    const t = setup(fixing({ decision }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(t.started.filter((s) => s.headSha === H2)).toEqual([]);
+  });
+
+  it.each<DecisionStepCode>(["none", "resolved", "refused"])("%s carries on to the next review", async (decision) => {
+    const t = setup(fixing({ decision }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
   });
 });
 

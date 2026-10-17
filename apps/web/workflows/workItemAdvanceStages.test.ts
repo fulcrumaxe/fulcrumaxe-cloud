@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AdvanceItem, AdvanceRunStart, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, AdvanceStepResult, Worker } from "@fx/worker";
+import type { AdvanceItem, AdvanceRunStart, AdvanceRunOutcome, AdvanceRunRequest, AdvanceStartArgs, AdvanceStepResult, DecisionStepCode, Worker } from "@fx/worker";
 import type { IssueReadResult } from "@fx/github";
 
 /**
@@ -49,6 +49,8 @@ interface SetupOptions {
   stages?: string[];
   /** What publishing the short Spec answers. */
   light?: { status: string; reason: string | null; version: number | null };
+  /** What the decision step answers (D#7 DP4b-2); `none` when absent. */
+  decision?: DecisionStepCode;
 }
 
 function setup(o: SetupOptions = {}) {
@@ -74,6 +76,7 @@ function setup(o: SetupOptions = {}) {
     advanceSpec: vi.fn(async (): Promise<AdvanceStepResult> => o.spec ?? { status: "published", stage: "spec_ready", version: 1 }),
     advanceBuild: vi.fn(async (): Promise<AdvanceStepResult> => (o.buildSequence?.length ? o.buildSequence.shift()! : undefined) ?? o.build ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
+    advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => o.decision ?? "none"),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
     advanceLoadReview: vi.fn(async (): Promise<{ ok: false; reason: string } | { ok: true; ctx: Record<string, unknown> }> => ({ ok: false, reason: "no_spec" })),
@@ -630,5 +633,62 @@ describe("a halt ends the workflow (DP-C6)", () => {
     await workItemAdvanceWorkflow(old as AdvanceStartArgs);
     expect(w.advanceStartRun.mock.calls[0]![0]).toMatchObject({ haltEpoch: 0 });
     expect((w.advancePanel.mock.calls as unknown as unknown[][])[0]![0]).toMatchObject({ haltEpoch: 0 });
+  });
+});
+
+describe("D#7 DP4b-2: the decision read after a succeeded build run", () => {
+  const WHO_ARGS = [ACCOUNT, ARGS.userId, ITEM, 0, "run-b"] as const;
+
+  it("is asked exactly once, with the build run's id and the approval's halt epoch, after the run ended and before the pull request is looked for", async () => {
+    const w = setup({ item: AT_SPEC });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceDecision).toHaveBeenCalledTimes(1);
+    expect(w.advanceDecision).toHaveBeenCalledWith(...WHO_ARGS);
+    const decided = w.advanceDecision.mock.invocationCallOrder[0]!;
+    expect(w.advanceRunOutcome.mock.invocationCallOrder.at(-1)!).toBeLessThan(decided);
+    // The first stage look after the load is the pull request lookup; the decision comes first.
+    expect(w.advanceLoadItem.mock.invocationCallOrder[1]!).toBeGreaterThan(decided);
+    expect(events().indexOf("advance.build_ended")).toBeGreaterThanOrEqual(0);
+  });
+
+  it.each(["failed", "timed_out", "cancelled", "killed_spend", "refused_spend"])("is never asked for a run that ended %s: the failure path runs unchanged", async (status) => {
+    const w = setup({ item: AT_SPEC, buildOutcomes: [{ status, done: true, envelope: { decision_request: { type: "d1" } } }] });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: `build_${status}` });
+    expect(w.advanceDecision).not.toHaveBeenCalled();
+    expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", `run_${status}`);
+  });
+
+  it("is never asked when the run never ended (the wait ran out)", async () => {
+    const w = setup({ item: AT_SPEC, buildOutcomes: [{ status: "running", done: false, envelope: null }] });
+    await workItemAdvanceWorkflow(ARGS);
+    expect(w.advanceDecision).not.toHaveBeenCalled();
+  });
+
+  it.each<DecisionStepCode>(["none", "resolved", "refused"])("an answer of %s changes nothing: the pull request is looked for and the review follows as before", async (decision) => {
+    const w = setup({ item: AT_SPEC, decision });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(w.advanceRecordEvent).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: "waiting_on_answer" }));
+  });
+
+  it("parked: one stopped fact (waiting_on_answer, against the run), the workflow ends, and it does not poll, retry, cancel or record a failed build", async () => {
+    const w = setup({ item: AT_SPEC, decision: "parked" });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "waiting_on_answer" });
+    const facts = (w.advanceRecordEvent.mock.calls as unknown as Array<[unknown, { code?: string }]>).filter(([, e]) => e.code === "waiting_on_answer");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]![1]).toEqual({ kind: "stopped", dedupeKey: "decision:run-b", code: "waiting_on_answer", runId: "run-b" });
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+    expect(w.advanceCancel).not.toHaveBeenCalled();
+    expect(w.advanceLoadItem).toHaveBeenCalledTimes(1); // the load; no stage look, so no pull request wait
+    expect(world.sleeps).toBe(0);
+    expect(logs.at(-1)).toMatchObject({ event: "advance.stopped", at: "decision", reason: "waiting_on_answer" });
+    expect(JSON.stringify(logs)).not.toMatch(/SECRET/);
+  });
+
+  it.each<DecisionStepCode>(["item_halted", "halted_since_approval"])("%s ends the halted way: one stopped fact (halted), nothing else", async (decision) => {
+    const w = setup({ item: AT_SPEC, decision });
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "stopped", detail: "halted" });
+    expect(w.advanceRecordEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ kind: "stopped", code: "halted" }));
+    expect(w.advanceBuildFailed).not.toHaveBeenCalled();
   });
 });

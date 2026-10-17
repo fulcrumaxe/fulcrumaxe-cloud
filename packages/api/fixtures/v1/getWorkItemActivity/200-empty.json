@@ -1,6 +1,7 @@
 {
   "stage": "triaged",
   "halted": false,
+  "waiting_on_answer": false,
   "repo": null,
   "issue_number": null,
   "pr_number": null,

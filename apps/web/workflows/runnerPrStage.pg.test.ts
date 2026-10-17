@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import type { AdvanceItem, AdvanceStartArgs, Worker } from "@fx/worker";
+import type { AdvanceItem, AdvanceStartArgs, DecisionStepCode, Worker } from "@fx/worker";
 import type { AppCredentialsSource, GithubPullRequestPayload, InstallationHttpRequest } from "@fx/github";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
@@ -131,6 +131,7 @@ describe("a runner run's pull request moves its item at once [pg]", () => {
         return { status: "succeeded", done: true, envelope: { summary: "done" } };
       }),
       advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
+      advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => "none"),
       advanceCancel: vi.fn(async () => undefined),
       advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
       // With `lookupFinds`, the first review load is `findBuiltPr`'s; every other load (the review phase's) stops at once.
