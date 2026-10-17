@@ -160,6 +160,10 @@
 .pl-ins-round-title { margin: 10px 0 4px; font-size: 0.85rem; }
 .pl-ins-ready { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--accent, #1aff80); overflow-wrap: anywhere; }
 .pl-ins-notice { margin: 8px 0; padding: 8px 10px; border: 1px solid rgba(210, 120, 60, 0.8); overflow-wrap: anywhere; }
+.pl-ins-flags { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.pl-ins-flags:empty { margin: 0; }
+.pl-flag { padding: 4px 8px; border: 1px solid var(--accent, #1aff80); overflow-wrap: anywhere; }
+.pl-flag-halted { border-color: rgba(210, 120, 60, 0.8); }
 .pl-ins a { color: var(--accent, #1aff80); }
 
 /* D#6 R2b-4b: a run waiting for a person to approve it, and the line for one approved automatically */

@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test, expect, type Page, type Route } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { bootToDesktop } from "./helpers/boot";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -621,5 +622,78 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
     expect(await detail.evaluate((el) => el.scrollTop)).toBeGreaterThan(100);
     expect(await tid(page, "pl-spec").evaluate((e) => (e as HTMLDetailsElement).open)).toBe(true);
     expect(await tid(page, "pl-panel").evaluate((e) => (e as HTMLDetailsElement).open)).toBe(true);
+  });
+});
+
+test.describe("D#7 DP8-f1: halted and waiting for an answer (mocked API)", () => {
+  const STATES: [string, boolean, boolean][] = [
+    ["halted", true, false],
+    ["waiting for an answer", false, true],
+    ["both", true, true],
+    ["neither", false, false],
+  ];
+  const flagText = (page: Page) => tid(page, "pl-flags").innerText();
+
+  for (const [name, halted, waiting] of STATES) {
+    test(`${name}: the flags follow the record, name no raw id and no null, and axe finds nothing serious`, async ({ page }) => {
+      const { errors } = await setup(page, { status: 200, json: { ...OK, halted, waiting_on_answer: waiting } });
+      await openDetail(page);
+      await expect(tid(page, "pl-flag-halted")).toHaveCount(halted ? 1 : 0);
+      await expect(tid(page, "pl-flag-waiting_on_answer")).toHaveCount(waiting ? 1 : 0);
+      // One persistent polite live region: always there, empty when no flag is drawn.
+      await expect(tid(page, "pl-flags")).toHaveCount(1);
+      await expect(tid(page, "pl-flags")).toHaveAttribute("aria-live", "polite");
+      if (!halted && !waiting) await expect(tid(page, "pl-flags")).toHaveText("");
+      if (waiting) await expect(tid(page, "pl-flag-waiting_on_answer")).toContainText("Waiting for your answer");
+      const live = await tid(page, "pl-live").innerText();
+      expect(live).not.toMatch(/\bnull\b|undefined|NaN|waiting_on_answer|[0-9a-f]{8}-[0-9a-f]{4}-/);
+      if (halted || waiting) expect(await flagText(page)).not.toMatch(/\bnull\b|undefined|waiting_on_answer|[0-9a-f]{8}-/);
+      // The flags' own scope: the muted text elsewhere in the section (the totals line) is older than this change and keeps its own record.
+      if (halted || waiting) {
+        const res = await new AxeBuilder({ page }).include(`${WIN} [data-testid="pl-flags"]`).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
+        expect(res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id} ${v.nodes[0]?.html.slice(0, 120)}`)).toEqual([]);
+      }
+      await expectNoOverflow(page);
+      expect(errors).toEqual([]);
+    });
+  }
+
+  test("a flag appears and goes as the record changes, and an older server that sends neither field draws nothing", async ({ page }) => {
+    const older: Record<string, unknown> = { ...OK };
+    delete older.halted;
+    delete older.waiting_on_answer;
+    const { mock, errors } = await setup(page, { status: 200, json: older });
+    await openDetail(page);
+    await expect(tid(page, "pl-flags")).toHaveText("");
+    await tid(page, "pl-flags").evaluate((n) => ((n as unknown as { __kept: boolean }).__kept = true));
+    mock.activity = { status: 200, json: { ...OK, halted: true, waiting_on_answer: true } };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-flag-halted")).toBeVisible();
+    // The same region element took the new text: a screen reader hears it.
+    expect(await tid(page, "pl-flags").evaluate((n) => (n as unknown as { __kept?: boolean }).__kept === true)).toBe(true);
+    await expect(tid(page, "pl-flag-waiting_on_answer")).toBeVisible();
+    mock.activity = { status: 200, json: { ...OK, halted: false, waiting_on_answer: false } };
+    await page.clock.runFor(10_000);
+    await expect(tid(page, "pl-flags")).toHaveText("");
+    expect(errors).toEqual([]);
+  });
+
+  test("the waiting flag has no Needs you link while that app is not installed, and opens it once it is", async ({ page }) => {
+    const { errors } = await setup(page, { status: 200, json: { ...OK, halted: false, waiting_on_answer: true } });
+    await openDetail(page);
+    await expect(tid(page, "pl-flag-waiting_on_answer")).toBeVisible();
+    await expect(tid(page, "pl-flag-needs-you")).toHaveCount(0);
+    // Installed after the card drew: the next change of the record redraws with the link.
+    await page.evaluate(() => {
+      const w = window as unknown as { FULCApps: { register: (id: string, app: object) => void } };
+      w.FULCApps.register("needs-you", { title: "Needs you", icon: "", defaultSize: { width: 400, height: 300 }, onOpen: (el: HTMLElement) => { el.textContent = "Needs you opened"; } });
+    });
+    await page.route((u) => u.pathname.endsWith("/activity"), (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...OK, halted: true, waiting_on_answer: true }) }));
+    await page.clock.runFor(10_000);
+    const link = tid(page, "pl-flag-needs-you");
+    await expect(link).toHaveText("Needs you");
+    await press(page, link);
+    await expect(page.locator('#windows-container .fulc-window[data-app-id="needs-you"]')).toBeVisible();
+    expect(errors).toEqual([]);
   });
 });

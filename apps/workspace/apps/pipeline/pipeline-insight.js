@@ -236,6 +236,23 @@ export function noticeBanner(data) {
   return null;
 }
 
+/**
+ * What state the item is in beyond its stage (D#7 DP8-f1): halted by a customer, and parked on an agent's question. Each is
+ * drawn only when the record says exactly `true`, so an older server that sends neither draws nothing. "Waiting for your
+ * answer" is approved wording; the "Halted" label is PROPOSED and held for the owner's copy approval.
+ */
+export const FLAG_WORDS = { halted: "Halted", waiting_on_answer: "Waiting for your answer" };
+/** The "Needs you" app's id, and the label of the link to it. The link is drawn only while that app is registered. */
+export const NEEDS_YOU_APP = "needs-you";
+export const NEEDS_YOU_LABEL = "Needs you";
+const NEEDS_YOU_TESTID = "pl-flag-needs-you";
+export function stateFlags(data) {
+  const out = [];
+  if (data && data.halted === true) out.push({ kind: "halted", text: FLAG_WORDS.halted });
+  if (data && data.waiting_on_answer === true) out.push({ kind: "waiting_on_answer", text: FLAG_WORDS.waiting_on_answer });
+  return out;
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -264,6 +281,7 @@ export function buildInsight(data) {
   const finished = runs.filter((r) => !r.live);
   const spent = (Array.isArray(data.runs) ? data.runs : []).reduce((n, r) => n + (!LIVE_STATUSES.has(r.status) && Number.isFinite(r.usd) ? r.usd : 0), 0);
   return {
+    flags: stateFlags(data),
     notice: noticeBanner(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
@@ -312,6 +330,7 @@ export function createInsightPanel(deps) {
   let timer = null;
   let ac = null;
   let signature = "";
+  let skeleton = null; // { body, live, rest } of the full section; null whenever a loading or error sentence replaced it
   /** Sections the person opened (true) or closed (false); a section not in here follows its default. */
   const toggled = new Map();
 
@@ -345,6 +364,19 @@ export function createInsightPanel(deps) {
       b.detail + " ",
       h("span", { "data-testid": "pl-ready-merge", "data-auto-merge": b.autoMerge ? "on" : "off" }, b.autoMergeText + " "),
       b.url ? h("a", { href: b.url, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-ready-link" }, "Open the pull request on GitHub") : null
+    );
+  }
+
+  /** The flags, as the children of the one live region (see `skeleton`): fixed words only, never record text. */
+  function flagNodes(flags) {
+    const needsYou = typeof window !== "undefined" && window.FULCWM && window.FULCApps && window.FULCApps.get(NEEDS_YOU_APP);
+    return flags.map((f) =>
+      h(
+        "span",
+        { class: "pl-flag pl-flag-" + f.kind, "data-testid": "pl-flag-" + f.kind },
+        f.text,
+        f.kind === "waiting_on_answer" && needsYou ? [" ", h("button", { type: "button", class: "pl-act", "data-testid": NEEDS_YOU_TESTID, onClick: () => window.FULCWM.open(NEEDS_YOU_APP) }, NEEDS_YOU_LABEL)] : null
+      )
     );
   }
 
@@ -400,7 +432,7 @@ export function createInsightPanel(deps) {
   /**
    * A redraw replaces the section's children, which shortens the page for a moment and makes the browser clamp every
    * scrolled ancestor (the detail, the app, the window frame) back toward the top. So the scroll position of each
-   * scrolled ancestor, and which section's summary had focus, are saved first and put back after the redraw.
+   * scrolled ancestor, and which section's summary (or the Needs you button) had focus, are saved first and put back after the redraw.
    */
   function render() {
     const saved = [];
@@ -408,7 +440,12 @@ export function createInsightPanel(deps) {
     const active = typeof document !== "undefined" ? document.activeElement : null;
     const focusDetails = active && typeof el.contains === "function" && el.contains(active) && typeof active.closest === "function" ? active.closest("details[data-key]") : null;
     const focusKey = focusDetails ? focusDetails.getAttribute("data-key") : null;
+    const focusNeedsYou = !!active && typeof el.contains === "function" && el.contains(active) && typeof active.getAttribute === "function" && active.getAttribute("data-testid") === NEEDS_YOU_TESTID;
     draw();
+    if (focusNeedsYou) {
+      const again = [...el.querySelectorAll("[data-testid]")].find((n) => n.getAttribute("data-testid") === NEEDS_YOU_TESTID);
+      if (again) again.focus({ preventScroll: true });
+    }
     if (focusKey !== null) {
       const again = [...el.querySelectorAll("details[data-key]")].find((d) => d.getAttribute("data-key") === focusKey);
       const summary = again && again.querySelector("summary");
@@ -419,28 +456,36 @@ export function createInsightPanel(deps) {
 
   function draw() {
     if (state.status === "idle" || state.status === "loading") {
+      skeleton = null;
       el.replaceChildren(h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.loading));
       return;
     }
     if (state.status === "error" && !state.data) {
+      skeleton = null;
       el.replaceChildren(h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.error));
       return;
     }
     const m = buildInsight(state.data);
+    // The flags live in one polite live region that is created once and kept across redraws, so a flag that arrives
+    // on a refresh is announced; only its text is rewritten. The rest of the section is rebuilt as before.
+    if (!skeleton) {
+      const live = h("div", { class: "pl-ins-flags", "data-testid": "pl-flags", role: "status", "aria-live": "polite" });
+      const rest = h("div", { class: "pl-ins-rest" });
+      const body = h("div", { class: "pl-ins-body" }, h("h3", { class: "pl-detail-sub" }, "What's happening"), live, rest);
+      skeleton = { body, live, rest };
+      el.replaceChildren(body);
+    }
+    skeleton.live.replaceChildren(...flagNodes(m.flags));
     // h() skips null children; the native replaceChildren would print "null" for one.
-    el.replaceChildren(
-      h(
-        "div",
-        { class: "pl-ins-body" },
-      h("h3", { class: "pl-detail-sub" }, "What's happening"),
-      state.stale ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.stale) : null,
-      m.notice ? noticeView(m.notice) : null,
-      m.banner ? banner(m.banner) : null,
+    const restKids = [
+      state.stale ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.stale) : [],
+      m.notice ? noticeView(m.notice) : [],
+      m.banner ? banner(m.banner) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),
       h("h3", { class: "pl-detail-sub" }, m.runs.length ? "Agent runs (" + m.runs.length + ")" : "Agent runs"),
       m.runs.length ? m.runs.map(runSection) : h("p", { class: "pl-muted", "data-testid": "pl-no-runs" }, SENTENCES.noRuns),
-      m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : null,
+      m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : [],
       m.steps.length
         ? [
             h("h3", { class: "pl-detail-sub" }, "Pipeline steps"),
@@ -451,22 +496,23 @@ export function createInsightPanel(deps) {
                 h(
                   "li",
                   { "data-testid": "pl-step" },
-                  s.at ? [timeNode(s.at, true), " "] : null,
+                  s.at ? [timeNode(s.at, true), " "] : [],
                   s.text,
-                  s.reasons.length ? h("span", { class: "pl-muted" }, " — " + s.reasons.join("; ")) : null
+                  s.reasons.length ? h("span", { class: "pl-muted" }, " — " + s.reasons.join("; ")) : []
                 )
               )
             ),
           ]
-        : null,
+        : [],
       m.commentCount
-        ? fold("panel", false, { class: "pl-ins-panel", "data-testid": "pl-panel" }, [h("strong", null, "Panel discussion"), " · " + m.commentCount + " comment" + (m.commentCount === 1 ? "" : "s")], m.commentsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderComments) : null, roundBlock("Round 1", m.rounds.round1), roundBlock("Challenge round", m.rounds.challenge))
+        ? fold("panel", false, { class: "pl-ins-panel", "data-testid": "pl-panel" }, [h("strong", null, "Panel discussion"), " · " + m.commentCount + " comment" + (m.commentCount === 1 ? "" : "s")], m.commentsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderComments) : [], roundBlock("Round 1", m.rounds.round1), roundBlock("Challenge round", m.rounds.challenge))
         : h("p", { class: "pl-muted", "data-testid": "pl-no-panel" }, SENTENCES.noPanel),
       m.spec
         ? fold("spec", false, { class: "pl-ins-spec", "data-testid": "pl-spec" }, [h("strong", null, "Spec"), " · version " + m.spec.version], text(m.spec.body))
         : h("p", { class: "pl-muted", "data-testid": "pl-no-spec" }, SENTENCES.noSpec)
-      )
-    );
+    ].flat(Infinity).filter((c) => c != null && c !== false);
+    // dom-insert-ok: restKids is flattened and stripped of null, undefined and false just above.
+    skeleton.rest.replaceChildren(...restKids);
   }
 
   async function load() {
