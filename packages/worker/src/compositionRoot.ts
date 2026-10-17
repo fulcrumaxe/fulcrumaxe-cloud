@@ -61,6 +61,7 @@ import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { sweepInvariants, type InvariantSweeper } from "./invariantSweep.js";
 import { sweepAskWithdrawals } from "./askWithdrawSweep.js";
+import { SWEEP_REAL_CLOCK, sweepOverdueAsks } from "@fx/core/src/decisions/sweepOverdue.js";
 import { purgeAap } from "./aapPurge.js";
 import { createRunnerNoticeSweeper, runnerNoticeReports, type RunnerNoticeSweeper } from "./runnerNotices.js";
 import { createRunnerQueueSweeper, type RunnerQueueSweeper } from "./runnerQueueSweep.js";
@@ -356,6 +357,9 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runInvariantTick = async (): Promise<Awaited<ReturnType<typeof sweepInvariants>>> => {
       const result = await sweepInvariants({ pool: pools.runnerPool, report: reportError, warn: (line) => console.warn(line) });
       await sweepAskWithdrawals({ pool: pools.receiptPool, warn: (line) => console.warn(line) });
+      // D#7 DP12a-2: asks whose answer window ended move to overdue or proceeded. Never throws; counts only, no ids or text.
+      const ended = await sweepOverdueAsks(pools.receiptPool, SWEEP_REAL_CLOCK);
+      if (ended.overdue + ended.proceeded + ended.failed > 0) console.warn(JSON.stringify({ event: "decision.ask_window_sweep", overdue: ended.overdue, proceeded: ended.proceeded, failed: ended.failed }));
       await purgeAap({ pool: pools.receiptPool, ready: pools.aapReady, warn: (line) => console.warn(line) });
       return result;
     };
