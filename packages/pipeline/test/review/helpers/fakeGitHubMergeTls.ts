@@ -24,6 +24,17 @@ import { ghError, type GhReply, type GhRequest } from "../../../../github/test/h
  *    `updateForbidden`. A body that is not a JSON object, or an `expected_head_sha` that is not a 40-hex string, is 422 as well.
  *  - `GET /compare/{base}...{head}`: `status` (`ahead` / `behind` / `diverged` / `identical`), `ahead_by`, `behind_by` and `files`,
  *    with `files` on one response only, capped at 300 (`per_page`/`page` page the commits); the head must be a commit that exists (404 otherwise).
+ *  - `GET /commits/{sha}` (D#519 MQ3-a): a commit GitHub knows (`commits`), with `parents`, `author` (the account the commit's author resolves
+ *    to, or null), `committer` (likewise), `commit.verification.verified` / `.reason` and `files` (against the FIRST parent, capped at 300);
+ *    an unknown sha is **422** "No commit found for SHA", as the live API answers (read against the live API, not assumed). The
+ *    commit an accepted update-branch produces is registered when it is applied: two parents (the old head, then `baseTipSha`), authored
+ *    by `refreshAuthorLogin`, committed by `refreshCommitterLogin` (GitHub's `web-flow`), signed unless `refreshVerified` is false.
+ *    Which fields a real update-branch commit carries is still to be confirmed from one real commit on staging; the fake pins the shape.
+ *  - `GET /git/commits/{sha}` and `GET /git/trees/{id}?recursive=1`: the tree of a commit (`trees`: path -> `mode type sha`; a commit with
+ *    no entry has the empty tree), `truncated: true` for a commit in `truncatedTrees`; an unknown tree id is 404. `GET /compare/{sha}...{sha}`
+ *    answers the merge base (`mergeBaseSha`) with `ahead_by` (`aheadFromReviewed`; `aheadFromBase` when the first sha is the merge base), so
+ *    a criss-cross history is modelled by making those two differ. `compare` also answers for a commit on the default branch
+ *    (`baseShas`: `identical` at the tip, `behind` below it) and for a registered commit that is not on it (`ahead`).
  *  - `GET /commits/{sha}/check-runs` and `/status`: one passing check run named by `checkNames` on every commit (or the runs of `checkRuns`,
  *    with GitHub's null `conclusion` until completed) and an empty combined status (or `statuses`), each cut at `per_page` with `total_count`, so a gate over the real port reaches its merge call.
  *  - `GET /branches/{b}/protection/required_status_checks`: 200 with `strict` when set, 404 "Branch not protected" / "Required status
@@ -43,6 +54,19 @@ export interface FakeRule {
   parameters?: Record<string, unknown>;
 }
 
+/** A commit the fake knows about (`GET /commits/{sha}`). */
+export interface FakeCommit {
+  parents: string[];
+  /** The login the commit's author resolves to, or null (no GitHub account). The author is whatever email the pusher typed. */
+  authorLogin: string | null;
+  /** The login the commit's committer resolves to (default `web-flow`, GitHub's own). The signature is checked against the committer. */
+  committerLogin?: string | null;
+  verified: boolean;
+  /** `commit.verification.reason`; default `valid` when verified, `unsigned` otherwise. */
+  verificationReason?: string;
+  files: Array<{ filename: string; previous_filename?: string }>;
+}
+
 export interface MergeWorld {
   owner: string;
   name: string;
@@ -53,6 +77,26 @@ export interface MergeWorld {
   headSha: string;
   /** The commit update-branch produces (the head after the refresh). */
   refreshedHeadSha: string;
+  /** The default branch's tip, and the commits on it (the second parent of a refresh must be one of these). */
+  baseTipSha: string;
+  baseShas: string[];
+  /** Commits `GET /commits/{sha}` answers for. */
+  commits: Record<string, FakeCommit>;
+  /** The login the update-branch commit is authored by, whether GitHub signed it, and the files it brings in from the default branch. */
+  refreshAuthorLogin: string | null;
+  refreshCommitterLogin: string | null;
+  refreshVerified: boolean;
+  /** Each commit's tree: path -> `mode type sha`. A commit with no entry has the empty tree. */
+  trees: Record<string, Record<string, string>>;
+  /** Commits whose recursive tree comes back `truncated: true`. */
+  truncatedTrees: string[];
+  /** The status every tree read answers (200 normally; a test sets 500 to show a failed read is "not verified"). */
+  treeStatus: number;
+  /** The merge base of any two commits, and the `ahead_by` counts the unique-base test compares. */
+  mergeBaseSha: string;
+  aheadFromReviewed: number;
+  aheadFromBase: number;
+  mainFiles: Array<{ filename: string; previous_filename?: string }>;
   state: "open" | "closed";
   merged: boolean;
   draft: boolean;
@@ -109,6 +153,19 @@ export function freshMergeWorld(over: Partial<MergeWorld> = {}): MergeWorld {
     baseRef: "main",
     headSha: "a".repeat(40),
     refreshedHeadSha: "b".repeat(40),
+    baseTipSha: "9".repeat(40),
+    baseShas: ["9".repeat(40), "8".repeat(40)],
+    commits: {},
+    refreshAuthorLogin: "fulcrumaxe-app[bot]",
+    refreshCommitterLogin: "web-flow",
+    refreshVerified: true,
+    trees: {},
+    truncatedTrees: [],
+    treeStatus: 200,
+    mergeBaseSha: "7".repeat(40),
+    aheadFromReviewed: 1,
+    aheadFromBase: 1,
+    mainFiles: [{ filename: "docs/main-only.md" }],
     state: "open",
     merged: false,
     draft: false,
@@ -175,6 +232,8 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
       // An accepted update-branch applies after the configured number of later reads, never in its own response.
       if (w.pendingRefresh) {
         if (w.pendingRefresh.remaining <= 0) {
+          // GitHub's merge of the base into the branch: two parents, the old head first.
+          w.commits[w.refreshedHeadSha] = { parents: [w.headSha, w.baseTipSha], authorLogin: w.refreshAuthorLogin, committerLogin: w.refreshCommitterLogin, verified: w.refreshVerified, files: w.mainFiles };
           w.headSha = w.refreshedHeadSha;
           w.behindBy = 0;
           w.pendingRefresh = null;
@@ -235,10 +294,61 @@ export function mergeRoute(w: MergeWorld): (req: GhRequest) => GhReply {
 
     const cmp = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/compare/(.+)\\.\\.\\.([^.]+)$`).exec(req.path);
     if (req.method === "GET" && cmp) {
-      if (decodeURIComponent(cmp[1]!) !== w.baseRef || cmp[2] !== w.headSha) return err(404, "Not Found");
+      const left = decodeURIComponent(cmp[1]!);
+      // Two commits (the merge-base read of the tree check): the merge base, with `ahead_by` of the head side over it.
+      if (/^[0-9a-f]{40}$/.test(left)) {
+        if (!/^[0-9a-f]{40}$/.test(cmp[2]!)) return err(404, "Not Found");
+        const ahead = left === w.mergeBaseSha ? w.aheadFromBase : w.aheadFromReviewed;
+        return json(200, { status: "ahead", ahead_by: ahead, behind_by: 0, total_commits: ahead, merge_base_commit: { sha: w.mergeBaseSha }, files: [] });
+      }
+      if (left !== w.baseRef) return err(404, "Not Found");
+      const target = cmp[2]!;
+      // A commit on the default branch is not ahead of it; a commit GitHub knows that is not on it is.
+      if (target !== w.headSha && w.baseShas.includes(target)) {
+        return json(200, { status: target === w.baseTipSha ? "identical" : "behind", ahead_by: 0, behind_by: target === w.baseTipSha ? 0 : 1, total_commits: 0, files: [] });
+      }
+      if (target !== w.headSha && w.commits[target]) return json(200, { status: "ahead", ahead_by: 1, behind_by: 0, total_commits: 1, files: [] });
+      if (target !== w.headSha) return err(404, "Not Found");
       // per_page/page page the COMMITS; files come on one response, capped at 300 for the whole comparison.
       const page = w.files.slice(0, 300);
       return json(200, { status: compareStatus(w), ahead_by: w.aheadBy, behind_by: w.behindBy, total_commits: w.aheadBy, files: page.map((f) => ({ sha: "c".repeat(40), status: f.previous_filename ? "renamed" : "modified", ...f })) });
+    }
+
+    const commit = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/commits/([0-9a-f]{40})$`).exec(req.path);
+    if (req.method === "GET" && commit) {
+      const c = w.commits[commit[1]!];
+      // The live API answers 422 (not 404) for a sha it has no commit for.
+      if (!c) return err(422, "No commit found for SHA");
+      const page = c.files.slice(0, 300);
+      return json(200, {
+        sha: commit[1],
+        parents: c.parents.map((sha) => ({ sha })),
+        author: c.authorLogin === null ? null : { login: c.authorLogin, id: 4242, type: c.authorLogin.endsWith("[bot]") ? "Bot" : "User" },
+        committer: c.committerLogin === null ? null : { login: c.committerLogin ?? "web-flow", id: 19864447, type: "User" },
+        commit: { message: "Merge branch 'main' into feature", verification: { verified: c.verified, reason: c.verificationReason ?? (c.verified ? "valid" : "unsigned") } },
+        files: page.map((f) => ({ sha: "d".repeat(40), status: f.previous_filename ? "renamed" : "modified", ...f })),
+      });
+    }
+
+    // The data API for a commit's tree id, and the tree behind it. The tree id is the commit sha reversed: stable, unique and invertible, so
+    // the fake needs no registry of commits (any well-formed sha has a tree; a commit with no `trees` entry has the empty one).
+    const treeId = (commitSha: string): string => [...commitSha].reverse().join("");
+    const escBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const dataCommit = new RegExp(`^${escBase}/git/commits/([0-9a-f]{40})$`).exec(req.path);
+    if (req.method === "GET" && dataCommit) {
+      const sha = dataCommit[1]!;
+      return json(200, { sha, tree: { sha: treeId(sha) }, parents: (w.commits[sha]?.parents ?? []).map((p) => ({ sha: p })) });
+    }
+    const dataTree = new RegExp(`^${escBase}/git/trees/([0-9a-f]{40})$`).exec(req.path);
+    if (req.method === "GET" && dataTree) {
+      const commitSha = treeId(dataTree[1]!);
+      if (w.treeStatus !== 200) return err(w.treeStatus, "Server Error");
+      if (query.get("recursive") !== "1") return err(422, "this fake serves recursive trees only");
+      const entries = Object.entries(w.trees[commitSha] ?? {}).map(([path, v]) => {
+        const [mode, type, sha] = v.split(" ");
+        return { path, mode, type, sha, ...(type === "blob" ? { size: 1 } : {}) };
+      });
+      return json(200, { sha: dataTree[1], tree: entries, truncated: w.truncatedTrees.includes(commitSha) });
     }
 
     const checks = /^\/repos\/[^/]+\/[^/]+\/commits\/([0-9a-f]{40})\/check-runs$/.exec(req.path);

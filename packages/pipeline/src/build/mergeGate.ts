@@ -1,5 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { MAX_REFRESHES } from "../mergeQueue/policy.js";
+import { effectiveRunRows, type HeadRuns } from "../mergeQueue/carryForward.js";
 import { requiredReviewers, shouldDispatchDebater } from "./requiredReviewers.js";
 import type { PipelineRole, PullRequestRef, WorkItemTier } from "./types.js";
 
@@ -548,6 +550,36 @@ export async function loadRunsOnSha(
 }
 
 /**
+ * D#519 MQ3-a: the rows that speak for `headSha`. Its own rows, and, for a role with none, the rows of the head it was refreshed from,
+ * but ONLY through a `head_refreshes` row, which the queue writes after it has verified a platform update-branch merge. A head with no
+ * such row has its own rows and nothing else (a person's merge of the default branch carries nothing). Where the refresh's files
+ * overlapped, the code reviewer's pass does not carry (see `effectiveRunRows`).
+ */
+export async function loadEffectiveRunsOnSha(pool: Pool, accountId: string, workItemId: string, headSha: string): Promise<RunRow[]> {
+  const own = await loadRunsOnSha(pool, accountId, workItemId, headSha);
+  const hops = await withTenant(pool, accountId, async (client) =>
+    (await client.query<{ from_sha: string; to_sha: string; files_overlap: boolean }>(
+      `SELECT from_sha, to_sha, files_overlap FROM head_refreshes WHERE account_id = $1 AND work_item_id = $2`,
+      [accountId, workItemId],
+    )).rows,
+  );
+  const chain: HeadRuns[] = [{ rows: own, refreshOverlap: false }];
+  const seen = new Set([headSha]);
+  let cur = headSha;
+  while (chain.length <= MAX_REFRESHES) {
+    const into = hops.filter((h) => h.to_sha === cur);
+    const hop = into[0];
+    if (!hop || seen.has(hop.from_sha)) break;
+    // Two rows into one head would be a recording error: the stricter answer stands.
+    chain[chain.length - 1]!.refreshOverlap = into.some((h) => h.files_overlap);
+    chain.push({ rows: await loadRunsOnSha(pool, accountId, workItemId, hop.from_sha), refreshOverlap: false });
+    seen.add(hop.from_sha);
+    cur = hop.from_sha;
+  }
+  return chain.length === 1 ? own : effectiveRunRows(chain);
+}
+
+/**
  * The reviewer half of the gate: why the recorded runs on one head do not clear the required roles. Empty means every
  * required role has a latest succeeded production pass AND no other gated role has a terminal rejection on this head.
  * `runMergeGate` uses it, and so does anything that has to ask "would the reviewers clear this head" without the CI and
@@ -599,7 +631,7 @@ export async function runMergeGate(deps: MergeGateDeps, input: MergeGateInput): 
   }
 
   const roles = gatedRoles(input);
-  const rows = await loadRunsOnSha(deps.pool, input.accountId, input.workItemId, headSha);
+  const rows = await loadEffectiveRunsOnSha(deps.pool, input.accountId, input.workItemId, headSha);
   // A head with no reviewer rows at all has never had its reviews
   // dispatched (or a dispatch after a moved head threw before writing any):
   // request them, so a retry cannot strand a new head with no reviews.
