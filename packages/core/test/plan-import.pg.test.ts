@@ -592,6 +592,41 @@ describe('plan import (live build L1)', () => {
       expect((await proposals(repoId))['gh:issue:2']!.state).toBe('new');
     });
 
+    it('CWE-367: an edit to the source after a decision does not change an approved or rejected proposal text; a new one and a reopened one still follow the source', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const disc = (number: number, title: string, body: string, closed = false) => ({ number, title, body, closed });
+      const original = [disc(11, 'Approve me', 'Original body A.'), disc(12, 'Reject me', 'Original body R.'), disc(13, 'Stay new', 'Original body N.'), disc(14, 'Withdraw me', 'Original body W.')];
+      expect((await run(r, repoId, source({ discussions: original }))).state).toBe('succeeded');
+      const text = async (key: string) => (await admin.query('SELECT title, summary, state FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0] as { title: string; summary: string; state: string };
+      const pid = async (key: string) => (await admin.query('SELECT id FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0].id as string;
+      const wi = (await admin.query(`INSERT INTO work_items (account_id, repo_id, kind, provenance) VALUES ($1, $2, 'issue', 'internal') RETURNING id`, [r.accountId, repoId])).rows[0].id;
+      await withTenant(appPool, r.accountId, r.userId, async (c) => {
+        await c.query('SELECT * FROM approve_proposal($1, $2)', [await pid('gh:discussion:11'), wi]);
+        await c.query('SELECT * FROM reject_proposal($1, $2)', [await pid('gh:discussion:12'), 'no']);
+      });
+      // Discussion 14 closes: its new proposal is withdrawn (derived).
+      await run(r, repoId, source({ discussions: original.map((d) => (d.number === 14 ? { ...d, closed: true } : d)) }));
+      expect((await text('gh:discussion:14')).state).toBe('withdrawn');
+      const approvedBefore = await text('gh:discussion:11');
+      const rejectedBefore = await text('gh:discussion:12');
+
+      // The source is edited by someone else: every discussion has new text, and 14 is open again.
+      const edited = [disc(11, 'EDITED approved', 'Edited body A.'), disc(12, 'EDITED rejected', 'Edited body R.'), disc(13, 'EDITED new', 'Edited body N.'), disc(14, 'EDITED reopened', 'Edited body W.')];
+      expect((await run(r, repoId, source({ discussions: edited }))).state).toBe('succeeded');
+
+      // A decided row keeps what the person read: title, summary and state.
+      expect(await text('gh:discussion:11')).toEqual(approvedBefore);
+      expect(await text('gh:discussion:12')).toEqual(rejectedBefore);
+      expect(approvedBefore.state).toBe('approved');
+      expect(rejectedBefore.state).toBe('rejected');
+      // A new row refreshes, and a withdrawn one that comes back as new shows the current source (nobody could act on it while withdrawn).
+      expect(await text('gh:discussion:13')).toMatchObject({ state: 'new', title: 'EDITED new' });
+      expect((await text('gh:discussion:13')).summary).toContain('Edited body N.');
+      expect(await text('gh:discussion:14')).toMatchObject({ state: 'new', title: 'EDITED reopened' });
+      expect((await text('gh:discussion:14')).summary).toContain('Edited body W.');
+    });
+
     it('a repo with nothing at all imports at level 3 as an empty plan', async () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);
