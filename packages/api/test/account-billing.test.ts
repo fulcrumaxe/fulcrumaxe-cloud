@@ -238,6 +238,10 @@ describe('D#31 API-7d: PATCH budgets and account settings', () => {
       ROUTES,
     );
   }
+  async function getAs(pathname: string, who: { accountId: string; userId: string }): Promise<Response> {
+    const headers = new Headers({ cookie: `${SESSION_COOKIE_NAME}=${await signSession(who)}` });
+    return handleApiRequest(new Request(`http://localhost${pathname}`, { headers }), appUserPool, platformOpsPool, ROUTES);
+  }
   async function audits(accountId: string): Promise<{ action: string; actor: string; payload: Record<string, unknown> }[]> {
     const { rows } = await admin.query(
       `SELECT action, actor, payload FROM audit_log WHERE account_id = $1 AND action LIKE 'account.%' ORDER BY created_at, id`,
@@ -309,7 +313,6 @@ describe('D#31 API-7d: PATCH budgets and account settings', () => {
     ['negative', -5],
     ['three decimals', 10.005],
     ['a string', '25'],
-    ['null', null],
   ])('model_usd_month %s is 422 on path model_usd_month and writes nothing', async (_name, value) => {
     const me = await seedAccountWithMember(admin, { role: 'owner' });
     const res = await patch('/api/v1/budgets', me, { model_usd_month: value });
@@ -319,6 +322,40 @@ describe('D#31 API-7d: PATCH budgets and account settings', () => {
     expect(body.details?.map((d) => d.path)).toEqual(['model_usd_month']);
     expect((await accountRow(me.accountId)).model).toBe(0);
     expect(await audits(me.accountId)).toHaveLength(0);
+  });
+
+  it('null removes the budget: set, clear, read back 0 (not set), one audit row each, and clearing an unset budget is still 200', async () => {
+    const me = await seedAccountWithMember(admin, { plan: 'team', role: 'owner' });
+    expect((await patch('/api/v1/budgets', me, { model_usd_month: 75 })).status).toBe(200);
+    const res = await patch('/api/v1/budgets', me, { model_usd_month: null });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { model_usd_month: number }).model_usd_month).toBe(0);
+    expect((await accountRow(me.accountId)).model).toBe(0);
+    const read = await getAs('/api/v1/budgets', me);
+    expect(((await read.json()) as { model_usd_month: number }).model_usd_month).toBe(0);
+    const usage = await getAs('/api/v1/usage', me);
+    expect(((await usage.json()) as { model: { limit_usd: number } }).model.limit_usd).toBe(0);
+    const rows = await audits(me.accountId);
+    expect(rows[1]).toMatchObject({ action: 'account.budgets_changed', payload: { before: { model_usd_month: 75 }, after: { model_usd_month: 0 } } });
+    expect((await patch('/api/v1/budgets', me, { model_usd_month: null })).status).toBe(200);
+    expect(await audits(me.accountId)).toHaveLength(3);
+  });
+
+  it("clearing from another account leaves this account's budget untouched", async () => {
+    const a = await seedAccountWithMember(admin, { plan: 'team', role: 'owner' });
+    const b = await seedAccountWithMember(admin, { plan: 'team', role: 'owner' });
+    expect((await patch('/api/v1/budgets', a, { model_usd_month: 75 })).status).toBe(200);
+    expect((await patch('/api/v1/budgets', b, { model_usd_month: 20 })).status).toBe(200);
+    expect((await patch('/api/v1/budgets', b, { model_usd_month: null })).status).toBe(200);
+    expect((await accountRow(a.accountId)).model).toBe(75);
+    expect((await accountRow(b.accountId)).model).toBe(0);
+    expect(await audits(a.accountId)).toHaveLength(1);
+    expect(((await (await getAs('/api/v1/budgets', a)).json()) as { model_usd_month: number }).model_usd_month).toBe(75);
+  });
+
+  it('a member cannot clear the budget', async () => {
+    const me = await seedAccountWithMember(admin, { role: 'member' });
+    expect((await patch('/api/v1/budgets', me, { model_usd_month: null })).status).toBe(403);
   });
 
   it('any compute_* key is 422 not_settable, even a value above the plan compute cap, and nothing is written', async () => {

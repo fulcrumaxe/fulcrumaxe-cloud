@@ -1219,6 +1219,42 @@ export interface Operations {
       }>;
     };
   };
+  resetDecisionDials: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      decision_type?: string;
+    };
+    response: {
+      repo_id: string;
+      can_change: boolean;
+      catalogue_version: number;
+      active_preset: string | null;
+      presets: Array<{
+        name: string;
+        label: string;
+        customer_role: string;
+      }>;
+      dials: Array<{
+        decision_type: string;
+        label: string;
+        class: string;
+        adjustable: boolean;
+        disposition: "ask" | "announce" | "act";
+        allowed_dispositions: Array<"ask" | "announce" | "act">;
+        source: "preset" | "override" | "default";
+        preset: string | null;
+        version: number | null;
+      }>;
+      invariants: Array<{
+        key: string;
+        layer: string;
+        label: string;
+      }>;
+    };
+  };
   getAskSettings: {
     path: {
       id: string;
@@ -1741,7 +1777,7 @@ export interface Operations {
     path: undefined;
     query: undefined;
     body: {
-      model_usd_month?: number;
+      model_usd_month?: (number) | (null);
       [key: string]: unknown;
     };
     response: {
@@ -1928,6 +1964,19 @@ export interface Operations {
       per_repo: number;
       accept?: boolean;
     };
+    response: {
+      applies: boolean;
+      total: number;
+      per_repo: number;
+      default_total: number;
+      default_per_repo: number;
+      accepted: boolean;
+    };
+  };
+  resetRunnerConcurrency: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
     response: {
       applies: boolean;
       total: number;
@@ -3934,6 +3983,17 @@ export const operations = {
     queryParams: [],
     hasBody: true,
   },
+  resetDecisionDials: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/decision-settings/reset",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
   getAskSettings: {
     method: "GET",
     path: "/api/v1/repos/{id}/ask-settings",
@@ -4219,6 +4279,17 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  resetRunnerConcurrency: {
+    method: "DELETE",
+    path: "/api/v1/account/runner-concurrency",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
   },
   getAccountBuildConcurrency: {
     method: "GET",

@@ -58,8 +58,8 @@ interface SettingsRow {
 }
 
 /**
- * POST /api/runners/:id/{pause,drain,resume,rename,labels,rank}. The body is `{}` (or none) for pause, drain and resume, `{ name }`, `{ labels }`
- * or `{ rank }` for the others. A pause or drain keeps running work running (the claim answers idle from the next poll, FL-3); resume ends both.
+ * POST /api/runners/:id/{pause,drain,resume,rename,labels,rank}. The body is `{}` (or none) for pause, drain and resume, `{ name }` (a string, or null
+ * to clear the name), `{ labels }` or `{ rank }` for the others. A pause or drain keeps running work running (the claim answers idle from the next poll, FL-3); resume ends both.
  * Answers 200 with the runner's settings now, 400 for a body or value the database refuses, 403, 404, or 409 `runner_revoked`.
  */
 export async function applyRunnerSetting(deps: RunnerCloudDeps, principal: SessionPrincipal, runnerId: string, action: FleetSettingAction, input: unknown): Promise<RunnerHttpResponse> {
@@ -67,11 +67,17 @@ export async function applyRunnerSetting(deps: RunnerCloudDeps, principal: Sessi
   let name: string | null = null;
   let labels: string[] | null = null;
   let rank: number | null = null;
+  let dbAction: string = action;
   if (action === "rename") {
     const given = argument(input, "name");
-    // The same name rule as registration (runner-protocol): it refuses a lone surrogate, which the driver would store as U+FFFD, before the database sees it.
-    if (typeof given !== "string" || !isValidRunnerName(given)) return invalid();
-    name = given;
+    if (given === null) {
+      // `{ name: null }` is the way back to "Unnamed runner (<registrant>)". An empty string is still refused, so a blank box never clears a name by accident.
+      dbAction = "clear_name";
+    } else {
+      // The same name rule as registration (runner-protocol): it refuses a lone surrogate, which the driver would store as U+FFFD, before the database sees it.
+      if (typeof given !== "string" || !isValidRunnerName(given)) return invalid();
+      name = given;
+    }
   } else if (action === "labels") {
     const given = argument(input, "labels");
     if (!Array.isArray(given) || given.length > 16 || !given.every((l) => typeof l === "string")) return invalid();
@@ -85,7 +91,7 @@ export async function applyRunnerSetting(deps: RunnerCloudDeps, principal: Sessi
   }
   try {
     const row = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
-      await client.query("SELECT runner_settings_apply($1, $2, $3, $4::text[], $5)", [runnerId, action, name, labels, rank]);
+      await client.query("SELECT runner_settings_apply($1, $2, $3, $4::text[], $5)", [runnerId, dbAction, name, labels, rank]);
       return (await client.query<SettingsRow>("SELECT name, labels, rank, paused_at IS NOT NULL AS paused, draining FROM runner_settings WHERE runner_id = $1", [runnerId])).rows[0];
     });
     if (!row) throw new Error("runner_settings_apply wrote no row");

@@ -10514,6 +10514,283 @@
         }
       }
     },
+    "/api/v1/repos/{id}/decision-settings/reset": {
+      "post": {
+        "operationId": "resetDecisionDials",
+        "summary": "Use the default again for one class 2 dial, or for every class 2 dial on the repo",
+        "description": "Body `{ decision_type? }`. With a decision type, that dial goes back to the catalogue default; without one, every class 2 dial on the repo does. A dial that has a version appends one new version holding the default disposition (its `source` then reads `default`) and one audit row; a dial with no version, or already on the default, writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "decision_type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Use the default again for one class 2 dial, or for every class 2 dial on the repo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "can_change": {
+                      "type": "boolean"
+                    },
+                    "catalogue_version": {
+                      "type": "number"
+                    },
+                    "active_preset": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "presets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "customer_role": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "label",
+                          "customer_role"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "dials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "decision_type": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "class": {
+                            "type": "string"
+                          },
+                          "adjustable": {
+                            "type": "boolean"
+                          },
+                          "disposition": {
+                            "type": "string",
+                            "enum": [
+                              "ask",
+                              "announce",
+                              "act"
+                            ]
+                          },
+                          "allowed_dispositions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ask",
+                                "announce",
+                                "act"
+                              ]
+                            }
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "preset",
+                              "override",
+                              "default"
+                            ]
+                          },
+                          "preset": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "version": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "decision_type",
+                          "label",
+                          "class",
+                          "adjustable",
+                          "disposition",
+                          "allowed_dispositions",
+                          "source",
+                          "preset",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "invariants": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "layer": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "layer",
+                          "label"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "can_change",
+                    "catalogue_version",
+                    "active_preset",
+                    "presets",
+                    "dials",
+                    "invariants"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A dial changed while the request was running (`dial_changed`), or the account is not active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/repos/{id}/ask-settings": {
       "get": {
         "operationId": "getAskSettings",
@@ -10797,7 +11074,7 @@
       "post": {
         "operationId": "setAskSetting",
         "summary": "Set the answer window, the outcome when nobody answers, or notify for one key",
-        "description": "Appends one `decision_ask_settings` version for the key (scope, decision type) holding all three values, and one audit row naming the previous and new values. A null value means inherit. Setting all three null hands the key back to its parent. Owner or admin, session only.",
+        "description": "Appends one `decision_ask_settings` version for the key (scope, decision type) holding all three values, and one audit row naming the previous and new values. A null value means inherit. Setting all three null hands the key back to its parent: the override is gone and `GET` shows `null` for that scope again (the version rows stay as history). Owner or admin, session only.",
         "security": [
           {
             "session": []
@@ -14736,8 +15013,8 @@
       },
       "patch": {
         "operationId": "updateBudgets",
-        "summary": "Set the monthly model budget (owner or admin, session only)",
-        "description": "Body `{ model_usd_month }`: 1.00 to 100000.00, at most 2 decimals. Compute budgets are set by the plan and cannot be changed: any `compute_*` key is a 422 with `not_settable`. Each accepted request writes one audit row, even when the value is unchanged. Returns the budgets in the `GET /budgets` shape.",
+        "summary": "Set or remove the monthly model budget (owner or admin, session only)",
+        "description": "Body `{ model_usd_month }`: 1.00 to 100000.00, at most 2 decimals, or `null` to remove the budget and return to \"not set\" (the `GET /budgets` value is then 0, exactly as for an account that never set one). Compute budgets are set by the plan and cannot be changed: any `compute_*` key is a 422 with `not_settable`. Each accepted request writes one audit row, even when the value is unchanged. Returns the budgets in the `GET /budgets` shape.",
         "security": [
           {
             "session": []
@@ -14753,9 +15030,16 @@
                 "type": "object",
                 "properties": {
                   "model_usd_month": {
-                    "type": "number",
-                    "minimum": 1,
-                    "maximum": 100000
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 100000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "additionalProperties": {}
@@ -14765,7 +15049,7 @@
         },
         "responses": {
           "200": {
-            "description": "Set the monthly model budget (owner or admin, session only)",
+            "description": "Set or remove the monthly model budget (owner or admin, session only)",
             "content": {
               "application/json": {
                 "schema": {
@@ -15985,6 +16269,135 @@
       }
     },
     "/api/v1/account/runner-concurrency": {
+      "delete": {
+        "operationId": "resetRunnerConcurrency",
+        "summary": "Withdraw the account's runner concurrency setting, so the plan's defaults apply again. An owner or admin; one audit row when there was a setting",
+        "description": "Removes the figures this account accepted. Afterwards `accepted` is false and `total` and `per_repo` are the plan defaults, from the next claim. Nothing running is stopped. Withdrawing when nothing was accepted is a 200 that changes and records nothing. Session only. On the runner plan there is nothing to withdraw: 409 `not_applicable`.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Withdraw the account's runner concurrency setting, so the plan's defaults apply again. An owner or admin; one audit row when there was a setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "applies": {
+                      "type": "boolean"
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "per_repo": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "default_total": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "default_per_repo": {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    "accepted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "applies",
+                    "total",
+                    "per_repo",
+                    "default_total",
+                    "default_per_repo",
+                    "accepted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "operationId": "getRunnerConcurrency",
         "summary": "The runner jobs the account may have running at once, in all and on one repository, and the plan's defaults",

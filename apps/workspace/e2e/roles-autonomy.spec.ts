@@ -36,6 +36,7 @@ const ASK_BALANCED = fx("getAskSettings", "200-balanced.json");
 const PREVIEW = fx("previewDecisionPreset", "200-ok.json");
 const APPLIED = fx("applyDecisionPreset", "200-ok.json");
 const DIAL_SET = fx("setDecisionDial", "200-ok.json");
+const DIAL_RESET = DIAL_SET; // the reset answers in the same shape as a dial write
 const ASK_SET = fx("setAskSetting", "200-ok.json");
 const member = <T extends object>(v: T) => ({ ...v, can_change: false });
 
@@ -88,6 +89,7 @@ async function boot(page: Page, opts: Opts = {}): Promise<Seen> {
       "decision-settings/preset/preview": PREVIEW,
       "decision-settings/preset": APPLIED,
       "decision-settings/dial": DIAL_SET,
+      "decision-settings/reset": DIAL_RESET,
       "ask-settings": ASK_SET,
     };
     return json(route, 200, reply[tail]);
@@ -218,6 +220,43 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     await expect(tid(page, "au-status")).toHaveText("How to test a change: Go ahead. Saved.");
     expect(seen.posts).toEqual([{ tail: "decision-settings/dial", body: { decision_type: "test_strategy_choice", disposition: "act" } }]);
     await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-apply")).toBeVisible();
+  });
+
+  test("the way back for a dial: 'Use the default' appears only on a dial someone set, sends one reset, and the row reads Default after a reload", async ({ page }) => {
+    const changed = {
+      ...DIALS,
+      dials: DIALS.dials.map((d: { decision_type: string }) => (d.decision_type === "test_strategy_choice" ? { ...d, disposition: "act", source: "override", version: 1 } : d)),
+    };
+    const reset = {
+      ...DIALS,
+      dials: DIALS.dials.map((d: { decision_type: string }) => (d.decision_type === "test_strategy_choice" ? { ...d, source: "default", preset: null } : d)),
+    };
+    let current = changed;
+    const seen = await boot(page, {
+      post: async (route, tail) => {
+        if (tail === "decision-settings/reset") current = reset;
+        return json(route, 200, current);
+      },
+    });
+    // The read answers from `current`, so the reload below sees what the reset wrote.
+    await page.route("**/api/v1/repos/*/decision-settings", (route) => (route.request().method() === "GET" ? json(route, 200, current) : route.fallback()));
+    await page.reload();
+    await bootToDesktop(page);
+    await wm(page, "open");
+    await openAutonomy(page);
+    const row = dialRow(page, "test_strategy_choice");
+    await expect(row.getByTestId("au-dial-reset")).toHaveText("Use the default");
+    await expect(dialRow(page, "nonbreaking_refactor_approach").getByTestId("au-dial-reset")).toHaveCount(0);
+    await row.getByTestId("au-dial-reset").click();
+    await expect(tid(page, "au-status")).toHaveText("How to test a change: back to the default. Saved.");
+    expect(seen.posts).toEqual([{ tail: "decision-settings/reset", body: { decision_type: "test_strategy_choice" } }]);
+    await expect(row.getByTestId("au-dial-reset")).toHaveCount(0);
+    await page.reload();
+    await bootToDesktop(page);
+    await wm(page, "open");
+    await openAutonomy(page);
+    await expect(dialRow(page, "test_strategy_choice")).toContainText("Default");
+    await expect(dialRow(page, "test_strategy_choice").getByTestId("au-dial-reset")).toHaveCount(0);
   });
 
   test("a dial change that fails shows the server's reason on its row (422), a fixed sentence otherwise, and keeps the typed choice", async ({ page }) => {
@@ -413,7 +452,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     expect((await scan()).map((v) => v.id)).toEqual([]);
   });
 
-  test("the view source has no sink and no direct fetch, and makes only the six calls the API defines", () => {
+  test("the view source has no sink and no direct fetch, and makes only the seven calls the API defines", () => {
     const src = readFileSync(join(SCRIPT_DIR, "..", "apps", "roles", "roles-autonomy.js"), "utf8");
     expect(src).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
     expect(src).not.toMatch(/\bfetch\(/);
@@ -421,7 +460,7 @@ test.describe("D#7 DP10b: Roles, Autonomy", () => {
     expect(src).not.toMatch(/FULC\.(state|config|window|backend|events)/);
     const paths = [...new Set([...src.matchAll(/api\("(GET|POST)", repoPath\(repoId, "([a-z/-]+)"\)/g)].map((m) => `${m[1]} ${m[2]}`))].sort();
     expect(paths).toEqual(
-      ["GET ask-settings", "GET decision-settings", "POST ask-settings", "POST decision-settings/dial", "POST decision-settings/preset", "POST decision-settings/preset/preview"].sort()
+      ["GET ask-settings", "GET decision-settings", "POST ask-settings", "POST decision-settings/dial", "POST decision-settings/preset", "POST decision-settings/preset/preview", "POST decision-settings/reset"].sort()
     );
   });
 

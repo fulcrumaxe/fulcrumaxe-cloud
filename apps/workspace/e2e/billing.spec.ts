@@ -242,6 +242,39 @@ test.describe("D#37 WS-F6: Budget & Billing (mocked API)", () => {
     expect(seen.sent.map((s) => (s.body as { model_usd_month: number }).model_usd_month)).toEqual([250.5, 1, 1, 100000]);
   });
 
+  test("Remove budget sends null, shows the not-set state, and a reload still shows it not set", async ({ page }) => {
+    await boot(page, { admin: true });
+    let stored = 600;
+    const sentBodies: unknown[] = [];
+    // A stateful stand-in for the route, registered after boot so it wins: the reload must read what the removal wrote.
+    await page.route("**/api/v1/budgets", async (route) => {
+      const req = route.request();
+      if (req.method() === "PATCH") {
+        sentBodies.push(req.postDataJSON());
+        stored = req.postDataJSON().model_usd_month ?? 0;
+      }
+      return json(route, 200, { ...BUDGETS, model_usd_month: stored });
+    });
+    await page.route("**/api/v1/usage", (route) => json(route, 200, { ...USAGE, model: { spent_usd: 0, reserved_usd: 0, limit_usd: stored } }));
+    const reload = async () => {
+      await page.reload();
+      await bootToDesktop(page, { keepPaused: false });
+      await wm(page, "open");
+      await expect(tid(page, "bb-plan")).toBeVisible();
+    };
+    await reload();
+    await expect(tid(page, "bb-model-input")).toHaveValue("600");
+    await tid(page, "bb-model-remove").click();
+    await expect(tid(page, "bb-notice")).toHaveText("Model budget removed.");
+    await expect(tid(page, "bb-model-input")).toHaveValue("");
+    await expect(tid(page, "bb-model-remove")).toBeHidden();
+    expect(sentBodies).toEqual([{ model_usd_month: null }]);
+    await reload();
+    await expect(tid(page, "bb-model-input")).toHaveValue("");
+    await expect(tid(page, "bb-model-remove")).toBeHidden();
+    await expect(tid(page, "bb-model-unset")).toContainText("Runs that use your own model key need a budget before they can start.");
+  });
+
   test("a refused save shows the app's own sentence, never the service's text", async ({ page }) => {
     await boot(page, {
       admin: true,

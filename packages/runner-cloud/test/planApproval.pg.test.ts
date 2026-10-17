@@ -322,6 +322,37 @@ describe("runner-run approval and the dial [pg]", () => {
       ]);
     });
 
+    it("use the default: set, reset, read back source default (announce); one more version and audit row; again is a no-op; a later write is an override", async () => {
+      const f = await fresh();
+      const repo = await newRepo(f);
+      // Nothing to undo yet: no version, no audit row.
+      expect(await put(f, f.o1, repo, { reset: true })).toMatchObject({ status: 200, body: { disposition: "announce", source: "default", version: null } });
+      expect(await rows(repo)).toEqual([]);
+      await put(f, f.o1, repo, { preset: "cautious" });
+      const reset = await put(f, f.a1, repo, { reset: true });
+      expect(reset).toMatchObject({ status: 200, body: { disposition: "announce", source: "default", preset: null, version: 2, can_change: true } });
+      expect((await get(f, f.m1, repo)).body).toMatchObject({ disposition: "announce", source: "default", preset: null, can_change: false });
+      expect(await rows(repo)).toEqual([
+        { disposition: "ask", preset: "cautious", version: 1, changed_by: f.o1 },
+        { disposition: "announce", preset: "default", version: 2, changed_by: f.a1 },
+      ]);
+      expect((await audits(f)).at(-1)).toEqual({ actor: f.a1, decision_type: "runner_run_on_member_plan", repo_id: repo, previous: "ask", new: "announce" });
+      await put(f, f.o1, repo, { reset: true });
+      expect(await rows(repo)).toHaveLength(2);
+      expect((await put(f, f.o1, repo, { disposition: "act" })).body).toMatchObject({ disposition: "act", source: "override", version: 3 });
+    });
+
+    it("use the default needs an owner or admin, and only { reset: true } is accepted", async () => {
+      const f = await fresh();
+      const repo = await newRepo(f);
+      await put(f, f.o1, repo, { disposition: "act" });
+      expect((await put(f, f.m1, repo, { reset: true })).status).toBe(403);
+      for (const bad of [{ reset: false }, { reset: "yes" }, { reset: true, disposition: "ask" }, { reset: 1 }]) {
+        expect((await put(f, f.o1, repo, bad)).status, JSON.stringify(bad)).toBe(400);
+      }
+      expect(await rows(repo)).toHaveLength(1);
+    });
+
     it("the three presets write ask, announce and act", async () => {
       const f = await fresh();
       const repo = await newRepo(f);
@@ -360,6 +391,18 @@ describe("runner-run approval and the dial [pg]", () => {
       expect((await get(f, f.o1, theirs)).status).toBe(404);
       expect((await put(f, f.o1, theirs, { disposition: "ask" })).status).toBe(404);
       expect(await rows(theirs)).toEqual([]);
+    });
+
+    it("use the default on a repo of another account is 404 and leaves that repo's dial as it was", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const theirs = await newRepo(g);
+      await put(g, g.o1, theirs, { disposition: "act" });
+      const before = await rows(theirs);
+      expect(before).toHaveLength(1);
+      expect((await put(f, f.o1, theirs, { reset: true })).status).toBe(404);
+      expect(await rows(theirs)).toEqual(before);
+      expect((await get(g, g.m1, theirs)).body).toMatchObject({ disposition: "act", source: "override", version: 1 });
     });
   });
 

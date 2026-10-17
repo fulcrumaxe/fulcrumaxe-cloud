@@ -157,6 +157,21 @@ describe("fleet control routes [pg]", () => {
       expect(await settings(id)).toMatchObject({ name: "Ada's laptop", labels: ["gpu", "fast-disk"], rank: 7 });
     });
 
+    it("clears a name with { name: null }: the registrant or an owner/admin, back to unnamed; an empty or blank name is still refused; one audit row", async () => {
+      const f = await fresh();
+      const id = await runner(f, f.m1);
+      await act(f, f.m1, id, "rename", { name: "Ada's laptop" });
+      expect(await act(f, f.m2, id, "rename", { name: null })).toMatchObject({ status: 403 });
+      expect(await settings(id)).toMatchObject({ name: "Ada's laptop" });
+      expect(await act(f, f.m1, id, "rename", { name: null })).toMatchObject({ status: 200, body: { runner_id: id, name: null } });
+      expect(await settings(id)).toMatchObject({ name: null });
+      // Set again and clear as an admin: the same way back.
+      await act(f, f.m1, id, "rename", { name: "Ada's desk" });
+      expect(await act(f, f.a1, id, "rename", { name: null })).toMatchObject({ status: 200, body: { name: null } });
+      for (const bad of ["", "   "]) expect(await act(f, f.m1, id, "rename", { name: bad }), JSON.stringify(bad)).toMatchObject({ status: 400 });
+      expect((await auditRows(f, "runner.name_cleared")).map((r) => [r.actor, r.payload.previous_name])).toEqual([[f.m1, "Ada's laptop"], [f.a1, "Ada's desk"]]);
+    });
+
     it("refuses a body that is not exactly what the route takes, before the database is asked", async () => {
       const f = await fresh();
       const id = await runner(f, f.m1);
@@ -205,6 +220,18 @@ describe("fleet control routes [pg]", () => {
       expect(rows.map((r) => r.actor)).toEqual([f.m1, f.m1, f.a1, f.m1]);
       expect(rows[0]!.payload).toMatchObject({ runner_id: id, added: [], removed: [r2] });
       expect(rows[2]!.payload).toMatchObject({ added: [r2, r3].sort(), removed: [] });
+    });
+
+    it("clearing the name of another account's runner is refused (404) and its name is unchanged", async () => {
+      const f = await fresh();
+      const g = await fresh();
+      const theirs = await runner(g, g.m1);
+      await act(g, g.m1, theirs, "rename", { name: "Their laptop" });
+      expect(await act(f, f.o1, theirs, "rename", { name: null })).toMatchObject({ status: 404 });
+      expect(await act(f, f.o1, theirs, "rename", { name: "mine now" })).toMatchObject({ status: 404 });
+      expect(await settings(theirs)).toMatchObject({ name: "Their laptop" });
+      expect(await auditRows(f, "runner.name_cleared")).toEqual([]);
+      expect(await auditRows(g, "runner.name_cleared")).toEqual([]);
     });
 
     it("refuses a repo of another account, and a list that is not a list of uuids, and writes nothing", async () => {

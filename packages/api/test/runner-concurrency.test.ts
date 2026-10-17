@@ -111,6 +111,44 @@ describe('D#605 FL-12a: the account runner concurrency setting', () => {
     expect(((await (await call(owner, 'GET')).json()) as Setting).total).toBe(3);
   });
 
+  const resetAudits = async (accountId: string) =>
+    (await admin.query<{ actor: string; payload: Record<string, unknown> }>(`SELECT actor, payload FROM audit_log WHERE account_id = $1 AND action = 'account.runner_concurrency.reset' ORDER BY created_at`, [accountId])).rows;
+
+  it('withdrawing: set, withdraw, read back the defaults with accepted false; the row is gone and one audit row names the figures removed', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const adminUser = await addMember(owner.accountId, 'admin');
+    await call(owner, 'PUT', { total: 12, per_repo: 6, accept: true });
+    const res = await call(adminUser, 'DELETE');
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Setting).toEqual({ applies: true, total: 4, per_repo: 2, default_total: 4, default_per_repo: 2, accepted: false });
+    expect(((await (await call(owner, 'GET')).json()) as Setting).accepted).toBe(false);
+    expect(await stored(owner.accountId)).toEqual([]);
+    expect(await resetAudits(owner.accountId)).toEqual([{ actor: adminUser.userId, payload: { previous_total_jobs: 12, previous_per_repo_jobs: 6 } }]);
+    // Withdrawing again changes and records nothing; a new accepted raise works afterwards.
+    expect((await call(owner, 'DELETE')).status).toBe(200);
+    expect(await resetAudits(owner.accountId)).toHaveLength(1);
+    expect((await call(owner, 'PUT', { total: 8, per_repo: 4, accept: true })).status).toBe(200);
+    expect(((await (await call(owner, 'GET')).json()) as Setting)).toMatchObject({ total: 8, accepted: true });
+  });
+
+  it('withdrawing is refused for a member and a token, on the runner plan, and for another account; nothing changes', async () => {
+    const owner = await seedAccountWithMember(admin, { role: 'owner' });
+    const member = await addMember(owner.accountId, 'member');
+    const other = await seedAccountWithMember(admin, { role: 'owner' });
+    await call(owner, 'PUT', { total: 12, per_repo: 6, accept: true });
+    expect((await call(member, 'DELETE')).status).toBe(403);
+    const plaintext = generateToken();
+    await insertApiToken(appUserPool, { accountId: owner.accountId, createdBy: owner.userId, tokenHash: hashToken(plaintext), displayHint: plaintext.slice(-4), scopes: ['read'], expiresAt: new Date(Date.now() + 86_400_000) });
+    expect([401, 403]).toContain((await call(owner, 'DELETE', undefined, plaintext)).status);
+    expect((await call(other, 'DELETE')).status).toBe(200);
+    expect(await stored(owner.accountId)).toEqual([{ total_jobs: 12, per_repo_jobs: 6 }]);
+    expect(await resetAudits(owner.accountId)).toEqual([]);
+    await admin.query(`UPDATE accounts SET plan = 'runner' WHERE id = $1`, [other.accountId]);
+    const res = await call(other, 'DELETE');
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('not_applicable');
+  });
+
   it('refuses figures that make no sense, and the other account never sees or shares the row', async () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     const other = await seedAccountWithMember(admin, { role: 'owner' });
@@ -137,6 +175,8 @@ describe('D#605 FL-12a: the account runner concurrency setting', () => {
     const owner = await seedAccountWithMember(admin, { role: 'owner' });
     await expect(appUserPool.query(`INSERT INTO account_runner_concurrency (account_id, total_jobs, per_repo_jobs, updated_by) VALUES ($1, 99, 99, $2)`, [owner.accountId, owner.userId])).rejects.toMatchObject({ code: '42501' });
     await expect(platformOpsPool.query(`SELECT account_runner_concurrency_set(99, 99, true)`)).rejects.toMatchObject({ code: '42501' });
+    await expect(platformOpsPool.query(`SELECT account_runner_concurrency_set(NULL::int, NULL::int, true)`)).rejects.toMatchObject({ code: '42501' });
+    await expect(appUserPool.query(`DELETE FROM account_runner_concurrency WHERE account_id = $1`, [owner.accountId])).rejects.toMatchObject({ code: '42501' });
     expect(await stored(owner.accountId)).toEqual([]);
   });
 });
