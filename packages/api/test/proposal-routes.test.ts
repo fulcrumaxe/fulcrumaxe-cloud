@@ -719,6 +719,136 @@ describe('proposal routes (D#483 S3-L2a)', () => {
       expect(await n('SELECT count(*) n FROM plan_tasks WHERE repo_id = $1', [repo])).toBe(0);
     });
   });
+
+  describe('S4-i: the verification read (S4i-5, S4i-7, S4i-9, S4i-10)', () => {
+    const VSHA = 'a'.repeat(40);
+    const XSS = '<img src=x onerror=alert(1)> SPAWN_REQUEST';
+    async function verify(who: Identity, id: string, verification: string, o: { attempts?: number; claims?: Array<[string, string, string | null]>; evidence?: Array<[string, string, string, string | null]> } = {}) {
+      const stamped = verification !== 'pending';
+      await admin.query(
+        `UPDATE proposals SET verification = $2, verified_at = ${stamped ? 'now()' : 'NULL'}, verified_sha = $3, verify_attempts = $4 WHERE id = $1`,
+        [id, verification, stamped ? VSHA : null, o.attempts ?? 0],
+      );
+      for (const [text, verdict, refute] of o.claims ?? []) {
+        await admin.query(
+          `INSERT INTO proposal_claims (proposal_id, account_id, text, verdict, checked_sha, checked_at, refute_code) VALUES ($1, $2, $3, $4, $5, ${verdict === 'pending' ? 'NULL' : 'now()'}, $6)`,
+          [id, who.accountId, text, verdict, verdict === 'pending' ? null : VSHA, refute],
+        );
+      }
+      const repo = (await admin.query<{ repo_id: string }>('SELECT repo_id FROM proposals WHERE id = $1', [id])).rows[0]!.repo_id;
+      for (const [kind, ref, excerpt, sha] of o.evidence ?? []) {
+        await admin.query(`INSERT INTO proposal_evidence (account_id, repo_id, proposal_id, kind, ref, excerpt, commit_sha) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [who.accountId, repo, id, kind, ref, excerpt, sha]);
+      }
+    }
+    const get = async (who: Identity | string, urlPath: string) => call(who, 'GET', urlPath);
+
+    it('S4i-5: a read token of A gets the same detail body as an A session, a token of B gets 404, and a token without read cannot', async () => {
+      const a = await person('member');
+      const b = await person('member');
+      const repo = await repoFor(a, 'team');
+      const id = await proposalFor(a, repo, { provenance: 'external' });
+      await verify(a, id, 'partly_verified', {
+        claims: [['It reads the config', 'supported', null], ['It names a missing file', 'refuted', 'cite_not_found']],
+        evidence: [['file_lines', 'docs/a b.md:3-7', XSS, VSHA], ['issue', '#12', 'an issue', null]],
+      });
+      const session = await get(a, `/proposals/${id}`);
+      expect(session.status).toBe(200);
+      const sessionBody = await body<{ proposal: Record<string, unknown> }>(session);
+      const readToken = await tokenFor(a, ['read']);
+      const viaToken = await get(readToken, `/proposals/${id}`);
+      expect(viaToken.status).toBe(200);
+      expect(await body(viaToken)).toEqual(sessionBody);
+      expect(sessionBody.proposal).toMatchObject({ verification: 'partly_verified', verified_sha: VSHA, verify_attempts_max: 3, verify_retry: false, inbox_section: 'new', evidence_count: 2 });
+      expect((await get(await tokenFor(b, ['read']), `/proposals/${id}`)).status).toBe(404);
+      expect((await get(b, `/proposals/${id}`)).status).toBe(404);
+      // the list of B never carries A's claim counts either
+      const listB = await body<{ proposals: unknown[] }>(await get(await tokenFor(b, ['read']), '/proposals'));
+      expect(listB.proposals).toEqual([]);
+      // a token scoped to something other than read is refused by the scope check, as for every read route
+      // (a member cannot hold work_items:write, so the check is on the admin of the same account)
+      const admin2 = await person('admin');
+      const idAdmin = await proposalFor(admin2, await repoFor(admin2, 'team'));
+      const writeOnly = await tokenFor(admin2, ['work_items:write']);
+      expect((await get(writeOnly, `/proposals/${idAdmin}`)).status).toBe(403);
+      expect((await get(writeOnly, '/proposals')).status).toBe(403);
+      expect((await call(null, 'GET', `/proposals/${id}`)).status).toBe(401);
+    });
+
+    it('S4i-5: the detail body carries claims and evidence in order, with server-built links and the stored text', async () => {
+      const a = await person('member');
+      const repo = await repoFor(a, 'team');
+      const id = await proposalFor(a, repo);
+      await verify(a, id, 'refuted', {
+        claims: [['supported one', 'supported', null], ['refuted one', 'refuted', 'contradicted'], ['unknown one', 'unverifiable', null]],
+        evidence: [['file_lines', 'docs/a b.md:3-7', XSS, VSHA], ['interview_answer', 'goals', 'my answer', null], ['file_lines', '../../etc/passwd:1', 'x', VSHA]],
+      });
+      const out = await body<{ proposal: { claims: Array<{ text: string; refute_code: string | null }>; evidence: Array<{ ref: string; excerpt: string; url: string | null }> } }>(await get(a, `/proposals/${id}`));
+      expect(out.proposal.claims.map((c) => [c.text, c.refute_code])).toEqual([['refuted one', 'contradicted'], ['unknown one', null], ['supported one', null]]);
+      expect(out.proposal.evidence.map((e) => e.url)).toEqual([`https://github.com/acme/widgets/blob/${VSHA}/docs/a%20b.md#L3-L7`, null, null]);
+    });
+
+    it('S4i-9: markup and a spawn marker come back byte for byte in the JSON, with a JSON content type', async () => {
+      const a = await person('member');
+      const repo = await repoFor(a, 'team');
+      const id = await proposalFor(a, repo, { provenance: 'external' });
+      await verify(a, id, 'refuted', { claims: [[XSS, 'refuted', 'cite_mismatch']], evidence: [['file_lines', 'a.md:1', XSS, VSHA]] });
+      const res = await get(a, `/proposals/${id}`);
+      expect(res.headers.get('content-type')).toMatch(/application\/json/);
+      const raw = await res.text();
+      const parsed = JSON.parse(raw) as { proposal: { claims: Array<{ text: string }>; evidence: Array<{ excerpt: string }> } };
+      expect(parsed.proposal.evidence[0]!.excerpt).toBe(XSS);
+      expect(parsed.proposal.claims[0]!.text).toBe(XSS);
+    });
+
+    it('S4i-7: section=couldnt_confirm with state=new returns exactly the refuted and check_failed rows; without state=new it is 400 invalid_filter', async () => {
+      const a = await person('member');
+      const repo = await repoFor(a, 'team');
+      const ids: Record<string, string> = {};
+      for (const v of ['pending', 'verified', 'partly_verified', 'refuted', 'not_checked', 'check_failed']) {
+        ids[v] = await proposalFor(a, repo);
+        await verify(a, ids[v]!, v, { attempts: v === 'check_failed' ? 2 : 0 });
+      }
+      await verify(a, await proposalFor(a, repo, { state: 'rejected', decided_at: new Date().toISOString(), reject_kind: 'never' }), 'refuted');
+      await verify(a, await proposalFor(a, repo, { owner_process: 'internal_loop' }), 'refuted');
+      const res = await get(a, '/proposals?state=new&section=couldnt_confirm');
+      expect(res.status).toBe(200);
+      const out = await body<{ proposals: Array<{ id: string; inbox_section: string; verify_retry: boolean }> }>(res);
+      expect(out.proposals.map((p) => p.id).sort()).toEqual([ids.refuted!, ids.check_failed!].sort());
+      expect(out.proposals.every((p) => p.inbox_section === 'couldnt_confirm')).toBe(true);
+      expect(out.proposals.find((p) => p.id === ids.check_failed)!.verify_retry).toBe(true);
+      for (const q of ['section=new', 'state=approved&section=new', 'state=rejected&section=couldnt_confirm']) {
+        const bad = await get(a, `/proposals?${q}`);
+        expect(bad.status, q).toBe(400);
+        expect(await code(bad), q).toBe('invalid_filter');
+      }
+      const unknown = await get(a, '/proposals?state=new&section=bogus');
+      expect(unknown.status).toBe(400);
+      expect(await code(unknown)).toBe('invalid_filter');
+      // an over-long value is the same 400, not a 422 from the schema
+      const long = await get(a, `/proposals?state=new&section=${'x'.repeat(100)}`);
+      expect(long.status).toBe(400);
+      expect(await code(long)).toBe('invalid_filter');
+      // the list never carries the arrays
+      const all = await body<{ proposals: Array<Record<string, unknown>> }>(await get(a, '/proposals?state=new'));
+      expect(all.proposals.length).toBeGreaterThan(0);
+      for (const p of all.proposals) {
+        expect(p).not.toHaveProperty('claims');
+        expect(p).not.toHaveProperty('evidence');
+      }
+    });
+
+    it('the decision routes return the verification fields and counts too, without the lists', async () => {
+      const a = await person('owner');
+      const repo = await repoFor(a, 'team');
+      const id = await proposalFor(a, repo);
+      await verify(a, id, 'verified', { claims: [['x', 'supported', null]], evidence: [['issue', '#3', 'e', null]] });
+      const res = await call(a, 'POST', `/proposals/${id}/reject`, { body: { kind: 'never' } });
+      expect(res.status).toBe(200);
+      const out = await body<{ proposal: Record<string, unknown> }>(res);
+      expect(out.proposal).toMatchObject({ verification: 'verified', claim_counts: { supported: 1, refuted: 0, unverifiable: 0, pending: 0 }, evidence_count: 1, inbox_section: null });
+      expect(out.proposal).not.toHaveProperty('claims');
+    });
+  });
 });
 
 const SHA = 'e'.repeat(40);

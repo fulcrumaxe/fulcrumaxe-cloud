@@ -27,6 +27,41 @@
     "work_item_id": null,
     "work_item_stage": null,
     "created_at": "2026-10-16T06:00:00.000Z",
-    "updated_at": "2026-10-16T06:00:00.000Z"
+    "updated_at": "2026-10-16T06:00:00.000Z",
+    "verification": "verified",
+    "verified_at": "2026-10-16T06:05:00.000Z",
+    "verified_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "verify_attempts": 0,
+    "verify_attempts_max": 3,
+    "verify_retry": false,
+    "inbox_section": "new",
+    "claim_counts": {
+      "supported": 1,
+      "refuted": 0,
+      "unverifiable": 0,
+      "pending": 0
+    },
+    "evidence_count": 1,
+    "claims": [
+      {
+        "id": "77777777-7777-4777-8777-777777777777",
+        "text": "The theme switch lives in settings.",
+        "verdict": "supported",
+        "refute_code": null,
+        "checked_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checked_at": "2026-10-16T06:05:00.000Z"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "88888888-8888-4888-8888-888888888888",
+        "kind": "file_lines",
+        "ref": "src/theme.ts:10-14",
+        "excerpt": "export const theme = \"light\";",
+        "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "url": "https://github.com/acme/widgets/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/src/theme.ts#L10-L14",
+        "created_at": "2026-10-16T06:05:00.000Z"
+      }
+    ]
   }
 }

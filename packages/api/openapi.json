@@ -22552,7 +22552,7 @@
       "get": {
         "operationId": "listProposals",
         "summary": "The proposal inbox",
-        "description": "Proposals newest first, 50 to a page, filtered by `repo_id`, `state` and `owner` (`product` or `internal_loop`). `next_cursor` is the last row's `created_at|id` and is null on the last page; pass it back as `cursor`. Each row carries its task and milestone when it has one, and an approved row carries its work item's live stage (read from the work item, never stored on the proposal).",
+        "description": "Proposals newest first, 50 to a page, filtered by `repo_id`, `state`, `owner` (`product` or `internal_loop`) and `section` (`new`, `being_checked`, `couldnt_confirm` or `not_checked`; only with `state=new`, and it means product-owned). `next_cursor` is the last row's `created_at|id` and is null on the last page; pass it back as `cursor`. Each row carries its task and milestone when it has one, and an approved row carries its work item's live stage (read from the work item, never stored on the proposal). Each row also carries what the verifier saw: `verification`, `verified_at`, `verified_sha`, `verify_attempts`, `verify_attempts_max` and `verify_retry`, the derived `inbox_section`, and `claim_counts` and `evidence_count`. The claims and evidence themselves are on the detail route only.",
         "security": [
           {
             "session": []
@@ -22598,6 +22598,16 @@
                 "product",
                 "internal_loop"
               ]
+            }
+          },
+          {
+            "name": "section",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "One of `new`, `being_checked`, `couldnt_confirm`, `not_checked`. Only with `state=new`.",
+              "type": "string",
+              "maxLength": 200
             }
           },
           {
@@ -22802,6 +22812,102 @@
                           },
                           "updated_at": {
                             "type": "string"
+                          },
+                          "verification": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "verified",
+                              "partly_verified",
+                              "refuted",
+                              "not_checked",
+                              "check_failed"
+                            ],
+                            "description": "What the verifier last saw. `pending` until the first check."
+                          },
+                          "verified_at": {
+                            "description": "When the last check finished; null until the first one.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "verified_sha": {
+                            "description": "The commit the last check read; null until the first one.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "verify_attempts": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991,
+                            "description": "Consecutive failed checks. A real verdict resets it to 0."
+                          },
+                          "verify_attempts_max": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991,
+                            "description": "The number of failed checks after which the verifier stops trying."
+                          },
+                          "verify_retry": {
+                            "type": "boolean",
+                            "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                          },
+                          "inbox_section": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "new",
+                                  "being_checked",
+                                  "couldnt_confirm",
+                                  "not_checked"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                          },
+                          "claim_counts": {
+                            "type": "object",
+                            "properties": {
+                              "supported": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "refuted": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "unverifiable": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              "pending": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "supported",
+                              "refuted",
+                              "unverifiable",
+                              "pending"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "evidence_count": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
                           }
                         },
                         "required": [
@@ -22830,7 +22936,16 @@
                           "work_item_id",
                           "work_item_stage",
                           "created_at",
-                          "updated_at"
+                          "updated_at",
+                          "verification",
+                          "verified_at",
+                          "verified_sha",
+                          "verify_attempts",
+                          "verify_attempts_max",
+                          "verify_retry",
+                          "inbox_section",
+                          "claim_counts",
+                          "evidence_count"
                         ],
                         "additionalProperties": false
                       }
@@ -22852,7 +22967,7 @@
             }
           },
           "400": {
-            "description": "Error `invalid_cursor`.",
+            "description": "Error `invalid_cursor` or `invalid_filter` (`section` unknown, or given without `state=new`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -22937,7 +23052,7 @@
       "get": {
         "operationId": "getProposal",
         "summary": "One proposal",
-        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage.",
+        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. `claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. `excerpt` and claim `text` are untrusted and returned as stored; render them as plain text.",
         "security": [
           {
             "session": []
@@ -23148,6 +23263,224 @@
                         },
                         "updated_at": {
                           "type": "string"
+                        },
+                        "verification": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "verified",
+                            "partly_verified",
+                            "refuted",
+                            "not_checked",
+                            "check_failed"
+                          ],
+                          "description": "What the verifier last saw. `pending` until the first check."
+                        },
+                        "verified_at": {
+                          "description": "When the last check finished; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verified_sha": {
+                          "description": "The commit the last check read; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verify_attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Consecutive failed checks. A real verdict resets it to 0."
+                        },
+                        "verify_attempts_max": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "The number of failed checks after which the verifier stops trying."
+                        },
+                        "verify_retry": {
+                          "type": "boolean",
+                          "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                        },
+                        "inbox_section": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "new",
+                                "being_checked",
+                                "couldnt_confirm",
+                                "not_checked"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                        },
+                        "claim_counts": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "refuted": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "unverifiable": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "refuted",
+                            "unverifiable",
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "claims": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "text": {
+                                "type": "string",
+                                "description": "Untrusted text; it can come from an outsider's issue. Render it as plain text."
+                              },
+                              "verdict": {
+                                "type": "string",
+                                "enum": [
+                                  "supported",
+                                  "refuted",
+                                  "unverifiable",
+                                  "pending"
+                                ]
+                              },
+                              "refute_code": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "cite_not_found",
+                                      "cite_mismatch",
+                                      "contradicted"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "checked_sha": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "checked_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "text",
+                              "verdict",
+                              "refute_code",
+                              "checked_sha",
+                              "checked_at"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Refuted first, then unverifiable, pending and supported; then by text."
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "file_lines",
+                                  "issue",
+                                  "discussion",
+                                  "doc_passage",
+                                  "interview_answer",
+                                  "preview"
+                                ]
+                              },
+                              "ref": {
+                                "type": "string",
+                                "description": "`<path>:<start>-<end>` or `<path>:<line>` for file and document kinds; `#<n>` for issue, discussion and preview; the section key for an interview answer."
+                              },
+                              "excerpt": {
+                                "type": "string",
+                                "description": "The text as read at `commit_sha`, byte for byte. Untrusted; render it as plain text."
+                              },
+                              "commit_sha": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "url": {
+                                "description": "A GitHub link the server built from the repository, the parsed `ref` and `commit_sha`. Null when the kind has no link or the `ref` could not be parsed.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "created_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "kind",
+                              "ref",
+                              "excerpt",
+                              "commit_sha",
+                              "url",
+                              "created_at"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Oldest first."
                         }
                       },
                       "required": [
@@ -23176,7 +23509,18 @@
                         "work_item_id",
                         "work_item_stage",
                         "created_at",
-                        "updated_at"
+                        "updated_at",
+                        "verification",
+                        "verified_at",
+                        "verified_sha",
+                        "verify_attempts",
+                        "verify_attempts_max",
+                        "verify_retry",
+                        "inbox_section",
+                        "claim_counts",
+                        "evidence_count",
+                        "claims",
+                        "evidence"
                       ],
                       "additionalProperties": false
                     }
@@ -23472,6 +23816,102 @@
                         },
                         "updated_at": {
                           "type": "string"
+                        },
+                        "verification": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "verified",
+                            "partly_verified",
+                            "refuted",
+                            "not_checked",
+                            "check_failed"
+                          ],
+                          "description": "What the verifier last saw. `pending` until the first check."
+                        },
+                        "verified_at": {
+                          "description": "When the last check finished; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verified_sha": {
+                          "description": "The commit the last check read; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verify_attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Consecutive failed checks. A real verdict resets it to 0."
+                        },
+                        "verify_attempts_max": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "The number of failed checks after which the verifier stops trying."
+                        },
+                        "verify_retry": {
+                          "type": "boolean",
+                          "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                        },
+                        "inbox_section": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "new",
+                                "being_checked",
+                                "couldnt_confirm",
+                                "not_checked"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                        },
+                        "claim_counts": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "refuted": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "unverifiable": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "refuted",
+                            "unverifiable",
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
                         }
                       },
                       "required": [
@@ -23500,7 +23940,16 @@
                         "work_item_id",
                         "work_item_stage",
                         "created_at",
-                        "updated_at"
+                        "updated_at",
+                        "verification",
+                        "verified_at",
+                        "verified_sha",
+                        "verify_attempts",
+                        "verify_attempts_max",
+                        "verify_retry",
+                        "inbox_section",
+                        "claim_counts",
+                        "evidence_count"
                       ],
                       "additionalProperties": false
                     },
@@ -23886,6 +24335,102 @@
                         },
                         "updated_at": {
                           "type": "string"
+                        },
+                        "verification": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "verified",
+                            "partly_verified",
+                            "refuted",
+                            "not_checked",
+                            "check_failed"
+                          ],
+                          "description": "What the verifier last saw. `pending` until the first check."
+                        },
+                        "verified_at": {
+                          "description": "When the last check finished; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verified_sha": {
+                          "description": "The commit the last check read; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verify_attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Consecutive failed checks. A real verdict resets it to 0."
+                        },
+                        "verify_attempts_max": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "The number of failed checks after which the verifier stops trying."
+                        },
+                        "verify_retry": {
+                          "type": "boolean",
+                          "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                        },
+                        "inbox_section": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "new",
+                                "being_checked",
+                                "couldnt_confirm",
+                                "not_checked"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                        },
+                        "claim_counts": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "refuted": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "unverifiable": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "refuted",
+                            "unverifiable",
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
                         }
                       },
                       "required": [
@@ -23914,7 +24459,16 @@
                         "work_item_id",
                         "work_item_stage",
                         "created_at",
-                        "updated_at"
+                        "updated_at",
+                        "verification",
+                        "verified_at",
+                        "verified_sha",
+                        "verify_attempts",
+                        "verify_attempts_max",
+                        "verify_retry",
+                        "inbox_section",
+                        "claim_counts",
+                        "evidence_count"
                       ],
                       "additionalProperties": false
                     }
@@ -24235,6 +24789,102 @@
                         },
                         "updated_at": {
                           "type": "string"
+                        },
+                        "verification": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "verified",
+                            "partly_verified",
+                            "refuted",
+                            "not_checked",
+                            "check_failed"
+                          ],
+                          "description": "What the verifier last saw. `pending` until the first check."
+                        },
+                        "verified_at": {
+                          "description": "When the last check finished; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verified_sha": {
+                          "description": "The commit the last check read; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verify_attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Consecutive failed checks. A real verdict resets it to 0."
+                        },
+                        "verify_attempts_max": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "The number of failed checks after which the verifier stops trying."
+                        },
+                        "verify_retry": {
+                          "type": "boolean",
+                          "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                        },
+                        "inbox_section": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "new",
+                                "being_checked",
+                                "couldnt_confirm",
+                                "not_checked"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                        },
+                        "claim_counts": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "refuted": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "unverifiable": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "refuted",
+                            "unverifiable",
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
                         }
                       },
                       "required": [
@@ -24263,7 +24913,16 @@
                         "work_item_id",
                         "work_item_stage",
                         "created_at",
-                        "updated_at"
+                        "updated_at",
+                        "verification",
+                        "verified_at",
+                        "verified_sha",
+                        "verify_attempts",
+                        "verify_attempts_max",
+                        "verify_retry",
+                        "inbox_section",
+                        "claim_counts",
+                        "evidence_count"
                       ],
                       "additionalProperties": false
                     }
@@ -24574,6 +25233,102 @@
                         },
                         "updated_at": {
                           "type": "string"
+                        },
+                        "verification": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "verified",
+                            "partly_verified",
+                            "refuted",
+                            "not_checked",
+                            "check_failed"
+                          ],
+                          "description": "What the verifier last saw. `pending` until the first check."
+                        },
+                        "verified_at": {
+                          "description": "When the last check finished; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verified_sha": {
+                          "description": "The commit the last check read; null until the first one.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verify_attempts": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "Consecutive failed checks. A real verdict resets it to 0."
+                        },
+                        "verify_attempts_max": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991,
+                          "description": "The number of failed checks after which the verifier stops trying."
+                        },
+                        "verify_retry": {
+                          "type": "boolean",
+                          "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                        },
+                        "inbox_section": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "new",
+                                "being_checked",
+                                "couldnt_confirm",
+                                "not_checked"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                        },
+                        "claim_counts": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "refuted": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "unverifiable": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "refuted",
+                            "unverifiable",
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence_count": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
                         }
                       },
                       "required": [
@@ -24602,7 +25357,16 @@
                         "work_item_id",
                         "work_item_stage",
                         "created_at",
-                        "updated_at"
+                        "updated_at",
+                        "verification",
+                        "verified_at",
+                        "verified_sha",
+                        "verify_attempts",
+                        "verify_attempts_max",
+                        "verify_retry",
+                        "inbox_section",
+                        "claim_counts",
+                        "evidence_count"
                       ],
                       "additionalProperties": false
                     }
