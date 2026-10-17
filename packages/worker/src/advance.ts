@@ -241,6 +241,8 @@ export interface AdvanceVerdictInput {
   role: string;
   runId: string;
   verdict: string;
+  /** D#598 P7d: the reviewer could not run the tests. */
+  environmentFailure?: boolean;
   /** The debater only. */
   debatedRole?: string;
 }
@@ -1223,7 +1225,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (input.round === undefined || (Number.isInteger(input.round) && input.round >= 0 && input.round <= 20)) &&
       input.requiredRoles.length > 0 && input.requiredRoles.length <= 4 && input.requiredRoles.every((r) => VERDICT_ROLES.includes(r)) &&
       input.verdicts.length <= 4 &&
-      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
+      input.verdicts.every((v) => VERDICT_ROLES.includes(v.role) && UUID_RE.test(v.runId) && VERDICT_WORDS.includes(v.verdict) && (v.environmentFailure === undefined || typeof v.environmentFailure === "boolean") && (v.debatedRole === undefined || v.debatedRole === "code-reviewer" || v.debatedRole === "security-reviewer"));
     if (!sane) return { decision: "refused", reason: "invalid_input" };
     const bad = await guardStep(who);
     if (bad) return { decision: "refused", reason: bad.reason ?? "refused" };

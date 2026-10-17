@@ -10,7 +10,8 @@ import { BOT_EMAIL, BOT_NAME, branchFor, type PromptRuntime } from "../advance/b
  *
  * Reviewer envelope: `{ verdict, findings[], summary }`. The verdict is exactly one of `pass`, `needs-fix` or `fail`; the
  * driver reads those exact words and counts anything else as `fail`. The code reviewer's envelope also carries
- * `security_review_needed` (a boolean the driver reads only as the exact JSON `true`).
+ * `security_review_needed` (a boolean the driver reads only as the exact JSON `true`). Any reviewer may add `environment_failure: true` (D#598 P7d):
+ * the tests could not be run, so there is no code verdict; the driver reads it only as the exact JSON `true`, records the fact and starts no fix round.
  */
 
 export type ReviewPromptRole = "code-reviewer" | "acceptance-tester" | "security-reviewer" | "debater";
@@ -80,6 +81,10 @@ const JOBS: Record<ReviewPromptRole, string> = {
     "You are the debater. The reviewers below passed this change. Try to refute their verdict: find a defect, a missed case or an unverified claim they let through. Check their claims yourself by running the code and the tests. Pass only if you cannot refute it.",
 };
 
+/** D#598 P7d: runner reviews only (the sandbox prompt is pinned byte for byte by golden files). */
+const ENV_FAILURE_LINE =
+  'If you could not run the tests at all (the test command would not start, or a tool it needs was refused), do not guess at a verdict on the code: set "environment_failure" to true in the envelope, use the verdict "fail", and say in `summary` which command did not start. A test that ran and failed is not this: that is a code problem, so use "needs-fix".';
+
 function checkReviewInput(i: ReviewPromptInput): void {
   if (!NAME_RE.test(i.owner)) throw new ReviewPromptInputError("owner");
   if (!NAME_RE.test(i.name)) throw new ReviewPromptInputError("name");
@@ -114,6 +119,7 @@ export function assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt 
           `  git diff origin/${baseRef}...HEAD`,
           `Confirm \`git rev-parse HEAD\` prints ${headSha} before you review. If it does not, your verdict is \`fail\` and the summary says the workspace was at the wrong commit.`,
           "Do not commit: you only report.",
+          ENV_FAILURE_LINE,
         ]
       : [
           "The repository is checked out in your working directory. Check the commit out first:",

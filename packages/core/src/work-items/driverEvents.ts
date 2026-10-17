@@ -29,7 +29,7 @@ import type { PoolClient } from 'pg';
  *   review_status         the `fulcrumaxe/review` commit status. code: posted | skipped | failed.
  *   merge_gate            the merge gate's outcome. code: its outcome; reasons: its block codes.
  *   merged_by_gate        the gate itself merged the pull request (a merge by a person has no such row).
- *   stopped               the driver stopped for a reason that is none of the above. code: the reason.
+ *   stopped               the driver stopped for a reason that is none of the above. code: the reason (`reviewer_environment`: a reviewer could not run the tests; reasons: its roles; no verdict was recorded).
  *   pr_head_pushed        the pull request's head moved to this commit (head_sha, pr_number). A person's push seen as pull_request.synchronize, or one the
  *                         driver itself saw (code: observed). Its created_at, the database clock, starts the quiet period of a cloud-verified review.
  *   correction_applied    the build or fix run carried accepted run notes (D#597 CC-3; migration 0788). run_id: the run; reasons: the notes' ids as codes
