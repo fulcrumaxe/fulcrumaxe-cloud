@@ -85,6 +85,12 @@ export interface PlanMock {
   onImport: (() => void) | null;
   /** Answers to GET /repos: when true the list fails with a 500. */
   reposFail: boolean;
+  /**
+   * D#483 S5-e1: what the estimate route answers, by proposal id; null (the default) leaves the route unanswered (404), as before it existed.
+   * `meta` is the set-level figures. An id missing from `estimates` is answered 404 like an unknown proposal.
+   */
+  estimates: Record<string, { basis: "history" | "seed" | "none"; total_usd: number | null }> | null;
+  estimateMeta: { margin_pct: number | null; remaining_budget_usd: number; first_run_usd: number };
   /** Requests held open until released (see holdRequest). Each holds the first request that matches, once. */
   holds: { re: RegExp; used: boolean; release: () => void; gate: Promise<void> }[];
 }
@@ -123,6 +129,8 @@ export function newMock(): PlanMock {
     removeReply: [],
     onImport: null,
     reposFail: false,
+    estimates: null,
+    estimateMeta: { margin_pct: 20, remaining_budget_usd: 437, first_run_usd: 10 },
     holds: [],
   };
 }
@@ -178,6 +186,13 @@ export async function installMock(page: Page, m: PlanMock) {
           return send(route, { status: 200, json: { ...m.plan, tasks: all.slice(from, from + m.taskPage), next_cursor: next } });
         }
         return send(route, { status: 200, json: m.plan });
+      }
+      const est = /^\/api\/v1\/repos\/([^/]+)\/proposals\/estimate$/.exec(p);
+      if (est && m.estimates) {
+        const ids = (q.get("ids") ?? "").split(",");
+        if (!ids.every((id) => m.estimates![id])) return send(route, refusal(404, "not_found"));
+        const proposals = ids.map((id) => ({ proposal_id: id, basis: m.estimates![id].basis, reason: m.estimates![id].basis === "none" ? "no_category" : null, total_usd: m.estimates![id].total_usd, slot_phase_usd: null, estimated: false }));
+        return send(route, { status: 200, json: { repo_id: est[1], proposals, total_usd: null, prefill_usd: null, capped: false, needs_amount: proposals.some((x) => x.basis === "none"), ...m.estimateMeta } });
       }
       return send(route, refusal(404, "not_found"));
     }

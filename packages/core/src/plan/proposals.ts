@@ -342,6 +342,21 @@ export async function restoreProposal(ctx: ProposalCtx, id: string): Promise<Pro
 }
 
 /**
+ * D#483 S5-e1 (S3 undo paths): withdrawing an approval also voids the item's own envelope, as a new version of amount 0 (append-only: the earlier amount
+ * stays readable). A shared batch envelope is left alone, because the other items of the batch still draw on it. No envelope, or one already at 0, writes nothing.
+ */
+async function voidItemEnvelope(c: PoolClient, workItemId: string): Promise<void> {
+  await c.query(
+    `INSERT INTO approval_envelopes (id, account_id, repo_id, scope, amount_usd, estimate_usd, margin_pct, version, created_by)
+     SELECT e.id, e.account_id, e.repo_id, e.scope, 0, e.estimate_usd, e.margin_pct, e.version + 1, NULLIF(current_setting('app.user_id', true), '')::uuid
+       FROM work_items w
+       JOIN LATERAL (SELECT x.* FROM approval_envelopes x WHERE x.account_id = w.account_id AND x.id = w.envelope_id ORDER BY x.version DESC LIMIT 1) e ON true
+      WHERE w.id = $1::uuid AND e.scope = 'item' AND e.amount_usd > 0`,
+    [workItemId],
+  );
+}
+
+/**
  * `approved` to `new`, only while the work item is at triaged and has no run. The definer checks that and clears the
  * approval; the work item then moves triaged to closed (a legal edge) through the one stage writer, in the SAME transaction.
  * If the item moved on between the definer's read and the stage write, nothing is written and the answer is `work_started`.
@@ -359,6 +374,7 @@ export async function withdrawApproval(ctx: ProposalCtx, id: string): Promise<Pr
         if (err instanceof IllegalStageTransitionError || err instanceof WorkItemHaltedError) throw new ProposalRefusedError('work_started');
         throw err;
       }
+      await voidItemEnvelope(c, workItemId);
     }
     return readProposal(c, id);
   });

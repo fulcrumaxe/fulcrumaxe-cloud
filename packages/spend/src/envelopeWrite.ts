@@ -19,7 +19,7 @@ export async function remainingAccountBudgetUsd(client: PoolClient, accountId: s
 }
 
 export class EnvelopeWriteError extends Error {
-  constructor(readonly code: 'over_account_budget' | 'envelope_not_found' | 'invalid_amount' | 'version_conflict') {
+  constructor(readonly code: 'over_account_budget' | 'envelope_not_found' | 'invalid_amount' | 'version_conflict' | 'envelope_below_first_run') {
     super(code);
     this.name = 'EnvelopeWriteError';
   }
@@ -34,6 +34,11 @@ export interface EnvelopeWrite {
   amountUsd: number;
   estimateUsd?: number | null;
   marginPct?: number | null;
+  /**
+   * D#483 S5-e1: the first run's reservation. A limit below it could never admit the item's first run, so it is refused `envelope_below_first_run`
+   * before anything else is checked or written. Omit it only for an amount of 0, which voids an envelope (the undo of an approval).
+   */
+  minAmountUsd?: number;
   now?: Date;
 }
 
@@ -44,6 +49,7 @@ export interface EnvelopeWrite {
  */
 export async function writeEnvelopeVersion(client: PoolClient, w: EnvelopeWrite): Promise<{ envelopeId: string; version: number }> {
   if (!Number.isFinite(w.amountUsd) || w.amountUsd < 0) throw new EnvelopeWriteError('invalid_amount');
+  if (w.minAmountUsd !== undefined && w.amountUsd < w.minAmountUsd) throw new EnvelopeWriteError('envelope_below_first_run');
   if (w.amountUsd > (await remainingAccountBudgetUsd(client, w.accountId, w.now))) throw new EnvelopeWriteError('over_account_budget');
   const envelopeId = w.envelopeId ?? randomUUID();
   let version = 1;

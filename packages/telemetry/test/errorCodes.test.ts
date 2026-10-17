@@ -68,6 +68,15 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// GitHub proxy, runner path (D#6 R5a-2c)");
   });
 
+  it("keeps the envelope codes of an approval (D#483 S5-e1) instead of folding them into other, in a block of their own", () => {
+    const codes = ["amount_required", "over_account_budget", "envelope_below_first_run", "envelope_already_set", "envelope_scope", "envelope_repo_mismatch", "envelope_taken"];
+    for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
+    const first = OWN_ERROR_CODES.indexOf(codes[0]!);
+    expect(OWN_ERROR_CODES.slice(first, first + codes.length)).toEqual(codes);
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// Envelope on an approval (D#483 S5-e1)");
+  });
+
   it("keeps the cloud runner approval codes (D#6 R2b-4a) instead of folding them into other, in a block of their own", () => {
     const codes = ["runner_not_for_repo", "dial_changed"];
     for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);

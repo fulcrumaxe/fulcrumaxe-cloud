@@ -6,7 +6,7 @@
 // survives an unknown outcome only.
 import { describe, expect, it } from "vitest";
 import { ApiFailure } from "../apps/_lib/api.js";
-import { DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
@@ -51,11 +51,13 @@ describe("rows", () => {
 
 describe("sentences", () => {
   it("every refusal the definers and the routes can answer has its own sentence", () => {
-    for (const code of ["not_new", "not_rejected", "not_approved", "work_started", "owned_by_internal_loop", "repo_not_connected", "work_item_wrong_repo", "work_item_wrong_stage", "insufficient_role", "session_required", "run_actions_unavailable", "not_found", "idempotency_key_reused", "idempotency_in_progress", "offline", "timeout", "server_error"]) {
+    for (const code of ["not_new", "not_rejected", "not_approved", "work_started", "owned_by_internal_loop", "repo_not_connected", "work_item_wrong_repo", "work_item_wrong_stage", "amount_required", "envelope_below_first_run", "over_account_budget", "insufficient_role", "session_required", "run_actions_unavailable", "not_found", "idempotency_key_reused", "idempotency_in_progress", "offline", "timeout", "server_error"]) {
       expect(REFUSALS[code], code).toBeTruthy();
       expect(refusalSentence(new ApiFailure(409, code, "server text that must never be shown"))).toBe(REFUSALS[code]);
     }
     for (const s of Object.values(REFUSALS)) expect(s).not.toMatch(BAD);
+    // D#483 S5-e1: the Spec's own sentence for a proposal that cannot be priced yet.
+    expect(REFUSALS.amount_required).toBe("Set a limit for this item: we can't estimate it yet");
   });
   it("an unknown code, a 5xx and a missing error each read as a fixed sentence, never the server's words", () => {
     expect(refusalSentence(new ApiFailure(409, "brand_new_code", "server text that must never be shown"))).toBe("That didn't work. Nothing was changed.");
@@ -86,5 +88,51 @@ describe("idempotency", () => {
     expect(outcomeUnknown(new ApiFailure(409, "not_new", "x"))).toBe(false);
     expect(outcomeUnknown(new ApiFailure(429, "rate_limited", "x"))).toBe(false);
     expect(outcomeUnknown(undefined)).toBe(false);
+  });
+});
+
+// D#483 S5-e1: the limit a person gives an item as they approve it.
+describe("the approve limit", () => {
+  it("uses the Spec's sentence for a proposal with no estimate, and a plain label", () => {
+    expect(AMOUNT_SENTENCE).toBe("Set a limit for this item: we can't estimate it yet");
+    expect(AMOUNT_LABEL).toBe("Limit for this item (USD)");
+    expect(REFUSALS.envelope_below_first_run).toMatch(/too low/);
+    expect(REFUSALS.over_account_budget).toMatch(/can still spend this month/);
+  });
+  it("a refusal below the first run reads as the raise-the-budget sentence when what is left is below that cost, and as 'enter a higher one' otherwise", () => {
+    expect(LOW_BUDGET_SENTENCE).toBe("Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.");
+    const refused = new ApiFailure(409, "envelope_below_first_run", "x");
+    expect(refusalSentence(refused, { basis: "seed", remaining: 4, firstRun: 10 })).toBe(LOW_BUDGET_SENTENCE);
+    expect(refusalSentence(refused, { basis: "seed", remaining: 10, firstRun: 10 })).toBe(REFUSALS.envelope_below_first_run);
+    expect(refusalSentence(refused, { basis: "seed", remaining: 437, firstRun: 10 })).toBe(REFUSALS.envelope_below_first_run);
+    expect(refusalSentence(refused, undefined)).toBe(REFUSALS.envelope_below_first_run);
+    expect(refusalSentence(refused, { basis: "seed" })).toBe(REFUSALS.envelope_below_first_run);
+    expect(LOW_BUDGET_SENTENCE).not.toMatch(BAD);
+  });
+  it("prefillAmount is total x (1 + margin), to four decimals, capped at the remaining budget, like the server's", () => {
+    expect(prefillAmount(100, 20, 437)).toBe(120);
+    expect(prefillAmount(3, 20, 437)).toBe(3.6);
+    expect(prefillAmount(10, null, 437)).toBe(10);
+    expect(prefillAmount(1000, 20, 437)).toBe(437);
+    expect(prefillAmount(10, 20, 11.99999)).toBe(11.9999);
+    expect(prefillAmount(10, 20, -4)).toBe(0);
+  });
+  it("checkAmount sends nothing for an empty field unless there is no estimate, and refuses a bad limit with a sentence", () => {
+    expect(checkAmount("", undefined)).toEqual({ ok: true, amount: null });
+    expect(checkAmount("  ", { basis: "seed", remaining: 5 })).toEqual({ ok: true, amount: null });
+    expect(checkAmount("", { basis: "none", remaining: 5 })).toEqual({ ok: false, sentence: AMOUNT_SENTENCE });
+    expect(checkAmount(" 12.5 ", { basis: "none", remaining: 50 })).toEqual({ ok: true, amount: 12.5 });
+    expect(checkAmount("12.12345", undefined).ok).toBe(false);
+    for (const bad of ["abc", "-x", "e", "$$", "x,y", "- ", ".x"]) {
+      const r = checkAmount(bad, { basis: "seed", remaining: 437 });
+      expect(r.ok, bad).toBe(false);
+      expect(r.sentence).not.toMatch(BAD);
+    }
+    expect(checkAmount("0", undefined)).toEqual({ ok: false, sentence: "Enter a limit above $0." });
+    expect(checkAmount("0.0000", undefined).ok).toBe(false);
+    expect(checkAmount("437.01", { basis: "seed", remaining: 437 })).toEqual({ ok: false, sentence: "Enter a limit of $437.00 or less: that is what this account can still spend this month." });
+    expect(checkAmount("437", { basis: "seed", remaining: 437 })).toEqual({ ok: true, amount: 437 });
+    // With the budget unknown, the server decides.
+    expect(checkAmount("9999", undefined)).toEqual({ ok: true, amount: 9999 });
   });
 });

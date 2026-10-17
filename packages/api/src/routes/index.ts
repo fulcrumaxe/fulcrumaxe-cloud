@@ -34,6 +34,7 @@ import { siteRoutes } from "./sites.js";
 import { sitekitBillingRoutes } from "./sitekitBilling.js";
 import { planRoutes } from "./plan.js";
 import { proposalRoutes } from "./proposals.js";
+import { proposalEnvelopeRoutes } from "./proposal-envelopes.js";
 import { correctionRoutes } from "./corrections.js";
 import { runHandoffRoutes } from "./run-handoff.js";
 import { memoryRoutes } from "./memory.js";
@@ -95,6 +96,7 @@ export const ROUTES: RouteEntry[] = [
   ...sitekitBillingRoutes,
   ...planRoutes,
   ...proposalRoutes,
+  ...proposalEnvelopeRoutes,
   ...correctionRoutes,
   ...runHandoffRoutes,
   ...memoryRoutes,

@@ -80,7 +80,12 @@ describe('proposal routes (D#483 S3-L2a)', () => {
     };
   });
 
-  const person = (role: 'owner' | 'admin' | 'member') => seedAccountWithMember(admin, { role });
+  // S5-e1: an approval now carries an envelope, which an account with no monthly budget cannot fund. Every account here has one.
+  const person = async (role: 'owner' | 'admin' | 'member') => {
+    const who = await seedAccountWithMember(admin, { role });
+    await admin.query('UPDATE accounts SET model_budget_usd_month = 600 WHERE id = $1', [who.accountId]);
+    return who;
+  };
   async function call(who: Identity | string | null, method: string, urlPath: string, o: { body?: unknown; key?: string | null } = {}): Promise<Response> {
     const h = new Headers();
     if (typeof who === 'string') h.set('authorization', `Bearer ${who}`);
@@ -125,7 +130,8 @@ describe('proposal routes (D#483 S3-L2a)', () => {
     agent_runs: await n('SELECT count(*) n FROM agent_runs WHERE account_id = $1', [who.accountId]),
     approved: await n(`SELECT count(*) n FROM proposals WHERE account_id = $1 AND state = 'approved'`, [who.accountId]),
   });
-  const approve = (who: Identity | string | null, id: string, key?: string | null) => call(who, 'POST', `/proposals/${id}/approve`, { key });
+  // Most of these proposals have no category, so the limit is given (S5-e1); the envelope itself is exercised in proposal-envelopes.test.ts.
+  const approve = (who: Identity | string | null, id: string, key?: string | null) => call(who, 'POST', `/proposals/${id}/approve`, { key, body: { amount_usd: 50 } });
   const body = async <T>(res: Response) => (await res.json()) as T;
 
   describe('A4: approve and its undo on a product repo (the write App is installed)', () => {

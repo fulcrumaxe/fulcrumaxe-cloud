@@ -106,6 +106,11 @@ export const planDataSchema = z
     /** Seed median cost of one run by model tier, until a tenant's own ledger medians replace it. */
     medianCostPerRunSeedUsd: z.object({ haiku: usd, sonnet: usd, opus: usd }).strict(),
     caps: z.object({ perSpawnUsd: usd, featureUsd: usd, smallUsd: usd, maxFixRounds: count }).strict(),
+    /**
+     * D#483 S5-e1: the default margin an envelope adds to the priced estimate, in percent (0 to 500, the same bound the margin setting will have).
+     * Optional: data that predates it loads, and a missing figure means the pre-fill is the bare estimate (fail closed, never a made-up margin).
+     */
+    envelope: z.object({ defaultMarginPct: z.number().finite().min(0).max(500) }).strict().optional(),
   })
   .strict();
 

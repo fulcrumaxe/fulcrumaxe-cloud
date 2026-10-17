@@ -79,7 +79,47 @@ export async function envelopeAdmits(client: PoolClient, accountId: string, enve
   return rows[0]?.ok === true;
 }
 
-/** Records a no-model run's estimated price against its envelope. The run must exist; a second call for the same run changes nothing. */
-export async function recordEnvelopeCharge(client: PoolClient, accountId: string, runId: string, envelopeId: string, usd: number): Promise<void> {
-  await client.query('INSERT INTO envelope_run_charges (account_id, run_id, envelope_id, usd) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [accountId, runId, envelopeId, usd]);
+/**
+ * Records a no-model run's estimated price against its envelope, through envelope_charge_record (0865), the only writer: the run's own item must draw on
+ * that envelope, and a charge only ever goes up, so a smaller figure written earlier cannot hide this one. A second call with the same figure changes nothing.
+ */
+export async function recordEnvelopeCharge(client: PoolClient, _accountId: string, runId: string, envelopeId: string, usd: number): Promise<void> {
+  // The tenant is the session's own (withTenant); the definer reads it from there, so the account id is not sent.
+  await client.query('SELECT envelope_charge_record($1::uuid, $2::uuid, $3::numeric)', [runId, envelopeId, usd]);
+}
+
+/** The refusals work_item_set_envelope raises (SQLSTATE 55000, the code as the message). */
+export type SetEnvelopeRefusal = 'work_started' | 'envelope_already_set' | 'envelope_scope' | 'envelope_repo_mismatch' | 'envelope_taken';
+
+export class SetEnvelopeError extends Error {
+  constructor(readonly code: SetEnvelopeRefusal) {
+    super(code);
+    this.name = 'SetEnvelopeError';
+  }
+}
+
+const SET_ENVELOPE_REFUSALS: ReadonlySet<string> = new Set<SetEnvelopeRefusal>(['work_started', 'envelope_already_set', 'envelope_scope', 'envelope_repo_mismatch', 'envelope_taken']);
+
+/**
+ * Attaches an envelope to a work item at approval, through work_item_set_envelope (0865), the only way work_items.envelope_id is ever set. The session must
+ * be an owner or admin of the account; the item must still be at Triaged with no run. True when this call set it, false when the item already had this envelope.
+ */
+export async function setWorkItemEnvelope(client: PoolClient, workItemId: string, envelopeId: string): Promise<boolean> {
+  await client.query('SAVEPOINT set_item_envelope');
+  try {
+    const { rows } = await client.query<{ set: boolean }>('SELECT work_item_set_envelope($1::uuid, $2::uuid) AS set', [workItemId, envelopeId]);
+    await client.query('RELEASE SAVEPOINT set_item_envelope');
+    return rows[0]!.set;
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT set_item_envelope');
+    const e = err as { code?: string; message?: string };
+    if (e.code === '55000' && e.message && SET_ENVELOPE_REFUSALS.has(e.message)) throw new SetEnvelopeError(e.message as SetEnvelopeRefusal);
+    throw err;
+  }
+}
+
+/** Remembers that the ask for (item, envelope version) was raised, through envelope_pause_ask_record (0865): the ask must exist. True when this call wrote it. */
+export async function recordEnvelopePauseAsk(client: PoolClient, input: { workItemId: string; envelopeId: string; version: number; askId: string }): Promise<boolean> {
+  const { rows } = await client.query<{ recorded: boolean }>('SELECT envelope_pause_ask_record($1::uuid, $2::uuid, $3::integer, $4::uuid) AS recorded', [input.workItemId, input.envelopeId, input.version, input.askId]);
+  return rows[0]!.recorded;
 }

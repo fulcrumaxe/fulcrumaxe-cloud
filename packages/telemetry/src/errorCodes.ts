@@ -305,6 +305,14 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "owned_by_internal_loop",
   "work_item_wrong_repo",
   "work_item_wrong_stage",
+  // Envelope on an approval (D#483 S5-e1): the three the routes throw, and the four the envelope setter's definer refuses with (passed through a variable).
+  "amount_required",
+  "over_account_budget",
+  "envelope_below_first_run",
+  "envelope_already_set",
+  "envelope_scope",
+  "envelope_repo_mismatch",
+  "envelope_taken",
 ];
 
 /** Stripe's documented error codes that our billing paths can meet. A short literal list, not a pattern. */
