@@ -60,7 +60,7 @@ describe('decision_ask_answer (0797)', () => {
   });
 
   const RAISE_SQL = `SELECT decision_ask_raise('human_over_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'apply',
-                                                'because', '["trusted"]'::jsonb, 60, 'stop_and_flag') AS id`;
+                                                'because', '["trusted"]'::jsonb, 60, 'stop_and_flag', 0) AS id`;
   const raise = (t: SeedRefs = refs, run: string | null = t.runId): Promise<string> =>
     withTenant(invokerPool, t.accountId, async (c) => (await c.query<{ id: string }>(RAISE_SQL, [TYPE, t.workItemId, run, JSON.stringify(OPTIONS)])).rows[0]!.id);
   /** A receipt as the answering person would have written it: matching type, choice, run and actor. */

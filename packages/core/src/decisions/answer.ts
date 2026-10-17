@@ -62,6 +62,7 @@ interface AskRow {
   options: { id: string }[];
   proposed: string;
   state: string;
+  rule_set_version: number;
 }
 
 export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promise<AskAnswerResult> {
@@ -78,7 +79,7 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       // 2. Read the ask through RLS: a missing, foreign or malformed id is the same 404.
       const found = typeof input.askId === 'string' && UUID_RE.test(input.askId)
         ? await client.query<AskRow>(
-          `SELECT id, repo_id, work_item_id, run_id, decision_type, options, proposed, state
+          `SELECT id, repo_id, work_item_id, run_id, decision_type, options, proposed, state, rule_set_version
              FROM decision_asks WHERE id = $1::uuid AND account_id = $2::uuid`, [input.askId, accountId])
         : { rows: [] as AskRow[] };
       const ask = found.rows[0];
@@ -101,6 +102,8 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
         rejectedAlternative: choice === ask.proposed ? 'deny' : ask.proposed,
         dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
         quotedInputs: [{ trust: 'trusted', storedBody: choice }],
+        // The rule set the ask was raised under (a one-time stamp; 0 is none and writes the plain receipt).
+        ruleSetVersion: ask.rule_set_version,
       });
       if (receipt.store !== 'decision_receipts') throw new AskAnswerError(409, 'ask_receipt_mismatch');
       // 8. The compare-and-set, linking the receipt in the same UPDATE.

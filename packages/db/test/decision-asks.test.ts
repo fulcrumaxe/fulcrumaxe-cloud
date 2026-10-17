@@ -113,14 +113,14 @@ describe('raiseAsk validation (no query is sent)', () => {
     const params = calls[0]![1] as unknown[];
     expect(params).toEqual([
       'human_over_the_loop', 'test_strategy_choice', '11111111-1111-4111-8111-111111111111', null,
-      JSON.stringify(OPTIONS), 'apply', 'because', '["trusted","untrusted"]', 1440, 'stop_and_flag',
+      JSON.stringify(OPTIONS), 'apply', 'because', '["trusted","untrusted"]', 1440, 'stop_and_flag', 0,
     ]);
   });
 
   it.each(['nonbreaking_refactor_approach', 'test_strategy_choice'])('%s may proceed on the recommended option', async (decisionType) => {
     const { client, calls } = stubClient();
     await raiseAsk(client, valid({ decisionType, policy: { answerWindowMinutes: 30, onTimeout: 'proceed_recommended' } }));
-    expect((calls[0]![1] as unknown[]).slice(8)).toEqual([30, 'proceed_recommended']);
+    expect((calls[0]![1] as unknown[]).slice(8)).toEqual([30, 'proceed_recommended', 0]);
   });
 
   it('accepts a class 3 ask that stops and flags', async () => {

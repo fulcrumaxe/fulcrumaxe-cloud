@@ -103,6 +103,8 @@ describe('decision_settings / decision_receipts schema (DP2 items 1, 3, 7)', () 
         'input_trust_classes',
         'rejected_alternative',
         'reversal_state',
+        'rule_id',
+        'rule_set_version',
         'run_id',
         'work_item_id',
       ].sort(),

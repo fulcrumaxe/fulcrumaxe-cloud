@@ -37,6 +37,13 @@ export interface WriteReceiptInput {
   dialVersion: number;
   /** One entry per quoted input; the receipt records each entry's trust class. */
   quotedInputs: readonly ReceiptQuotedInput[];
+  /**
+   * The approval-rule set version that decided or framed this receipt (D#7 AAP-a4). Absent or 0 writes the plain receipt, with no version.
+   * Class 2 and 3 only: a class 1 receipt goes to run_events, which has no such field.
+   */
+  ruleSetVersion?: number;
+  /** The id of the rule that decided, when one did (needs `ruleSetVersion` of 1 or more). */
+  ruleId?: string;
 }
 
 export type WriteReceiptResult =
@@ -56,7 +63,8 @@ export type ReceiptErrorCode =
   | 'receipt_decision_class_mismatch'
   | 'receipt_chosen_invalid'
   | 'receipt_rejected_alternative_invalid'
-  | 'receipt_untrusted_input_not_stored_body';
+  | 'receipt_untrusted_input_not_stored_body'
+  | 'receipt_rule_invalid';
 
 /** Thrown before any query is sent. `code` is the named error; branch on it, not on the message. */
 export class ReceiptWriteError extends Error {
@@ -82,6 +90,8 @@ const CLASSES: readonly string[] = ['automated_with_monitoring', 'human_over_the
  */
 const OPTION_ID = /^[a-z0-9_.:-]{1,128}$/;
 const INT4_MAX = 2_147_483_647;
+/** The rule validator's id grammar (packages/decisions/src/rules.ts), at most 64 characters. */
+const RULE_ID = /^[A-Za-z0-9_.-]{1,64}$/;
 /** A receipt's dial version when the account has no `decision_settings` row: the catalogue default. Real versions start at 1. */
 export const DIAL_VERSION_CATALOGUE_DEFAULT = 0;
 
@@ -117,6 +127,10 @@ function validate(input: WriteReceiptInput): ReceiptTrustClass[] {
       throw new ReceiptWriteError('receipt_untrusted_input_not_stored_body');
     }
   }
+  const v = input.ruleSetVersion;
+  if (v !== undefined && (!Number.isInteger(v) || v < 0 || v > INT4_MAX)) throw new ReceiptWriteError('receipt_rule_invalid');
+  if (input.ruleId !== undefined && (!(v !== undefined && v >= 1) || !RULE_ID.test(input.ruleId))) throw new ReceiptWriteError('receipt_rule_invalid');
+  if ((v !== undefined || input.ruleId !== undefined) && input.class === 'automated_with_monitoring') throw new ReceiptWriteError('receipt_rule_invalid');
   return (quoted as ReceiptQuotedInput[]).map((q) => q.trust);
 }
 
@@ -131,6 +145,15 @@ export async function writeReceipt(client: PoolClient, input: WriteReceiptInput)
         workItemId, input.runId, CATALOGUE_VERSION],
     );
     return { store: 'run_events', outcome: rows[0]!.outcome };
+  }
+  if (input.ruleSetVersion !== undefined && input.ruleSetVersion >= 1) {
+    const ruled = await client.query<{ id: string }>(
+      `SELECT decision_receipt_write_ruled($1::text, $2::text, $3::text, $4::text, $5::integer, $6::jsonb,
+                                           $7::uuid, $8::uuid, $9::integer, $10::integer, $11::text) AS id`,
+      [input.class, input.decisionType, input.chosen, input.rejectedAlternative, input.dialVersion,
+        trustClasses, workItemId, input.runId, CATALOGUE_VERSION, input.ruleSetVersion, input.ruleId ?? null],
+    );
+    return { store: 'decision_receipts', id: ruled.rows[0]!.id };
   }
   const { rows } = await client.query<{ id: string }>(
     `SELECT decision_receipt_write($1::text, $2::text, $3::text, $4::text, $5::integer, $6::jsonb,

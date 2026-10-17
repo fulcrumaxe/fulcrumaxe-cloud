@@ -113,7 +113,7 @@ describe("resume_decision: resume from the answer [pg]", { timeout: 120_000 }, (
     if (o.prompt !== null) await admin.query("INSERT INTO run_events (account_id, run_id, seq, kind, payload) VALUES ($1, $2, 1, 'run.input', $3::jsonb)", [a.accountId, parkedRunId, JSON.stringify({ prompt: o.prompt ?? PROMPT })]);
     const askId = await withTenant(receiptPool, a.accountId, async (c) =>
       (await c.query<{ id: string }>(
-        `SELECT decision_ask_raise('human_in_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'keep', 'because', '["untrusted"]'::jsonb, 60, 'stop_and_flag') AS id`,
+        `SELECT decision_ask_raise('human_in_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'keep', 'because', '["untrusted"]'::jsonb, 60, 'stop_and_flag', 0) AS id`,
         [CLASS3, itemId, parkedRunId, JSON.stringify(OPTIONS)],
       )).rows[0]!.id);
     return { a, itemId, parkedRunId, askId };

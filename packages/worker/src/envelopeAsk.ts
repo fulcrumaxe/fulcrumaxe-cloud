@@ -1,5 +1,9 @@
 import type { Pool } from "pg";
+import { clampRuleOutcome, evaluateRules, platformAskRequest, tightenAskDisposition, usdCeilCents } from "@fx/decisions";
+import { resolveActionRules } from "@fx/db/src/actionRules.js";
 import { raiseAsk } from "@fx/db/src/decisionAsks.js";
+import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
+import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId } from "@fx/spend";
 
@@ -14,7 +18,8 @@ import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId } from "@fx/spend";
  * Nothing in it is customer text: the rationale and the two labels are fixed words and figures.
  */
 
-export type EnvelopeAskOutcome = "raised" | "already_asked" | "no_envelope" | "no_run";
+/** `denied_by_rule`: a customer rule said not to ask. The item stays paused (not cancelled) and the decision is recorded once per envelope version. */
+export type EnvelopeAskOutcome = "raised" | "already_asked" | "no_envelope" | "no_run" | "denied_by_rule";
 
 const FINISHED = ["succeeded", "failed", "timed_out", "killed_spend"];
 const cents = (usd: number): string => `$${(Math.ceil(usd * 100 - 1e-9) / 100).toFixed(2)}`;
@@ -38,6 +43,49 @@ export function createEnvelopeAsk(receiptPool: Pool) {
       ).rows[0];
       if (!run) return "no_run";
       const spent = await envelopeSpentUsd(client, accountId, envelopeId);
+      const nextRun = Math.max(0, input.runUsd);
+
+      // AAP-a4: the customer's rules may only make this stricter. The repo is read here, from the item's own row, never from the caller.
+      const item = (
+        await client.query<{ repo_id: string | null; owner: string | null; name: string | null; kind: string | null }>(
+          `SELECT w.repo_id, r.gh_owner AS owner, r.gh_name AS name, d.kind
+             FROM work_items w LEFT JOIN repos r ON r.account_id = w.account_id AND r.id = w.repo_id
+             LEFT JOIN discussions d ON d.id = w.discussion_id
+            WHERE w.account_id = $1 AND w.id = $2`,
+          [accountId, workItemId],
+        )
+      ).rows[0];
+      const rules = await resolveActionRules(client, item?.repo_id ?? null);
+      const facts = {
+        spent_usd: usdCeilCents(spent),
+        limit_usd: usdCeilCents(envelope.amountUsd),
+        next_run_usd: usdCeilCents(nextRun),
+        proposed_limit_usd: usdCeilCents(spent + nextRun),
+        repo: item?.owner && item?.name ? `${item.owner}/${item.name}` : "",
+        category: item?.kind ?? "",
+      };
+      const request = platformAskRequest("spend_past_envelope");
+      const decision = evaluateRules(rules.rules, request, facts);
+      // The catalogue allows only `ask` here, so `deny` is the only tightening there is.
+      const outcome = tightenAskDisposition("spend_past_envelope", "ask", clampRuleOutcome(decision.outcome, "ask"));
+      if (outcome === "deny" && decision.ruleId !== null) {
+        const dial = item?.repo_id ? await getCurrentDialSetting(client, item.repo_id, "spend_past_envelope") : null;
+        const receipt = await writeReceipt(client, {
+          class: "human_in_the_loop",
+          runId: run.id,
+          workItemId,
+          decisionType: "spend_past_envelope",
+          chosen: "deny",
+          rejectedAlternative: "raise_limit",
+          dialVersion: dial?.version ?? DIAL_VERSION_CATALOGUE_DEFAULT,
+          quotedInputs: [],
+          ruleSetVersion: rules.version,
+          ruleId: decision.ruleId,
+        });
+        if (receipt.store !== "decision_receipts") throw new Error("envelope deny receipt was not durable");
+        await client.query("INSERT INTO envelope_pause_asks (account_id, work_item_id, envelope_id, envelope_version, receipt_id) VALUES ($1, $2, $3, $4, $5)", [accountId, workItemId, envelopeId, envelope.version, receipt.id]);
+        return "denied_by_rule";
+      }
       const askId = await raiseAsk(client, {
         class: "human_in_the_loop",
         decisionType: "spend_past_envelope",
@@ -50,6 +98,7 @@ export function createEnvelopeAsk(receiptPool: Pool) {
         proposed: "raise_limit",
         rationale: `This item has used ${cents(spent)} of its ${cents(envelope.amountUsd)} limit, and its next step needs about ${cents(Math.max(0, input.runUsd))} more. Nothing more starts until you raise the limit or stop the item.`,
         quotedInputs: [],
+        ruleSetVersion: rules.version,
       });
       await client.query("INSERT INTO envelope_pause_asks (account_id, work_item_id, envelope_id, envelope_version, ask_id) VALUES ($1, $2, $3, $4, $5)", [accountId, workItemId, envelopeId, envelope.version, askId]);
       return "raised";

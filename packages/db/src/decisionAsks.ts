@@ -48,6 +48,11 @@ export interface RaiseAskInput {
   policy?: AskPolicy;
   /** The active preset, used when `policy` is omitted. Defaults to the most cautious one. */
   preset?: PresetName;
+  /**
+   * The version of the customer's approval rules this ask was raised under (D#7 AAP-a4); 0, the default, is "no rule set". Stored on the ask
+   * once and never changed. The definer refuses a version above the highest one of the item's scope.
+   */
+  ruleSetVersion?: number;
 }
 
 export type AskErrorCode =
@@ -64,7 +69,8 @@ export type AskErrorCode =
   | 'ask_untrusted_input_not_stored_body'
   | 'ask_window_out_of_range'
   | 'ask_timeout_outcome_invalid'
-  | 'ask_proceed_not_allowed';
+  | 'ask_proceed_not_allowed'
+  | 'ask_rule_set_version_invalid';
 
 /** Thrown before any query is sent. `code` is the named error; branch on it, not on the message. */
 export class AskRaiseError extends Error {
@@ -140,6 +146,9 @@ function validate(input: RaiseAskInput): { trust: string[]; entry: CatalogueEntr
     if (q.trust === 'untrusted' && !isFenced(q.storedBody)) throw new AskRaiseError('ask_untrusted_input_not_stored_body');
   }
 
+  const version = input.ruleSetVersion;
+  if (version !== undefined && (!Number.isInteger(version) || version < 0 || version > 2_147_483_647)) throw new AskRaiseError('ask_rule_set_version_invalid');
+
   return { trust: (quoted as ReceiptQuotedInput[]).map((q) => q.trust), entry };
 }
 
@@ -156,10 +165,10 @@ export async function raiseAsk(client: PoolClient, input: RaiseAskInput): Promis
   checkPolicy(policy, entry);
   const { rows } = await client.query<{ id: string }>(
     `SELECT decision_ask_raise($1::text, $2::text, $3::uuid, $4::uuid, $5::jsonb, $6::text,
-                               $7::text, $8::jsonb, $9::integer, $10::text) AS id`,
+                               $7::text, $8::jsonb, $9::integer, $10::text, $11::integer) AS id`,
     [input.class, input.decisionType, input.workItemId, input.runId ?? null,
       JSON.stringify(input.options.map((o) => ({ id: o.id, label: o.label }))), input.proposed,
-      input.rationale, JSON.stringify(trust), policy.answerWindowMinutes, policy.onTimeout],
+      input.rationale, JSON.stringify(trust), policy.answerWindowMinutes, policy.onTimeout, input.ruleSetVersion ?? 0],
   );
   return rows[0]!.id;
 }
