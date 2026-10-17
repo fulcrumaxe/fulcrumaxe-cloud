@@ -8,7 +8,7 @@
     "bg-overlay": "rgba(22, 33, 62, 0.9)",
     "text-primary": "#ffffff",
     "text-secondary": "rgba(255, 255, 255, 0.7)",
-    "text-muted": "rgba(255, 255, 255, 0.4)",
+    "text-muted": "rgba(255, 255, 255, 0.54)",
     "text-inverse": "#1a1a2e",
     "accent": "#7c3aed",
     "accent-bright": "#9b59b6",

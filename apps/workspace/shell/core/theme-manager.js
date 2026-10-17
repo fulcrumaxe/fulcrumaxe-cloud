@@ -71,14 +71,14 @@ export const FULCTheme = {};
     'white': {
       'accent': '#E0E0E0', 'accent-bright': '#FFFFFF', 'accent-rgb': '224, 224, 224',
       'text-primary': '#E0E0E0', 'text-secondary': 'rgba(224,224,224,0.7)',
-      'text-muted': 'rgba(224,224,224,0.4)', 'border': 'rgba(224,224,224,0.3)',
+      'text-muted': 'rgba(224,224,224,0.54)', 'border': 'rgba(224,224,224,0.3)',
       'border-bright': 'rgba(224,224,224,0.8)',
       'glow-accent': '0 0 8px rgba(224,224,224,0.4)', 'glow-bright': '0 0 12px rgba(224,224,224,0.6)'
     },
     'red': {
       'accent': '#FF4141', 'accent-bright': '#FF6B6B', 'accent-rgb': '255, 65, 65',
-      'text-primary': '#FF4141', 'text-secondary': 'rgba(255,65,65,0.7)',
-      'text-muted': 'rgba(255,65,65,0.4)', 'border': 'rgba(255,65,65,0.3)',
+      'text-primary': '#FF4141', 'text-secondary': 'rgba(255,170,170,0.85)',
+      'text-muted': 'rgba(255,150,150,0.68)', 'border': 'rgba(255,65,65,0.3)',
       'border-bright': 'rgba(255,65,65,0.8)',
       'glow-accent': '0 0 8px rgba(255,65,65,0.6)', 'glow-bright': '0 0 16px rgba(255,65,65,0.9)'
     }
