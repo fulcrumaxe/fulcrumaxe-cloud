@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool, withTenant } from '../src/pg.js';
 import { reserve, type ReserveParams } from '../src/reserve.js';
 import { checkHeadroom } from '../src/headroom.js';
-import { envelopeRunUsd, envelopeSpentUsd } from '../src/envelope.js';
+import { envelopeRunUsd, envelopeSpentUsd, SetEnvelopeError, setWorkItemEnvelope } from '../src/envelope.js';
 import { EnvelopeWriteError, remainingAccountBudgetUsd, writeEnvelopeVersion } from '../src/envelopeWrite.js';
 import { foregroundBudgetUsd } from '../src/plans.js';
 import { seedAccount } from './helpers/seed.js';
@@ -283,6 +283,37 @@ describe('approval envelopes', () => {
       await expect(w({ envelopeId: randomUUID() })).rejects.toMatchObject({ code: 'envelope_not_found' });
       await expect(w({ amountUsd: -1 })).rejects.toMatchObject({ code: 'invalid_amount' });
       await expect(w({ amountUsd: Number.NaN })).rejects.toMatchObject({ code: 'invalid_amount' });
+    });
+
+    it('S5-e1: a limit below the first run\'s reservation is refused envelope_below_first_run before anything else is checked or written; equal to it is fine; 0 voids with no floor', async () => {
+      const f = await fixture(null);
+      const w = (amountUsd: number, minAmountUsd?: number) =>
+        asPerson(f.accountId, f.userId, (c) => writeEnvelopeVersion(c, { accountId: f.accountId, scope: 'item', amountUsd, ...(minAmountUsd !== undefined && { minAmountUsd }) }));
+      await expect(w(1.99, 2)).rejects.toMatchObject({ code: 'envelope_below_first_run' });
+      // The floor is checked before the account budget, so a limit that is both low and over budget names the floor.
+      await expect(w(0, 2)).rejects.toMatchObject({ code: 'envelope_below_first_run' });
+      expect((await admin.query('SELECT count(*)::int AS n FROM approval_envelopes WHERE account_id = $1', [f.accountId])).rows[0].n).toBe(0);
+      expect((await w(2, 2)).version).toBe(1);
+      expect((await w(0)).version).toBe(1);
+    });
+
+    it('S5-e1: setWorkItemEnvelope attaches through the definer, once, for an owner; its refusals carry their codes; a failure inside does not abort the caller\'s transaction', async () => {
+      const f = await fixture(5);
+      const item = randomUUID();
+      await admin.query(`INSERT INTO work_items (id, account_id, kind, provenance) VALUES ($1, $2, 'small', 'internal')`, [item, f.accountId]);
+      const outcome = await asPerson(f.accountId, f.userId, async (c) => {
+        const first = await setWorkItemEnvelope(c, item, f.envelopeId);
+        const again = await setWorkItemEnvelope(c, item, f.envelopeId);
+        const refused = await setWorkItemEnvelope(c, item, (await writeEnvelopeVersion(c, { accountId: f.accountId, scope: 'item', amountUsd: 1 })).envelopeId).catch((e: unknown) => e);
+        // The transaction is still usable after the refusal (the savepoint was rolled back, not the whole transaction).
+        const still = await c.query('SELECT envelope_id FROM work_items WHERE id = $1', [item]);
+        return { first, again, refused, still: still.rows[0].envelope_id };
+      });
+      expect(outcome.first).toBe(true);
+      expect(outcome.again).toBe(false);
+      expect(outcome.refused).toBeInstanceOf(SetEnvelopeError);
+      expect((outcome.refused as SetEnvelopeError).code).toBe('envelope_already_set');
+      expect(outcome.still).toBe(f.envelopeId);
     });
 
     it('two writers racing to the same next version: one wins, the other gets version_conflict', async () => {

@@ -1,0 +1,20 @@
+{
+  "repo_id": "66666666-6666-4666-8666-666666666666",
+  "proposals": [
+    {
+      "proposal_id": "55555555-5555-4555-8555-555555555555",
+      "basis": "seed",
+      "reason": null,
+      "total_usd": 55.4167,
+      "slot_phase_usd": 31.2,
+      "estimated": false
+    }
+  ],
+  "total_usd": 55.4167,
+  "margin_pct": 20,
+  "prefill_usd": 66.5,
+  "capped": false,
+  "needs_amount": false,
+  "remaining_budget_usd": 601.1,
+  "first_run_usd": 44.0003
+}

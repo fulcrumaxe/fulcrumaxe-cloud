@@ -218,7 +218,8 @@ export function buildOpenApiDocument(routes: readonly RouteEntry[]): OpenApiDocu
       ...(route.bodySchema
         ? {
             requestBody: {
-              required: true,
+              // An optional body schema (an approve with nothing to set) is optional in the contract too.
+              required: !route.bodySchema.safeParse(undefined).success,
               content: {
                 "application/json": {
                   schema: z.toJSONSchema(route.bodySchema, { target: "draft-2020-12" }),

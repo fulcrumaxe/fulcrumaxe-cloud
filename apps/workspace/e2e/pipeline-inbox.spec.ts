@@ -614,3 +614,140 @@ test.describe("D#483 S3-L2b fix round: focus, announcements and names", () => {
     for (const extra of box.panelScroll) expect(extra).toBeLessThanOrEqual(1);
   });
 });
+
+test.describe("D#483 S5-e1: the limit a person gives an item as they approve it", () => {
+  const AMOUNT_SENTENCE = "Set a limit for this item: we can't estimate it yet";
+  const amount = (page: Page) => tid(page, "pl-inbox-amount");
+  const bodyOf = (m: PlanMock, i: number) => JSON.parse(m.posts[i].body ?? "{}");
+  const rowOf = (page: Page, n: number) => page.locator(`${WIN} [data-id="${proposal(n).id}"]`);
+
+  test("no estimate: the Spec sentence and an empty field; nothing is sent until a valid limit is typed, then approve sends amount_usd", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.estimates = { [proposal(1).id]: { basis: "none", total_usd: null } };
+    const { errors } = await start(page, m);
+    await expect(tid(page, "pl-inbox-amount-line")).toHaveText(AMOUNT_SENTENCE);
+    await expect(page.locator(`${WIN} label.pl-inbox-amountlabel`)).toContainText("Limit for this item (USD)");
+    await expect(amount(page)).toHaveValue("");
+    await axeClean(page);
+    // Empty, not a number, zero, and more than the account can still spend: each says what to fix and sends nothing.
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-sentence")).toHaveText(AMOUNT_SENTENCE);
+    for (const [typed, words] of [["abc", "Enter a limit in dollars"], ["0", "Enter a limit above $0."], ["438", "Enter a limit of $437.00 or less"]] as const) {
+      await amount(page).fill(typed);
+      await press(page, tid(page, "pl-inbox-approve"));
+      await expect(tid(page, "pl-inbox-sentence")).toContainText(words);
+    }
+    expect(m.posts).toHaveLength(0);
+    await amount(page).fill("25.50");
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-note-line")).toContainText("Approved and started.");
+    expect(m.posts).toHaveLength(1);
+    expect(bodyOf(m, 0)).toEqual({ amount_usd: 25.5 });
+    await clean(page, errors);
+  });
+
+  test("with an estimate the field is pre-filled from it (total x margin, capped at the remaining budget) and the person can change it", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1), proposal(2), proposal(3)];
+    m.estimates = {
+      [proposal(1).id]: { basis: "seed", total_usd: 100 },
+      [proposal(2).id]: { basis: "seed", total_usd: 1000 },
+      [proposal(3).id]: { basis: "history", total_usd: 3 },
+    };
+    const { errors } = await start(page, m);
+    await expect(rows(page)).toHaveCount(3);
+    const field = (n: number) => rowOf(page, n).locator('[data-testid="pl-inbox-amount"]');
+    await expect(field(1)).toHaveValue("120");
+    await expect(field(2)).toHaveValue("437"); // 1,200 capped at what the account can still spend
+    await expect(field(3)).toHaveValue("3.6");
+    await expect(tid(page, "pl-inbox-amount-line")).toHaveCount(0);
+    // Sent as it stands.
+    await press(page, rowOf(page, 1).locator('[data-testid="pl-inbox-approve"]'));
+    await expect(tid(page, "pl-inbox-note-line")).toContainText("Approved and started.");
+    expect(bodyOf(m, 0)).toEqual({ amount_usd: 120 });
+    // Changed.
+    await field(3).fill("7");
+    await press(page, rowOf(page, 3).locator('[data-testid="pl-inbox-approve"]'));
+    await expect(tid(page, "pl-inbox-note-line")).toContainText("Approved and started.");
+    expect(bodyOf(m, 1)).toEqual({ amount_usd: 7 });
+    await clean(page, errors);
+  });
+
+  test("rows on the second page get their estimate and pre-fill too", async ({ page }) => {
+    const m = newMock();
+    m.pageSize = 2;
+    m.proposals = [proposal(1), proposal(2), proposal(3)];
+    m.estimates = {
+      [proposal(1).id]: { basis: "seed", total_usd: 10 },
+      [proposal(2).id]: { basis: "seed", total_usd: 20 },
+      [proposal(3).id]: { basis: "seed", total_usd: 100 },
+    };
+    const { errors } = await start(page, m);
+    await expect(rows(page)).toHaveCount(2);
+    await expect(rowOf(page, 2).locator('[data-testid="pl-inbox-amount"]')).toHaveValue("24");
+    await press(page, tid(page, "pl-inbox-more"));
+    await expect(rows(page)).toHaveCount(3);
+    await expect(rowOf(page, 3).locator('[data-testid="pl-inbox-amount"]')).toHaveValue("120");
+    await clean(page, errors);
+  });
+
+  test("when what is left this month is below the first run's cost the refusal says to raise the monthly budget", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.estimates = { [proposal(1).id]: { basis: "none", total_usd: null } };
+    m.estimateMeta = { margin_pct: 20, remaining_budget_usd: 4, first_run_usd: 10 };
+    const { errors } = await start(page, m);
+    await amount(page).fill("3");
+    m.decide = [refusal(409, "envelope_below_first_run")];
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-sentence")).toHaveText("Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.");
+    await expect(amount(page)).toHaveValue("3");
+    await axeClean(page);
+    await clean(page, errors);
+  });
+
+  test("the server's refusals read as their own sentences, keep the typed limit and let the person try again", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    m.estimates = { [proposal(1).id]: { basis: "none", total_usd: null } };
+    const { errors } = await start(page, m);
+    await amount(page).fill("1");
+    const cases: [number, string, string][] = [
+      [409, "envelope_below_first_run", "That limit is too low to start this item. Enter a higher one."],
+      [409, "over_account_budget", "That limit is more than this account can still spend this month."],
+      [400, "amount_required", AMOUNT_SENTENCE],
+    ];
+    for (const [status, code, words] of cases) {
+      m.decide = [refusal(status, code)];
+      await press(page, tid(page, "pl-inbox-approve"));
+      await expect(tid(page, "pl-inbox-sentence")).toHaveText(words);
+      await expect(amount(page)).toHaveValue("1");
+      await expect(tid(page, "pl-inbox-approve")).toBeEnabled();
+    }
+    await axeClean(page);
+    // Changing the limit after an unknown outcome is a new request: it gets a new key.
+    m.decide = [{ status: 0, abort: true }];
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-sentence")).toBeVisible();
+    const firstKey = m.posts.at(-1)?.key;
+    await amount(page).fill("40");
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-note-line")).toContainText("Approved and started.");
+    expect(m.posts.at(-1)?.key).not.toBe(firstKey);
+    expect(bodyOf(m, m.posts.length - 1)).toEqual({ amount_usd: 40 });
+    await clean(page, errors);
+  });
+
+  test("when the estimate cannot be read the field stays, blank and optional, and approve sends no body", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1)];
+    const { errors } = await start(page, m);
+    await expect(amount(page)).toHaveValue("");
+    await expect(tid(page, "pl-inbox-amount-line")).toHaveCount(0);
+    await press(page, tid(page, "pl-inbox-approve"));
+    await expect(tid(page, "pl-inbox-note-line")).toContainText("Approved and started.");
+    expect(m.posts[0].body).toBeNull();
+    await clean(page, errors);
+  });
+});

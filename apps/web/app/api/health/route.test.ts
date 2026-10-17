@@ -76,6 +76,28 @@ describe("GET /api/health", () => {
     }
   });
 
+  it("D#483 S5-e1: the operator is told, by a fixed code, when the envelope margin figure is absent; anonymous callers and the verdict are not", async () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
+      resetPlanDataCache();
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: [] });
+      const data = JSON.parse(process.env.FX_PLAN_DATA!);
+      delete data.envelope;
+      process.env.FX_PLAN_DATA = JSON.stringify(data);
+      resetPlanDataCache();
+      const operator = await call(env, bearer(OPERATOR_SECRET));
+      expect(operator.status).toBe(200);
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured"] });
+      const anonymous = await call(env);
+      expect(anonymous.status).toBe(200);
+      expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
+    } finally {
+      if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
   it("gives the operator the missing and invalid names, by name and fixed reason", async () => {
     const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET, FX_KEK_V1: "short-and-not-base64" };
     delete env.FX_CURSOR_KEY_V1;

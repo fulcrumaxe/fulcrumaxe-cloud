@@ -78,3 +78,16 @@ export function planDataStatus(): 'ok' | 'missing' {
     throw error;
   }
 }
+
+/**
+ * D#483 S5-e1: `envelope.defaultMarginPct`, or null when plan data is unavailable or carries no such figure. Null is not a default: the caller pre-fills
+ * the bare estimate and the health check reports `envelope_margin_unconfigured`. Never throws.
+ */
+export function envelopeDefaultMarginPct(): number | null {
+  try {
+    return loadPlanData().envelope?.defaultMarginPct ?? null;
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return null;
+    throw error;
+  }
+}

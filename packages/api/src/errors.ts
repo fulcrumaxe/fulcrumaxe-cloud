@@ -366,10 +366,41 @@ const PROPOSAL_REFUSALS: Record<string, string> = {
   repo_not_connected: "this repository isn't connected any more",
   work_item_wrong_repo: "the work item belongs to another repository",
   work_item_wrong_stage: "this issue is already in flight: its work item has moved past triaged",
+  // D#483 S5-e1: the envelope setter's own refusals.
+  envelope_already_set: "the work item already draws on another envelope",
+  envelope_scope: "that envelope is not one a person's approval can attach",
+  envelope_repo_mismatch: "the envelope belongs to another repository",
+  envelope_taken: "that item envelope already belongs to another work item",
 };
 export class ProposalRefusedApiError extends ApiError {
   constructor(code: string) {
     super(409, code, PROPOSAL_REFUSALS[code] ?? "refused");
+  }
+}
+
+/**
+ * D#483 S5-e1: the three refusals of an approval's envelope. Each is answered before anything is written, so a refused approve leaves no work item,
+ * no roadmap position and no envelope behind. The codes are on the telemetry allowlist by hand because the scan cannot read a variable.
+ */
+export class AmountRequiredError extends ApiError {
+  constructor(scope: "item" | "batch") {
+    super(
+      400,
+      "amount_required",
+      scope === "item" ? "Set a limit for this item: we can't estimate it yet" : "Set a limit for this set: at least one item in it can't be estimated yet",
+    );
+  }
+}
+
+export class OverAccountBudgetError extends ApiError {
+  constructor() {
+    super(409, "over_account_budget", "that limit is more than the account can still spend this month");
+  }
+}
+
+export class EnvelopeBelowFirstRunError extends ApiError {
+  constructor() {
+    super(409, "envelope_below_first_run", "that limit is below what the first step of the item reserves");
   }
 }
 

@@ -657,6 +657,9 @@ export const FILTERS = [
   { key: "own_loop", label: "Your own loop", query: "owner=internal_loop", empty: "None of this repository's items belong to your own development loop." },
 ];
 
+/** Shown instead of "Enter a higher one" when the remaining monthly budget is below the first run's cost. Fixed text. */
+export const LOW_BUDGET_SENTENCE = "Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.";
+
 /** The sentence a person reads after a refusal or a failed call, by the code the server (or the network) answered with. */
 export const REFUSALS = {
   not_new: "This proposal isn't waiting for a decision any more, so nothing was changed. The list has been refreshed.",
@@ -667,6 +670,9 @@ export const REFUSALS = {
   repo_not_connected: "This repository isn't connected any more, so nothing was changed. Install the GitHub App on it again to approve its proposals.",
   work_item_wrong_repo: "The work item for this proposal belongs to another repository, so nothing was changed.",
   work_item_wrong_stage: "The work item for this proposal has already moved past Triaged, so nothing was changed.",
+  amount_required: "Set a limit for this item: we can't estimate it yet",
+  envelope_below_first_run: "That limit is too low to start this item. Enter a higher one.",
+  over_account_budget: "That limit is more than this account can still spend this month.",
   insufficient_role: "Only an owner or an admin can decide proposals.",
   session_required: "Sign in again to do this.",
   run_actions_unavailable: "Starting work isn't available right now, so nothing was changed. Try again later.",
@@ -683,12 +689,43 @@ const RATE = Symbol("rate");
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 /** The sentence for a failed call: a 429 counts down, a known code has its own sentence, anything else is generic. */
-export function refusalSentence(e) {
+export function refusalSentence(e, est) {
   if (isRateLimited(e)) return "You're changing things too fast. " + retryWords(waitSeconds(e));
   const code = e && typeof e.code === "string" ? e.code : "";
+  // A higher limit cannot help when what the account has left is itself below the first run's cost.
+  if (code === "envelope_below_first_run" && est && isNum(est.remaining) && isNum(est.firstRun) && est.remaining < est.firstRun) return LOW_BUDGET_SENTENCE;
   if (has(REFUSALS, code)) return REFUSALS[code];
   if (e && e.kind === "server_error") return REFUSALS.server_error;
   return INBOX_GENERIC;
+}
+
+// D#483 S5-e1: the limit a person gives an item as they approve it.
+export const AMOUNT_LABEL = "Limit for this item (USD)";
+/** The Spec's sentence for a proposal with no estimate; shown beside the field and again if the server answers `amount_required`. */
+export const AMOUNT_SENTENCE = REFUSALS.amount_required;
+const AMOUNT_RE = /^\d+(\.\d{1,4})?$/;
+const round4 = (n) => Math.round(n * 1e4) / 1e4;
+const dollars = (n) => "$" + n.toFixed(2);
+
+/** The pre-fill the server computes (total x (1 + margin), capped at the remaining budget), from the figures the estimate route returns. */
+export function prefillAmount(total, marginPct, remaining) {
+  const want = round4(total * (1 + (isNum(marginPct) ? marginPct : 0) / 100));
+  const cap = Math.floor(Math.max(0, remaining) * 1e4 + 1e-9) / 1e4;
+  return want > cap ? cap : want;
+}
+
+/**
+ * What the field holds, checked before anything is sent. `est` is that proposal's estimate (or undefined when it could not be read).
+ * { ok: true, amount } where amount is a number, or null to send no amount (the server pre-fills); else { ok: false, sentence }.
+ */
+export function checkAmount(text, est) {
+  const t = typeof text === "string" ? text.trim() : "";
+  if (t === "") return est && est.basis === "none" ? { ok: false, sentence: AMOUNT_SENTENCE } : { ok: true, amount: null };
+  if (!AMOUNT_RE.test(t)) return { ok: false, sentence: "Enter a limit in dollars, like 12.50." };
+  const n = Number(t);
+  if (!(n > 0)) return { ok: false, sentence: "Enter a limit above $0." };
+  if (est && isNum(est.remaining) && n > est.remaining) return { ok: false, sentence: "Enter a limit of " + dollars(Math.floor(est.remaining * 100) / 100) + " or less: that is what this account can still spend this month." };
+  return { ok: true, amount: n };
 }
 
 /** True when the failure leaves the outcome unknown (the call may have been processed), so a retry must replay its key. */
@@ -793,6 +830,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
   const rowNote = new Map(); // proposal id -> the sentence under its buttons
   const notes = new Map(); // proposal id -> the reject note being typed
   const keys = new Map(); // proposal id -> the Idempotency-Key of an approve whose outcome is unknown
+  const amounts = new Map(); // proposal id -> the limit being typed (a string)
+  const estimates = new Map(); // proposal id -> { basis, remaining, ... } from the estimate route; absent when it could not be read
   const sending = new Set();
   let ac = null;
   let seq = 0;
@@ -839,6 +878,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       rowNote.clear();
       notes.clear();
       keys.clear();
+      amounts.clear();
+      estimates.clear();
     }
     if (!keepNotes) note = "";
     ac = new AbortController();
@@ -856,6 +897,31 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       status = "error";
     }
     paint();
+    if (status === "ready") void loadEstimates(repo, mine);
+  }
+
+  /** The estimate of every new, product-owned row not yet read, in sets of 50 (the route's limit). A failure leaves the field blank and optional. */
+  async function loadEstimates(repo, mine) {
+    const wanted = rows.filter((r) => r.state === "new" && r.owner_process !== "internal_loop" && !estimates.has(r.id)).map((r) => r.id);
+    for (let i = 0; i < wanted.length; i += 50) {
+      const ids = wanted.slice(i, i + 50);
+      try {
+        const res = await call("GET", "/api/v1/repos/" + encodeURIComponent(repo.id) + "/proposals/estimate?ids=" + ids.map(encodeURIComponent).join(","));
+        if (mine !== seq || destroyed) return;
+        const list = res && Array.isArray(res.proposals) ? res.proposals : [];
+        for (const e of list) {
+          if (!e || typeof e.proposal_id !== "string" || !ids.includes(e.proposal_id)) continue;
+          const est = { basis: e.basis, remaining: isNum(res.remaining_budget_usd) ? res.remaining_budget_usd : undefined, firstRun: isNum(res.first_run_usd) ? res.first_run_usd : undefined };
+          estimates.set(e.proposal_id, est);
+          if (e.basis !== "none" && isNum(e.total_usd) && isNum(res.remaining_budget_usd) && !amounts.has(e.proposal_id)) {
+            amounts.set(e.proposal_id, String(prefillAmount(e.total_usd, isNum(res.margin_pct) ? res.margin_pct : null, res.remaining_budget_usd)));
+          }
+        }
+        paint();
+      } catch {
+        if (mine !== seq || destroyed) return;
+      }
+    }
   }
 
   async function loadMore() {
@@ -877,10 +943,24 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     }
     moreBusy = false;
     paint();
+    // The rows added by this page get their estimate (and pre-fill) like the first page's.
+    if (!moreFailed) void loadEstimates(repo, mine);
   }
 
   async function act(p, path) {
     if (sending.has(p.id) || limited > 0) return;
+    let amount = null;
+    if (path === "approve") {
+      // Checked before anything is sent: a bad limit never costs a request, and says what to fix.
+      const checked = checkAmount(amounts.get(p.id) || "", estimates.get(p.id));
+      if (!checked.ok) {
+        rowNote.set(p.id, checked.sentence);
+        announce(checked.sentence);
+        paint();
+        return;
+      }
+      amount = checked.amount;
+    }
     sending.add(p.id);
     rowNote.set(p.id, INBOX_SENDING[path]);
     announce(INBOX_SENDING[path]);
@@ -894,6 +974,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       }
     }
     let body;
+    if (path === "approve" && amount !== null) body = { amount_usd: amount };
     if (path === "reject") {
       const text = (notes.get(p.id) || "").trim();
       body = { note: text === "" ? null : text };
@@ -902,6 +983,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       const res = await call("POST", "/api/v1/proposals/" + encodeURIComponent(p.id) + "/" + path, body, undefined, path === "approve" ? opts : undefined);
       keys.delete(p.id);
       notes.delete(p.id);
+      amounts.delete(p.id);
+      estimates.delete(p.id);
       rowNote.delete(p.id);
       note = path === "approve" ? approvedSentence(res) : INBOX_DONE[path];
       announce(note);
@@ -915,7 +998,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         return;
       }
       if (!outcomeUnknown(e)) keys.delete(p.id);
-      const sentence = refusalSentence(e);
+      const sentence = refusalSentence(e, estimates.get(p.id));
       sending.delete(p.id);
       rowNote.set(p.id, isRateLimited(e) ? RATE : sentence);
       if (isRateLimited(e)) gate.start(waitSeconds(e));
@@ -958,7 +1041,27 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         "data-testid": "pl-inbox-note",
         onInput: (e) => notes.set(p.id, e.target.value),
       });
+      const aid = "pl-amount-" + p.id;
+      const est = estimates.get(p.id);
+      const amountInput = h("input", {
+        type: "text",
+        id: aid,
+        class: "pl-inbox-amount",
+        inputMode: "decimal",
+        autocomplete: "off",
+        value: amounts.get(p.id) || "",
+        "aria-describedby": est && est.basis === "none" ? aid + "-line" : null,
+        "data-focus": p.id + ":amount",
+        "data-testid": "pl-inbox-amount",
+        onInput: (e) => {
+          // A different limit is a different request: an Idempotency-Key kept for an unknown outcome would be refused as reused.
+          if (e.target.value !== (amounts.get(p.id) || "")) keys.delete(p.id);
+          amounts.set(p.id, e.target.value);
+        },
+      });
       return [
+        est && est.basis === "none" ? h("p", { class: "pl-inbox-line", id: aid + "-line", "data-testid": "pl-inbox-amount-line" }, AMOUNT_SENTENCE) : null,
+        h("label", { class: "pl-inbox-amountlabel", for: aid }, AMOUNT_LABEL, amountInput),
         button("Approve", p, "approve"),
         repo && !repo.connected ? h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-detached" }, DETACHED_SENTENCE) : null,
         h("label", { class: "pl-inbox-notelabel", for: id }, h("span", { class: "pl-sr" }, "Reason for rejecting " + p.title + " (optional)"), input),

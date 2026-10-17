@@ -196,6 +196,9 @@
 .pl-inbox-badges, .pl-inbox-details, .pl-inbox-line { margin: 2px 0; }
 .pl-inbox-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
 .pl-inbox-notelabel { display: inline-flex; }
+.pl-inbox-amountlabel { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pl-inbox-amount { box-sizing: border-box; min-height: 44px; width: 9em; max-width: 100%; padding: 4px 8px; background: var(--bg-base, #000); color: inherit; border: 1px solid var(--accent, #1aff80); font: inherit; }
+.pl-inbox-amount:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .pl-inbox-note { box-sizing: border-box; min-height: 44px; min-width: 12em; max-width: 100%; padding: 4px 8px; background: var(--bg-base, #000); color: inherit; border: 1px solid var(--accent, #1aff80); font: inherit; }
 .pl-inbox-sentence, .pl-plan-sentence { margin: 6px 0; overflow-wrap: anywhere; }
 .pl-inbox-more { margin-top: 6px; }

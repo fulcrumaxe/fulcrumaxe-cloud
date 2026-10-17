@@ -25404,7 +25404,7 @@
       "post": {
         "operationId": "approveProposal",
         "summary": "Approve a proposal onto the roadmap",
-        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction. Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal and work item and creates nothing; if its start was never requested it is requested now. If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
+        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. The envelope is pre-filled to the priced estimate times (1 + the default margin), capped at what the account can still spend this month. The body is optional: `amount_usd` sets the limit yourself, and is required when the proposal cannot be priced yet (a question, or no category), which otherwise answers 400 `amount_required` and writes nothing. A limit below the first run's reservation is refused 409 `envelope_below_first_run`, and one above the remaining budget 409 `over_account_budget`. Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal, work item and envelope and creates nothing; if its start was never requested it is requested now. If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
         "security": [
           {
             "session": []
@@ -25421,6 +25421,25 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "amount_usd": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 99999999
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Approve a proposal onto the roadmap",
@@ -25753,6 +25772,59 @@
                       "format": "uuid",
                       "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                     },
+                    "envelope": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "envelope_id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "scope": {
+                              "type": "string",
+                              "enum": [
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "version": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "amount_usd": {
+                              "type": "number"
+                            },
+                            "estimate_usd": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            },
+                            "margin_pct": {
+                              "type": [
+                                "number",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "envelope_id",
+                            "scope",
+                            "version",
+                            "amount_usd",
+                            "estimate_usd",
+                            "margin_pct"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "started": {
                       "type": "boolean"
                     },
@@ -25774,10 +25846,21 @@
                   "required": [
                     "proposal",
                     "work_item_id",
+                    "envelope",
                     "started",
                     "not_started_reason"
                   ],
                   "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error `amount_required`: the proposal cannot be priced yet and no `amount_usd` was given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -25813,7 +25896,7 @@
             }
           },
           "409": {
-            "description": "Error `owned_by_internal_loop`, `not_new`, `repo_not_connected`, `work_item_wrong_repo` or `work_item_wrong_stage`.",
+            "description": "Error `owned_by_internal_loop`, `not_new`, `repo_not_connected`, `work_item_wrong_repo`, `work_item_wrong_stage`, `work_started`, `envelope_below_first_run` or `over_account_budget`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -27256,6 +27339,809 @@
         }
       }
     },
+    "/api/v1/repos/{id}/proposals/estimate": {
+      "get": {
+        "operationId": "estimateProposals",
+        "summary": "The priced estimate of some proposals, with the margin, the remaining budget and the envelope pre-fill",
+        "description": "`ids` is a comma-separated list of up to 50 proposal ids of this repository. Each is priced for the whole pipeline it will go through (`basis` is `history` or `seed`), or has `basis: none` when it cannot be priced (a question, or no category). `prefill_usd` is the sum times (1 + `margin_pct`), capped at `remaining_budget_usd`; it is null while any proposal has no estimate, and `needs_amount` is then true. With no margin configured the pre-fill is the bare estimate. `first_run_usd` is the smallest limit that could start the item. Reads only; any member, session or read token.",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "token": [
+              "read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The priced estimate of some proposals, with the margin, the remaining budget and the envelope pre-fill",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "repo_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "proposals": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "proposal_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "basis": {
+                            "type": "string",
+                            "enum": [
+                              "history",
+                              "seed",
+                              "none"
+                            ]
+                          },
+                          "reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "total_usd": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "slot_phase_usd": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "estimated": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "proposal_id",
+                          "basis",
+                          "reason",
+                          "total_usd",
+                          "slot_phase_usd",
+                          "estimated"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "total_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "margin_pct": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "prefill_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "capped": {
+                      "type": "boolean"
+                    },
+                    "needs_amount": {
+                      "type": "boolean"
+                    },
+                    "remaining_budget_usd": {
+                      "type": "number"
+                    },
+                    "first_run_usd": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "repo_id",
+                    "proposals",
+                    "total_usd",
+                    "margin_pct",
+                    "prefill_usd",
+                    "capped",
+                    "needs_amount",
+                    "remaining_budget_usd",
+                    "first_run_usd"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error `invalid_input`: `ids` is empty, has more than 50 ids, repeats one or holds something that is not an id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: the repository or one of the proposals is not in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`. Carries an integer `Retry-After` in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/repos/{id}/proposals/approve-batch": {
+      "post": {
+        "operationId": "approveProposalBatch",
+        "summary": "Approve a set of proposals under one batch envelope",
+        "description": "Session only, owner or admin; a token is refused. `Idempotency-Key` is required: a replay with the same key answers the same envelope and work items and creates nothing. Every proposal must be `new` and product-owned, and belong to this repository; one that is not refuses the whole set (409) and nothing is written. The set shares ONE `batch` envelope of `amount_usd`, or, when it is omitted, of the pre-fill (the sum of the estimates times (1 + margin), capped at the remaining budget). A set holding a proposal that cannot be priced needs an explicit `amount_usd` (400 `amount_required`). A limit below the first run's reservation is refused 409 `envelope_below_first_run`, and one above the remaining budget 409 `over_account_budget`. Each work item is created and its start requested exactly as a single approve does it. If a start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "required",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "proposal_ids": {
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    }
+                  },
+                  "amount_usd": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 99999999
+                  }
+                },
+                "required": [
+                  "proposal_ids"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approve a set of proposals under one batch envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "envelope": {
+                      "type": "object",
+                      "properties": {
+                        "envelope_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "scope": {
+                          "type": "string",
+                          "enum": [
+                            "item",
+                            "batch"
+                          ]
+                        },
+                        "version": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "amount_usd": {
+                          "type": "number"
+                        },
+                        "estimate_usd": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "margin_pct": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "envelope_id",
+                        "scope",
+                        "version",
+                        "amount_usd",
+                        "estimate_usd",
+                        "margin_pct"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "proposal": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "repo_id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "dedupe_key": {
+                                "type": "string"
+                              },
+                              "sources": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "gh_number": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "discussion_number": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "task_key": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "milestone_key": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "milestone_title": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "title": {
+                                "type": "string"
+                              },
+                              "summary": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "category_hint": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "estimate_usd": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ]
+                              },
+                              "provenance": {
+                                "type": "string",
+                                "enum": [
+                                  "internal",
+                                  "external"
+                                ]
+                              },
+                              "owner_process": {
+                                "type": "string",
+                                "enum": [
+                                  "product",
+                                  "internal_loop"
+                                ]
+                              },
+                              "state": {
+                                "type": "string",
+                                "enum": [
+                                  "new",
+                                  "approved",
+                                  "rejected",
+                                  "withdrawn"
+                                ]
+                              },
+                              "decided_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "reject_note": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "reject_kind": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "not_now",
+                                      "never"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "resurface_after": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "resurfaced_at": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "roadmap_position": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "work_item_id": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "uuid",
+                                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "work_item_stage": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "created_at": {
+                                "type": "string"
+                              },
+                              "updated_at": {
+                                "type": "string"
+                              },
+                              "verification": {
+                                "type": "string",
+                                "enum": [
+                                  "pending",
+                                  "verified",
+                                  "partly_verified",
+                                  "refuted",
+                                  "not_checked",
+                                  "check_failed"
+                                ],
+                                "description": "What the verifier last saw. `pending` until the first check."
+                              },
+                              "verified_at": {
+                                "description": "When the last check finished; null until the first one.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "verified_sha": {
+                                "description": "The commit the last check read; null until the first one.",
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "verify_attempts": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991,
+                                "description": "Consecutive failed checks. A real verdict resets it to 0."
+                              },
+                              "verify_attempts_max": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991,
+                                "description": "The number of failed checks after which the verifier stops trying."
+                              },
+                              "verify_retry": {
+                                "type": "boolean",
+                                "description": "True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."
+                              },
+                              "inbox_section": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "enum": [
+                                      "new",
+                                      "being_checked",
+                                      "couldnt_confirm",
+                                      "not_checked"
+                                    ]
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "description": "Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."
+                              },
+                              "claim_counts": {
+                                "type": "object",
+                                "properties": {
+                                  "supported": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "refuted": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "unverifiable": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "pending": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  }
+                                },
+                                "required": [
+                                  "supported",
+                                  "refuted",
+                                  "unverifiable",
+                                  "pending"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "evidence_count": {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "repo_id",
+                              "dedupe_key",
+                              "sources",
+                              "gh_number",
+                              "discussion_number",
+                              "task_key",
+                              "milestone_key",
+                              "milestone_title",
+                              "title",
+                              "summary",
+                              "category_hint",
+                              "estimate_usd",
+                              "provenance",
+                              "owner_process",
+                              "state",
+                              "decided_at",
+                              "reject_note",
+                              "reject_kind",
+                              "resurface_after",
+                              "resurfaced_at",
+                              "roadmap_position",
+                              "work_item_id",
+                              "work_item_stage",
+                              "created_at",
+                              "updated_at",
+                              "verification",
+                              "verified_at",
+                              "verified_sha",
+                              "verify_attempts",
+                              "verify_attempts_max",
+                              "verify_retry",
+                              "inbox_section",
+                              "claim_counts",
+                              "evidence_count"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "work_item_id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "started": {
+                            "type": "boolean"
+                          },
+                          "not_started_reason": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "no_write_install",
+                                  "owned_by_internal_loop"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "proposal",
+                          "work_item_id",
+                          "started",
+                          "not_started_reason"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "envelope",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error `amount_required`: a proposal in the set cannot be priced and no `amount_usd` was given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error `not_found`: the repository or one of the proposals is not in this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `not_new`, `owned_by_internal_loop`, `work_started`, `envelope_below_first_run` or `over_account_budget`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet. Nothing was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/work-items/{id}/corrections": {
       "post": {
         "operationId": "createCorrection",
@@ -27781,7 +28667,7 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
@@ -28045,7 +28931,7 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {

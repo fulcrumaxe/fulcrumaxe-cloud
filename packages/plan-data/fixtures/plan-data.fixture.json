@@ -85,5 +85,6 @@
     "featureUsd": 2.5,
     "smallUsd": 3.5,
     "maxFixRounds": 7
-  }
+  },
+  "envelope": { "defaultMarginPct": 20 }
 }

@@ -21,12 +21,43 @@ import { mapRefusal, ProposalRefusedError, readProposal, proposalTenant, UUID_RE
  * fails, the approval stands and the work item waits at Triaged; approving the same proposal again (a repeat) finds it
  * approved, still at triaged with no run, and files the start again. A start is never filed twice: the request is deduped
  * by the run-action definer (one live request per kind and target, and the idempotency key).
+ *
+ * D#483 S5-e1: the click also gives the item its spend envelope, in the same transaction. This package cannot price an estimate
+ * (that is the pipeline's, and the pipeline depends on this package), so the caller passes a `PlanEnvelope`: it runs inside the
+ * transaction before anything is approved, may refuse (nothing is written then), and returns the function that attaches the
+ * envelope it wrote to each new work item. A repeat of an approved proposal creates no second envelope.
  */
 export type NotStartedReason = 'no_write_install' | 'owned_by_internal_loop';
+
+/** The current version of an envelope, as the approve routes show it. */
+export interface EnvelopeAttachment {
+  envelope_id: string;
+  scope: 'item' | 'batch';
+  version: number;
+  amount_usd: number;
+  estimate_usd: number | null;
+  margin_pct: number | null;
+}
+
+/** What a planner may price from: the proposal facts that decide its category and prompt. */
+export interface ProposalToApprove {
+  id: string;
+  repo_id: string;
+  title: string;
+  summary: string | null;
+  category_hint: string | null;
+}
+
+/** Attaches the envelope the planner wrote to a work item (through the definer), and says what it attached. */
+export type AttachEnvelope = (c: PoolClient, workItemId: string) => Promise<EnvelopeAttachment>;
+/** Runs in the approval's transaction, before any proposal is approved, for the proposals that are about to be approved. A throw writes nothing. */
+export type PlanEnvelope = (c: PoolClient, proposals: ProposalToApprove[]) => Promise<AttachEnvelope>;
 
 export interface ApproveResult {
   proposal: ProposalRow;
   work_item_id: string;
+  /** The item's envelope (written by this call, or the one a repeat finds); null for an item approved before envelopes existed. */
+  envelope: EnvelopeAttachment | null;
   /** True when THIS call filed the start. A repeat of an approved proposal answers false unless it filed the start it found missing. */
   started: boolean;
   not_started_reason: NotStartedReason | null;
@@ -49,7 +80,22 @@ interface ProposalFacts {
   state: string;
   gh_number: number | null;
   title: string;
+  summary: string | null;
+  category_hint: string | null;
   work_item_id: string | null;
+}
+
+const FACTS_SQL = 'SELECT repo_id, owner_process, state, gh_number, title, summary, category_hint, work_item_id FROM proposals WHERE id = $1::uuid';
+
+/** The current version of the envelope an item draws on, or null when it draws on none. */
+export async function readItemEnvelope(c: PoolClient, workItemId: string): Promise<EnvelopeAttachment | null> {
+  const { rows } = await c.query<EnvelopeAttachment>(
+    `SELECT e.id AS envelope_id, e.scope, e.version, e.amount_usd::float8 AS amount_usd, e.estimate_usd::float8 AS estimate_usd, e.margin_pct::float8 AS margin_pct
+       FROM work_items w JOIN approval_envelopes e ON e.account_id = w.account_id AND e.id = w.envelope_id
+      WHERE w.id = $1::uuid AND e.scope IN ('item', 'batch') ORDER BY e.version DESC LIMIT 1`,
+    [workItemId],
+  );
+  return rows[0] ?? null;
 }
 
 /** Why a start would not be filed, or null when it would. The conditions of Spec section 1 that remain after S4-e. */
@@ -83,20 +129,17 @@ async function workItemFor(c: PoolClient, p: ProposalFacts): Promise<string> {
   return rows[0]!.id;
 }
 
-export async function approveProposal(ctx: ProposalCtx, id: string, requestStart: RequestStart | null): Promise<ApproveResult> {
+export async function approveProposal(ctx: ProposalCtx, id: string, requestStart: RequestStart | null, planEnvelope: PlanEnvelope | null = null): Promise<ApproveResult> {
   if (!UUID_RE.test(id)) throw new NotFoundError('proposal not found');
   const done = await proposalTenant(ctx, async (c) => {
-    const { rows } = await c.query<ProposalFacts>(
-      'SELECT repo_id, owner_process, state, gh_number, title, work_item_id FROM proposals WHERE id = $1::uuid',
-      [id],
-    );
+    const { rows } = await c.query<ProposalFacts>(FACTS_SQL, [id]);
     const p = rows[0];
     if (!p) throw new NotFoundError('proposal not found');
     // E5/E7: refused before any write. The definer refuses it again, and the data (a CHECK) a third time.
     if (p.owner_process !== 'product') throw new ProposalRefusedError('owned_by_internal_loop');
 
     if (p.state === 'approved' && p.work_item_id) {
-      // A repeat. Nothing is created; the start is filed again only when it was never made (still triaged, no run).
+      // A repeat. Nothing is created (no second work item, no second envelope); the start is filed again only when it was never made (still triaged, no run).
       const reason = await notStartedReason(c, p);
       const { rows: w } = await c.query<{ stage: string; has_run: boolean }>(
         `SELECT w.stage, EXISTS (SELECT 1 FROM agent_runs r WHERE r.account_id = w.account_id AND r.work_item_id = w.id) AS has_run
@@ -105,23 +148,82 @@ export async function approveProposal(ctx: ProposalCtx, id: string, requestStart
       );
       const idle = w[0]?.stage === 'triaged' && w[0].has_run === false;
       if (reason === null && idle && !requestStart) throw new StartUnavailableError();
-      return { proposal: await readProposal(c, id), workItemId: p.work_item_id, start: reason === null && idle, reason: reason === null ? null : reason };
+      return { proposal: await readProposal(c, id), workItemId: p.work_item_id, envelope: await readItemEnvelope(c, p.work_item_id), start: reason === null && idle, reason: reason === null ? null : reason };
     }
     if (p.state !== 'new') throw new ProposalRefusedError('not_new');
 
     const reason = await notStartedReason(c, p);
     // A start that cannot be filed refuses BEFORE the write, as the work item's own approve does.
     if (reason === null && !requestStart) throw new StartUnavailableError();
-    const workItemId = await workItemFor(c, p);
-    await c.query('SELECT * FROM approve_proposal($1::uuid, $2::uuid)', [id, workItemId]).catch(mapRefusal);
-    return { proposal: await readProposal(c, id), workItemId, start: reason === null, reason };
+    // The planner runs before any write: a refusal (no estimate and no amount, a limit below the first run, over the account's budget) leaves nothing behind.
+    const attach = planEnvelope ? await planEnvelope(c, [{ id, repo_id: p.repo_id, title: p.title, summary: p.summary, category_hint: p.category_hint }]) : null;
+    const approved = await approveFresh(c, id, p, attach);
+    return { ...approved, start: reason === null, reason };
   });
 
   if (done.start) await requestStart!(done.workItemId);
   return {
     proposal: done.proposal,
     work_item_id: done.workItemId,
+    envelope: done.envelope,
     started: done.start,
     not_started_reason: done.start ? null : done.reason,
   };
+}
+
+/** Creates (or reuses) the work item, approves, and attaches the envelope: one proposal of a fresh approval. */
+async function approveFresh(c: PoolClient, id: string, p: ProposalFacts, attach: AttachEnvelope | null): Promise<{ proposal: ProposalRow; workItemId: string; envelope: EnvelopeAttachment | null }> {
+  const workItemId = await workItemFor(c, p);
+  await c.query('SELECT * FROM approve_proposal($1::uuid, $2::uuid)', [id, workItemId]).catch(mapRefusal);
+  const envelope = attach ? await attach(c, workItemId).catch(mapEnvelopeRefusal) : null;
+  return { proposal: await readProposal(c, id), workItemId, envelope };
+}
+
+/** The envelope setter's refusals are the same kind of answer as the approve definer's: a 409 carrying the code. */
+function mapEnvelopeRefusal(err: unknown): never {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (err instanceof Error && err.name === 'SetEnvelopeError' && typeof code === 'string') throw new ProposalRefusedError(code);
+  throw err;
+}
+
+export interface ApproveBatchResult {
+  items: Array<{ proposal: ProposalRow; work_item_id: string; envelope: EnvelopeAttachment | null; started: boolean; not_started_reason: NotStartedReason | null }>;
+}
+
+/**
+ * D#483 S5-e1: approves a set of NEW proposals of one repository in ONE transaction, under whatever envelope the planner wrote for the set. All or nothing:
+ * one proposal that is not new (or belongs to the internal loop, or to another repository) refuses the whole set and nothing is written. The starts are
+ * filed after the commit, one per work item, exactly as a single approve files its own.
+ */
+export async function approveProposalBatch(ctx: ProposalCtx, repoId: string, ids: string[], requestStart: RequestStart | null, planEnvelope: PlanEnvelope): Promise<ApproveBatchResult> {
+  if (!UUID_RE.test(repoId) || ids.length === 0 || new Set(ids).size !== ids.length || !ids.every((i) => UUID_RE.test(i))) throw new NotFoundError('proposal not found');
+  const done = await proposalTenant(ctx, async (c) => {
+    const facts: Array<ProposalFacts & { id: string }> = [];
+    for (const id of ids) {
+      const { rows } = await c.query<ProposalFacts>(FACTS_SQL, [id]);
+      const p = rows[0];
+      if (!p || p.repo_id !== repoId) throw new NotFoundError('proposal not found');
+      if (p.owner_process !== 'product') throw new ProposalRefusedError('owned_by_internal_loop');
+      if (p.state !== 'new') throw new ProposalRefusedError('not_new');
+      facts.push({ ...p, id });
+    }
+    const reasons = new Map<string, NotStartedReason | null>();
+    for (const p of facts) {
+      const reason = await notStartedReason(c, p);
+      if (reason === null && !requestStart) throw new StartUnavailableError();
+      reasons.set(p.id, reason);
+    }
+    const attach = await planEnvelope(c, facts.map((p) => ({ id: p.id, repo_id: p.repo_id, title: p.title, summary: p.summary, category_hint: p.category_hint })));
+    const out: Array<{ proposal: ProposalRow; workItemId: string; envelope: EnvelopeAttachment | null; reason: NotStartedReason | null }> = [];
+    for (const p of facts) out.push({ ...(await approveFresh(c, p.id, p, attach)), reason: reasons.get(p.id) ?? null });
+    return out;
+  });
+
+  const items: ApproveBatchResult['items'] = [];
+  for (const d of done) {
+    const start = d.reason === null;
+    if (start) await requestStart!(d.workItemId);
+    items.push({ proposal: d.proposal, work_item_id: d.workItemId, envelope: d.envelope, started: start, not_started_reason: start ? null : d.reason });
+  }
+  return { items };
 }

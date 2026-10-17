@@ -2939,7 +2939,9 @@ export interface Operations {
       id: string;
     };
     query: undefined;
-    body: undefined;
+    body: {
+      amount_usd?: number;
+    };
     response: {
       proposal: {
         id: string;
@@ -2984,6 +2986,14 @@ export interface Operations {
         evidence_count: number;
       };
       work_item_id: string;
+      envelope: ({
+        envelope_id: string;
+        scope: "item" | "batch";
+        version: number;
+        amount_usd: number;
+        estimate_usd: number | null;
+        margin_pct: number | null;
+      }) | (null);
       started: boolean;
       not_started_reason: ("no_write_install" | "owned_by_internal_loop") | (null);
     };
@@ -3143,6 +3153,100 @@ export interface Operations {
         };
         evidence_count: number;
       };
+    };
+  };
+  estimateProposals: {
+    path: {
+      id: string;
+    };
+    query: {
+      ids: string;
+    };
+    body: undefined;
+    response: {
+      repo_id: string;
+      proposals: Array<{
+        proposal_id: string;
+        basis: "history" | "seed" | "none";
+        reason: string | null;
+        total_usd: number | null;
+        slot_phase_usd: number | null;
+        estimated: boolean;
+      }>;
+      total_usd: number | null;
+      margin_pct: number | null;
+      prefill_usd: number | null;
+      capped: boolean;
+      needs_amount: boolean;
+      remaining_budget_usd: number;
+      first_run_usd: number;
+    };
+  };
+  approveProposalBatch: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      proposal_ids: Array<string>;
+      amount_usd?: number;
+    };
+    response: {
+      envelope: {
+        envelope_id: string;
+        scope: "item" | "batch";
+        version: number;
+        amount_usd: number;
+        estimate_usd: number | null;
+        margin_pct: number | null;
+      };
+      items: Array<{
+        proposal: {
+          id: string;
+          repo_id: string;
+          dedupe_key: string;
+          sources: Array<string>;
+          gh_number: (number) | (null);
+          discussion_number: (number) | (null);
+          task_key: string | null;
+          milestone_key: string | null;
+          milestone_title: string | null;
+          title: string;
+          summary: string | null;
+          category_hint: string | null;
+          estimate_usd: number | null;
+          provenance: "internal" | "external";
+          owner_process: "product" | "internal_loop";
+          state: "new" | "approved" | "rejected" | "withdrawn";
+          decided_at: string | null;
+          reject_note: string | null;
+          reject_kind: ("not_now" | "never") | (null);
+          resurface_after: string | null;
+          resurfaced_at: string | null;
+          roadmap_position: (number) | (null);
+          work_item_id: (string) | (null);
+          work_item_stage: string | null;
+          created_at: string;
+          updated_at: string;
+          verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+          verified_at: string | null;
+          verified_sha: string | null;
+          verify_attempts: number;
+          verify_attempts_max: number;
+          verify_retry: boolean;
+          inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+          claim_counts: {
+            supported: number;
+            refuted: number;
+            unverifiable: number;
+            pending: number;
+          };
+          evidence_count: number;
+        };
+        work_item_id: string;
+        started: boolean;
+        not_started_reason: ("no_write_install" | "owned_by_internal_loop") | (null);
+      }>;
     };
   };
   listCorrections: {
@@ -4762,7 +4866,7 @@ export const operations = {
     idempotency: "required",
     pathParams: ["id"],
     queryParams: [],
-    hasBody: false,
+    hasBody: true,
   },
   rejectProposal: {
     method: "POST",
@@ -4796,6 +4900,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  estimateProposals: {
+    method: "GET",
+    path: "/api/v1/repos/{id}/proposals/estimate",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: ["ids"],
+    hasBody: false,
+  },
+  approveProposalBatch: {
+    method: "POST",
+    path: "/api/v1/repos/{id}/proposals/approve-batch",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "required",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   listCorrections: {
     method: "GET",

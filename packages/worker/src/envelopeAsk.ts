@@ -5,7 +5,7 @@ import { raiseAsk } from "@fx/db/src/decisionAsks.js";
 import { getCurrentDialSetting } from "@fx/db/src/decisions.js";
 import { DIAL_VERSION_CATALOGUE_DEFAULT, writeReceipt } from "@fx/db/src/receiptWriter.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId } from "@fx/spend";
+import { currentEnvelope, envelopeSpentUsd, itemEnvelopeId, recordEnvelopePauseAsk } from "@fx/spend";
 
 /**
  * D#483 S5-d: the `spend_past_envelope` ask. When a run's start is denied because it would pass its item's spend envelope, the person is asked once per item
@@ -100,7 +100,8 @@ export function createEnvelopeAsk(receiptPool: Pool) {
         quotedInputs: [],
         ruleSetVersion: rules.version,
       });
-      await client.query("INSERT INTO envelope_pause_asks (account_id, work_item_id, envelope_id, envelope_version, ask_id) VALUES ($1, $2, $3, $4, $5)", [accountId, workItemId, envelopeId, envelope.version, askId]);
+      // envelope_pause_ask_record (0865) is the only writer and refuses unless the ask just raised exists, so the memory never stands without its ask.
+      await recordEnvelopePauseAsk(client, { workItemId, envelopeId, version: envelope.version, askId });
       return "raised";
     });
   };

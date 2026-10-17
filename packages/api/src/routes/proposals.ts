@@ -1,28 +1,26 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   approveProposal,
   getProposal,
   listProposals,
-  ProposalRefusedError,
   rejectProposal,
   restoreProposal,
   StartUnavailableError,
   withdrawApproval,
-  type RequestStart,
 } from "@fx/core/src/plan/index.js";
-import { INBOX_SECTIONS, VERIFICATIONS } from "@fx/core/src/plan/proposalVerification.js";
-import { requestRunAction } from "@fx/core/src/runActions/index.js";
-import type { RouteContext, RouteEntry } from "../registry.js";
-import { ApiError, ProposalRefusedApiError, RunActionsUnavailableError } from "../errors.js";
-import { UNAVAILABLE_TEXT, mapDbError, runActionDeps } from "./run-actions.js";
+import type { RouteEntry } from "../registry.js";
+import { INBOX_SECTIONS } from "@fx/core/src/plan/proposalVerification.js";
+import { ApiError, RunActionsUnavailableError } from "../errors.js";
+import { UNAVAILABLE_TEXT } from "./run-actions.js";
+import { amountField, envelopeSchema, planEnvelope } from "./proposal-envelopes.js";
+import { proposalCtx, proposalDetailSchema, proposalSchema, refuse, startFiler } from "./proposal-shared.js";
 
 /**
  * D#483 S3-L2a: the proposal inbox routes (S3 Spec section 5).
  *
  *   GET  /proposals?repo_id=&state=&owner=&cursor=   list, newest first, 50 a page
  *   GET  /proposals/{id}                             detail
- *   POST /proposals/{id}/approve                     session only; Idempotency-Key required; 200 {proposal, work_item_id, started, not_started_reason}
+ *   POST /proposals/{id}/approve {amount_usd?}       session only; Idempotency-Key required; 200 {proposal, work_item_id, envelope, started, not_started_reason}
  *   POST /proposals/{id}/reject {kind, resurface_after?, note?}   200 {proposal}   (S5-f: "not_now" comes back, "never" stays)
  *   POST /proposals/{id}/restore                     200 {proposal}
  *   POST /proposals/{id}/withdraw-approval           200 {proposal}
@@ -32,90 +30,7 @@ import { UNAVAILABLE_TEXT, mapDbError, runActionDeps } from "./run-actions.js";
  * code. Approve is session only because its second half, the stage driver's start, is a session-only run action: a token
  * could approve the item onto the roadmap but never start it, and the Spec gives that case no reason to report.
  */
-function refuse(err: unknown): never {
-  if (err instanceof ProposalRefusedError) {
-    if (err.code === "invalid_cursor") throw new ApiError(400, "invalid_cursor", "cursor is malformed");
-    if (err.code === "invalid_filter") throw new ApiError(400, "invalid_filter", "section is accepted only with state=new");
-    if (err.code === "invalid_resurface_date") throw new ApiError(400, "invalid_resurface_date", "resurface_after must be in the future and at most 365 days away");
-    throw new ProposalRefusedApiError(err.code);
-  }
-  throw err;
-}
-
 const idParams = z.object({ id: z.string() });
-
-const proposalSchema = z.object({
-  id: z.string().uuid(),
-  repo_id: z.string().uuid(),
-  dedupe_key: z.string(),
-  sources: z.array(z.string()),
-  gh_number: z.number().int().nullable(),
-  discussion_number: z.number().int().nullable(),
-  task_key: z.string().nullable(),
-  milestone_key: z.string().nullable(),
-  milestone_title: z.string().nullable(),
-  title: z.string(),
-  summary: z.string().nullable(),
-  category_hint: z.string().nullable(),
-  estimate_usd: z.number().nullable(),
-  provenance: z.enum(["internal", "external"]),
-  owner_process: z.enum(["product", "internal_loop"]),
-  state: z.enum(["new", "approved", "rejected", "withdrawn"]),
-  decided_at: z.string().nullable(),
-  reject_note: z.string().nullable(),
-  reject_kind: z.enum(["not_now", "never"]).nullable(),
-  resurface_after: z.string().nullable(),
-  resurfaced_at: z.string().nullable(),
-  roadmap_position: z.number().int().nullable(),
-  work_item_id: z.string().uuid().nullable(),
-  work_item_stage: z.string().nullable(),
-  created_at: z.string(),
-  updated_at: z.string(),
-  verification: z.enum(VERIFICATIONS).describe("What the verifier last saw. `pending` until the first check."),
-  verified_at: z.string().nullable().describe("When the last check finished; null until the first one."),
-  verified_sha: z.string().nullable().describe("The commit the last check read; null until the first one."),
-  verify_attempts: z.number().int().describe("Consecutive failed checks. A real verdict resets it to 0."),
-  verify_attempts_max: z.number().int().describe("The number of failed checks after which the verifier stops trying."),
-  verify_retry: z.boolean().describe("True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."),
-  inbox_section: z
-    .enum(INBOX_SECTIONS)
-    .nullable()
-    .describe("Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."),
-  claim_counts: z.object({
-    supported: z.number().int(),
-    refuted: z.number().int(),
-    unverifiable: z.number().int(),
-    pending: z.number().int(),
-  }),
-  evidence_count: z.number().int(),
-});
-
-const claimSchema = z.object({
-  id: z.string().uuid(),
-  text: z.string().describe("Untrusted text; it can come from an outsider's issue. Render it as plain text."),
-  verdict: z.enum(["supported", "refuted", "unverifiable", "pending"]),
-  refute_code: z.enum(["cite_not_found", "cite_mismatch", "contradicted"]).nullable(),
-  checked_sha: z.string().nullable(),
-  checked_at: z.string().nullable(),
-});
-
-const evidenceSchema = z.object({
-  id: z.string().uuid(),
-  kind: z.enum(["file_lines", "issue", "discussion", "doc_passage", "interview_answer", "preview"]),
-  ref: z.string().describe("`<path>:<start>-<end>` or `<path>:<line>` for file and document kinds; `#<n>` for issue, discussion and preview; the section key for an interview answer."),
-  excerpt: z.string().describe("The text as read at `commit_sha`, byte for byte. Untrusted; render it as plain text."),
-  commit_sha: z.string().nullable(),
-  url: z
-    .string()
-    .nullable()
-    .describe("A GitHub link the server built from the repository, the parsed `ref` and `commit_sha`. Null when the kind has no link or the `ref` could not be parsed."),
-  created_at: z.string(),
-});
-
-const proposalDetailSchema = proposalSchema.extend({
-  claims: z.array(claimSchema).describe("Refuted first, then unverifiable, pending and supported; then by text."),
-  evidence: z.array(evidenceSchema).describe("Oldest first."),
-});
 
 const listQuery = z.object({
   repo_id: z.string().uuid().optional(),
@@ -129,6 +44,9 @@ const listQuery = z.object({
 const one = z.object({ proposal: proposalSchema });
 const oneDetail = z.object({ proposal: proposalDetailSchema });
 
+/** The click's body is optional: an empty request approves at the pre-filled limit. */
+const approveBody = z.object({ amount_usd: amountField.optional() }).strict().optional();
+
 /** `kind` is required: a rejection is either "Not now" or "Never", and the caller says which. A date goes only with "Not now". */
 const rejectBody = z
   .object({
@@ -138,27 +56,6 @@ const rejectBody = z
   })
   .strict()
   .refine((b) => b.kind === "not_now" || b.resurface_after === undefined, { message: "resurface_after goes only with kind not_now" });
-
-function proposalCtx(ctx: RouteContext) {
-  const { accountId, userId, tokenId } = ctx.principal;
-  return { pool: ctx.pool, principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) } };
-}
-
-/** Files `advance_work_item` for a work item, as the card's "Approve and start" does; null when no worker signal is registered. */
-function startFiler(ctx: RouteContext): RequestStart | null {
-  const signal = runActionDeps.getRunActionSignal();
-  if (!signal) return null;
-  const key = ctx.idempotencyKey || undefined;
-  return async (workItemId) => {
-    const requestHash = createHash("sha256").update(`advance_work_item:${workItemId.toLowerCase()}`).digest("hex");
-    const result = await requestRunAction(
-      { pool: ctx.pool, principal: ctx.principal },
-      { kind: "advance_work_item", targetId: workItemId, idempotencyKey: key, requestHash },
-      { signal },
-    ).catch(mapDbError);
-    if (result.replayed) ctx.markReplayed?.();
-  };
-}
 
 const decisionErrors = {
   "404": "Error `not_found`: no such proposal in this account.",
@@ -222,28 +119,35 @@ export const proposalRoutes: RouteEntry[] = [
     operationId: "approveProposal",
     summary: "Approve a proposal onto the roadmap",
     description:
-      "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction. " +
+      "Session only, owner or admin; a token is refused. `Idempotency-Key` is required. One click: the proposal moves to `approved` with the next roadmap position, and a work item is created (internal, at Triaged, with the issue number when the proposal is issue-backed) in the same transaction, together with the item's spend `envelope`. " +
+      "The envelope is pre-filled to the priced estimate times (1 + the default margin), capped at what the account can still spend this month. The body is optional: `amount_usd` sets the limit yourself, and is required when the proposal cannot be priced yet (a question, or no category), which otherwise answers 400 `amount_required` and writes nothing. " +
+      "A limit below the first run's reservation is refused 409 `envelope_below_first_run`, and one above the remaining budget 409 `over_account_budget`. " +
       "Then, when the repository has an active write-App install and the proposal is product-owned, the stage driver's start is requested for the work item, for every kind of proposal: an issue-backed one is read from its issue, any other from the proposal's own title and summary, fenced as untrusted in every prompt. `started` says whether this call requested it; when it did not, `not_started_reason` is `no_write_install` and the work item waits at Triaged. " +
-      "An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal and work item and creates nothing; if its start was never requested it is requested now. " +
+      "An internal-loop proposal is refused with 409 `owned_by_internal_loop` before anything is written. Approving a proposal that is already approved answers with the same proposal, work item and envelope and creates nothing; if its start was never requested it is requested now. " +
       "If the start cannot be requested (no worker is registered) nothing is written and the answer is 503.",
     principals: ["session"],
     minRole: "admin",
     idempotency: "required",
     rateClass: "write",
     paramsSchema: idParams,
+    bodySchema: approveBody,
     responseSchema: z.object({
       proposal: proposalSchema,
       work_item_id: z.string().uuid(),
+      /** The item's spend envelope; null only for an item approved before envelopes existed. */
+      envelope: envelopeSchema.nullable(),
       started: z.boolean(),
       not_started_reason: z.enum(["no_write_install", "owned_by_internal_loop"]).nullable(),
     }),
     extraResponses: {
       ...decisionErrors,
-      "409": "Error `owned_by_internal_loop`, `not_new`, `repo_not_connected`, `work_item_wrong_repo` or `work_item_wrong_stage`.",
+      "400": "Error `amount_required`: the proposal cannot be priced yet and no `amount_usd` was given.",
+      "409": "Error `owned_by_internal_loop`, `not_new`, `repo_not_connected`, `work_item_wrong_repo`, `work_item_wrong_stage`, `work_started`, `envelope_below_first_run` or `over_account_budget`.",
       "503": UNAVAILABLE_TEXT + " Nothing was written.",
     },
     async handler(ctx, input) {
-      return approveProposal(proposalCtx(ctx), input.params.id!, startFiler(ctx)).catch((err: unknown) => {
+      const body = input.body as z.infer<typeof approveBody>;
+      return approveProposal(proposalCtx(ctx), input.params.id!, startFiler(ctx), planEnvelope({ accountId: ctx.principal.accountId, scope: "item", amountUsd: body?.amount_usd })).catch((err: unknown) => {
         if (err instanceof StartUnavailableError) throw new RunActionsUnavailableError();
         return refuse(err);
       });

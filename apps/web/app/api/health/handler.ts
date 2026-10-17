@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { sessionSecretProblems } from "@fx/core/src/auth/session";
-import { planDataStatus } from "@fx/plan-data";
+import { envelopeDefaultMarginPct, planDataStatus } from "@fx/plan-data";
 import { partnerLayerOn } from "@fx/partners/host";
 import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
@@ -50,6 +50,8 @@ function detail(report: EnvReport) {
     invalid: report.invalid,
     invalid_optional: report.invalidOptional,
     disabled: report.disabled,
+    // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
+    unconfigured: envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : [],
   };
 }
 
