@@ -114,6 +114,41 @@ describe("run-action facade: every method runs on the runner login's pool and no
     expect(calls[1]!.sql).toContain("'too_many_runs'");
   });
 
+  it("settleRunAction with defer (D#7 DP11c) calls the deferral definer only; at its age limit it then settles failed with resume_pause_expired", async () => {
+    const worker = await createWorker(OPTIONS);
+    nextRows = [{ r: "deferred" }];
+    await worker.settleRunAction(ID, { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 900, defer: true });
+    expect(calls.map((c) => [c.pool, c.sql, c.params])).toEqual([["runner", "SELECT run_action_defer_resume($1::uuid, $2::int) AS r", [ID, 900]]]);
+    calls.length = 0;
+    nextRows = [{ r: "expired" }];
+    await worker.settleRunAction(ID, { state: "accepted", errorCode: "resume_deferred", retryAfterSeconds: 60, defer: true });
+    expect(calls.map((c) => [c.sql.split("(")[0], c.params])).toEqual([
+      ["SELECT run_action_defer_resume", [ID, 60]],
+      ["SELECT run_action_settle", [ID, '{"reason":"resume_pause_expired"}']],
+    ]);
+    expect(calls[1]!.sql).toContain("'failed'");
+    expect(calls[1]!.sql).toContain("'resume_pause_expired'");
+  });
+
+  it("settleRunAction refuses a defer that is not alone with accepted, an error code and a delay of 1 to 3600 seconds", async () => {
+    const worker = await createWorker(OPTIONS);
+    const bad = [
+      { state: "done", errorCode: "resume_paused", retryAfterSeconds: 900, defer: true },
+      { state: "failed", errorCode: "resume_paused", retryAfterSeconds: 900, defer: true },
+      { state: "accepted", retryAfterSeconds: 900, defer: true },
+      { state: "accepted", errorCode: "resume_paused", defer: true },
+      { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 0, defer: true },
+      { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 3601, defer: true },
+      { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 900, defer: true, outcome: { a: 1 } },
+      { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 900, defer: false },
+    ];
+    for (const input of bad) {
+      calls.length = 0;
+      await expect(worker.settleRunAction(ID, input as never), JSON.stringify(input)).rejects.toBeInstanceOf(RunActionInputError);
+      expect(calls).toEqual([]);
+    }
+  });
+
   it("listDueRunActions returns ids; purgeRunActions returns the count", async () => {
     const worker = await createWorker(OPTIONS);
     nextRows = [{ id: "x" }, { id: "y" }];

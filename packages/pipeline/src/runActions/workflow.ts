@@ -16,6 +16,11 @@ import { performerFor, type ClaimedAction, type PerformResult, type RunActionsWo
 export const CLAIM_LEASE_SECONDS = 300;
 /** The retry delay is 2^attempts x 5 s, never more than this (the definer's own limit is 86400). */
 const MAX_RETRY_SECONDS = 3600;
+/**
+ * D#7 DP11c: how long a deferred resume waits before it is looked at again, by the code the performer threw: a sandbox being reaped or no run starter yet
+ * (`resume_deferred`) clears in a minute or so; a spending limit or another live run (`resume_paused`) waits for a person, so the sweep's own cadence (fifteen minutes).
+ */
+export const RESUME_DEFER_SECONDS: Readonly<Record<string, number>> = Object.freeze({ resume_deferred: 60, resume_paused: 900 });
 
 /** A worker that disappears after a claim fails the step: the lease runs out and the next sweep starts the action again. */
 const NOT_CONFIGURED = "run actions: worker not configured";
@@ -50,6 +55,8 @@ function errorCodeFor(err: unknown): string {
   if (name === "RunActionRefusedError") return "database_refused";
   if (name === "RunActionInputError") return "invalid_input";
   if (name === "SandboxReapingError") return "sandbox_reaping";
+  if (name === "ResumeDeferredError") return "resume_deferred";
+  if (name === "ResumePausedError") return "resume_paused";
   if (name === "AuthorCheckUnavailableError") return "author_check_unavailable";
   return "perform_failed";
 }
@@ -78,6 +85,10 @@ export function settleInputFor(claimed: ClaimStepResult, outcome: PerformStepRes
     return { state: "done", outcome: outcome.outcome };
   }
   if (outcome.result === "refused") return { state: "refused", errorCode: outcome.errorCode, outcome: { reason: outcome.errorCode } };
+  // A resume that waits on something that clears by itself is deferred without spending an attempt (the definer ends it at 14 days).
+  if (claimed.kind === "resume_decision" && Object.hasOwn(RESUME_DEFER_SECONDS, outcome.errorCode)) {
+    return { state: "accepted", errorCode: outcome.errorCode, retryAfterSeconds: RESUME_DEFER_SECONDS[outcome.errorCode]!, defer: true };
+  }
   // A thrown error retries with backoff; from the 5th attempt the settle definer writes `failed` with this code instead.
   return {
     state: "accepted",

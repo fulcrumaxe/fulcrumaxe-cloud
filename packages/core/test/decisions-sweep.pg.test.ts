@@ -242,7 +242,9 @@ describe('sweepOverdueAsks (DP12a-2)', () => {
       // moved other asks of this file, so only the ask's own receipt is counted.
       expect(await count(`SELECT count(*)::int AS n FROM decision_receipts WHERE id = $1`, [ask.receipt_id])).toBe(1);
       expect(await nReceipts(a)).toBe(r0 + 1);
-      expect(await nActions(a)).toBe(q0);
+      // The answer's own transaction makes the one resume request (DP11c, migration 0860); the sweep's proceeded outcome makes none here (the
+      // reconcile does that later), and a rolled-back loser leaves none.
+      expect(await nActions(a)).toBe(ans === 'answered' ? q0 + 1 : q0);
     }
     expect(tally.answered + tally.proceeded).toBe(50);
   });

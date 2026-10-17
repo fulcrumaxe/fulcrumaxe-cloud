@@ -86,13 +86,13 @@ describe("the tick: the invariant sweep also runs the withdrawal on the RECEIPT 
     return buildWorker(options);
   }
 
-  it("sweepInvariants asks the receipt pool for the withdrawal, the window-end list (DP12a-2) and the approval-request housekeeping, and the runner pool only for the invariant rules", async () => {
-    const receipt = fake([[], [], [{ o_expired: 0, o_arguments_purged: 0, o_idempotency_purged: 0, o_instances_purged: 0 } as never]]);
-    const runner = { async query(sql: string) { if (/decision_ask_withdraw|decision_ask_due|aap_sweep/.test(sql)) throw new Error("the runner pool must not run the withdrawal, the window-end sweep or the approval-request sweep"); return { rows: [] }; } } as unknown as Pool;
+  it("sweepInvariants asks the receipt pool for the withdrawal, the resume reconcile (D#7 DP11c), the window-end list (DP12a-2) and the approval-request housekeeping, and the runner pool only for the invariant rules", async () => {
+    const receipt = fake([[], [], [], [{ o_expired: 0, o_arguments_purged: 0, o_idempotency_purged: 0, o_instances_purged: 0 } as never]]);
+    const runner = { async query(sql: string) { if (/decision_ask_withdraw|resume_decision_reconcile|decision_ask_due|aap_sweep/.test(sql)) throw new Error("the runner pool must not run the withdrawal, the resume reconcile, the window-end sweep or the approval-request sweep"); return { rows: [] }; } } as unknown as Pool;
     const worker = await build(receipt.pool, runner);
     const result = await worker.sweepInvariants();
     expect(result.failed).toBe(0);
-    expect(receipt.calls.map((c) => c[0])).toEqual([expect.stringContaining("decision_ask_withdraw"), expect.stringContaining("decision_ask_due"), expect.stringContaining("aap_sweep")]);
+    expect(receipt.calls.map((c) => c[0])).toEqual([expect.stringContaining("decision_ask_withdraw"), expect.stringContaining("resume_decision_reconcile"), expect.stringContaining("decision_ask_due"), expect.stringContaining("aap_sweep")]);
   });
 
   it("a failing withdrawal does not fail the invariant sweep's result", async () => {
@@ -100,5 +100,17 @@ describe("the tick: the invariant sweep also runs the withdrawal on the RECEIPT 
     const runner = { async query() { return { rows: [] }; } } as unknown as Pool;
     const worker = await build(receipt.pool, runner);
     await expect(worker.sweepInvariants()).resolves.toMatchObject({ failed: 0 });
+  });
+});
+
+describe("the tick: a failing resume reconcile does not fail the sweep or the calls after it", () => {
+  it("the approval-request housekeeping still runs, and the result is not failed", async () => {
+    const ports: WorkerPorts = { decryptTenantKey: async () => "k", modelConnection: { get: async () => { throw new Error("not used"); } }, connectionStatus: { markBroken: async () => {}, markCreditsExhausted: async () => {} }, hooks: { resume: async () => {} } };
+    const receipt = fake([[], new Error("receipt login unreachable"), [], [{ o_expired: 0, o_arguments_purged: 0, o_idempotency_purged: 0, o_instances_purged: 0 } as never]]);
+    const runner = { async query() { return { rows: [] }; } } as unknown as Pool;
+    const pools: WorkerPools = { runnerPool: runner, platformOpsPool: {} as Pool, receiptPool: receipt.pool, close: async () => {} };
+    const worker = await buildWorker({ env: { FX_GH_FORWARD_SUFFIX: "fixture.test", FX_GH_FORWARD_HOST: "gh-proxy.fixture.test" }, vercel: { teamId: "t", projectId: "p", getToken: async () => "tok" }, ports, createPools: async () => pools });
+    await expect(worker.sweepInvariants()).resolves.toMatchObject({ failed: 0 });
+    expect(receipt.calls.map((c) => c[0])).toEqual([expect.stringContaining("decision_ask_withdraw"), expect.stringContaining("resume_decision_reconcile"), expect.stringContaining("decision_ask_due"), expect.stringContaining("aap_sweep")]);
   });
 });

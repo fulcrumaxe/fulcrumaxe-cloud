@@ -80,7 +80,7 @@ export interface ClaimedRunAction {
   kind: string;
   targetId: string;
   requestedBy: string;
-  principalKind: "session" | "token";
+  principalKind: "session" | "token" | "system";
   attempts: number;
   /** ISO timestamp of the lease end. */
   claimedUntil: string;
@@ -99,6 +99,11 @@ export interface SettleRunActionInput {
    * settles `failed` with error code `too_many_runs`.
    */
   progress?: true;
+  /**
+   * D#7 DP11c: only with `state: "accepted"`, an error code and a delay: a `resume_decision` waiting on something that clears by itself goes back to accepted,
+   * due after the delay, without spending an attempt, until it is 14 days old. Past that the request settles `failed` with `resume_pause_expired`.
+   */
+  defer?: true;
 }
 
 /**
@@ -275,7 +280,7 @@ interface ClaimRow {
   kind: string;
   target_id: string;
   requested_by: string;
-  principal_kind: "session" | "token";
+  principal_kind: "session" | "token" | "system";
   attempts: number;
   claimed_until: Date | string;
 }
@@ -319,6 +324,15 @@ export function createRunActionFacade(runnerPool: Pool, registry: ExecutionTarge
           const { rows } = await runnerPool.query<{ r: string }>("SELECT run_action_requeue_progress($1::uuid) AS r", [id]);
           if (rows[0]?.r === "cap_reached") {
             await runnerPool.query("SELECT run_action_settle($1::uuid, 'failed', $2::jsonb, 'too_many_runs', NULL)", [id, JSON.stringify({ reason: "too_many_runs" })]);
+          }
+          return;
+        }
+        if (input.defer !== undefined) {
+          if (input.defer !== true || input.state !== "accepted" || input.outcome != null || input.errorCode == null || retry === null || retry < 1 || retry > 3600) throw new RunActionInputError();
+          const { rows } = await runnerPool.query<{ r: string }>("SELECT run_action_defer_resume($1::uuid, $2::int) AS r", [id, retry]);
+          // The definer changes nothing at its age limit; the terminal settle (and its events) stays the settle definer's.
+          if (rows[0]?.r === "expired") {
+            await runnerPool.query("SELECT run_action_settle($1::uuid, 'failed', $2::jsonb, 'resume_pause_expired', NULL)", [id, JSON.stringify({ reason: "resume_pause_expired" })]);
           }
           return;
         }

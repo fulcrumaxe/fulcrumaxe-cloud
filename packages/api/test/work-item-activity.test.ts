@@ -24,7 +24,7 @@ interface Activity {
   runs: Array<{ id: string; role: string; status: string; usd: number | null; created_at: string; summary: string | null; lines: Array<{ at: string; text: string }> }>;
   runs_truncated: boolean;
   steps: Array<{ kind: string; state: string; code: string | null; result: string | null; reasons: string[]; at: string; finished_at: string | null }>;
-  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait'; reason: string } | null;
+  notice: { kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused'; reason: string } | null;
   actions: string[];
   close_on_github: boolean;
 }
@@ -236,6 +236,39 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       await wait('one_build_per_repo_until_d598', 'w6');
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('build_slot_wait');
       await admin.query('UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = 1 WHERE id = $1', [itemId, randomUUID()]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+    });
+
+    it('resume_refused (D#7 DP11c): an answered question whose resume did not happen shows its fixed CODE (never a sentence) while the item sits at the park and nothing runs; a live run, a newer executor run or another stage shows none', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'in_progress' });
+      const parked = await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded', createdAt: '2026-10-03T10:00:00Z' });
+      const refused = (code: string, key: string) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, run_id, dedupe_key) VALUES ($1, $2, 'resume_refused', $3, $4, $5)`, [accountId, itemId, code, parked, key]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+
+      await refused('prompt_not_retained', 'ask:a1');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'resume_refused', reason: 'prompt_not_retained' });
+      // the newest one wins, and the code is passed on as it is
+      await refused('work_item_not_resumable', 'ask:a2');
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'resume_refused', reason: 'work_item_not_resumable' });
+
+      // a fix round that was parked and not resumed is the same
+      await admin.query(`UPDATE work_items SET stage = 'changes_requested' WHERE id = $1`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toEqual({ kind: 'resume_refused', reason: 'work_item_not_resumable' });
+      // any other stage says nothing
+      await admin.query(`UPDATE work_items SET stage = 'pr_opened' WHERE id = $1`, [itemId]);
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await admin.query(`UPDATE work_items SET stage = 'in_progress' WHERE id = $1`, [itemId]);
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('resume_refused');
+
+      // a run of the item is live: it is not stuck
+      const live = await seedRun(accountId, itemId, { role: 'code-reviewer', status: 'running' });
+      expect(await noticeOf(accountId, userId, itemId)).toBeNull();
+      await admin.query(`UPDATE agent_runs SET status = 'succeeded' WHERE id = $1`, [live]);
+      expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('resume_refused');
+      // a person pressed Build again (or a resume went through): an executor run newer than the refusal ends it
+      await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded' });
       expect(await noticeOf(accountId, userId, itemId)).toBeNull();
     });
 

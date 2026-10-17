@@ -692,3 +692,41 @@ describe("D#7 DP4b-2: the decision read after a succeeded build run", () => {
     expect(w.advanceBuildFailed).not.toHaveBeenCalled();
   });
 });
+
+describe("D#7 DP11c: following the run a resumed ask started", () => {
+  const RESUMED: AdvanceStartArgs = { ...ARGS, specVersion: 3, resumeRunId: "run-b" };
+  const AT_PR: AdvanceItem = { ...AT_SPEC, stage: "pr_opened" };
+
+  it("starts no build and loads nothing: it follows the given run, reads its decisions, looks for the pull request and goes on to the review", async () => {
+    const w = setup({ item: AT_PR });
+    expect(await workItemAdvanceWorkflow(RESUMED)).toEqual(REVIEW_STOPS);
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+    expect(w.advanceTriage).not.toHaveBeenCalled();
+    expect(w.advanceRunOutcome).toHaveBeenCalledWith(ACCOUNT, "run-b");
+    expect(w.advanceDecision).toHaveBeenCalledWith(ACCOUNT, ARGS.userId, ITEM, 0, "run-b");
+    expect(events()).toEqual(expect.arrayContaining(["advance.build_started", "advance.build_ended", "advance.built"]));
+  });
+
+  it("a resumed run that asks again parks the item the same way a build does (one stopped fact against that run)", async () => {
+    const w = setup({ item: AT_PR, decision: "parked" });
+    expect(await workItemAdvanceWorkflow(RESUMED)).toEqual({ status: "stopped", detail: "waiting_on_answer" });
+    expect(w.advanceRecordEvent).toHaveBeenCalledWith(expect.anything(), { kind: "stopped", dedupeKey: "decision:run-b", code: "waiting_on_answer", runId: "run-b" });
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+  });
+
+  it("a resumed run that failed takes the build's failure path, and a halt ends it the halted way", async () => {
+    const failed = setup({ item: AT_PR, buildOutcomes: [{ status: "failed", done: true, envelope: null }] });
+    expect(await workItemAdvanceWorkflow(RESUMED)).toEqual({ status: "failed", detail: "build_failed" });
+    expect(failed.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "run_failed");
+    const halted = setup({ item: AT_PR, decision: "item_halted" });
+    expect(await workItemAdvanceWorkflow(RESUMED)).toEqual({ status: "stopped", detail: "halted" });
+    expect(halted.advanceBuild).not.toHaveBeenCalled();
+  });
+
+  it("a run that is still going is waited for, and a placement change does not start a build", async () => {
+    const w = setup({ item: AT_PR, buildOutcomes: [{ status: "running", done: false, envelope: null }, { status: "cancelled", done: true, envelope: null, failureReason: "placement_changed" } as AdvanceRunOutcome] });
+    await workItemAdvanceWorkflow(RESUMED);
+    expect(world.sleeps).toBeGreaterThan(0);
+    expect(w.advanceBuild).not.toHaveBeenCalled();
+  });
+});

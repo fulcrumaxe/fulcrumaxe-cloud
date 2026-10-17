@@ -3,6 +3,7 @@ import { AskAnswerDefinerError, answerAskIn, catalogueClassOf } from '@fx/db/src
 import { getCurrentDialSetting } from '@fx/db/src/decisions.js';
 import { DIAL_VERSION_CATALOGUE_DEFAULT, ReceiptWriteError, writeReceipt } from '@fx/db/src/receiptWriter.js';
 import { emitDomainEvent } from '../domain-events/emit.js';
+import { announceNewRunAction, type RunActionSignal } from '../runActions/index.js';
 import { withTenant } from '../tenancy/withTenant.js';
 
 /**
@@ -24,6 +25,8 @@ export interface AskAnswerCtx {
   /** The receipt pool. A token principal (`tokenId`) can never answer. */
   pool: Pool;
   principal: { accountId: string; userId: string; tokenId?: string };
+  /** Kicks the resume request this answer makes (DP11c). Optional: the run-action sweep finds the request anyway. */
+  signal?: RunActionSignal;
 }
 export interface AskAnswerInput {
   askId: string;
@@ -64,10 +67,11 @@ interface AskRow {
 export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promise<AskAnswerResult> {
   const { accountId, userId, tokenId } = ctx.principal;
   const choice = input.choice;
+  let resumeActionId: string | null = null;
   // 1. Principal checks.
   if (tokenId !== undefined) throw new AskAnswerError(403, 'session_required');
   try {
-    return await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
+    const result = await withTenant(ctx.pool, accountId, userId, tokenId, async (client) => {
       const member = await client.query<{ role: string }>('SELECT role FROM account_members WHERE account_id = $1 AND user_id = $2', [accountId, userId]);
       if (member.rows[0] === undefined) throw new AskAnswerError(403, 'session_required');
       if (member.rows[0].role !== 'owner' && member.rows[0].role !== 'admin') throw new AskAnswerError(403, 'forbidden');
@@ -101,6 +105,10 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       if (receipt.store !== 'decision_receipts') throw new AskAnswerError(409, 'ask_receipt_mismatch');
       // 8. The compare-and-set, linking the receipt in the same UPDATE.
       await answerAskIn(client, { askId: ask.id, choice, receiptId: receipt.id });
+      // 8b. The resume request (DP11c), in this same transaction: the person's own request, one per ask, so a replay gets the same action.
+      const resume = await client.query<{ action_id: string; replayed: boolean }>('SELECT action_id, replayed FROM run_action_request($1, $2, $3, $4)',
+        ['resume_decision', ask.id, `ask:${ask.id}`, `resume:${ask.id}`]);
+      if (!resume.rows[0]!.replayed) resumeActionId = resume.rows[0]!.action_id;
       // 9. The event goes to the outbox on this transaction, so it exists only if the answer commits. Ids only.
       await emitDomainEvent(client, {
         type: 'decision.ask_answered',
@@ -113,6 +121,8 @@ export async function answerAsk(ctx: AskAnswerCtx, input: AskAnswerInput): Promi
       });
       return { askId: ask.id, receiptId: receipt.id, answeredOption: choice };
     });
+    if (resumeActionId !== null && ctx.signal) await announceNewRunAction({ signal: ctx.signal }, { actionId: resumeActionId, accountId, kind: 'resume_decision' });
+    return result;
   } catch (err) {
     if (err instanceof AskAnswerDefinerError) throw new AskAnswerError(...DEFINER_ERRORS[err.code]);
     throw err;
