@@ -204,18 +204,18 @@ describe("the built output: the app shipped from a scratch build, read back", ()
   })();
   const shipped = (rel) => readFileSync(shippedPath(result, rel), "utf8");
 
-  it("ships the app's files, the tag in index.html, and no more than the per-app boot ceiling", () => {
+  it("ships the app's three files, the tag in index.html, and no more than the per-app boot ceiling", () => {
     const files = result.copiedFiles.filter((f) => f.startsWith("apps/memory/")).sort();
-    expect(files).toEqual(["apps/memory/memory-app.css", "apps/memory/memory-app.js", "apps/memory/memory-storage.js"]);
+    expect(files).toEqual(["apps/memory/memory-app.css", "apps/memory/memory-app.js", "apps/memory/memory-queue.js", "apps/memory/memory-storage.js"]);
     expect(result.bootFiles.filter((f) => f.startsWith("apps/memory/")).length).toBeLessThanOrEqual(5);
     expect(shipped("index.html")).toContain('data-app="memory"');
   });
 
   it("the shipped code carries the Spec's words, uses no markup sink, and every import resolves to a shipped file", () => {
-    const all = ["memory-app.js", "memory-storage.js"].map((f) => shipped("apps/memory/" + f)).join("\n");
+    const all = ["memory-app.js", "memory-queue.js", "memory-storage.js"].map((f) => shipped("apps/memory/" + f)).join("\n");
     for (const w of ["Open each card first (", "Edit then approve", "Used in ", "Approve", "Reject"]) expect(all, w).toContain(w);
     for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "eval(", "document.write"]) expect(all, sink).not.toContain(sink);
-    for (const rel of ["memory-app.js", "memory-storage.js"]) {
+    for (const rel of ["memory-app.js", "memory-queue.js", "memory-storage.js"]) {
       const code = shipped("apps/memory/" + rel);
       for (const m of code.matchAll(/from\s*"(\.[^"]+)"/g)) {
         const target = join("apps/memory", m[1]).replace(/\\/g, "/");
