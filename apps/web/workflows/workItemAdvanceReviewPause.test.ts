@@ -62,6 +62,7 @@ function setup(script: Script = {}) {
     advanceLoadReview: vi.fn(async () => ({ ok: true as const, ctx: { workItemId: ITEM, stage: "pr_opened", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 3, debaterEnabled: false, executionMode: "sandbox", recordedPr: null } })),
     advanceLoadSpecText: vi.fn(async (_who: unknown, v: number) => (v === 3 ? { version: 3, body: "SPEC BODY" } : null)),
     advanceReviewRuns: vi.fn(async (_who: unknown, _req: { headSha: string; rereview: number }) => script.known ?? []),
+    advanceRecordMergeOnly: vi.fn(async () => ({ decision: "full_review", reason: "no_prior_review" })),
     advanceStartRun: vi.fn(async (req: AdvanceRunRequest) => {
       started.push(req);
       const call = (asks.get(req.role) ?? 0) + 1;

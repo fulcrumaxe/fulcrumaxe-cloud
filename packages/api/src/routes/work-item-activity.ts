@@ -38,7 +38,7 @@ export const activityResponseSchema = z.object({
       runner_usage_state: z.enum(["recorded", "not_priced", "not_recorded"]).nullable().optional(),
       runner_usage_note: z.string().nullable().optional(),
       runner_checked_in_at: z.string().nullable().optional(),
-      // D#6 C42-3b: a runner run only: why it is not running yet (non-null only while it is pending), with the sentence to show.
+      // D#6 C42-3b: a runner run only: why it is not running yet (present only while it is pending), with the sentence to show.
       wait: runWaitSchema.nullable().optional(),
     }),
   ),
@@ -55,6 +55,8 @@ export const activityResponseSchema = z.object({
     }),
   ),
   notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait"]), reason: z.string() }).nullable(),
+  // D#598 P7c: present only while the newest review round was a merge-only re-check; `sentence` is the approved line.
+  review_recheck: z.object({ kind: z.literal("merge_only"), sentence: z.string() }).nullable().optional(),
   actions: z.array(z.enum(OPERATOR_ACTIONS)),
   close_on_github: z.boolean(),
 });
@@ -87,7 +89,10 @@ export const workItemActivityRoutes: RouteEntry[] = [
         const wait = r.runtime === "runner" ? await readRunWait(ctx.pool, ctx.principal.accountId, r) : undefined;
         return { ...r, lines: withRunnerWords(r.lines), ...(wait === undefined ? {} : { wait }) };
       }));
-      const activity = { ...read, runs };
+      // The review section's line for a merge-only re-check is written once, in the runner protocol's copy.
+      // The field is present only when there is a line to show, so every other answer keeps the shape it had.
+      const { review_recheck: recheck, ...rest } = read;
+      const activity = { ...rest, runs, ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }) };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null) } };

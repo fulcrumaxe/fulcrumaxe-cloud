@@ -288,6 +288,8 @@ export function buildInsight(data) {
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
     runs,
     runsTruncated: data.runs_truncated === true,
+    // D#598 P7c: the review section's line for a head that is only a merge of the base branch. The server writes the sentence; no reviewer run exists for it.
+    recheck: data.review_recheck && data.review_recheck.kind === "merge_only" && typeof data.review_recheck.sentence === "string" ? data.review_recheck.sentence : null,
     rounds: groupRounds(data.comments),
     commentCount: Array.isArray(data.comments) ? data.comments.length : 0,
     commentsTruncated: data.comments_truncated === true,
@@ -486,6 +488,7 @@ export function createInsightPanel(deps) {
       h("h3", { class: "pl-detail-sub" }, m.runs.length ? "Agent runs (" + m.runs.length + ")" : "Agent runs"),
       m.runs.length ? m.runs.map(runSection) : h("p", { class: "pl-muted", "data-testid": "pl-no-runs" }, SENTENCES.noRuns),
       m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : [],
+      m.recheck ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-review-recheck" }, m.recheck) : [],
       m.steps.length
         ? [
             h("h3", { class: "pl-detail-sub" }, "Pipeline steps"),

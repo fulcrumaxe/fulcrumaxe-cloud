@@ -493,6 +493,10 @@ export interface Operations {
         kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait";
         reason: string;
       }) | (null);
+      review_recheck?: ({
+        kind: "merge_only";
+        sentence: string;
+      }) | (null);
       actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen">;
       close_on_github: boolean;
     };

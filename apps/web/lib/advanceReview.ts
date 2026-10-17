@@ -1,5 +1,5 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
-import { createCiGate, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
+import { createCiGate, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordMergeOnlyRecheck, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 
@@ -40,6 +40,20 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
         // D#598 P7b: the head's CI is read with the merge gate's token purpose (check runs, statuses, branch protection) and, for a runner_local repo, its fence.
         createCiGate({ pool, openHttp: (c) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp> }),
       ),
+    // D#598 P7c: a head that is only a merge of the base branch is re-checked from facts (GitHub's commit and compare reads, our own records), with no reviewer run.
+    // The reads use the merge gate's token purpose, like the CI wait; the head's CI is waited for before anything is recorded.
+    async recordMergeOnly(pool, input) {
+      const openHttp = (c: { repoId: string; owner: string; name: string; executionMode: string }) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp>;
+      const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);
+      if (!loaded.ok) return { decision: "full_review", reason: loaded.reason };
+      const c = loaded.ctx;
+      const out = await recordMergeOnlyRecheck(
+        pool,
+        { accountId: input.accountId, workItemId: input.workItemId, headSha: input.headSha, prNumber: input.prNumber, baseRef: input.baseRef, requiredRoles: input.requiredRoles as VerdictRole[] },
+        { http: await openHttp({ repoId: c.repoId, owner: c.owner, name: c.name, executionMode: c.executionMode }), ci: createCiGate({ pool, openHttp }) },
+      );
+      return out.decision === "full_review" ? { decision: out.decision, reason: out.reason } : { decision: out.decision };
+    },
     resume: (pool, registry, input) => resumeAgentRun(pool, registry, input),
     async mergeGate(pool, input) {
       const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);

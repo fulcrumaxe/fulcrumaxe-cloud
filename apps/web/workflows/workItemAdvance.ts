@@ -14,6 +14,7 @@ import {
   fixDescentBody,
   mergeGateBody,
   prFoundBody,
+  recordMergeOnlyBody,
   recordRoundBody,
   reviewLoadBody,
   reviewPlanBody,
@@ -25,6 +26,7 @@ import {
   type DescentOut,
   type FixOut,
   type GateOut,
+  type MergeOnlyOut,
   type PrLookup,
   type ReviewCtx,
   type ReviewLoaded,
@@ -332,6 +334,18 @@ export async function advanceRecordRoundStep(
 ): Promise<RoundOut> {
   "use step";
   return recordRoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
+}
+
+/** D#598 P7c: is this head only a merge of the base branch? If so (and its CI has finished) it is recorded as re-checked and the reviewers do not run. */
+export async function advanceRecordMergeOnlyStep(
+  accountId: string,
+  userId: string,
+  workItemId: string,
+  haltEpoch: number,
+  input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] },
+): Promise<MergeOnlyOut> {
+  "use step";
+  return recordMergeOnlyBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
 }
 
 export async function advanceStartFixStep(
@@ -1123,6 +1137,25 @@ async function recordWhenCiSettled(args: AdvanceStartArgs, input: Parameters<typ
 }
 
 /**
+ * D#598 P7c: the delta re-check of a head that is only a merge of the base branch. Not being one answers `full_review` at once (no wait, nothing recorded).
+ * Being one waits for the head's CI like a full review does (same cadence and limit as `recordWhenCiSettled`), then records it.
+ */
+async function recheckMergeOnly(args: AdvanceStartArgs, input: Parameters<typeof advanceRecordMergeOnlyStep>[4]): Promise<MergeOnlyOut> {
+  let out = await advanceRecordMergeOnlyStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
+  for (let waited = 0; out.decision === "ci_pending" && waited < CI_WAIT_MS; ) {
+    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    await sleep(pause);
+    waited += pause;
+    out = await advanceRecordMergeOnlyStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
+  }
+  if (out.decision === "ci_pending") {
+    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12) });
+    return { decision: "ci_wait_timeout", reason: null };
+  }
+  return out;
+}
+
+/**
  * The review of an open pull request: reviewers on the head, all verdicts gathered, then recorded; the merge gate when
  * everyone passed; a fix round (a RESUME of the build's session) when someone asked for changes; then the review again on
  * the new head. See the file header for every way it stops.
@@ -1165,6 +1198,27 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     // Who must review this head: code and acceptance always; security when the item is critical, the diff touches a
     // security surface, or (below) the code reviewer asks for it; the debater when the repo's role setting allows it.
     let plan = await advanceReviewPlanStep(accountId, userId, workItemId, args.haltEpoch, ctx, found, false);
+    // D#598 P7c: a head that is only a merge of the base branch into the reviewed one gets the delta re-check, not a full review: no reviewer runs,
+    // the reviewed head's passes stand for it, and the merge gate follows. A head with any code change falls through to the full review below.
+    if (again === null) {
+      const delta = await recheckMergeOnly(args, { headSha: pr.headSha, prNumber: pr.number, baseRef: pr.baseRef, requiredRoles: plan.roles });
+      if (delta.decision === "halted") return haltedEnd(args, "review");
+      // The head moved while the re-check waited for CI: nothing was recorded; look at the new head.
+      if (delta.decision === "head_moved") continue;
+      if (delta.decision === "all_passed") {
+        await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: "merge_only", recorded: "" });
+        const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
+        await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });
+        if (gate.outcome === "head_moved") continue;
+        if (gate.outcome === "error" || gate.outcome === "refused") await stopped(args, "merge_gate", gate.reasons[0] ?? gate.outcome, { head: pr.headSha, pr: pr.number });
+        return { status: gate.outcome, detail: gate.reasons.join(",") || undefined };
+      }
+      if (delta.decision !== "full_review") {
+        // CI never finished, or the step was refused: nothing is decided, nothing is merged.
+        await stopped(args, "review", delta.decision, { head: pr.headSha, pr: pr.number });
+        return { status: "needs_human", detail: delta.decision };
+      }
+    }
     const roundOne = again !== null ? again.roles.filter((r) => r !== "debater") : plan.roles.filter((r) => r !== "debater");
     const first = await runReviewers(args, ctx, pr, roundOne, [], attempt, rereview);
     if (first.paused !== null) return pausedEnd(workItemId, "review", first.paused.pause, first.paused.attempt);

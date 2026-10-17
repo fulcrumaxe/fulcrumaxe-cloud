@@ -900,6 +900,45 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
     });
   });
 
+  // D#598 P7c: a head that is only a merge of the base branch.
+  describe("advanceRecordMergeOnly", () => {
+    const input = (over: Record<string, unknown> = {}) => ({ headSha: HEAD, prNumber: 41, baseRef: "main", requiredRoles: ["code-reviewer", "acceptance-tester"], ...over });
+
+    it("hands the pipeline the head, the base branch and the roles, bound to the item, and returns its answer", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const recordMergeOnly = vi.fn(async () => ({ decision: "all_passed" }));
+      const rd = review({ recordMergeOnly });
+      expect(await build({}, rd).module.advanceRecordMergeOnly(who(a, w), input())).toEqual({ decision: "all_passed" });
+      expect(recordMergeOnly).toHaveBeenCalledWith(writerPool, { accountId: a.accountId, workItemId: w, headSha: HEAD, prNumber: 41, baseRef: "main", requiredRoles: ["code-reviewer", "acceptance-tester"] });
+      // It is not a round: nothing was recorded through the round path.
+      expect(rd.recordRound).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a head that is not a commit id", { headSha: "x" }],
+      ["a PR number of zero", { prNumber: 0 }],
+      ["an empty base branch", { baseRef: "" }],
+      ["a role that is not a reviewer", { requiredRoles: ["executor"] }],
+      ["no required roles", { requiredRoles: [] }],
+    ])("%s is refused before the pipeline is asked", async (_n, over) => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const recordMergeOnly = vi.fn(async () => ({ decision: "all_passed" }));
+      expect(await build({}, review({ recordMergeOnly })).module.advanceRecordMergeOnly(who(a, w), input(over))).toEqual({ decision: "refused", reason: "invalid_input" });
+      expect(recordMergeOnly).not.toHaveBeenCalled();
+    });
+
+    it("an external item is refused; without the review dependencies it is unavailable; without the re-check port every head is a full review", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const ext = await item(a, { provenance: "external" });
+      expect(await build({}, review({ recordMergeOnly: vi.fn() })).module.advanceRecordMergeOnly(who(a, ext), input())).toEqual({ decision: "refused", reason: "external_requires_human" });
+      const w = await item(a);
+      expect(await build({}, null).module.advanceRecordMergeOnly(who(a, w), input())).toEqual({ decision: "refused", reason: "review_unavailable" });
+      expect(await build({}, review()).module.advanceRecordMergeOnly(who(a, w), input())).toEqual({ decision: "full_review", reason: "unavailable" });
+    });
+  });
+
   describe("advanceMergeGate, advanceLoadReview and advanceLoadSpecText", () => {
     it("runs the gate for the item on the pull request, after the external guard", async () => {
       const a = await seedAccount(admin, randomUUID());
@@ -1138,6 +1177,19 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       warn.mockRestore();
       expect((await events(w)).map((e) => e.kind)).toEqual(["fix_pushed_nothing"]);
       expect(await t.module.advanceRecordEvent({ ...who(a, w), workItemId: "nope" }, { kind: "stopped", dedupeKey: "x" })).toEqual({ recorded: false });
+    });
+
+    it("refuses the merge-only re-check record: only the pipeline's own re-check may write it, since the merge gate trusts it", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const t = build();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      expect(await t.module.advanceRecordEvent(who(a, w), { kind: "review_verdicts", dedupeKey: "forged", code: "merge_only_recheck", reasons: [`from_${HEAD}`, `rows_${HEAD}`], headSha: HEAD, prNumber: 41 })).toEqual({ recorded: false });
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+      expect(await events(w)).toEqual([]);
+      // Other review_verdicts events, and other kinds with that code, are not this record.
+      expect(await t.module.advanceRecordEvent(who(a, w), { kind: "review_verdicts", dedupeKey: "plain", headSha: HEAD, prNumber: 41 })).toEqual({ recorded: true });
     });
 
     it("another tenant's item cannot be written to", async () => {

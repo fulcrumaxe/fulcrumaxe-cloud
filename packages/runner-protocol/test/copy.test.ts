@@ -36,6 +36,7 @@ describe("the runner copy (D#6 R2b)", () => {
       modeVisibilityUnknown: "The repository's visibility couldn't be read. Try again in a moment.",
       reviewKeyMissing: "A review is waiting for your model key to be connected.",
       reviewQuietUnsettled: "Reviews are waiting for pushes to settle.",
+      reviewMergeOnlyRecheck: "Re-checked after a merge from main (no code changes)",
       reviewRoundCap: "This pull request has been reviewed on three versions, so no further automatic review will run. A person reviews and merges it.",
       reviewComputeCap: "This month's allowance for cloud review compute is used up, so this pull request is not reviewed automatically. A person reviews and merges it. The allowance resets on the 1st, UTC.",
       usageLimits: "Work runs within your own Claude plan's usage limits. When you reach them, work pauses until they reset. fulcrumaxe cannot raise them.",

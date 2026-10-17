@@ -31,6 +31,7 @@ export * from "./review/mergeGateRun.js";
 export * from "./review/localReviewOptIn.js";
 export * from "./review/roundDecision.js";
 export * from "./review/ciWait.js";
+export * from "./review/mergeOnly.js";
 export * from "./advance/lightSpec.js";
 export * from "./advance/respec.js";
 export * from "./advance/amend.js";

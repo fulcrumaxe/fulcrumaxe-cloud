@@ -218,6 +218,23 @@ export interface AdvanceReviewDeps {
   resume: (pool: Pool, registry: ExecutionTargetRegistry, input: StartAgentRunInput) => Promise<{ id: string; status: string }>;
   /** The merge gate over the real GitHub port (a token of the `merge_gate` purpose). */
   mergeGate: (pool: Pool, input: { accountId: string; workItemId: string; prNumber: number }) => Promise<AdvanceMergeGateResult>;
+  /** D#598 P7c: the pipeline's `recordMergeOnlyRecheck`. Absent, every new head gets a full review. */
+  recordMergeOnly?: (pool: Pool, input: AdvanceMergeOnlyInput) => Promise<AdvanceMergeOnlyResult>;
+}
+
+/** D#598 P7c: a new head that may be only a merge of the base branch. */
+export interface AdvanceMergeOnlyInput {
+  accountId: string;
+  workItemId: string;
+  headSha: string;
+  prNumber: number;
+  baseRef: string;
+  requiredRoles: string[];
+}
+/** `all_passed` (the head was carried forward and recorded), `full_review` (run the reviewers; `reason` is a fixed code) or `ci_pending`. */
+export interface AdvanceMergeOnlyResult {
+  decision: string;
+  reason?: string;
 }
 
 /** The review context the workflow keeps: small facts only. The Spec's text is read inside the step that needs it. */
@@ -497,6 +514,8 @@ export interface AdvanceFacade {
   advanceLoadSpecText(who: AdvanceStepWho, expectedVersion: number): Promise<{ version: number; body: string; sha256?: string } | null>;
   /** D#483 P3: every verdict of one head recorded (passes first, non-passes last) and the decision that follows. */
   advanceRecordRound(who: AdvanceStepWho, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">): Promise<AdvanceRoundResult | { decision: "refused"; reason: string }>;
+  /** D#598 P7c: a new head that is only a merge of the base branch is recorded as re-checked (no reviewer runs), or answers `full_review` / `ci_pending`; nothing is written in those two. */
+  advanceRecordMergeOnly(who: AdvanceStepWho, input: Omit<AdvanceMergeOnlyInput, "accountId" | "workItemId">): Promise<AdvanceMergeOnlyResult | { decision: "refused"; reason: string }>;
   /**
    * D#483 P3: an executor fix round, continuing the build's persistent sandbox and session. Never a fresh start; refuses a
    * second concurrent resume (`already_running`); moves the card to Changes requested whatever an earlier record said;
@@ -1234,6 +1253,23 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
+  async function advanceRecordMergeOnly(who: AdvanceStepWho, input: Omit<AdvanceMergeOnlyInput, "accountId" | "workItemId">): Promise<AdvanceMergeOnlyResult | { decision: "refused"; reason: string }> {
+    if (!deps.review) return { decision: "refused", reason: "review_unavailable" };
+    const sane =
+      SHA_RE.test(input.headSha) &&
+      Number.isSafeInteger(input.prNumber) && input.prNumber > 0 &&
+      typeof input.baseRef === "string" && input.baseRef.length > 0 && input.baseRef.length <= 200 &&
+      input.requiredRoles.length > 0 && input.requiredRoles.length <= 4 && input.requiredRoles.every((r) => VERDICT_ROLES.includes(r));
+    if (!sane) return { decision: "refused", reason: "invalid_input" };
+    const bad = await guardStep(who);
+    if (bad) return { decision: "refused", reason: bad.reason ?? "refused" };
+    // No port, no carry-forward: the reviewers run as they always did.
+    if (!deps.review.recordMergeOnly) return { decision: "full_review", reason: "unavailable" };
+    const out = await deps.review.recordMergeOnly(runnerPool, { ...input, accountId: who.accountId, workItemId: who.workItemId });
+    console.info(JSON.stringify({ event: "advance.merge_only", work_item_id: who.workItemId, decision: out.decision, reason: out.reason ?? null }));
+    return out;
+  }
+
   /**
    * The newest executor run of the item that holds a session (the build's, or the last fix's). A runner fix run that ended `no_commit` (the
    * agent finished and pushed nothing) recorded no branch, so a continuation cannot start from it: the run before it is the parent.
@@ -1562,6 +1598,12 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
 
   async function advanceRecordEvent(who: AdvanceStepWho, event: Omit<DriverEventInput, "workItemId">): Promise<{ recorded: boolean }> {
     if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId)) return { recorded: false };
+    // D#598 P7c: the merge gate trusts a `review_verdicts` event with this code (it makes a carried head's reviewer passes count). Only the pipeline's
+    // `recordMergeOnlyRecheck`, after its own checks, may write it; a step's free-form event may not. (The literal: this package cannot import @fx/pipeline.)
+    if (event.kind === "review_verdicts" && event.code === "merge_only_recheck") {
+      console.warn(JSON.stringify({ event: "advance.record_event_refused", work_item_id: who.workItemId, kind: event.kind, code: event.code }));
+      return { recorded: false };
+    }
     const out = await writeEvent(who, event);
     // D#483 S5-k1c: a start before the build that a limit denied leaves its waiting fact through here. Like the build's, a limit pause may outlast the workflow
     // that is asking (it parks after four hours), so the sweep is told there is work to look at.
@@ -1616,6 +1658,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceLoadReview,
     advanceLoadSpecText,
     advanceRecordRound,
+    advanceRecordMergeOnly,
     advanceStartFix,
     advanceReviewRuns,
     advanceMergeGate,
