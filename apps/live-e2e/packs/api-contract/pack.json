@@ -1,0 +1,16 @@
+{
+  "id": "api-contract",
+  "rows": ["W21"],
+  "tier": "standard",
+  "tags": ["@api"],
+  "targets": ["staging"],
+  "destructive": false,
+  "model_spend": false,
+  "projects": ["desktop"],
+  "needs": ["bypass", "session:owner"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/web/app/api/v1/**", "packages/api/src/**", "packages/api/openapi.json", "packages/api-client/src/**"]
+}

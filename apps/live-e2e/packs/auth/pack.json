@@ -1,0 +1,16 @@
+{
+  "id": "auth",
+  "rows": ["A1", "A7"],
+  "tier": "standard",
+  "tags": ["@ui", "@api"],
+  "targets": ["staging"],
+  "destructive": false,
+  "model_spend": false,
+  "projects": ["desktop", "phone", "tablet"],
+  "needs": ["bypass", "session:owner"],
+  "probes": [],
+  "cost": { "class": "free", "est_usd": 0, "est_sandbox_min": 0 },
+  "retry": 0,
+  "runs_last": false,
+  "paths": ["apps/web/app/api/auth/github/handler.ts", "apps/web/app/api/auth/github/route.ts", "apps/web/lib/shell/session-routes.ts", "apps/web/lib/shell/session-guard.ts", "packages/core/src/auth/provider.ts"]
+}

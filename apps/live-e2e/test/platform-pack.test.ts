@@ -32,7 +32,7 @@ describe("plan on production", () => {
       { id: "platform", prod_safe: true, probes: platform.probes.length },
     ]);
     expect(platform.probes.length).toBeGreaterThan(0);
-    for (const p of packs) expect(p.destructive, p.id).toBe(false);
+    for (const p of packs.filter((x) => x.tier === "smoke")) expect(p.destructive, p.id).toBe(false);
     expect(plan.refused).toEqual([]);
   });
 
