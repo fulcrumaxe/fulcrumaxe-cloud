@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { PoolClient } from "pg";
 import { CATALOGUE, CATALOGUE_VERSION, PRESETS, decide, getCatalogueEntry, getPreset } from "@fx/decisions";
 import type { CatalogueEntry, Disposition, PresetName } from "@fx/decisions";
-import { appendDialVersion, getCurrentDialSetting, type DecisionSetting } from "@fx/db/src/decisions.js";
+import { DIAL_DEFAULT_MARKER, appendDialVersion, getCurrentDialSetting, type DecisionSetting } from "@fx/db/src/decisions.js";
 import { FIXED_INVARIANTS } from "@fx/db/src/dialInventory.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { assertRepoExists } from "@fx/core/src/role-settings/internal.js";
@@ -25,7 +25,8 @@ import type { RouteEntry } from "../registry.js";
  *    a label of what the customer picked; a later single-dial change moves the derivation to "custom" without touching it.
  *
  * Undo: there is no delete. A change is undone by writing the earlier value (or re-applying the earlier preset), which appends a version
- * and an audit row of its own; the history keeps both.
+ * and an audit row of its own; the history keeps both. "Use the default" is the same kind of write: a version holding the catalogue's default
+ * disposition and `DIAL_DEFAULT_MARKER`, which the read shows as `source: default`.
  */
 
 const repoIdParamsSchema = z.object({ id: z.string() });
@@ -33,6 +34,7 @@ const PRESET_NAMES = PRESETS.map((p) => p.name) as [PresetName, ...PresetName[]]
 const DISPOSITIONS = ["ask", "announce", "act"] as const;
 
 const presetBodySchema = z.object({ preset: z.enum(PRESET_NAMES) }).strict();
+const resetBodySchema = z.object({ decision_type: z.string().min(1).max(100).optional() }).strict();
 const dialBodySchema = z.object({ decision_type: z.string().min(1).max(100), disposition: z.enum(DISPOSITIONS) }).strict();
 
 const dispositionSchema = z.enum(DISPOSITIONS);
@@ -45,7 +47,7 @@ const dialSchema = z.object({
   adjustable: z.boolean(),
   disposition: dispositionSchema,
   allowed_dispositions: z.array(dispositionSchema),
-  /** `preset` when the current version adopted a preset, `override` for a single-dial change, `default` when no version exists. */
+  /** `preset` when the current version adopted a preset, `override` for a single-dial change, `default` when no version exists or the last change was "use the default". */
   source: z.enum(["preset", "override", "default"]),
   preset: z.string().nullable(),
   version: z.number().nullable(),
@@ -78,6 +80,9 @@ type Move = z.infer<typeof moveSchema>;
 
 const CLASS_2 = "human_over_the_loop";
 const classTwo = (): CatalogueEntry[] => CATALOGUE.filter((e) => e.class === CLASS_2);
+
+/** No version, or a "use the default" version: the catalogue's default is in force. */
+const isDefault = (row: DecisionSetting | null): boolean => row === null || row.preset === DIAL_DEFAULT_MARKER;
 
 /** What `decide()` resolves for an entry under a preset: the one definition of "what this preset does". */
 function presetDisposition(entry: CatalogueEntry, preset: PresetName): Disposition {
@@ -128,8 +133,8 @@ function view(repoId: string, canChange: boolean, rows: Map<string, DecisionSett
         adjustable: entry.class === CLASS_2,
         disposition: entry.class === CLASS_2 ? effective(entry, row) : presetDisposition(entry, "cautious"),
         allowed_dispositions: [...entry.allowedDispositions],
-        source: row === null ? ("default" as const) : row.preset !== null ? ("preset" as const) : ("override" as const),
-        preset: row?.preset ?? null,
+        source: row === null || isDefault(row) ? ("default" as const) : row.preset !== null ? ("preset" as const) : ("override" as const),
+        preset: isDefault(row) ? null : (row?.preset ?? null),
         version: row?.version ?? null,
       };
     }),
@@ -272,6 +277,49 @@ export const decisionSettingRoutes: RouteEntry[] = [
           // With no version yet, the catalogue default is what is in force, so naming it is also the request satisfied (as the preset path does).
           if (effective(entry, current) !== body.disposition) {
             await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: body.disposition, preset: null, changedBy: userId });
+          }
+          return view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId));
+        });
+      } catch (error) {
+        throw mapWriteError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/repos/{id}/decision-settings/reset",
+    operationId: "resetDecisionDials",
+    summary: "Use the default again for one class 2 dial, or for every class 2 dial on the repo",
+    description:
+      "Body `{ decision_type? }`. With a decision type, that dial goes back to the catalogue default; without one, every class 2 dial on the repo does. " +
+      "A dial that has a version appends one new version holding the default disposition (its `source` then reads `default`) and one audit row; a dial with no version, " +
+      "or already on the default, writes nothing. Class 1 and class 3 are never touched. Owner or admin, session only.",
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    extraResponses: { "409": "A dial changed while the request was running (`dial_changed`), or the account is not active." },
+    paramsSchema: repoIdParamsSchema,
+    bodySchema: resetBodySchema,
+    responseSchema: settingsResponseSchema,
+    async handler(ctx, input) {
+      const repoId = input.params.id!;
+      assertRepoIdShape(repoId);
+      const body = input.body as z.infer<typeof resetBodySchema>;
+      let targets = classTwo();
+      if (body.decision_type !== undefined) {
+        const entry = getCatalogueEntry(body.decision_type);
+        if (entry === undefined) throw invalid("decision_type", "unknown_decision_type", "no such decision type");
+        if (entry.class !== CLASS_2) throw invalid("decision_type", "not_adjustable", "only a class 2 decision type has a dial");
+        targets = [entry];
+      }
+      const { accountId, userId, role } = ctx.principal;
+      try {
+        return await withTenant(ctx.pool, accountId, userId, async (client) => {
+          await assertRepoExists(client, repoId);
+          for (const entry of targets) {
+            const current = await getCurrentDialSetting(client, repoId, entry.id);
+            if (isDefault(current)) continue;
+            await appendDialVersion(client, { accountId, repoId, decisionType: entry.id, disposition: entry.defaultDisposition, preset: DIAL_DEFAULT_MARKER, changedBy: userId });
           }
           return view(repoId, role === "owner" || role === "admin", await currentRows(client, repoId));
         });

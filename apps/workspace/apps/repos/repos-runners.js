@@ -150,7 +150,21 @@ export function createDialController({ call = api, signal, repoId, onChange = ()
       if (e && e.status === 409) load(true);
     }
   }
-  return { load, save, get state() { return st; } };
+  /** "Use the default": the server writes the default back and the next read says so. Nothing to do when it already is. */
+  async function reset() {
+    if (st.saving || st.status !== "ready" || !st.dial.canChange || st.dial.source === "default") return;
+    gen++;
+    set({ saving: true, error: "" });
+    try {
+      const dial = read(await call("PUT", dialUrl(repoId), { reset: true }, signal));
+      set({ saving: false, dial: dial || st.dial, error: dial ? "" : DIAL_SENTENCES.other });
+    } catch (e) {
+      if (cancelled(e)) return;
+      set({ saving: false, error: sentence(DIAL_SENTENCES, e), ...(e && e.status === 403 && st.dial ? { dial: { ...st.dial, canChange: false } } : {}) });
+      if (e && e.status === 409) load(true);
+    }
+  }
+  return { load, save, reset, get state() { return st; } };
 }
 
 /** Where the value in force comes from, in plain words. */
@@ -299,6 +313,9 @@ export function createDialControl({ call = api, signal, repoId, data, doc = docu
           h("span", null, h("strong", null, copy[DIAL_KEYS[d]])))
       ),
       h("p", { id: "repos-dial-source", class: "repos-muted", "data-testid": "repos-dial-source" }, sourceWords(s.dial)),
+      ...(editable && s.dial.source !== "default"
+        ? [h("button", { type: "button", class: "repos-btn", disabled: s.saving, "data-testid": "repos-dial-reset", onClick: () => ctl.reset() }, "Use the default")]
+        : []),
       ...(editable ? [] : [h("p", { class: "repos-muted", "data-testid": "repos-dial-admin-only" }, "Only owners and admins can change this.")]),
       ...(s.error ? [h("p", { class: "repos-error", role: "alert", "data-testid": "repos-dial-save-error" }, s.error)] : [])
     );

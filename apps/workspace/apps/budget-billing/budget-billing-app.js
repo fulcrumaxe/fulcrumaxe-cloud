@@ -309,6 +309,17 @@ export function mountBudgetBilling(host) {
     }, "bb-model-save");
   }
 
+  function removeModel() {
+    if (state.busy) return;
+    state.modelError = "";
+    run(async () => {
+      state.budgets = await api("PATCH", BUDGETS, { model_usd_month: null }, abort.signal);
+      state.dirty = false;
+      setNotice("Model budget removed.");
+      loadUsage();
+    }, "bb-model-remove");
+  }
+
   // ── the model budget form: built once, so a live refresh never disturbs what is typed ──
 
   const modelInput = h("input", {
@@ -325,11 +336,12 @@ export function mountBudgetBilling(host) {
   });
   const modelErr = h("p", { class: "bb-field-error", id: uid + "-model-err", role: "alert", "data-testid": "bb-model-error" });
   const modelSave = h("button", { type: "submit", class: "bb-btn bb-btn-primary", "data-testid": "bb-model-save" }, "Save budget");
+  const modelRemove = h("button", { type: "button", class: "bb-btn", "data-testid": "bb-model-remove", onClick: removeModel }, "Remove budget");
   const modelForm = h(
     "form",
     { class: "bb-form", "data-testid": "bb-model-form", noValidate: true, onSubmit: saveModel },
     h("label", { class: "bb-label", for: uid + "-model" }, "Monthly model budget (USD)"),
-    h("div", { class: "bb-inline" }, modelInput, modelSave),
+    h("div", { class: "bb-inline" }, modelInput, modelSave, modelRemove),
     h("p", { class: "bb-muted", id: uid + "-model-help" }, "From 1.00 to 100,000.00, at most 2 decimals."),
     modelErr
   );
@@ -520,7 +532,8 @@ export function mountBudgetBilling(host) {
     modelErr.textContent = state.modelError;
     modelErr.hidden = !state.modelError;
     modelInput.setAttribute("aria-invalid", state.modelError ? "true" : "false");
-    modelInput.disabled = modelSave.disabled = state.busy;
+    modelInput.disabled = modelSave.disabled = modelRemove.disabled = state.busy;
+    modelRemove.hidden = set === 0;
     return modelForm;
   }
 

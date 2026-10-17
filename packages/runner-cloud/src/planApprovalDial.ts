@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
-import { writeDialSetting } from "@fx/db/src/decisions.js";
-import { RUNNER_RUN_DECISION_TYPE, dispositionForPreset, isPresetName, readRunnerPlanDial, type RunnerPlanDial } from "@fx/db/src/runnerPlanDial.js";
+import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, writeDialSetting } from "@fx/db/src/decisions.js";
+import { RUNNER_RUN_DECISION_TYPE, defaultDisposition, dispositionForPreset, isPresetName, readRunnerPlanDial, type RunnerPlanDial } from "@fx/db/src/runnerPlanDial.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
@@ -37,8 +37,9 @@ export async function getPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
 
 /**
  * PUT /api/runners/repos/:id/plan-approval-dial (a session route, owner or admin only; a member gets 403 and nothing is written). The body is
- * exactly `{ disposition: "ask" | "announce" | "act" }` (an override) or `{ preset: "cautious" | "balanced" | "autonomous" }` (the preset's
- * disposition for this decision, recorded with its name); anything else is 400. It goes through `writeDialSetting`, so the write is a new
+ * exactly `{ disposition: "ask" | "announce" | "act" }` (an override), `{ preset: "cautious" | "balanced" | "autonomous" }` (the preset's
+ * disposition for this decision, recorded with its name) or `{ reset: true }` (use the default again: `source` reads `default`; a repo with no
+ * version, or already on the default, writes nothing); anything else is 400. It goes through `writeDialSetting`, so the write is a new
  * append-only version attributed to the signed-in user (never a field of the request), with the dial audit row, in one transaction. A pending
  * run is not touched: it is re-read at the next claim, so lowering the dial applies from there.
  */
@@ -52,7 +53,12 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
   const given = input as { disposition?: unknown; preset?: unknown };
   let disposition: (typeof DISPOSITIONS)[number];
   let preset: string | null = null;
-  if (keys === "disposition" && typeof given.disposition === "string" && (DISPOSITIONS as readonly string[]).includes(given.disposition)) {
+  let reset = false;
+  if (keys === "reset" && (input as { reset?: unknown }).reset === true) {
+    reset = true;
+    disposition = defaultDisposition();
+    preset = DIAL_DEFAULT_MARKER;
+  } else if (keys === "disposition" && typeof given.disposition === "string" && (DISPOSITIONS as readonly string[]).includes(given.disposition)) {
     disposition = given.disposition as (typeof DISPOSITIONS)[number];
   } else if (keys === "preset" && isPresetName(given.preset)) {
     preset = given.preset;
@@ -66,6 +72,11 @@ export async function setPlanApprovalDial(deps: RunnerCloudDeps, principal: Sess
       if (role !== "owner" && role !== "admin") throw new RunnerHttpError(403, "forbidden", "only an owner or admin can change this");
       await requireRepo(client, repoId);
     });
+    if (reset) {
+      // Nothing to undo when no version exists or the current one already is the default: no version, no audit row.
+      const current = await withTenant(deps.appUserPool, principal.accountId, principal.userId, (client) => getCurrentDialSetting(client, repoId, RUNNER_RUN_DECISION_TYPE));
+      if (current === null || current.preset === DIAL_DEFAULT_MARKER) return getPlanApprovalDial(deps, principal, repoId);
+    }
     await writeDialSetting({ pool: deps.appUserPool, principal: principal.userId }, { accountId: principal.accountId, repoId, decisionType: RUNNER_RUN_DECISION_TYPE, disposition, preset });
   } catch (error) {
     if (error instanceof RunnerHttpError) throw error;

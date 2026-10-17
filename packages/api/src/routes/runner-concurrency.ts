@@ -13,6 +13,8 @@ import type { RouteEntry } from "../registry.js";
  * plan data's defaults; an owner or admin raises or lowers them here with an explicit accept, and each real change writes one audit row.
  * What the claim applies is never more than this and never more than the account's live runners can hold, so the setting is a
  * ceiling the person chose, not a promise of capacity. On the runner plan the account figure is flat plan data, so there is nothing to set.
+ * The setting is not one-way (D#605 names no such rule): DELETE withdraws it, the row is removed, and `accepted` reads false with the plan's
+ * defaults in force again. Withdrawing needs no accept, because it can only lower what the account may run.
  */
 export const runnerConcurrencyResponseSchema = z.object({
   /** Whether the account's own setting applies: a hosted plan. False on the runner plan, whose figure is flat. */
@@ -54,6 +56,28 @@ async function readSetting(client: PoolClient, accountId: string): Promise<z.inf
 }
 
 export const runnerConcurrencyRoutes: RouteEntry[] = [
+  {
+    method: "DELETE",
+    path: "/api/v1/account/runner-concurrency",
+    operationId: "resetRunnerConcurrency",
+    summary: "Withdraw the account's runner concurrency setting, so the plan's defaults apply again. An owner or admin; one audit row when there was a setting",
+    description:
+      "Removes the figures this account accepted. Afterwards `accepted` is false and `total` and `per_repo` are the plan defaults, from the next claim. " +
+      "Nothing running is stopped. Withdrawing when nothing was accepted is a 200 that changes and records nothing. Session only. On the runner plan there is nothing to withdraw: 409 `not_applicable`.",
+    // principals omitted -> session-only: an API token can never change it.
+    minRole: "admin",
+    idempotency: "never",
+    rateClass: "write",
+    responseSchema: runnerConcurrencyResponseSchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      return withTenant(ctx.pool, accountId, userId, async (client) => {
+        if (!(await readSetting(client, accountId)).applies) throw new ApiError(409, "not_applicable", "the runner plan's account limit is fixed by the plan");
+        await client.query("SELECT account_runner_concurrency_set(NULL::int, NULL::int, true)");
+        return readSetting(client, accountId);
+      });
+    },
+  },
   {
     method: "GET",
     path: "/api/v1/account/runner-concurrency",

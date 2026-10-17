@@ -266,13 +266,18 @@ describe('D#7 DP10b: ask settings routes', () => {
     await write(f.owner, f.repoId, { ...body, answer_window_minutes: 45, timeout_outcome: 'proceed_recommended', notify: null });
     const cleared = (await (await write(f.owner, f.repoId, { ...body, answer_window_minutes: null, timeout_outcome: null, notify: null })).json()) as AskSettings;
     expect(byType(cleared).nonbreaking_refactor_approach).toMatchObject({
-      repo: { answer_window_minutes: null, timeout_outcome: null, notify: null, version: 2 },
+      repo: null,
       effective: { answer_window_minutes: 1440, timeout_outcome: 'stop_and_flag' },
     });
+    // A fresh read agrees (derived on every read), and the next write still takes the next version, so the conflict check is unchanged.
+    expect(byType(await get(f.owner, f.repoId)).nonbreaking_refactor_approach!.repo).toBeNull();
+    const again = (await (await write(f.owner, f.repoId, { ...body, answer_window_minutes: 60, timeout_outcome: null, notify: null })).json()) as AskSettings;
+    expect(byType(again).nonbreaking_refactor_approach!.repo).toMatchObject({ answer_window_minutes: 60, version: 3 });
+    await write(f.owner, f.repoId, { ...body, answer_window_minutes: null, timeout_outcome: null, notify: null });
     const rows = await versions(f.owner.accountId);
-    expect(rows.map((r) => [r.version, r.answer_window_minutes])).toEqual([[1, 45], [2, null]]);
+    expect(rows.map((r) => [r.version, r.answer_window_minutes])).toEqual([[1, 45], [2, null], [3, 60], [4, null]]);
     const audit = await auditRows(f.owner.accountId);
-    expect(audit.at(-1)!.payload).toMatchObject({ previous: { answer_window_minutes: 45, timeout_outcome: 'proceed_recommended' }, new: { answer_window_minutes: null, timeout_outcome: null } });
+    expect(audit[1]!.payload).toMatchObject({ previous: { answer_window_minutes: 45, timeout_outcome: 'proceed_recommended' }, new: { answer_window_minutes: null, timeout_outcome: null } });
   });
 
   it('a plain member reads but cannot write, a token can neither write nor read, and a missing, malformed or other-tenant repo is one 404', async () => {

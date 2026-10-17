@@ -118,8 +118,13 @@ export function formatWindow(minutes: number): string {
   return parts.join(" ");
 }
 
+/**
+ * A key whose current version holds all three values null overrides nothing, so it reads as no override (`null`), exactly as a key never
+ * written does. The version rows stay (append-only); this is derived on every read, never stamped. The next write for the key still
+ * takes the next version number, so the version and conflict checks are unchanged.
+ */
 const stored = (v: AskSettingVersion | undefined): Stored | null =>
-  v === undefined ? null : { answer_window_minutes: v.answerWindowMinutes, timeout_outcome: v.timeoutOutcome, notify: v.notify, version: v.version };
+  v === undefined || (v.answerWindowMinutes === null && v.timeoutOutcome === null && v.notify === null) ? null : { answer_window_minutes: v.answerWindowMinutes, timeout_outcome: v.timeoutOutcome, notify: v.notify, version: v.version };
 
 /** The entries a customer can be asked about: everything that lists a timeout outcome (class 1 lists none). */
 const askedEntries = (): CatalogueEntry[] => CATALOGUE.filter((e) => e.timeoutOutcomes.length > 0);
@@ -208,7 +213,7 @@ export const askSettingRoutes: RouteEntry[] = [
     summary: "Set the answer window, the outcome when nobody answers, or notify for one key",
     description:
       "Appends one `decision_ask_settings` version for the key (scope, decision type) holding all three values, and one audit row naming the previous and new values. " +
-      "A null value means inherit. Setting all three null hands the key back to its parent. Owner or admin, session only.",
+      "A null value means inherit. Setting all three null hands the key back to its parent: the override is gone and `GET` shows `null` for that scope again (the version rows stay as history). Owner or admin, session only.",
     // principals omitted -> session-only.
     minRole: "admin",
     idempotency: "never",

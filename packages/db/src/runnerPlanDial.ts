@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { CATALOGUE_VERSION, getCatalogueEntry, getPreset, type Disposition, type PresetName } from '@fx/decisions';
-import { getCurrentDialSetting, type DecisionSetting } from './decisions.js';
+import { DIAL_DEFAULT_MARKER, getCurrentDialSetting, type DecisionSetting } from './decisions.js';
 
 /**
  * The dial for `runner_run_on_member_plan` (D#6 R2b-4a, C31 section 2.1): whether a runner run that uses another member's Claude
@@ -23,7 +23,7 @@ export interface RunnerPlanDial {
   source: RunnerPlanDialSource;
   /** The preset the current version adopted; null for an override or the default. */
   preset: PresetName | null;
-  /** The current version, or null when no row exists and the default applies. */
+  /** The current version, or null when no row exists. A "use the default" version is a real version, so it shows its number with source `default`. */
   version: number | null;
 }
 
@@ -43,6 +43,7 @@ export function resolveStoredDial(row: Pick<DecisionSetting, 'disposition' | 'pr
   const entry = getCatalogueEntry(RUNNER_RUN_DECISION_TYPE);
   if (!entry) throw new Error('runner_run_on_member_plan is not in the catalogue');
   if (row === null) return { disposition: entry.defaultDisposition, source: 'default', preset: null, version: null };
+  if (row.preset === DIAL_DEFAULT_MARKER) return { disposition: entry.defaultDisposition, source: 'default', preset: null, version: row.version };
   const stored = row.disposition as Disposition;
   const disposition: Disposition = entry.allowedDispositions.includes(stored) ? stored : 'ask';
   const preset = isPresetName(row.preset) ? row.preset : null;
@@ -52,4 +53,11 @@ export function resolveStoredDial(row: Pick<DecisionSetting, 'disposition' | 'pr
 /** The repo's current dial. `client` must come from `withTenant`. */
 export async function readRunnerPlanDial(client: PoolClient, repoId: string): Promise<RunnerPlanDial> {
   return resolveStoredDial(await getCurrentDialSetting(client, repoId, RUNNER_RUN_DECISION_TYPE));
+}
+
+/** The disposition a "use the default" version stores: the catalogue's default for this decision. */
+export function defaultDisposition(): Disposition {
+  const entry = getCatalogueEntry(RUNNER_RUN_DECISION_TYPE);
+  if (!entry) throw new Error('runner_run_on_member_plan is not in the catalogue');
+  return entry.defaultDisposition;
 }

@@ -115,7 +115,9 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       if (req.method() === "PUT") {
         const body = JSON.parse(req.postData() ?? "{}");
         mock.dialPuts.push(body);
-        mock.dial = dial({ disposition: body.disposition, source: "override", can_change: mock.dial.can_change });
+        mock.dial = body.reset === true
+          ? dial({ disposition: "announce", source: "default", can_change: mock.dial.can_change })
+          : dial({ disposition: body.disposition, source: "override", can_change: mock.dial.can_change });
       }
       return json(route, 200, mock.dial);
     }
@@ -257,6 +259,20 @@ test.describe("D#6 R2b-4b: Repos app, runners", () => {
     await press(t(page, "repos-dial-act"));
     await expect(t(page, "repos-dial-act")).toBeChecked();
     expect(mock.dialPuts).toEqual([{ disposition: "ask" }, { disposition: "act" }]);
+    // Undo: Use the default sends { reset: true }, the value returns to announce, and the button goes away because nothing is left to undo.
+    await expect(t(page, "repos-dial-reset")).toHaveText("Use the default");
+    await press(t(page, "repos-dial-reset"));
+    await expect(t(page, "repos-dial-announce")).toBeChecked();
+    await expect(t(page, "repos-dial-source")).toHaveText("This is the default. Nobody has set it for this repo.");
+    await expect(t(page, "repos-dial-reset")).toHaveCount(0);
+    expect(mock.dialPuts).toEqual([{ disposition: "ask" }, { disposition: "act" }, { reset: true }]);
+    // After a reload the screen reads the default from the server again.
+    await page.reload();
+    await open(page, "repos");
+    await press(t(page, "repos-open").first());
+    await expect(t(page, "repos-dial-announce")).toBeChecked();
+    await expect(t(page, "repos-dial-source")).toHaveText("This is the default. Nobody has set it for this repo.");
+    await expect(t(page, "repos-dial-reset")).toHaveCount(0);
     await clean(page, errors);
   });
 
@@ -269,6 +285,7 @@ test.describe("D#6 R2b-4b: Repos app, runners", () => {
     await expect(t(page, "repos-dial-act")).toBeDisabled();
     await expect(t(page, "repos-dial-source")).toHaveText("Set by the Cautious preset.");
     await expect(t(page, "repos-dial-admin-only")).toHaveText("Only owners and admins can change this.");
+    await expect(t(page, "repos-dial-reset")).toHaveCount(0);
     expect(mock.dialPuts).toEqual([]);
     await clean(page, errors);
   });

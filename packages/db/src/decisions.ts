@@ -45,6 +45,14 @@ export interface DecisionReceipt {
   createdAt: Date;
 }
 
+/**
+ * The `preset` a "use the default" version carries. Dials are append-only with a NOT NULL disposition, so going back to the default is a new
+ * version holding the catalogue's own default disposition and this marker. Every reader that only looks at the disposition (the claim's
+ * definer, the decision snapshot, the preset derivation) already gets the right answer; the two screens that show where a value comes from
+ * read the marker and say `default`. It is not a preset name, so `isPresetName` is false for it.
+ */
+export const DIAL_DEFAULT_MARKER = 'default';
+
 interface DecisionSettingRow {
   id: string;
   account_id: string;

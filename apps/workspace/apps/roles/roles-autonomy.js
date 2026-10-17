@@ -131,6 +131,11 @@ export function mountAutonomy(host, ctx) {
         )
       )
     );
+    if (!untouched) {
+      section.append(
+        h("div", { class: "au-actions" }, h("button", { type: "button", class: "rl-btn", "data-focus": "preset-reset", "data-testid": "au-reset-all", onClick: () => resetDial(null) }, "Use the defaults for all"))
+      );
+    }
     if (preview) {
       section.append(
         h(
@@ -192,7 +197,10 @@ export function mountAutonomy(host, ctx) {
                   },
                   d.allowed_dispositions.map((v) => h("option", { value: v, selected: v === chosen }, word(DISPOSITION_TEXT, v)))
                 ),
-                h("button", { type: "button", class: "rl-btn", "aria-label": "Apply for " + d.label, "data-focus": key + "-apply", "data-testid": "au-dial-apply", onClick: () => saveDial(d) }, "Apply")
+                h("button", { type: "button", class: "rl-btn", "aria-label": "Apply for " + d.label, "data-focus": key + "-apply", "data-testid": "au-dial-apply", onClick: () => saveDial(d) }, "Apply"),
+                d.source === "default"
+                  ? null
+                  : h("button", { type: "button", class: "rl-btn", "aria-label": "Use the default for " + d.label, "data-focus": key + "-reset", "data-testid": "au-dial-reset", onClick: () => resetDial(d) }, "Use the default")
               )
             : h("span", { class: "au-value", "data-testid": "au-dial-value" }, word(DISPOSITION_TEXT, d.disposition));
           return h(
@@ -475,6 +483,14 @@ export function mountAutonomy(host, ctx) {
       dial = await api("POST", repoPath(repoId, "decision-settings/dial"), { decision_type: d.decision_type, disposition: value });
       ask = await api("GET", repoPath(repoId, "ask-settings"));
     }, () => d.label + ": " + word(DISPOSITION_TEXT, value) + ". Saved.");
+  };
+  // "Use the default": the server writes the catalogue default back; the read then says Default. `d` is one dial, or null for every dial.
+  const resetDial = (d) => {
+    const key = d ? "dial-" + d.decision_type : "preset";
+    return write(key, async () => {
+      dial = await api("POST", repoPath(repoId, "decision-settings/reset"), d ? { decision_type: d.decision_type } : {});
+      ask = await api("GET", repoPath(repoId, "ask-settings"));
+    }, () => (d ? d.label + ": back to the default. Saved." : "All decisions are back to the default. Saved."));
   };
   async function openPreview(name) {
     if (saving) return;

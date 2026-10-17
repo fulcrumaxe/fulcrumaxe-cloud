@@ -103,6 +103,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       mock.runners = mock.runners.map((r) => {
         if ((r as { id: string }).id !== act[1]) return r;
         if (act[2] === "pause") return { ...(r as object), state: "paused", state_note: "Resumes within 5 min", paused: true, controls: { ...OWN, pause: { allowed: false, reason: "Already paused." }, resume: ok } };
+        if (act[2] === "rename" && body.name === null) return { ...(r as object), name: "Unnamed runner (Ada Admin)", has_name: false };
         if (act[2] === "rename") return { ...(r as object), name: body.name, has_name: true };
         if (act[2] === "remove") return { ...(r as object), state: "revoked", controls: null, capacity: null, repos: [] };
         return r;
@@ -238,6 +239,25 @@ test.describe("D#605 FL-9: the fleet page", () => {
     await expect(t(page, "runners-state")).toHaveText(/Revoked: registrant left/);
     await expect(t(page, "runners-again")).toHaveCount(0);
     await expect(page.locator(`${WIN} .runners-controls`)).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("a named runner can go back to unnamed: Remove the name sends { name: null }, the row reads Unnamed again, and the button is gone after a reload", async ({ page }) => {
+    const { mock, errors } = await setup(page);
+    await open(page);
+    await expect(t(page, "runners-name")).toHaveText("Desktop");
+    await press(t(page, "runners-rename"));
+    await press(page.locator('[data-testid="runners-rename-clear"]'));
+    await expect(t(page, "runners-name")).toHaveText(/^Unnamed runner \(/);
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    expect(mock.posts.filter((p) => p.path.endsWith("/rename")).map((p) => p.body)).toEqual([{ name: null }]);
+    await page.reload();
+    await open(page);
+    await expect(t(page, "runners-name")).toHaveText(/^Unnamed runner \(/);
+    await expect(t(page, "runners-rename")).toBeEnabled();
+    await press(t(page, "runners-rename"));
+    await expect(page.locator("#runners-rename-input")).toHaveValue("");
+    await expect(page.locator('[data-testid="runners-rename-clear"]')).toHaveCount(0);
     await clean(page, errors);
   });
 

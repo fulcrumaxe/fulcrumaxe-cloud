@@ -268,6 +268,71 @@ describe('D#7 DP10a: decision settings routes', () => {
     expect(last.actor).toBe(f.owner.userId);
   });
 
+  it('use the default: set, reset, read back source default; one new version and one audit row; the history keeps every step', async () => {
+    const f = await fixture();
+    const base = `/repos/${f.repoId}/decision-settings`;
+    await call(f.owner, 'POST', `${base}/dial`, { decision_type: 'test_strategy_choice', disposition: 'act' });
+    const res = await call(f.owner, 'POST', `${base}/reset`, { decision_type: 'test_strategy_choice' });
+    expect(res.status).toBe(200);
+    const s = (await res.json()) as Settings;
+    expect(dialsByType(s).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'default', preset: null, version: 2 });
+    // A fresh read agrees: derived, not stamped on the response.
+    expect(dialsByType(await get(f.owner, f.repoId)).test_strategy_choice).toMatchObject({ disposition: 'ask', source: 'default', preset: null });
+    expect((await versions(f.repoId)).map((v) => [v.version, v.disposition, v.preset])).toEqual([[1, 'act', null], [2, 'ask', 'default']]);
+    expect((await auditRows(f.owner.accountId)).at(-1)!.payload).toMatchObject({ decision_type: 'test_strategy_choice', previous: 'act', new: 'ask' });
+    // Already on the default: nothing more is written.
+    await call(f.owner, 'POST', `${base}/reset`, { decision_type: 'test_strategy_choice' });
+    expect(await versions(f.repoId)).toHaveLength(2);
+    // A later write is an override again, with the next version.
+    const again = (await (await call(f.owner, 'POST', `${base}/dial`, { decision_type: 'test_strategy_choice', disposition: 'announce' })).json()) as Settings;
+    expect(dialsByType(again).test_strategy_choice).toMatchObject({ disposition: 'announce', source: 'override', version: 3 });
+  });
+
+  it('use the default with no decision type resets every class 2 dial the preset moved, and a repo with no versions writes nothing', async () => {
+    const f = await fixture();
+    const base = `/repos/${f.repoId}/decision-settings`;
+    expect((await call(f.owner, 'POST', `${base}/reset`, {})).status).toBe(200);
+    expect(await versions(f.repoId)).toHaveLength(0);
+    await call(f.owner, 'POST', `${base}/preset`, { preset: 'autonomous' });
+    const moved = (await versions(f.repoId)).length;
+    expect(moved).toBeGreaterThan(0);
+    const s = (await (await call(f.owner, 'POST', `${base}/reset`, {})).json()) as Settings;
+    for (const d of s.dials.filter((x) => x.adjustable)) expect(d.source, d.decision_type).toBe('default');
+    expect(s.active_preset).toBe((await get(f.owner, await seedRepo(f.owner.accountId))).active_preset);
+    expect((await versions(f.repoId)).length).toBe(moved * 2);
+  });
+
+  it('use the default: a member and a token are refused, unknown types are 422, another account\'s repo is 404, and nothing is written', async () => {
+    const f = await fixture();
+    const other = await fixture();
+    const url = `/repos/${f.repoId}/decision-settings/reset`;
+    const plaintext = generateToken();
+    await insertApiToken(appUserPool, {
+      accountId: f.owner.accountId,
+      createdBy: f.owner.userId,
+      tokenHash: hashToken(plaintext),
+      displayHint: 'fxat_...test',
+      scopes: ['read'],
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    await call(other.owner, 'POST', `/repos/${other.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'act' });
+    const theirsBefore = await versions(other.repoId);
+    const crossed = await call(f.owner, 'POST', `/repos/${other.repoId}/decision-settings/reset`, {});
+    expect(crossed.status).toBe(404);
+    const crossedSingle = await call(f.owner, 'POST', `/repos/${other.repoId}/decision-settings/reset`, { decision_type: 'test_strategy_choice' });
+    expect(crossedSingle.status).toBe(404);
+    expect(await versions(other.repoId)).toEqual(theirsBefore);
+    const asToken = await call(f.owner, 'POST', url, {}, plaintext);
+    expect(asToken.status).toBe(403);
+    expect(((await asToken.json()) as ErrorBody).error.code).toBe('session_required');
+    await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'act' });
+    const before = (await versions(f.repoId)).length;
+    expect((await call(f.member, 'POST', url, {})).status).toBe(403);
+    expect((await call(f.owner, 'POST', url, { decision_type: 'no_such_type' })).status).toBe(422);
+    expect((await call(f.owner, 'POST', url, { decision_type: 'test_strategy_choice', extra: 1 })).status).toBe(422);
+    expect((await versions(f.repoId)).length).toBe(before);
+  });
+
   it('naming the catalogue default on a dial with no version is a no-op: no version, no audit row', async () => {
     const f = await fixture();
     const res = await call(f.owner, 'POST', `/repos/${f.repoId}/decision-settings/dial`, { decision_type: 'test_strategy_choice', disposition: 'ask' });

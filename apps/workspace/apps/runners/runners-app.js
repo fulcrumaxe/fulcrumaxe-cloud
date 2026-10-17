@@ -79,10 +79,20 @@ function mountApp(contentEl) {
       err.textContent = said;
       err.focus();
     });
+    // The way back to "Unnamed runner (...)": offered only on a runner that has a name.
+    const clear = button("Remove the name", { "data-testid": "runners-rename-clear" }, async () => {
+      if (clear.getAttribute("aria-disabled") === "true") return;
+      clear.setAttribute("aria-disabled", "true");
+      const said = await fleet.act(r.id, "rename", { name: null });
+      if (said === "") return closeDialog();
+      clear.setAttribute("aria-disabled", "false");
+      err.textContent = said;
+      err.focus();
+    });
     openDialog({
       title: "Rename runner", from: "runners-" + r.id + "-rename", labelId: "runners-rename-h",
       body: h("div", null, h("label", { for: "runners-rename-input" }, "Name"), input, h("p", { id: "runners-rename-help", class: "runners-muted" }, "1 to 64 characters. People see this name in the fleet and when they pick a runner."), err),
-      actions: [save, button("Cancel", null, closeDialog)],
+      actions: [save, ...(r.hasName ? [clear] : []), button("Cancel", null, closeDialog)],
     });
     input.focus();
   }

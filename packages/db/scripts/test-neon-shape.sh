@@ -3433,11 +3433,11 @@ check_runner_concurrency_exception_shape() {
 }
 
 # D#605 FL-12a (0784): role shape of runner_concurrency_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no
-# member but the migration role and no live membership for it, a member of no role, privileges exactly the 25 granted by 0784 (column grants on the
-# concurrency table, account_members, accounts and audit_log, USAGE on public; nothing table-wide), owning exactly its one function and nothing else.
+# member but the migration role and no live membership for it, a member of no role, privileges exactly the 26 granted by 0784 and 0857 (column grants on the
+# concurrency table, account_members, accounts and audit_log, USAGE on public, and 0857's DELETE on the concurrency table for the withdrawal; nothing else table-wide), owning exactly its one function and nothing else.
 check_runner_concurrency_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column account_runner_concurrency.account_id SELECT','column account_runner_concurrency.total_jobs SELECT','column account_runner_concurrency.per_repo_jobs SELECT','column account_runner_concurrency.updated_by SELECT','column account_runner_concurrency.updated_at SELECT','column account_runner_concurrency.account_id INSERT','column account_runner_concurrency.total_jobs INSERT','column account_runner_concurrency.per_repo_jobs INSERT','column account_runner_concurrency.updated_by INSERT','column account_runner_concurrency.updated_at INSERT','column account_runner_concurrency.total_jobs UPDATE','column account_runner_concurrency.per_repo_jobs UPDATE','column account_runner_concurrency.updated_by UPDATE','column account_runner_concurrency.updated_at UPDATE','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+  local expected="'column account_runner_concurrency.account_id SELECT','column account_runner_concurrency.total_jobs SELECT','column account_runner_concurrency.per_repo_jobs SELECT','column account_runner_concurrency.updated_by SELECT','column account_runner_concurrency.updated_at SELECT','column account_runner_concurrency.account_id INSERT','column account_runner_concurrency.total_jobs INSERT','column account_runner_concurrency.per_repo_jobs INSERT','column account_runner_concurrency.updated_by INSERT','column account_runner_concurrency.updated_at INSERT','column account_runner_concurrency.total_jobs UPDATE','column account_runner_concurrency.per_repo_jobs UPDATE','column account_runner_concurrency.updated_by UPDATE','column account_runner_concurrency.updated_at UPDATE','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','table account_runner_concurrency DELETE','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_concurrency_definer'),
     held AS (
@@ -3452,7 +3452,7 @@ check_runner_concurrency_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_concurrency_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 25 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 25 granted by 0784' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 26 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 26 granted by 0784 and 0857' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 1
               OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.account_runner_concurrency_set(integer,integer,boolean)'::regprocedure::oid)
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)

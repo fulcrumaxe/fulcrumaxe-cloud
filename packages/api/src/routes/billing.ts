@@ -116,6 +116,8 @@ const patchBudgetsBodySchema = z
       .min(1)
       .max(100000)
       .refine(isWholeCents, "model_usd_month takes at most 2 decimal places")
+      // null clears the budget back to "not set" (stored as 0, the same as an account that never set one).
+      .nullable()
       .optional(),
   })
   .catchall(z.unknown());
@@ -154,9 +156,9 @@ export const billingRoutes: RouteEntry[] = [
     rateClass: "write",
     path: "/api/v1/budgets",
     operationId: "updateBudgets",
-    summary: "Set the monthly model budget (owner or admin, session only)",
+    summary: "Set or remove the monthly model budget (owner or admin, session only)",
     description:
-      "Body `{ model_usd_month }`: 1.00 to 100000.00, at most 2 decimals. Compute budgets are set by the plan and cannot be changed: any `compute_*` key is a 422 with `not_settable`. Each accepted request writes one audit row, even when the value is unchanged. Returns the budgets in the `GET /budgets` shape.",
+      "Body `{ model_usd_month }`: 1.00 to 100000.00, at most 2 decimals, or `null` to remove the budget and return to \"not set\" (the `GET /budgets` value is then 0, exactly as for an account that never set one). Compute budgets are set by the plan and cannot be changed: any `compute_*` key is a 422 with `not_settable`. Each accepted request writes one audit row, even when the value is unchanged. Returns the budgets in the `GET /budgets` shape.",
     extraResponses: { "422": "`validation_failed` with `details` naming each bad key; a `compute_*` key has code `not_settable`." },
     bodySchema: patchBudgetsBodySchema,
     responseSchema: budgetsResponseSchema,
@@ -172,7 +174,7 @@ export const billingRoutes: RouteEntry[] = [
 
       const result = await setAccountBudgets(billingCtx(ctx), {
         accountId: ctx.principal.accountId,
-        modelUsdMonth: body.model_usd_month!,
+        modelUsdMonth: body.model_usd_month ?? 0,
       });
       if (!result.ok) throw billingLinkError(result.reason);
       return getBudgets(ctx);
