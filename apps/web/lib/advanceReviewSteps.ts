@@ -11,9 +11,12 @@ import {
   isLocalGitHubHttp,
   listChangedFiles,
   listChangedFilesLocal,
+  pauseForDenial,
+  pauseOnDenial,
   promptRuntimeOf,
   readVerdict,
   reviewPlanFor,
+  reviewStep,
   roundIsCrossSide,
   securityTriggers,
   type AssembledPrompt,
@@ -48,7 +51,9 @@ export type ReviewWorker = Pick<
   | "advanceRecordEvent"
   | "advanceCancel"
   | "advancePrFound"
->;
+> &
+  /** D#483 S5-k1d: optional so a worker built before it (and a test's fake) still works; absent reads as "no reviewer run is known". */
+  Partial<Pick<AdvanceFacade, "advanceReviewRuns">>;
 
 /** Opens the GitHub client for one repository (apps/web/lib/github/installationHttp.ts in production). */
 export type OpenHttp = (kind: InstallationHttpKind, target: InstallationHttpTarget) => Promise<InstallationHttp>;
@@ -181,9 +186,21 @@ export interface StartedReviewer {
 const REVIEW_ROLES: readonly string[] = ["code-reviewer", "acceptance-tester", "security-reviewer", "debater"];
 
 /**
+ * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a refused one), one per role. A restarted review uses them and
+ * asks only for the roles that have none: the key of an ask a spending limit denied finds that refused run again, so it is never asked a second time.
+ */
+export async function reviewRunsBody(worker: ReviewWorker | null, who: StepWho, headSha: string, rereview: number): Promise<Array<{ role: string; runId: string }>> {
+  if (!worker || typeof worker.advanceReviewRuns !== "function") return [];
+  return worker.advanceReviewRuns(who, { headSha, rereview });
+}
+
+/**
  * Starts one reviewer on the pull request's EXACT head. The run is keyed by (head, role), so a replayed step, a second
  * press of Approve, or a re-review of an unchanged head finds the run that exists and starts nothing. The prompt carries
  * the approved Spec and ends with the AGENT_OUTPUT envelope. The debater also gets the summaries of the reviewers who passed.
+ *
+ * D#483 S5-k1d: a start a spending limit denied answers the named pause as its reason (and no run id). Each later ask of the same reviewer is a new attempt (`attempt`,
+ * the key's `:s<n>` after the re-review round), because the denied key finds its own refused run again.
  */
 export async function startReviewerBody(
   worker: ReviewWorker | null,
@@ -193,6 +210,7 @@ export async function startReviewerBody(
   role: string,
   prior: ReadonlyArray<{ role: string; runId: string }>,
   rereview = 0,
+  attempt = 0,
 ): Promise<StartedReviewer> {
   if (!worker) return { role, runId: null, reason: "worker_unavailable" };
   if (!REVIEW_ROLES.includes(role)) return { role, runId: null, reason: "invalid_input" };
@@ -226,18 +244,18 @@ export async function startReviewerBody(
     if (err instanceof ReviewPromptInputError) return { role, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
   }
-  const started: AdvanceRunStart = await worker.advanceStartRun({
+  const started: AdvanceRunStart = pauseOnDenial(await worker.advanceStartRun({
     accountId: who.accountId,
     workItemId: who.workItemId,
     haltEpoch: who.haltEpoch,
-    step: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`,
+    step: reviewStep(pr.headSha, role, rereview, attempt),
     role,
     prompt: assembled.prompt,
     contextSections: assembled.sections,
     clone: true,
     headSha: pr.headSha,
     expectedExecutionMode: ctx.executionMode,
-  });
+  }));
   if (!started.ok) return { role, runId: null, reason: started.reason };
   await worker.advanceRecordEvent(who, { kind: "review_started", dedupeKey: `review:${pr.headSha}:${role}${rereview > 0 ? `:rr${rereview}` : ""}`, reasons: [toCode(role)], headSha: pr.headSha, prNumber: pr.number, runId: started.runId });
   return { role, runId: started.runId, reason: null };
@@ -312,6 +330,7 @@ export async function startFixBody(
   round: number,
   failing: ReadonlyArray<{ role: string; runId: string }>,
   retry = 0,
+  spendAttempt = 0,
 ): Promise<FixOut> {
   if (!worker) return { ok: false, runId: null, reason: "worker_unavailable" };
   const first = failing[0];
@@ -355,13 +374,16 @@ export async function startFixBody(
     round,
     actionId,
     ...(retry > 0 ? { retry } : {}),
+    // D#483 S5-k1d: the number of the ask when an earlier ask of this round was denied by a spending limit (the first ask carries none).
+    ...(spendAttempt > 0 ? { spendAttempt } : {}),
     reviewer: REVIEWER_OF_ROLE[first.role] ?? "code",
     failingRunId: first.runId,
     expectedExecutionMode: ctx.executionMode,
     // The pull request the pipeline just found on GitHub: a cross-side round works on its branch. The worker checks it against the item's own record.
     ...(crossSide ? { pr: { number: pr.number, branch: pr.branch } } : {}),
   });
-  return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: started.reason };
+  // A spending-limit denial comes back as its named pause (the driver waits and asks again); every other refusal keeps the code it came with.
+  return started.ok ? { ok: true, runId: started.runId, reason: null } : { ok: false, runId: null, reason: pauseForDenial(started.reason) ?? started.reason };
 }
 
 export interface DescentOut {

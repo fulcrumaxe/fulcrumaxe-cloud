@@ -95,6 +95,11 @@ export interface AdvanceStartArgs {
    * more than the highest attempt among the approval's earlier build runs, so a restart never replays the `refused_spend` run an earlier ask left.
    */
   startAttempt?: number;
+  /**
+   * D#483 S5-k1d: the re-review round (`:rr<n>`) a parked review was in when its reviewers' start was denied. Set by the sweep from the waiting fact; absent (0) on
+   * every start a person's approval makes. The restarted review asks its reviewers at this round, so their keys are the ones the earlier asks used.
+   */
+  startRereview?: number;
 }
 
 /**
@@ -271,6 +276,11 @@ export interface AdvanceFixRequest {
    * "no change needed" fix that still asked for changes). It joins the run's key, so that attempt is a run of its own, not the finished one.
    */
   retry?: number;
+  /**
+   * D#483 S5-k1d: the number of the ask when an earlier ask of this fix round was denied by a spending limit (absent for the first ask). A denied start leaves a keyed
+   * `refused_spend` run, and a replay of the same key finds that run again, so each later ask is a new attempt: `:s<n>` after everything else in the round's key.
+   */
+  spendAttempt?: number;
   /** Which review the card shows as asking for changes. */
   reviewer: "code" | "security" | "acceptance";
   /** A reviewer run whose verdict asked for the changes. */
@@ -477,6 +487,11 @@ export interface AdvanceFacade {
    * records `fix_round_started` or `fix_round_refused`. A replay of the same approval and head returns the run it started.
    */
   advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart>;
+  /**
+   * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a `refused_spend` one), newest per role. A restarted review
+   * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
+   */
+  advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string }>>;
   /** D#483 P3: the merge gate on the pull request's current head. */
   advanceMergeGate(who: AdvanceStepWho, prNumber: number): Promise<AdvanceMergeGateResult>;
   /**
@@ -1016,6 +1031,26 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   }
 
   /** D#597 CC-3: the run a step of this item started, found by its key: the exact prefix, or the prefix plus a note pin (`:n<hash>`), and nothing longer. */
+  /**
+   * D#483 S5-k1d: the admit denials that are a spending limit (packages/pipeline reservationPauses.ts RESERVATION_DENIAL_PAUSES; a test holds the lists equal). The
+   * web step turns each one into its named pause.
+   */
+  const SPEND_DENIALS: readonly string[] = ["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded"];
+
+  /** The spending-limit denial a run ended with (`refused_spend` and the closed reason the admit gave), or null when the run did not end that way. */
+  async function deniedRunReason(who: AdvanceStepWho, runId: string): Promise<string | null> {
+    return withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ status: string; reason: string | null }>(
+        `SELECT a.status, (SELECT e.payload->>'failureReason' FROM run_events e WHERE e.account_id = a.account_id AND e.run_id = a.id AND e.kind = 'run.status_changed' AND e.payload->>'to' = 'refused_spend' ORDER BY e.seq DESC LIMIT 1) AS reason
+           FROM agent_runs a WHERE a.account_id = $1 AND a.id = $2`,
+        [who.accountId, runId],
+      );
+      const row = r.rows[0];
+      if (!row || row.status !== "refused_spend") return null;
+      return row.reason !== null && SPEND_DENIALS.includes(row.reason) ? row.reason : "refused_spend";
+    });
+  }
+
   async function findStepRun(who: AdvanceStepWho, stepPrefix: string): Promise<{ step: string; runId: string } | null> {
     if (!/^[a-z0-9:_.-]{1,128}$/i.test(stepPrefix)) return null;
     const keyPrefix = `advance:${who.workItemId}:${stepPrefix}`;
@@ -1177,6 +1212,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
       (req.fallbackPrompt === undefined || (typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
       (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
+      (req.spendAttempt === undefined || (Number.isSafeInteger(req.spendAttempt) && req.spendAttempt >= 0 && req.spendAttempt <= MAX_WAITING_ATTEMPT)) &&
       (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
       (req.expectedExecutionMode === undefined || MODE_RE.test(req.expectedExecutionMode)) &&
       (req.pr === undefined || (Number.isSafeInteger(req.pr.number) && req.pr.number >= 1 && req.pr.number <= 2_147_483_647 && (RUNNER_RUN_BRANCH.test(req.pr.branch) || ITEM_PR_BRANCH.test(req.pr.branch))));
@@ -1184,8 +1220,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     const bad = await guardStep(who);
     if (bad) return { ok: false, reason: bad.reason ?? "refused" };
 
-    const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}`;
+    // D#483 S5-k1d: the attempt after a spending-limit denial goes last, after the re-review retry (`:r<n>`), so the two never collide.
+    const attemptKey = `${req.headSha}:${req.actionId}${req.retry ? `:r${req.retry}` : ""}${req.spendAttempt ? `:s${req.spendAttempt}` : ""}`;
     const refuse = async (reason: string): Promise<AdvanceRunStart> => {
+      // A spending-limit denial is a pause, not a refusal: the driver leaves its waiting fact and asks again, and the sweep resumes it. No refusal fact is written.
+      if (SPEND_DENIALS.includes(reason)) return { ok: false, reason };
       await writeEvent(who, { kind: "fix_round_refused", dedupeKey: `fix:${attemptKey}`, code: /^[a-z][a-z0-9_]{0,63}$/.test(reason) ? reason : "refused", headSha: req.headSha, round: req.round });
       return { ok: false, reason };
     };
@@ -1210,6 +1249,9 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     };
     const prior = await claimed();
     if (prior) {
+      // A replay of a key whose run a spending limit denied is that denial again (a later ask is another attempt, so this is the same ask repeated).
+      const denied = await deniedRunReason(who, prior.runId);
+      if (denied !== null) return refuse(denied);
       await attachRunNotes(runnerPool, who.accountId, who.workItemId, prior.runId, { suffix: prior.step.slice(keyBase.length) });
       return started(prior.runId);
     }
@@ -1387,7 +1429,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       if (err instanceof NoSpecVersionError) return refuse("no_spec_version");
       return refuse("resume_failed");
     }
-    if (out.status === "refused_spend") return refuse("refused_spend");
+    if (out.status === "refused_spend") {
+      // D#483 S5-k1d: the admit's own reason, when it is a spending-limit denial, so the driver can wait for the limit; any other denial keeps the code it always had.
+      const why = (out as { reason?: unknown }).reason;
+      return refuse(typeof why === "string" && SPEND_DENIALS.includes(why) ? why : "refused_spend");
+    }
     console.info(JSON.stringify({ event: "advance.resumed", work_item_id: who.workItemId, run_id: out.id, status: out.status, round: req.round }));
     await attachRunNotes(runnerPool, who.accountId, who.workItemId, out.id, { ids: notes.map((n) => n.id) });
     return started(out.id);
@@ -1472,6 +1518,30 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return out;
   }
 
+  async function advanceReviewRuns(who: AdvanceStepWho, req: { headSha: string; rereview: number }): Promise<Array<{ role: string; runId: string }>> {
+    if (!UUID_RE.test(who.accountId) || !UUID_RE.test(who.workItemId) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(req.headSha)) return [];
+    if (!(Number.isInteger(req.rereview) && req.rereview >= 0 && req.rereview <= 100)) return [];
+    const prefix = `advance:${who.workItemId}:review:${req.headSha}:`;
+    const rows = await withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ idempotency_key: string; run_id: string }>(
+        `SELECT k.idempotency_key, k.run_id FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+          WHERE k.account_id = $1 AND a.work_item_id = $2 AND starts_with(k.idempotency_key, $3) AND a.status <> 'refused_spend'
+          ORDER BY k.created_at DESC, k.run_id DESC LIMIT 200`,
+        [who.accountId, who.workItemId, prefix],
+      );
+      return r.rows;
+    });
+    // What follows the head is `<role>[:rr<n>][:s<n>][:p<n>][:n<pin>]` (the role, the re-review round, the attempt, a placement generation, a note pin).
+    const tail = /^([a-z][a-z-]*)(?::rr(\d{1,3}))?(?::s\d{1,6})?(?::p\d{1,2})?(?::n[0-9a-f]{16})?$/;
+    const newest = new Map<string, string>();
+    for (const row of rows) {
+      const m = tail.exec(row.idempotency_key.slice(prefix.length));
+      if (!m || Number(m[2] ?? 0) !== req.rereview) continue;
+      if (!newest.has(m[1]!)) newest.set(m[1]!, row.run_id);
+    }
+    return [...newest].map(([role, runId]) => ({ role, runId }));
+  }
+
   async function advanceCancel(who: AdvanceStepWho, runId: string): Promise<void> {
     await cancelItemRun(who, runId);
   }
@@ -1495,6 +1565,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceLoadSpecText,
     advanceRecordRound,
     advanceStartFix,
+    advanceReviewRuns,
     advanceMergeGate,
     advanceVerifiedReviewGate,
     advanceRecordEvent,

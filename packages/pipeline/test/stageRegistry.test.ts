@@ -23,9 +23,9 @@ describe("the parked-stage registry", () => {
     for (const stage of UNREGISTERED_STAGES) expect(WAITING_STAGES).toContain(stage);
   });
 
-  it("S5k1c-8: the allowlist lost classify, spec and respec (the short Spec waits as `spec`); review, fix round and the panel are the later rows' to remove", () => {
-    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec"]);
-    expect([...UNREGISTERED_STAGES].sort()).toEqual(["fix_round", "panel", "review"]);
+  it("S5k1c-8 and S5k1d-8: the allowlist lost classify, spec and respec (the short Spec waits as `spec`), then the review and the fix round; the panel is the last row's to remove", () => {
+    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round"]);
+    expect([...UNREGISTERED_STAGES]).toEqual(["panel"]);
   });
 
   it("an entry is keyed by its own stage and parks only for a spend pause at stage positions the table lists", () => {
