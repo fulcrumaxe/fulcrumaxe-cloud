@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { CATALOGUE_IDS } from "../src/catalogue.js";
+import { CATALOGUE, CATALOGUE_IDS } from "../src/catalogue.js";
 import {
+  PLATFORM_DECLARATIONS,
   UndeclaredCatalogueEntryError,
   assertDeclarationsResolve,
   findUnresolvedDeclarations,
@@ -63,5 +64,19 @@ describe("D#7 DP5 criteria 1-2: the declared-classes resolution mechanism", () =
       expect((err as Error).message).toContain("tools.ts:fixture_tool");
       expect((err as Error).message).toContain("made_up_type");
     }
+  });
+});
+
+describe("D#7 DP13: the platform declaration source", () => {
+  const declarations: DeclaredEntry[] = PLATFORM_DECLARATIONS.map((decisionType) => ({ source: "platform", decisionType }));
+
+  it("is exactly [run_extension] and every entry resolves", () => {
+    expect([...PLATFORM_DECLARATIONS]).toEqual(["run_extension"]);
+    expect(findUnresolvedDeclarations(declarations)).toEqual([]);
+  });
+
+  it("non-vacuity: against a catalogue without run_extension, the platform declaration is caught", () => {
+    const without = CATALOGUE.filter((e) => e.id !== "run_extension");
+    expect(findUnresolvedDeclarations(declarations, without)).toEqual(declarations);
   });
 });

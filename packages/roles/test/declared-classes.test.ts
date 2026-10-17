@@ -27,6 +27,7 @@ import {
   CATALOGUE_IDS,
   findUnresolvedDeclarations,
   getCatalogueEntry,
+  PLATFORM_DECLARATIONS,
   type DeclaredEntry,
 } from "@fx/decisions";
 import { loadProductCard } from "../src/cards.js";
@@ -207,5 +208,29 @@ describe("D#7 DP-C2b: a declaration never reaches the agent -- the text a role i
     const leaked = `# Executor\n\ndecision_types: [${FIRST_CATALOGUE_ID}]`;
     expect(idsIn(leaked)).toEqual([FIRST_CATALOGUE_ID]);
     expect(leaked).toContain("decision_types");
+  });
+});
+
+describe("D#7 DP13: run_extension is declared by the platform, never by a card or a tool", () => {
+  it("is the platform's declaration and it resolves", () => {
+    expect([...PLATFORM_DECLARATIONS]).toEqual(["run_extension"]);
+    const declarations = PLATFORM_DECLARATIONS.map((decisionType) => ({ source: "platform", decisionType }));
+    expect(findUnresolvedDeclarations(declarations)).toEqual([]);
+  });
+
+  it("appears in no card (whole text, declaration line included) and in no tool entry", () => {
+    for (const file of cardFiles()) {
+      const text = readFileSync(path.join(CARDS_DIR, file), "utf8");
+      expect({ file, found: text.includes("run_extension") }).toEqual({ file, found: false });
+    }
+    for (const d of [...extractToolDeclarations(), ...realCardDeclarations()]) {
+      expect(PLATFORM_DECLARATIONS, d.source).not.toContain(d.decisionType);
+    }
+    expect(JSON.stringify(TOOL_REGISTRY)).not.toContain("run_extension");
+  });
+
+  it("the check is not vacuous: a card that declared it would be caught", () => {
+    const hostile = parseCardDeclarations("---\nname: x\ndecision_types: [run_extension]\n---\n", "fixture.md");
+    expect(hostile.some((d) => PLATFORM_DECLARATIONS.includes(d.decisionType))).toBe(true);
   });
 });

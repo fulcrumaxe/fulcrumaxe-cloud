@@ -27,8 +27,8 @@ function fingerprint(catalogue: readonly CatalogueEntry[], presets: readonly Pre
  * "we shipped a new dial" is never indistinguishable from "nothing happened".
  */
 const PINNED = {
-  version: 5,
-  sha256: "ec9b2c408e4359db584caa1b3effc1f6056ea297937e996057ba214237b6367a",
+  version: 6,
+  sha256: "e077bfef83c253610d61caa3e054bc87cfdf9351150ebda386777fe3d2ed6441",
 };
 
 describe("DP3b-7: CATALOGUE_VERSION is pinned to the catalogue and presets", () => {
@@ -50,7 +50,7 @@ describe("DP3b-7: CATALOGUE_VERSION is pinned to the catalogue and presets", () 
 
   it("non-vacuity: changing or dropping a starting-work entry changes the hash (S5a-5)", () => {
     const base = fingerprint(CATALOGUE, PRESETS);
-    for (const id of ["start_work_small", "start_parent_item", "launch_sub_item", "spend_past_envelope", "start_after_reclassify"]) {
+    for (const id of ["start_work_small", "start_parent_item", "launch_sub_item", "spend_past_envelope", "start_after_reclassify", "run_extension"]) {
       expect(CATALOGUE.some((e) => e.id === id), id).toBe(true);
       expect(fingerprint(CATALOGUE.filter((e) => e.id !== id), PRESETS), id).not.toBe(base);
       expect(fingerprint(CATALOGUE.map((e) => (e.id === id ? { ...e, defaultDisposition: "act" as const } : e)), PRESETS), id).not.toBe(base);

@@ -56,6 +56,7 @@ const ASKED = [
   'start_work_doc',
   'launch_sub_item',
   'tool_call',
+  'run_extension',
   'publish_deprecation_notice',
   'publish_release_artifact',
   'external_paid_api_call',
@@ -199,9 +200,11 @@ describe('D#7 DP10b: ask settings routes', () => {
       expect(rows[type]!.label, type).not.toBe(type);
       expect(rows[type]!.account).toBeNull();
     }
-    // The catalogue, not this route, decides what is allowed: only the two internal class 2 entries may go ahead on silence.
+    // The catalogue, not this route, decides what is allowed: only the two internal refactor/test entries and run_extension may go ahead on silence.
     for (const type of STOP_ONLY) expect(rows[type]!.allowed_outcomes, type).toEqual(['stop_and_flag']);
     expect(rows.nonbreaking_refactor_approach!.allowed_outcomes).toEqual(['stop_and_flag', 'proceed_recommended']);
+    expect(rows.run_extension!.allowed_outcomes).toEqual(['stop_and_flag', 'proceed_recommended']);
+    expect(rows.run_extension!.label).toBe('Extending a run past its limit');
     expect(await versions(f.owner.accountId)).toHaveLength(0);
   });
 

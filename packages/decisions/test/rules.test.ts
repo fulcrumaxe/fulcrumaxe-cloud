@@ -279,8 +279,8 @@ describe("AAP-a1 criterion 9: the tool_call catalogue entry", () => {
   it("is not reversible, with the prose", () => {
     expect(entry?.reversal).toEqual({ availability: "not_reversible", reason: "a tool call that ran can't be un-run; you can deny the next one" });
   });
-  it("went up one catalogue version from 4", () => {
-    expect(CATALOGUE_VERSION).toBe(5);
+  it("is in the catalogue from version 5 on (catalogue-version.test.ts pins the exact number)", () => {
+    expect(CATALOGUE_VERSION).toBeGreaterThanOrEqual(5);
   });
   it("resolves per preset: Cautious asks, Balanced announces, Autonomous acts", () => {
     const request = { type: "tool_call", options: [], proposed: "", rationale: "" };
