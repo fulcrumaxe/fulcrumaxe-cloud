@@ -345,3 +345,65 @@ export async function isItemWaitingOnAnswer(client: Pick<PoolClient, 'query'>, w
   );
   return rows[0]?.waiting === true;
 }
+
+/** The most one window-end sweep lists; the definer refuses a limit outside 1..500. */
+export const ASK_DUE_DEFAULT_LIMIT = 100;
+
+export interface DueAsk {
+  askId: string;
+  accountId: string;
+}
+
+/**
+ * Which open asks are past their answer window at `now`, across tenants, soonest due first (migration 0853,
+ * `decision_ask_due`). A read only: nothing is locked or moved here, the claim is `timeOutAskIn`'s. It is for the
+ * worker's tick only, on the RECEIPT pool with no tenant set; nothing in the result is user text. The definer
+ * refuses a `now` more than a minute ahead of the database clock.
+ */
+export async function listDueAsks(pool: Pick<Pool, 'query'>, now: Date, limit: number = ASK_DUE_DEFAULT_LIMIT): Promise<DueAsk[]> {
+  const { rows } = await pool.query<{ o_ask_id: string; o_account_id: string }>(
+    'SELECT o_ask_id, o_account_id FROM decision_ask_due($1::timestamptz, $2::integer)',
+    [now, limit],
+  );
+  return rows.map((r) => ({ askId: r.o_ask_id, accountId: r.o_account_id }));
+}
+
+/** The named exceptions decision_ask_time_out() raises (migration 0853). */
+export const ASK_TIMEOUT_EXCEPTIONS = [
+  'ask_no_tenant', 'ask_sweep_system_only', 'ask_sweep_bad_time', 'ask_sweep_bad_outcome',
+  'ask_receipt_mismatch', 'ask_sweep_not_proceedable', 'ask_no_run',
+] as const;
+
+/** Thrown by `timeOutAskIn`. `code` is the exception name; branch on it, not on the message. */
+export class AskTimeoutDefinerError extends Error {
+  constructor(readonly code: (typeof ASK_TIMEOUT_EXCEPTIONS)[number]) {
+    super(code);
+    this.name = 'AskTimeoutDefinerError';
+  }
+}
+
+/**
+ * Ends one ask's window through decision_ask_time_out() on a receipt-pool `withTenant` client with NO user or token set
+ * (the system). Returns true when this call moved the ask; false when it moved nothing (the row is locked by an answer or
+ * a withdrawal, is no longer open, or is not yet due), in which case the caller rolls back what it wrote for the ask.
+ * `to: 'proceeded'` needs the policy receipt written earlier on the same client. A unique violation on the receipt link
+ * is a receipt mismatch; any other error passes through as it is.
+ */
+export async function timeOutAskIn(
+  client: PoolClient,
+  input: { askId: string; now: Date; to: 'overdue' | 'proceeded'; receiptId?: string },
+): Promise<boolean> {
+  try {
+    const { rows } = await client.query<{ moved: boolean }>(
+      'SELECT decision_ask_time_out($1::uuid, $2::timestamptz, $3::text, $4::uuid) AS moved',
+      [input.askId, input.now, input.to, input.receiptId ?? null],
+    );
+    return rows[0]!.moved;
+  } catch (err) {
+    const e = err as { code?: string; message?: string } | null;
+    const name = e?.code === '23505' ? 'ask_receipt_mismatch' : /^([a-z_]+)(?::|$)/.exec(e?.message ?? '')?.[1];
+    const known = ASK_TIMEOUT_EXCEPTIONS.find((n) => n === name);
+    if (known !== undefined) throw new AskTimeoutDefinerError(known);
+    throw err;
+  }
+}
