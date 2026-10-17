@@ -9,6 +9,7 @@ import { select, triggerRule, type SelectInput, type Trigger } from "./select.js
 import type { RouteRecord, RoutingResult } from "./routing.js";
 import type { StagingOnlyTest } from "./staging-only.js";
 import { isProdSafe, targetGuard, type Target } from "./targets.js";
+import { accountBaseline, type AccountBaseline } from "./janitor/baseline.js";
 
 export type PackOutcome =
   | { id: string; outcome: "RUN"; named: boolean }
@@ -37,6 +38,12 @@ export interface Plan {
   /** Why routing fell back to every pack at or below standard; null when it judged every file. */
   routing_fallback: string | null;
   estimated_cost_usd: number;
+  /**
+   * What the janitors would do for this selection (T6a; offline, nothing is read from the account here). The account
+   * janitor runs only when a selected pack is destructive; the dry-run that shows its changes is
+   * `live-e2e janitor account --target <name>`.
+   */
+  janitors: { account: { needed: boolean; packs: string[]; pending: string[]; baseline: AccountBaseline } };
 }
 
 export interface PlanInput extends Omit<SelectInput, "routed"> {
@@ -110,7 +117,31 @@ export function buildPlan(input: PlanInput): Plan {
     routing: input.routing?.files ?? [],
     routing_fallback: input.routing?.fallback ?? null,
     estimated_cost_usd: selected.reduce((sum, s) => sum + s.est_usd, 0),
+    janitors: { account: janitorForPlan(outcomes, byId) },
   };
+}
+
+/**
+ * The account janitor runs only when a destructive pack is going to run (`needed`, `packs`). A destructive pack that
+ * `plan` skipped for a need only `run` can check (the owner session) is `pending`: the janitor would run for it once
+ * the need is met.
+ */
+function janitorForPlan(outcomes: PackOutcome[], byId: Map<string, Pack>): Plan["janitors"]["account"] {
+  const destructive = (o: PackOutcome): boolean => byId.get(o.id)?.destructive === true;
+  const packs = outcomes.filter((o) => o.outcome === "RUN" && destructive(o)).map((o) => o.id);
+  const pending = outcomes.filter((o) => o.outcome === "SKIPPED-NEED" && destructive(o)).map((o) => o.id);
+  return { needed: packs.length > 0, packs, pending, baseline: accountBaseline() };
+}
+
+/** The line(s) `plan` prints for the janitors. */
+export function describeJanitors(plan: Plan): string[] {
+  const a = plan.janitors.account;
+  const b = a.baseline;
+  const baseline = `janitor account: baseline ${Object.entries(b.limits).map(([k, v]) => `${k} ${v}`).join(", ")}; model_usd_month ${b.model_usd_month}; role model ${b.role_model} (${b.floored_roles.join(", ")} ${b.floor_model}); lowers only`;
+  const dry = `dry-run: live-e2e janitor account --target ${plan.target}`;
+  if (a.needed) return [`janitor account: runs before ${a.packs.join(", ")} (${dry})`, baseline];
+  if (a.pending.length > 0) return [`janitor account: would run before ${a.pending.join(", ")} once their needs are met (${dry})`, baseline];
+  return ["janitor account: not needed (no destructive pack selected)"];
 }
 
 /** One line per pack, the form the CLI prints. */

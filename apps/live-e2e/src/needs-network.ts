@@ -34,9 +34,9 @@ export const FIXTURE_REPO_PATTERN = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$
 /** Run minutes above this are over the 60 sandbox-minute ceiling (4d, Q2 c). */
 export const MAX_RUN_MINUTES = 60;
 /** The two roles the product holds at their `sonnet-5` floor; every other role the pipeline uses is pinned to the cheapest tier. */
-const FLOORED_ROLES = ["security-reviewer", "security-expert"];
-const FLOOR_MODEL = "sonnet-5";
-const MAX_PAGES = 10;
+export const FLOORED_ROLES = ["security-reviewer", "security-expert"];
+export const FLOOR_MODEL = "sonnet-5";
+export const MAX_PAGES = 10;
 
 const NETWORK_BARE = ["model-key", "test-repo", "caps-set", "sandbox"];
 const NETWORK_PREFIXES = ["session:", "github-app:", "fresh-state:"];
