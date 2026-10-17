@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFollowedRunner } from "../src/advance/followedRunner.js";
-import { PanelYieldError } from "../src/plan/panel.js";
+import { PanelYieldError, type PanelSeatResult } from "../src/plan/panel.js";
 import { PanelSeatAbortedError } from "../src/plan/sandboxPanelRunner.js";
 import { WaitBudget } from "../src/plan/waitBudget.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts } from "../src/advance/runPorts.js";
@@ -67,7 +67,7 @@ describe("a wait that hands control back", () => {
         ? { status: "running", done: false, envelope: null, ...(runtime ? { runtime } : {}) }
         : { status: "succeeded", done: true, envelope: { comment: "ok" } };
     });
-    const out = await createFollowedRunner(p, { pollMs: 1, yieldAfterMs: 150_000, now: clock.now }).panel.runSeat(seat, live());
+    const out = (await createFollowedRunner(p, { pollMs: 1, yieldAfterMs: 150_000, now: clock.now }).panel.runSeat(seat, live())) as PanelSeatResult;
     expect(out.agentOutput).toEqual({ comment: "ok" });
     expect(reads).toBe(4);
     expect(p.cancel).not.toHaveBeenCalled();
@@ -77,7 +77,7 @@ describe("a wait that hands control back", () => {
     const clock = handClock();
     clock.advance(10 * 60_000);
     const p = portsOver(() => ({ status: "succeeded", done: true, envelope: { comment: "ok" }, runtime: "runner" }));
-    const out = await createFollowedRunner(p, { pollMs: 1, yieldAfterMs: 0, now: clock.now }).panel.runSeat(seat, live());
+    const out = (await createFollowedRunner(p, { pollMs: 1, yieldAfterMs: 0, now: clock.now }).panel.runSeat(seat, live())) as PanelSeatResult;
     expect(out.agentOutput).toEqual({ comment: "ok" });
   });
 

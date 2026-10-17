@@ -50,14 +50,14 @@ describe("GET /api/cron/stage-resume-sweep", () => {
     expect(s.getWorker).not.toHaveBeenCalled();
   });
 
-  it("a pause the worker recorded wakes it: the sweep gets the pipeline's registry (build, classify, the Spec, the re-spec, the review and the fix round today) and the marker moves to the next pass while items stay parked", async () => {
+  it("a pause the worker recorded wakes it: the sweep gets the pipeline's registry (build, classify, the Spec, the re-spec, the review, the fix round and the panel) and the marker moves to the next pass while items stay parked", async () => {
     await markWorkPending("stage-resume-sweep", { since: clock.value });
     const next = clock.value + 15 * 60_000;
     const s = setup(async () => ({ ...NONE, listed: 2, refreshed: 2, nextDueAt: next }));
     const res = await stageResumeSweepHandler(req(`Bearer ${SECRET}`), s.deps);
     expect(await res.json()).toMatchObject({ configured: true, listed: 2, refreshed: 2 });
     const passed = s.sweepParkedStages.mock.calls[0]![0] as Array<{ stage: string }>;
-    expect(passed.map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round"]);
+    expect(passed.map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel"]);
     expect(passed.map((e) => e.stage)).toEqual(registeredStages().map((e) => e.stage));
     expect(marker()).toBe(next);
   });

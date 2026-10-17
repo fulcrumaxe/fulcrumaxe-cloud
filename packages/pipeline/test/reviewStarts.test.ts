@@ -85,10 +85,10 @@ describe("S5k1d-8: the registry entries for the review and the fix round", () =>
   const review = PARKED_STAGE_REGISTRY.review!;
   const fix = PARKED_STAGE_REGISTRY.fix_round!;
 
-  it("both stages are registered and the allowlist lost them; only the panel is left", () => {
+  it("both stages are registered and the allowlist lost them (the panel, the last one, left it in S5-k1e)", () => {
     expect(review).toBeDefined();
     expect(fix).toBeDefined();
-    expect([...UNREGISTERED_STAGES]).toEqual(["panel"]);
+    expect([...UNREGISTERED_STAGES]).toEqual([]);
   });
 
   it("they park at the positions the table lists, for the spend pauses only, under the build's approval, on a head", () => {

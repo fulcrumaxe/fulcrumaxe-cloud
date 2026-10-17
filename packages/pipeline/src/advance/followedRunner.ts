@@ -1,4 +1,4 @@
-import type { PanelRunner, PanelSeatRequest, PanelSeatResult } from "../plan/panel.js";
+import type { PanelRunner, PanelSeatDenied, PanelSeatRequest, PanelSeatResult } from "../plan/panel.js";
 import type { SpecWriter, SpecWriteRequest } from "../plan/spec.js";
 import { PanelYieldError } from "../plan/panel.js";
 import { PanelSeatAbortedError, PanelSeatFailedError } from "../plan/sandboxPanelRunner.js";
@@ -6,6 +6,7 @@ import type { WaitClock } from "../plan/waitBudget.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { SpecWriterPausedError } from "./stageStarts.js";
+import { nextSeatStep } from "./panelStarts.js";
 
 /**
  * D#483 P2: the panel's `PanelRunner` and the Spec step's `SpecWriter`, over real agent runs started through the
@@ -129,7 +130,7 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     if (signal.aborted) throw new PanelSeatAbortedError(); // before start: nothing exists to stop
     const started = await ports.startRun({ step, role, prompt, clone: true });
     if (!started.ok) {
-      // D#483 S5-k1c: the Spec PM's start denied by a spending limit is a named pause, not a failed run. (A panel seat's denial is still absorbed as a seat failure: that is S5-k1e.)
+      // D#483 S5-k1c: the Spec PM's start denied by a spending limit is a named pause, not a failed run. (A panel seat's denial is its own typed answer: see `runPanelSeat`.)
       const pause = spendPauses ? pauseForDenial(started.reason) : null;
       if (pause !== null) throw new SpecWriterPausedError(pause);
       throw new PanelSeatFailedError(`refused:${started.reason}`);
@@ -137,10 +138,25 @@ export function createFollowedRunner(ports: AdvanceRunPorts, options: FollowedRu
     return follow(started.runId, signal, clock);
   }
 
+  /**
+   * D#483 S5-k1e: one panel seat. A start that a spending limit denied is handed back as a typed `PanelSeatDenied` (never a seat failure), so the panel waits instead of
+   * showing the seat as DID NOT POST. Any other refusal is still a failure. The key is chosen from the seat's own earlier runs (`nextSeatStep`): a seat whose latest run
+   * was refused by a limit asks again at the next attempt, and every other seat keeps its key and follows its run.
+   */
+  async function runPanelSeat(request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult | PanelSeatDenied> {
+    if (signal.aborted) throw new PanelSeatAbortedError(); // before start: nothing exists to stop
+    const { step } = await nextSeatStep(ports, request.idempotencyKey, request.round, request.role);
+    const started = await ports.startRun({ step, role: request.role, prompt: request.prompt, clone: true });
+    if (!started.ok) {
+      const pause = pauseForDenial(started.reason);
+      if (pause !== null) return { denied: true, pause };
+      throw new PanelSeatFailedError(`refused:${started.reason}`);
+    }
+    return follow(started.runId, signal, clock);
+  }
+
   return {
-    panel: {
-      runSeat: (request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock) => runKeyed(request.idempotencyKey, request.role, request.prompt, signal, clock),
-    },
+    panel: { runSeat: runPanelSeat },
     writer: {
       writeSpec: (request: SpecWriteRequest, signal: AbortSignal, clock?: WaitClock) => runKeyed(request.idempotencyKey, "project-manager", request.prompt, signal, clock, true),
     },

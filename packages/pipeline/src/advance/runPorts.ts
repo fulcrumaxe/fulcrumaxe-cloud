@@ -62,7 +62,17 @@ export interface AdvanceRunPorts {
    * replay uses it to find its run again even when the notes accepted since would now give a different pin. Absent: no such lookup.
    */
   findStep?(stepPrefix: string): Promise<{ step: string; runId: string } | null>;
-  /** How a run stands. A run that does not exist reads as `{ status: "missing", done: true }`. */
+  /**
+   * D#483 S5-k1e: the runs a panel seat's earlier asks started, whatever attempt they were: the steps shaped `<head>[:s<n>]<tail>` (the item's own prefix is the port's
+   * business), each with its attempt number and the run's status, oldest first. A seat chooses its next key from this. Absent: every seat is a first ask.
+   */
+  startedAttempts?(head: string, tail: string): Promise<Array<{ attempt: number; status: string }>>;
+  /**
+   * D#483 S5-k1e: the read-only headroom check for a whole round: would a spending limit deny the seats of these roles if they were all started now? Writes no run
+   * row. `{ ok: false, reason }` carries the denial's own name (`model_budget_exceeded`, ...). Absent: the round is not checked as a whole.
+   */
+  headroom?(roles: readonly string[]): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** How a run that does not exist reads as `{ status: "missing", done: true }`. */
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path (the same one the Cancel button uses). Safe on a finished run. */
   cancel(runId: string): Promise<void>;

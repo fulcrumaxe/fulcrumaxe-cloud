@@ -36,6 +36,8 @@ export {
   type PanelRunner,
   type PanelSeatRequest,
   type PanelSeatResult,
+  type PanelSeatDenied,
+  isSeatDenied,
   type PanelOutcome,
   type PanelRefusal,
   type SeatStatus,

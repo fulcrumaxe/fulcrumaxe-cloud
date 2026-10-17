@@ -157,10 +157,9 @@ describe("S5-k1c: the Spec PM's start under a limit (the keyed runner)", () => {
     expect((err as PanelSeatFailedError).runStatus).toBe("refused:account_not_active");
   });
 
-  it("a panel seat's denial is still absorbed as a seat failure here (the panel is another row's)", async () => {
+  it("S5k1e-5: a panel seat's spend denial is no longer a seat failure (it is the typed denial, see panelStarts.test.ts)", async () => {
     const { panel } = createFollowedRunner(ports({ ok: false, reason: "model_budget_exceeded" }), { pollMs: 1 });
-    const err = await panel.runSeat({ workItemId: ITEM, discussionId: DISCUSSION, role: "security-expert", prompt: "p", idempotencyKey: "k", round: 1 } as never, signal).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PanelSeatFailedError);
-    expect((err as PanelSeatFailedError).runStatus).toBe("refused:model_budget_exceeded");
+    const out = await panel.runSeat({ workItemId: ITEM, discussionId: DISCUSSION, role: "security-expert", prompt: "p", idempotencyKey: "k:r1:security-expert", round: 1 } as never, signal);
+    expect(out).toEqual({ denied: true, pause: "account_budget_reached" });
   });
 });

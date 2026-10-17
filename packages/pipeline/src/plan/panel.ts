@@ -10,6 +10,7 @@ import { ownData } from "./ownData.js";
 import { selectPanel, type PanelRole } from "./panelRoles.js";
 import { agentOutputBlock, READ_ONLY_CHECKOUT_LINE } from "./envelope.js";
 import { WaitBudget, type WaitClock } from "./waitBudget.js";
+import type { ReservationPause } from "../advance/reservationPauses.js";
 
 /**
  * D#2 H15b-2: panel orchestration, the challenge round and signed comments
@@ -68,6 +69,19 @@ export interface PanelSeatResult {
 }
 
 /**
+ * D#483 S5-k1e: a seat whose start a spending limit denied. A typed answer, not a failure: the runner hands it back instead of rejecting, so the panel can tell
+ * "a limit stopped this seat" (it waits and asks again later) from "this seat failed" (it shows DID NOT POST). `pause` is the named pause of the limit (the same
+ * names the build start uses).
+ */
+export interface PanelSeatDenied {
+  denied: true;
+  pause: ReservationPause;
+}
+
+export const isSeatDenied = (value: unknown): value is PanelSeatDenied =>
+  value !== null && typeof value === "object" && (value as { denied?: unknown }).denied === true && typeof (value as { pause?: unknown }).pause === "string";
+
+/**
  * The model port. Production wiring (real runs) is H14c's; every test here
  * supplies a fixture.
  *
@@ -91,7 +105,7 @@ export interface PanelRunner {
    * `clock.pause()` while it does and `clock.resume()` after, so the round deadline counts only time the run could work.
    * A runner may ignore it, and the deadline is then a plain timeout.
    */
-  runSeat(request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult>;
+  runSeat(request: PanelSeatRequest, signal: AbortSignal, clock?: WaitClock): Promise<PanelSeatResult | PanelSeatDenied>;
 }
 
 /**
@@ -114,6 +128,11 @@ export interface PanelDeps {
   runner: PanelRunner;
   /** Per-round wait. Seats that have not posted by then are missing. */
   timeoutMs?: number;
+  /**
+   * D#483 S5-k1e: asked before a round starts any seat, with the seats the round is about to start. A pause answers that a spending limit would deny the round as a
+   * whole, and then no seat starts. Null (or absent): go ahead; a seat denied after all is still handled seat by seat.
+   */
+  roundHeadroom?: (round: 1 | 2, roles: readonly PanelRole[], keyPrefix: string) => Promise<ReservationPause | null>;
 }
 
 /** Fixed reason codes, never error text. `wrong_run`: the port handed the seat
@@ -125,7 +144,7 @@ export type SeatFailure = "runner_failed" | "invalid_output" | "post_refused" | 
  * seat claim `posted` while the database has no row) `no_signed_comment`. */
 export type MissingReason = SeatFailure | "no_signed_comment";
 
-export type SeatStatus = { role: PanelRole; status: "posted" } | { role: PanelRole; status: "missing"; reason: SeatFailure };
+export type SeatStatus = { role: PanelRole; status: "posted" } | { role: PanelRole; status: "missing"; reason: SeatFailure } | { role: PanelRole; status: "paused"; pause: ReservationPause };
 
 export type ChallengeTrigger = "requested" | "disagreement";
 
@@ -138,6 +157,11 @@ export type PanelRefusal = "not_found" | "no_discussion" | "not_discussing" | "n
 
 export type PanelOutcome =
   | { status: "refused"; reason: PanelRefusal }
+  /**
+   * D#483 S5-k1e: a spending limit denied the round (the whole round before it started, or some seats after it did). Seats that posted stay posted; `deniedRoles` are
+   * the seats still to ask, and nothing here is a failure. No challenge round runs and no Spec is written from a panel that is not whole.
+   */
+  | { status: "paused"; reason: ReservationPause; round: 1 | 2; deniedRoles: PanelRole[] }
   | {
       status: "completed";
       workItemId: string;
@@ -361,7 +385,7 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
         controller.abort();
         expire();
       });
-      let result: PanelSeatResult | "timeout";
+      let result: PanelSeatResult | PanelSeatDenied | "timeout";
       try {
         const prompt = buildSeatPrompt({ role, round, title, body, priorComments });
         result = await Promise.race([
@@ -384,6 +408,8 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
         roundController.signal.removeEventListener("abort", abortSeat);
       }
       if (result === "timeout") return missing("timed_out");
+      // A limit denied this seat's start: not a failure and not a missing seat. The round reports it and the panel waits.
+      if (isSeatDenied(result)) return { role, status: "paused", pause: result.pause };
       const agentRunId = result !== null && typeof result === "object" ? ownData(result, "agentRunId") : undefined;
       const output = result !== null && typeof result === "object" ? readSeatOutput(ownData(result, "agentOutput")) : null;
       if (typeof agentRunId !== "string" || output === null) return missing("invalid_output");
@@ -426,7 +452,22 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
     return { seats, outputs };
   };
 
+  // D#483 S5-k1e: a round that a spending limit denies (whole, or in part) ends the panel's turn as a pause. The seats that posted stay posted and are not run again:
+  // asking again follows their finished runs and starts only the seats that were denied.
+  const pausedBy = (round: 1 | 2, seats: readonly SeatStatus[]): PanelOutcome | null => {
+    const denied = seats.flatMap((s) => (s.status === "paused" ? [s] : []));
+    return denied.length === 0 ? null : { status: "paused", reason: denied[0]!.pause, round, deniedRoles: denied.map((s) => s.role) };
+  };
+  const gate = async (round: 1 | 2, roles: readonly PanelRole[]): Promise<PanelOutcome | null> => {
+    const pause = (await deps.roundHeadroom?.(round, roles, keyPrefix)) ?? null;
+    return pause === null ? null : { status: "paused", reason: pause, round, deniedRoles: [...roles] };
+  };
+
+  const closed1 = await gate(1, expectedRoles);
+  if (closed1 !== null) return closed1;
   const r1 = await runRound(1, expectedRoles, []);
+  const paused1 = pausedBy(1, r1.seats);
+  if (paused1 !== null) return paused1;
 
   // The seats that really have a signed row, from the database: only they are asked to challenge.
   const afterR1 = await readSignedComments(deps, discussionId, generation.since);
@@ -440,9 +481,13 @@ export async function runPanel(deps: PanelDeps, input: { workItemId: string }): 
   let round2: SeatStatus[] = [];
   let round2Ran = false;
   if (MAX_CHALLENGE_ROUNDS >= 1 && trigger !== null && present.length > 0) {
+    const closed2 = await gate(2, present);
+    if (closed2 !== null) return closed2;
     round2Ran = true;
     const prior = r1.outputs.filter((o) => present.includes(o.role)).map((o) => ({ role: o.role, comment: o.output.comment }));
     round2 = (await runRound(2, present, prior)).seats;
+    const paused2 = pausedBy(2, round2);
+    if (paused2 !== null) return paused2;
   }
 
   const signed = await readSignedComments(deps, discussionId, generation.since);

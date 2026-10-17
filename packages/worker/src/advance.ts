@@ -13,6 +13,7 @@ import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNot
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
 import { envelopeRunUsd } from "@fx/spend";
+import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import type { ContextSection } from "@fx/runner";
@@ -110,6 +111,10 @@ export interface AdvanceStepPorts {
   startRun(req: Omit<AdvanceRunRequest, "accountId" | "workItemId" | "haltEpoch">): Promise<AdvanceRunStart>;
   /** D#597 CC-3: the run an earlier call of a step started (the step's prefix plus whatever note pin its key carries), or null. */
   findStep(stepPrefix: string): Promise<{ step: string; runId: string } | null>;
+  /** D#483 S5-k1e: the runs a panel seat's earlier asks started (steps shaped `<head>[:s<n>]<tail>`), oldest first, each with its attempt and the run's status. */
+  startedAttempts(head: string, tail: string): Promise<Array<{ attempt: number; status: string }>>;
+  /** D#483 S5-k1e: the read-only headroom check for a whole round of seats: would a spending limit deny them if all were started now? Writes no run row. */
+  headroom(roles: readonly string[]): Promise<{ ok: true } | { ok: false; reason: string }>;
   outcome(runId: string): Promise<AdvanceRunOutcome>;
   /** The existing cancel path, as the approver (so the cancel is audited as theirs and needs their membership to still be active). Safe on a finished run. */
   cancel(runId: string): Promise<void>;
@@ -961,6 +966,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     return {
       startRun: (req) => advanceStartRun({ ...req, accountId: who.accountId, workItemId: who.workItemId, haltEpoch: who.haltEpoch }),
       findStep: (stepPrefix) => findStepRun(who, stepPrefix),
+      startedAttempts: (head, tail) => startedSeatAttempts(who, head, tail),
+      headroom: (roles) => checkRoundHeadroom(runnerPool, deps.resolveRunSeat, who, roles),
       outcome: (runId) => advanceRunOutcome(who.accountId, runId),
       cancel: (runId) => cancelItemRun(who, runId),
     };
@@ -1027,6 +1034,30 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
         [accountId, runId, PLACEMENT_CHANGED],
       );
       return r.rowCount === 1;
+    });
+  }
+
+  /**
+   * D#483 S5-k1e: every run a panel seat's asks started, found by key: `advance:<item>:<head>[:s<n>]<tail>` and, after a placement restart, `:p<n>` on the end. The
+   * LIKE finds candidates (head and tail escaped); the pattern below decides, so a key that merely contains the head is never counted. Oldest first, so the caller
+   * reads the newest run of the highest attempt last.
+   */
+  async function startedSeatAttempts(who: AdvanceStepWho, head: string, tail: string): Promise<Array<{ attempt: number; status: string }>> {
+    if (!/^[a-z0-9:_.-]{1,100}$/i.test(head) || !/^:r[12]:[a-z][a-z-]{0,40}$/.test(tail)) return [];
+    const esc = (t: string): string => t.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const prefix = `advance:${who.workItemId}:${head}`;
+    const exact = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?::s(\\d{1,6}))?${tail}(?::p\\d{1,2})?$`);
+    return withTenant(runnerPool, who.accountId, async (client) => {
+      const r = await client.query<{ idempotency_key: string; status: string }>(
+        `SELECT k.idempotency_key, a.status FROM agent_run_idempotency_keys k JOIN agent_runs a ON a.account_id = k.account_id AND a.id = k.run_id
+          WHERE k.account_id = $1 AND a.work_item_id = $2 AND k.idempotency_key LIKE $3 ESCAPE '\\' ORDER BY k.created_at DESC, k.run_id DESC LIMIT 500`,
+        [who.accountId, who.workItemId, `${esc(prefix)}%${esc(tail)}%`],
+      );
+      // Read newest first so a seat with more than 500 rows loses its oldest, never its newest; handed back oldest first, as the caller expects.
+      return r.rows.reverse().flatMap((row) => {
+        const m = exact.exec(row.idempotency_key);
+        return m ? [{ attempt: m[1] === undefined ? 0 : Number(m[1]), status: row.status }] : [];
+      });
     });
   }
 

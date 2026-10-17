@@ -17,6 +17,7 @@ export * from "./advance/stageRegistry.js";
 export * from "./advance/stageWords.js";
 export * from "./advance/stageStarts.js";
 export * from "./advance/reviewStarts.js";
+export * from "./advance/panelStarts.js";
 export * from "./estimate/index.js";
 export * from "./concurrency/index.js";
 export { agentOutputBlock } from "./plan/envelope.js";
