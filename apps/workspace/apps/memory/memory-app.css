@@ -1,0 +1,85 @@
+/* D#601 MEM-4a3: Memory app (review queue and all memory). Theme variables come from the shell; the fallbacks only matter if a theme leaves one out.
+   Muted text uses --text-muted (raised to AA contrast in every shipped theme). */
+
+.mem-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.mem-main { box-sizing: border-box; height: 100%; overflow: auto; padding: 14px; }
+.mem-title-h { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.mem-h { margin: 14px 0 6px; font-size: 0.9rem; letter-spacing: 0.06em; font-weight: 600; }
+.mem-h3 { margin: 12px 0 6px; font-size: 0.85rem; font-weight: 600; overflow-wrap: anywhere; }
+.mem-muted { color: var(--text-muted, rgba(26, 255, 128, 0.7)); }
+.mem-status { margin: 0 0 8px; color: var(--text-muted, rgba(26, 255, 128, 0.7)); }
+.mem-status:empty { display: none; }
+.mem-status[data-state="error"], .mem-error { color: #ff6b6b; }
+.mem-error { margin: 6px 0; overflow-wrap: anywhere; }
+.mem-section { margin: 0 0 18px; }
+.mem-scope { margin: 0 0 14px; }
+
+.mem-badge { display: inline-block; padding: 0 6px; border: 1px solid var(--accent, #1aff80); color: var(--accent, #1aff80); font-size: 0.78rem; font-weight: 400; white-space: nowrap; }
+.mem-chip { padding: 0 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); font-size: 0.78rem; white-space: nowrap; }
+.mem-status-chip { padding: 0 6px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); font-size: 0.78rem; white-space: nowrap; }
+
+.mem-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 8px; }
+.mem-input {
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 4px 8px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+}
+textarea.mem-input { width: 100%; min-height: 6em; resize: vertical; }
+.mem-edit input.mem-input, .mem-edit select.mem-input { width: 100%; }
+.mem-edit label { display: block; margin: 8px 0 2px; }
+
+.mem-btn {
+  min-height: 44px;
+  padding: 4px 12px;
+  background: var(--bg-base, #000);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.mem-btn:hover { border-color: var(--accent, #1aff80); }
+.mem-btn[aria-disabled="true"], .mem-btn:disabled { opacity: 0.65; cursor: default; }
+.mem-btn-quiet { border-style: dashed; }
+.mem-link { min-height: 44px; padding: 0 4px; background: none; border: 0; color: var(--accent, #1aff80); font: inherit; text-decoration: underline; cursor: pointer; }
+.mem-btn:focus-visible, .mem-link:focus-visible, .mem-input:focus-visible, .mem-card:focus-visible, .mem-h:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+
+.mem-cards { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; }
+.mem-card { box-sizing: border-box; padding: 8px 10px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0); }
+.mem-card.mem-busy { opacity: 0.8; }
+.mem-card-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.mem-text, .mem-title { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-title { font-weight: 600; }
+.mem-prov { margin: 4px 0; overflow-wrap: anywhere; }
+.mem-open-state { margin: 4px 0; }
+.mem-actions { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 8px 0 0; }
+.mem-batch { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 6px 0; }
+
+.mem-rows { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.mem-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 6px 10px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); border-radius: var(--border-radius-sm, 0); }
+.mem-row-title { flex: 1 1 14em; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.mem-runs { display: inline-flex; flex-direction: column; }
+.mem-run-list { margin: 0; padding-left: 14px; list-style: none; }
+
+.mem-dialog { max-width: min(520px, 92vw); padding: 0; background: var(--bg-surface, #0a0a0a); color: var(--text-primary, #1aff80); border: 1px solid var(--accent, #1aff80); font-family: var(--font-mono, monospace); }
+.mem-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.mem-dialog-body { padding: 14px; }
+
+@container (max-width: 640px) {
+  .mem-main { padding: 10px; }
+  .mem-actions .mem-btn, .mem-batch .mem-btn { flex: 1 1 100%; }
+}

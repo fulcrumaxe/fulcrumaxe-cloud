@@ -289,6 +289,20 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#601 MEM-4a3: opening the Memory app reads the list, the review queue and the badge counts (GET only; memory.spec.ts mocks the writes and the errors).
+    const memoryRead =
+      req.method === "GET" && urlPath === "/api/v1/memory" ? "listMemory"
+        : req.method === "GET" && urlPath === "/api/v1/memory/queue" ? "getMemoryQueue"
+          : req.method === "GET" && urlPath === "/api/v1/memory/pending-counts" ? "getMemoryPendingCounts"
+            : null;
+    if (memoryRead) {
+      readFile(join(V1_FIXTURES_DIR, memoryRead, "200-ok.json")).then(
+        (body) => res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(body),
+        () => res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }))
+      );
+      return;
+    }
+
     // D#37 WS-F9a: opening the Onboarding app reads the setup progress (GET only; onboarding.spec.ts mocks the rest).
     if (urlPath === "/api/v1/onboarding" && req.method === "GET") {
       readFile(join(V1_FIXTURES_DIR, "getOnboarding", "200-new.json")).then(
