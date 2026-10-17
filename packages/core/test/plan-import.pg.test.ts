@@ -627,6 +627,41 @@ describe('plan import (live build L1)', () => {
       expect((await text('gh:discussion:14')).summary).toContain('Edited body W.');
     });
 
+    it('CWE-367: a roadmap text edit after a decision does not change an approved or rejected plan-task proposal; a new one and a withdrawn one that returns still follow the file', async () => {
+      const r = await seedAccount(admin, randomUUID());
+      const repoId = await repo(r);
+      const keys = ['D#1:A', 'D#1:B', 'D#1:C', 'D#1:D'];
+      const roadmap = (tag: string, drop: string[] = []) =>
+        rm(Object.fromEntries(keys.filter((k) => !drop.includes(k)).map((k) => [k, { note: `${tag} text for ${k}.` }])), { m1: keys.filter((k) => !drop.includes(k)) });
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Original') } }))).state).toBe('succeeded');
+      const text = async (key: string) => (await admin.query('SELECT title, summary, state FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0] as { title: string; summary: string; state: string };
+      const pid = async (key: string) => (await admin.query('SELECT id FROM proposals WHERE repo_id = $1 AND dedupe_key = $2', [repoId, key])).rows[0].id as string;
+      const wi = (await admin.query(`INSERT INTO work_items (account_id, repo_id, kind, provenance) VALUES ($1, $2, 'issue', 'internal') RETURNING id`, [r.accountId, repoId])).rows[0].id;
+      await withTenant(appPool, r.accountId, r.userId, async (c) => {
+        await c.query('SELECT * FROM approve_proposal($1, $2)', [await pid('plan:D#1:A'), wi]);
+        await c.query('SELECT * FROM reject_proposal($1, $2)', [await pid('plan:D#1:B'), 'no']);
+      });
+      // D leaves the file: its new proposal is withdrawn (derived).
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Original', ['D#1:D']) } }))).state).toBe('succeeded');
+      expect((await text('plan:D#1:D')).state).toBe('withdrawn');
+      const approvedBefore = await text('plan:D#1:A');
+      const rejectedBefore = await text('plan:D#1:B');
+      expect(approvedBefore).toMatchObject({ state: 'approved', summary: expect.stringContaining('Original text for D#1:A.') });
+      expect(rejectedBefore.state).toBe('rejected');
+
+      // The maintainer rewrites every note, and D comes back.
+      expect((await run(r, repoId, source({ files: { 'roadmap.json': roadmap('Edited') } }))).state).toBe('succeeded');
+      expect(await text('plan:D#1:A')).toEqual(approvedBefore);
+      expect(await text('plan:D#1:B')).toEqual(rejectedBefore);
+      const fresh = await text('plan:D#1:C');
+      expect(fresh.state).toBe('new');
+      expect(fresh.summary).toContain('Edited text for D#1:C.');
+      expect(fresh.title).toContain('Edited text for D#1:C.');
+      const back = await text('plan:D#1:D');
+      expect(back.state).toBe('new');
+      expect(back.summary).toContain('Edited text for D#1:D.');
+    });
+
     it('a repo with nothing at all imports at level 3 as an empty plan', async () => {
       const r = await seedAccount(admin, randomUUID());
       const repoId = await repo(r);

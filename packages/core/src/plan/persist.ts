@@ -157,7 +157,7 @@ const TASKS_SQL = `
         is_leaf = true, parent_key = EXCLUDED.parent_key, owner_process = EXCLUDED.owner_process, evidence = EXCLUDED.evidence,
         evidence_dropped = EXCLUDED.evidence_dropped, last_import_id = EXCLUDED.last_import_id, removed_at = NULL, updated_at = now()`;
 
-/** A remaining leaf task becomes a proposal. A withdrawn one comes back to new; an approved or rejected one keeps its state. The owner is fixed when the row is created (0753 refuses the import role any change to it). */
+/** A remaining leaf task becomes a proposal. A withdrawn one comes back to new; an approved or rejected one keeps its state and its text: title and summary follow the roadmap file only while the row is `new` or `withdrawn`, so an edit after a decision cannot change what the person read and acted on (CWE-367). The owner is fixed when the row is created (0753 refuses the import role any change to it). */
 const PROPOSALS_SQL = `
   INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, plan_task_id, discussion_number, title, summary, provenance, owner_process, state, last_import_id)
   SELECT $1::uuid, $2::uuid, 'plan:' || t.task_key, ARRAY['plan_task'], pt.id, t.discussion_number, left(t.title, 256), left(t.summary, 2000),
@@ -165,7 +165,9 @@ const PROPOSALS_SQL = `
     FROM jsonb_to_recordset($4::jsonb) AS t(task_key text, discussion_number int, title text, summary text)
     JOIN plan_tasks pt ON pt.repo_id = $2::uuid AND pt.task_key = t.task_key
   ON CONFLICT (repo_id, dedupe_key) DO UPDATE
-    SET plan_task_id = EXCLUDED.plan_task_id, discussion_number = EXCLUDED.discussion_number, title = EXCLUDED.title, summary = EXCLUDED.summary,
+    SET plan_task_id = EXCLUDED.plan_task_id, discussion_number = EXCLUDED.discussion_number,
+        title = CASE WHEN proposals.state IN ('new', 'withdrawn') THEN EXCLUDED.title ELSE proposals.title END,
+        summary = CASE WHEN proposals.state IN ('new', 'withdrawn') THEN EXCLUDED.summary ELSE proposals.summary END,
         owner_process = proposals.owner_process,
         state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
         last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
