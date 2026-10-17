@@ -3578,6 +3578,55 @@ export interface Operations {
       };
     };
   };
+  getMemoryPendingCounts: {
+    path: undefined;
+    query: {
+      repo_ids?: Array<string>;
+      item_ids?: Array<string>;
+    };
+    body: undefined;
+    response: {
+      repos: {
+        [key: string]: number;
+      };
+      items: {
+        [key: string]: number;
+      };
+    };
+  };
+  editMemory: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      body: string;
+      why?: (string) | (null);
+      kind?: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+      scope?: "account" | "repo" | "item" | "role";
+      repo_id?: string;
+      item_id?: string;
+      role?: string;
+    };
+    response: {
+      entry: {
+        id: string;
+        scope: "account" | "repo" | "item" | "role";
+        kind: "convention" | "command" | "fact" | "gotcha" | "preference" | "decision";
+        body: string;
+        why: string | null;
+        author_kind: "person" | "agent" | "assistant" | "import" | "runner_agent";
+        status: "proposed" | "approved" | "rejected" | "expired" | "retired" | "deleted" | "archived" | "superseded";
+        version: number;
+        content_sha256: string;
+        created_at: string;
+        updated_at: string;
+        approved_at: string | null;
+        expires_at: string | null;
+      };
+      previous_id: string;
+    };
+  };
   decideMemoryBatch: {
     path: undefined;
     query: undefined;
@@ -5162,6 +5211,28 @@ export const operations = {
   decideMemory: {
     method: "POST",
     path: "/api/v1/memory/{id}/decide",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
+  },
+  getMemoryPendingCounts: {
+    method: "GET",
+    path: "/api/v1/memory/pending-counts",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["repo_ids","item_ids"],
+    hasBody: false,
+  },
+  editMemory: {
+    method: "POST",
+    path: "/api/v1/memory/{id}/edit",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

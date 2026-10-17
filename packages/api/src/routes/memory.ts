@@ -6,10 +6,12 @@ import {
   MEMORY_STATUSES,
   MemoryInputError,
   decideMemory,
+  editMemory,
+  type LiveSecretsSource,
   type MemoryEntry,
 } from "@fx/core/src/memory/index.js";
 import { MEMORY_BATCH_DECISIONS, MEMORY_BATCH_MAX, decideMemoryBatch, markMemoryOpened } from "@fx/core/src/memory/batch.js";
-import { MEMORY_LIST_MAX, listMemory, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
+import { MEMORY_LIST_MAX, listMemory, memoryMoveRef, memoryPendingCounts, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
 import { ApiError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 
@@ -20,6 +22,13 @@ import type { RouteContext, RouteEntry } from "../registry.js";
  * one. Every rule (who may decide, one source per batch, opened before batched, the 20-entry cap) lives in the database (migration 0835);
  * a route validates the shape of the call, hands it to core and maps the refusal. It holds no second copy of any rule.
  */
+
+/**
+ * Where the edit route gets the tenant's live token values to scan an edited text against. The app registers the real source (the process's
+ * live installation tokens); with none registered the scan still runs its credential-shape check and finds no live value. Tokens minted in
+ * another process (the worker) are not visible here: the shape check is the net for those.
+ */
+export const memoryEditDeps: { liveSecrets: LiveSecretsSource } = { liveSecrets: () => [] };
 
 const uuid = z.string().uuid();
 const idParamsSchema = z.object({ id: z.string() });
@@ -49,6 +58,30 @@ const listQuerySchema = z
   })
   .strict();
 const queueQuerySchema = z.object({ scope: z.enum(MEMORY_SCOPES).optional(), repo_id: uuid.optional(), item_id: uuid.optional(), limit: limit.optional() }).strict();
+/** The most ids one counts read takes (the core read's own limit). */
+const MEMORY_COUNT_IDS_MAX = 200;
+const uuidList = z
+  .string()
+  .max(200 * 37)
+  .transform((s) => s.split(",").filter((p) => p !== ""))
+  .pipe(z.array(uuid).min(1).max(MEMORY_COUNT_IDS_MAX));
+const countsQuerySchema = z
+  .object({ repo_ids: uuidList.optional(), item_ids: uuidList.optional() })
+  .strict()
+  .refine((q) => q.repo_ids !== undefined || q.item_ids !== undefined, { message: "name repo_ids or item_ids" });
+const editBodySchema = z
+  .object({
+    body: z.string().min(1).max(4096),
+    why: z.string().max(1024).nullable().optional(),
+    kind: z.enum(MEMORY_KINDS).optional(),
+    // "Change scope": naming `scope` moves the entry, with the one id (or role name) of the place it moves to.
+    scope: z.enum(MEMORY_SCOPES).optional(),
+    repo_id: uuid.optional(),
+    item_id: uuid.optional(),
+    role: z.string().min(1).max(64).optional(),
+  })
+  .strict()
+  .refine((b) => b.scope !== undefined || (b.repo_id === undefined && b.item_id === undefined && b.role === undefined), { message: "a place needs a scope" });
 const decideBodySchema = z.object({ to: z.enum(MEMORY_BATCH_DECISIONS) }).strict();
 const batchBodySchema = z.object({ ids: z.array(uuid).min(1).max(MEMORY_BATCH_MAX), to: z.enum(MEMORY_BATCH_DECISIONS) }).strict();
 
@@ -112,6 +145,9 @@ const cardSchema = z.object({
 export const memoryQueueResponseSchema = z.object({ cards: z.array(cardSchema), truncated: z.boolean() });
 const openResponseSchema = z.object({ opened: z.boolean() });
 const decideResponseSchema = z.object({ outcome: z.enum(["decided", "already_decided"]), entry: entrySchema });
+const editResponseSchema = z.object({ entry: entrySchema, previous_id: z.string().uuid() });
+const countMap = z.record(z.string(), z.number().int().min(0));
+export const memoryPendingCountsResponseSchema = z.object({ repos: countMap, items: countMap });
 const batchResponseSchema = z.object({ decided: z.number().int().min(0), entries: z.array(entrySchema) });
 
 function entryDto(e: MemoryEntry): z.infer<typeof entrySchema> {
@@ -286,6 +322,72 @@ export const memoryRoutes: RouteEntry[] = [
         // Deciding never scans text, so no live token values are needed here.
         const r = await decideMemory({ ...mctx(ctx), liveSecrets: () => [] }, { id: input.params.id!, to: body.to });
         return { outcome: r.outcome, entry: entryDto(r.entry) };
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/memory/pending-counts",
+    operationId: "getMemoryPendingCounts",
+    summary: "How many memory proposals wait, per repo and per item",
+    description:
+      "Session only, member. For each repo id in `repo_ids` and each work item id in `item_ids` (comma-separated, at most 200 of each, at least one list), the number of `proposed` entries waiting: the same number the queue holds, so a badge equals the queue. Every id asked for gets a number, 0 when none is waiting. An id the caller cannot see also reads 0, which is what a repo with nothing waiting reads, so the call cannot be used to find out what exists in another account.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    querySchema: countsQuerySchema,
+    responseSchema: memoryPendingCountsResponseSchema,
+    async handler(ctx, input) {
+      try {
+        const q = input.query as z.infer<typeof countsQuerySchema>;
+        return await memoryPendingCounts(mctx(ctx), { repoIds: q.repo_ids ?? [], itemIds: q.item_ids ?? [] });
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/v1/memory/{id}/edit",
+    operationId: "editMemory",
+    summary: "Edit a memory entry, which records a new version",
+    description:
+      "Session only, member. Replaces the text of a `proposed` or `approved` entry with `body` (1 KiB at most once cleaned) and `why` (256 B at most; leave it out or send null for none), optionally changing its `kind` or moving it (\"Change scope\": `scope` with the one `repo_id`, `item_id` or `role` it moves to; an `account` move names none). The old version stays readable as `superseded`, and the answer is the new version with `previous_id`. The entry keeps its status, so editing a proposal leaves it waiting: approve the answer's id afterwards. Who wrote the text never changes: an agent's proposal still reads as proposed by that agent after a person edits it, and its text stays fenced. Text that looks like a credential, or holds one of the tenant's live token values, is refused (422 `secret_detected`) and nothing is stored. Session only: a token is refused, whatever it holds. Owner or admin for repo and account entries (the person who proposed a still-waiting entry may edit it in place), an item member for item entries; the database re-checks. A second edit of a version that was already edited answers 409 `conflict`.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "optional",
+    rateClass: "write",
+    paramsSchema: idParamsSchema,
+    bodySchema: editBodySchema,
+    responseSchema: editResponseSchema,
+    extraResponses: { "409": "Error `conflict`: the entry was edited by someone else first. Nothing changed." },
+    async handler(ctx, input) {
+      const body = input.body as z.infer<typeof editBodySchema>;
+      try {
+        const m = mctx(ctx);
+        const scopeRef =
+          body.scope === undefined
+            ? null
+            : await memoryMoveRef(m, {
+                scope: body.scope,
+                ...(body.repo_id !== undefined ? { repoId: body.repo_id } : {}),
+                ...(body.item_id !== undefined ? { itemId: body.item_id } : {}),
+                ...(body.role !== undefined ? { role: body.role } : {}),
+              });
+        const entry = await editMemory(
+          { ...m, liveSecrets: () => memoryEditDeps.liveSecrets() },
+          {
+            id: input.params.id!,
+            body: body.body,
+            why: body.why ?? null,
+            ...(body.kind !== undefined ? { kind: body.kind } : {}),
+            ...(body.scope !== undefined ? { scope: body.scope, scopeRef } : {}),
+          },
+        );
+        return { entry: entryDto(entry), previous_id: entry.supersedesId! };
       } catch (err) {
         throw mapMemoryError(err);
       }
