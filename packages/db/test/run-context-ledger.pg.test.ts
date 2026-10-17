@@ -75,8 +75,8 @@ describe(`migration 0792: ${ROLE}, run_context_ledger and its function (D#600 CX
     expect(fk.rows).toEqual([{ confdeltype: 'c' }]);
   });
 
-  it('the migration never grants platform_ops a privilege, revokes one from it or makes it an owner', () => {
-    const sql = readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, MIGRATION), 'utf8')
+  it.each([MIGRATION, '0869_run_context_ledger_merge_sections.sql'])('%s never grants platform_ops a privilege, revokes one from it or makes it an owner', (file) => {
+    const sql = readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), 'utf8')
       .split('\n')
       .map((line) => line.replace(/--.*$/, ''))
       .join('\n');

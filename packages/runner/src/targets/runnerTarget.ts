@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
-import { RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
+import { NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, REVIEW_JOB_ROLES } from "@fulcrumaxe/runner-protocol";
 import { DEFAULT_BACKEND } from "@fx/runtime/src/backends/types.js";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
+import { reportError } from "@fx/telemetry";
+import { recordContextLedger } from "../contextLedgerWriter.js";
 import type { RunnerMode } from "../runnerModes.js";
 import type {
   AdmitResult,
@@ -223,6 +225,7 @@ export class RunnerTarget implements ExecutionTarget {
         continues: { parentRunId: run.parentRunId ?? null, sessionId: null, branch: run.continuesBranch, ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
       });
     } else await this.deps.issuer.issue({ run, ...this.modeInput });
+    await this.recordSections(run);
     this.markQueued();
     return { queued: true };
   }
@@ -234,8 +237,25 @@ export class RunnerTarget implements ExecutionTarget {
       ...this.modeInput,
       continues: { parentRunId: run.parentRunId ?? null, sessionId, ...(run.continuesBranch === undefined ? {} : { branch: run.continuesBranch }), ...(run.continuesPrNumber === undefined ? {} : { prNumber: run.continuesPrNumber }) },
     });
+    await this.recordSections(run);
     this.markQueued();
     return { queued: true };
+  }
+
+  /**
+   * D#600 CX-2b: records the sections the cloud assembled for this run's prompt on the run's context ledger row, once the job is queued. They are
+   * the cloud's own sizes and hashes (code, bytes, sha256, trimmed bytes), never text, so a runner run shows what its prompt held even when the
+   * runner sends no ledger of its own. The row starts `partial` with nothing measured ("Not recorded", never 0); the runner's `done` adds its
+   * figures and its map entry to it (`run_context_ledger_record` merges by code). Never fatal: the ledger is information and the job is queued.
+   */
+  private async recordSections(run: ExecutionRun): Promise<void> {
+    const sections = run.contextSections;
+    if (sections === undefined || sections.length === 0) return;
+    try {
+      await withTenant(this.deps.pool, run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure: NOT_RECORDED_MEASURE }));
+    } catch (err) {
+      reportError(err, { stage: "run.context_ledger" });
+    }
   }
 
   /**

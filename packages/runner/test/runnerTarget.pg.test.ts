@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
+import type { ContextSection } from "@fulcrumaxe/runner-protocol";
 import { setPendingHooks } from "@fx/core/src/pendingWork.js";
 import { isAdmitDenyReason, type ExecutionRun } from "../src/executionTarget.js";
 import {
@@ -226,6 +227,81 @@ describe("RunnerTarget [pg]", () => {
       const t = target(db.runWriterPool);
       await t.target.resume(run, "session-1");
       expect(t.issuer.calls).toEqual([{ run, continues: { parentRunId, sessionId: "session-1", branch: "fx/5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d-g1" } }]);
+    });
+
+    // D#600 CX-2b: the cloud's assembled sections are recorded on the run's ledger row when the job is queued.
+    describe("records the cloud's assembled sections on the context ledger (D#600 CX-2b)", () => {
+      /** A prompt and its section list built the way the assembler does it: sections joined by a blank line, each measured in UTF-8 bytes. */
+      function assembled(): { prompt: string; sections: ContextSection[] } {
+        const parts: { code: ContextSection["code"]; text: string }[] = [
+          { code: "boundary", text: "You are the executor. Stay inside the repository." },
+          { code: "card", text: "Role card with a non-ASCII word: héllo." },
+          { code: "spec", text: "SPEC (version 3):\nAdd the footer." },
+          { code: "output", text: "End with the JSON envelope." },
+        ];
+        return {
+          prompt: parts.map((p) => p.text).join("\n\n"),
+          sections: parts.map((p) => ({ code: p.code, bytes: Buffer.byteLength(p.text, "utf8"), sha256: createHash("sha256").update(p.text).digest("hex"), trimmed_bytes: 0 })),
+        };
+      }
+      const ledger = (accountId: string, runId: string) => db.admin.query("SELECT * FROM run_context_ledger WHERE account_id = $1 AND run_id = $2", [accountId, runId]);
+
+      it("dispatch writes one partial row: every section with its bytes, no figure measured (null, never 0), and the bytes fit the dispatched prompt", async () => {
+        const w = await world();
+        const { prompt, sections } = assembled();
+        const run = { ...(await insertRun(w, { role: "executor" })), prompt, contextSections: sections };
+        const t = target(db.runWriterPool);
+        await t.target.dispatch(run);
+        expect(t.issuer.calls[0]!.run.prompt).toBe(prompt);
+        const { rows } = await ledger(w.accountId, run.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, memory_tokens: null, compactions: 0, tool_output_bytes: {} });
+        expect(rows[0].sections).toEqual(sections);
+        expect(rows[0].sections.map((s: ContextSection) => s.code)).toEqual(["boundary", "card", "spec", "output"]);
+        const total = (rows[0].sections as ContextSection[]).reduce((n, s) => n + s.bytes, 0);
+        expect(total).toBeGreaterThan(0);
+        expect(total).toBeLessThanOrEqual(Buffer.byteLength(prompt, "utf8"));
+      });
+
+      it("resume writes the same row for the new run", async () => {
+        const w = await world();
+        const { prompt, sections } = assembled();
+        const run = { ...(await insertRun(w, { role: "executor" })), parentRunId: randomUUID(), prompt, contextSections: sections };
+        await target(db.runWriterPool).target.resume(run, "session-1");
+        expect((await ledger(w.accountId, run.id)).rows[0]).toMatchObject({ basis: "partial", sections });
+      });
+
+      it("a run with no sections (or an empty list) writes no row", async () => {
+        const w = await world();
+        const bare = await insertRun(w, { role: "executor" });
+        const empty = { ...(await insertRun(w, { role: "executor" })), contextSections: [] };
+        const t = target(db.runWriterPool);
+        await t.target.dispatch(bare);
+        await t.target.dispatch(empty);
+        expect((await ledger(w.accountId, bare.id)).rows).toEqual([]);
+        expect((await ledger(w.accountId, empty.id)).rows).toEqual([]);
+      });
+
+      it("an issuer that refuses writes no row", async () => {
+        const w = await world();
+        const { prompt, sections } = assembled();
+        const run = { ...(await insertRun(w, { role: "executor" })), prompt, contextSections: sections };
+        const refusing = { issue: async (): Promise<void> => { throw new Error("job_not_recorded"); } };
+        await expect(
+          new RunnerTarget({ limits: createFakeRunnerLimits(PER_DAY), pool: db.runWriterPool, visibility: createFakeVisibility("private"), issuer: refusing }).dispatch(run),
+        ).rejects.toThrow("job_not_recorded");
+        expect((await ledger(w.accountId, run.id)).rows).toEqual([]);
+      });
+
+      it("a ledger write the database refuses does not fail the dispatch: the job is queued and no row is written", async () => {
+        const w = await world();
+        const { prompt, sections } = assembled();
+        const run = { ...(await insertRun(w, { role: "executor" })), prompt, contextSections: [...sections, { code: "not_a_section", bytes: 1, sha256: "c".repeat(64), trimmed_bytes: 0 } as never] };
+        const t = target(db.runWriterPool);
+        expect(await t.target.dispatch(run)).toEqual({ queued: true });
+        expect(t.issuer.calls).toHaveLength(1);
+        expect((await ledger(w.accountId, run.id)).rows).toEqual([]);
+      });
     });
 
     describe("tells the runner sweeper when the queue time ends (D#6 R2b, the cron's no-database marker)", () => {

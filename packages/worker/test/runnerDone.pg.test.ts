@@ -1,11 +1,11 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply, DoneRetryReply, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
-import { RUNNER_DISPATCH_BASE_KIND, readRecordedRunnerBranch } from "@fx/runner";
+import { RUNNER_DISPATCH_BASE_KIND, readRecordedRunnerBranch, recordContextLedger } from "@fx/runner";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { CLAIM_PATH, DISPATCH_BASE_KIND, claimRun, createRunPullRequestPort, donePath, doneRun, eventsPath, heartbeatRun, HEARTBEAT_PATH, ingestEvents, toResponse, type RunnerCloudDeps } from "@fx/runner-cloud";
 import { RunActionInputError } from "../src/index.js";
@@ -304,6 +304,67 @@ describe("runner done [pg]", () => {
         expect((await row(id)).status).toBe("succeeded");
         expect(lines.join("\n")).toContain("runner.done.context_ledger_not_recorded");
         expect(lines.join("\n")).not.toContain("not_a_section");
+      });
+
+      // D#600 CX-2b: the dispatch already wrote the cloud's sections (a partial row, nothing measured); the done adds the runner's figures and map.
+      describe("after the dispatch recorded the cloud's sections (CX-2b)", () => {
+        const sec = (code: string, bytes: number, sha = "d") => ({ code: code as "spec", bytes, sha256: sha.repeat(64), trimmed_bytes: 0 });
+        const cloud = [sec("boundary", 60), sec("card", 120), sec("spec", 300), sec("output", 40)];
+        const dispatched = async (id: string, sections = cloud) =>
+          withTenant(writerPool, A.accountId, (client) => recordContextLedger(client, { accountId: A.accountId, runId: id, sections, measure: NOT_RECORDED_MEASURE }));
+        // The staging shape of 10-17: first turn 12,619 tokens.
+        const staging = { ...body, sections: [sec("map", 800, "e")], first_turn_input: 12_619, peak_context: 12_900 };
+
+        it("lists every cloud section plus the daemon's map entry, measured, with the first turn (acceptance 1 and 2)", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: staging });
+          const rows = await ledgerRows(id);
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ basis: "measured", first_turn_input_tokens: "12619", peak_context_tokens: "12900" });
+          expect(rows[0].sections).toEqual([...cloud, sec("map", 800, "e")]);
+        });
+
+        it("an older runner that sends no ledger still gets the cloud's sections: partial, nothing measured (acceptance 3)", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: ok });
+          const rows = await ledgerRows(id);
+          expect(rows[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, compactions: 0, sections: cloud });
+        });
+
+        it("a taken-over run keeps the cloud's sections and takes nothing the runner sent", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: { outcome: "failed", failureReason: "taken_over", prNumber: null }, contextLedger: staging });
+          expect((await ledgerRows(id))[0]).toMatchObject({ basis: "partial", peak_context_tokens: null, sections: cloud });
+        });
+
+        it("the runner's figures for a code the cloud assembled are ignored, and its extra codes are not added", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: { ...body, sections: [sec("spec", 1, "f"), sec("findings", 9, "f")] } });
+          expect((await ledgerRows(id))[0].sections).toEqual(cloud);
+        });
+
+        it("a ledger the definer refuses leaves the dispatch row as it was", async () => {
+          const id = await pending();
+          const g = await claimed(id);
+          await dispatched(id);
+          const warn = console.warn;
+          console.warn = () => undefined;
+          try {
+            const refused = { ...body, sections: [{ code: "not_a_section", bytes: 1, sha256: "c".repeat(64), trimmed_bytes: 0 }] } as never;
+            expect(await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, contextLedger: refused })).toEqual({ kind: "recorded", verdict: ok });
+          } finally {
+            console.warn = warn;
+          }
+          expect((await ledgerRows(id))[0]).toMatchObject({ basis: "partial", peak_context_tokens: null, sections: cloud });
+        });
       });
 
       it("a fenced done writes no ledger", async () => {
