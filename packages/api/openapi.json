@@ -11624,6 +11624,1363 @@
         }
       }
     },
+    "/api/v1/setup-requests": {
+      "get": {
+        "operationId": "listSetupRequests",
+        "summary": "The account's setup requests, newest first (open ones by default)",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "work_item_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          {
+            "name": "repo_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's setup requests, newest first (open ones by default)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "repo_id": {
+                            "type": "string"
+                          },
+                          "work_item_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "env_var",
+                              "app_not_installed",
+                              "parity_drift",
+                              "parent_pr_closed",
+                              "branch_pushed_by_person",
+                              "overlay_path_missing"
+                            ]
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "env_name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "provider_url": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "check": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "env_var_present"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "open",
+                              "done",
+                              "withdrawn"
+                            ]
+                          },
+                          "origin": {
+                            "type": "string",
+                            "enum": [
+                              "agent",
+                              "derived"
+                            ]
+                          },
+                          "created_by": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "resolution": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "marked_done",
+                                  "check_passed",
+                                  "condition_cleared",
+                                  "withdrawn"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "resolved_by": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "resolved_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "check_reason": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "check_ran_at": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "repo_id",
+                          "work_item_id",
+                          "kind",
+                          "title",
+                          "target",
+                          "env_name",
+                          "reason",
+                          "provider_url",
+                          "check",
+                          "state",
+                          "origin",
+                          "created_by",
+                          "created_at",
+                          "resolution",
+                          "resolved_by",
+                          "resolved_at",
+                          "check_reason",
+                          "check_ran_at"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "requests",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSetupRequest",
+        "summary": "Ask a person for one setup step; the work item it names stays paused until it is done",
+        "description": "Proposes one request of a fixed kind. The body is strict: a field outside the listed ones (a `value`, a `secret`) is refused, and so is text shaped like a credential. `reason` is stored as plain text. The only link allowed is `provider_url` on github.com or vercel.com. The account and the proposing person are the session's. Owner or admin, session only.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "env_var",
+                      "app_not_installed",
+                      "parent_pr_closed",
+                      "branch_pushed_by_person",
+                      "overlay_path_missing"
+                    ]
+                  },
+                  "repo_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "work_item_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "env_name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "provider_url": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "check": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "env_var_present"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repo_id",
+                  "target",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ask a person for one setup step; the work item it names stays paused until it is done",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The same step is already requested and open (`setup_request_exists`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup-requests/{id}": {
+      "get": {
+        "operationId": "getSetupRequest",
+        "summary": "One setup request",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One setup request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup-requests/{id}/withdraw": {
+      "post": {
+        "operationId": "withdrawSetupRequest",
+        "summary": "Withdraw an open setup request; its work item stays paused until someone advances it",
+        "description": "Owner or admin, session only. Repeating a withdrawal answers 200 with the request unchanged; withdrawing a request already marked done is 409.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Withdraw an open setup request; its work item stays paused until someone advances it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is already closed the other way (`setup_request_closed`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup-requests/{id}/done": {
+      "post": {
+        "operationId": "markSetupRequestDone",
+        "summary": "Mark an open setup request done; its work item can go on at once",
+        "description": "Owner or admin, session only. Repeating it answers 200 with the request unchanged; marking a withdrawn request done is 409. A check that later fails puts the request back.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Mark an open setup request done; its work item can go on at once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "repo_id": {
+                      "type": "string"
+                    },
+                    "work_item_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "env_var",
+                        "app_not_installed",
+                        "parity_drift",
+                        "parent_pr_closed",
+                        "branch_pushed_by_person",
+                        "overlay_path_missing"
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "env_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "provider_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "env_var_present"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "done",
+                        "withdrawn"
+                      ]
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "derived"
+                      ]
+                    },
+                    "created_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "marked_done",
+                            "check_passed",
+                            "condition_cleared",
+                            "withdrawn"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resolved_by": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_ran_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "repo_id",
+                    "work_item_id",
+                    "kind",
+                    "title",
+                    "target",
+                    "env_name",
+                    "reason",
+                    "provider_url",
+                    "check",
+                    "state",
+                    "origin",
+                    "created_by",
+                    "created_at",
+                    "resolution",
+                    "resolved_by",
+                    "resolved_at",
+                    "check_reason",
+                    "check_ran_at"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is already closed the other way (`setup_request_closed`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/action-rules": {
       "get": {
         "operationId": "getActionAccountRules",

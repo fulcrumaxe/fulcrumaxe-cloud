@@ -1,0 +1,21 @@
+{
+  "id": "3a1f6c52-7a0e-4c1a-9a53-0b1d2e3f4a55",
+  "repo_id": "6f1c2f5e-3d8f-4f43-8d6e-8f2f6a9b1c22",
+  "work_item_id": "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66",
+  "kind": "env_var",
+  "title": "Add the environment variable STRIPE_WEBHOOK_SECRET to cloud-staging",
+  "target": "cloud-staging",
+  "env_name": "STRIPE_WEBHOOK_SECRET",
+  "reason": "The webhook route needs this name set before the build can be checked.",
+  "provider_url": "https://vercel.com/docs/environment-variables",
+  "check": "env_var_present",
+  "state": "withdrawn",
+  "origin": "agent",
+  "created_by": "b7e4a1c9-2d6f-4b3a-9c8e-5f4a3b2c1d77",
+  "created_at": "2026-10-16T20:00:00.000Z",
+  "resolution": "withdrawn",
+  "resolved_by": "b7e4a1c9-2d6f-4b3a-9c8e-5f4a3b2c1d77",
+  "resolved_at": "2026-10-16T20:05:00.000Z",
+  "check_reason": null,
+  "check_ran_at": null
+}

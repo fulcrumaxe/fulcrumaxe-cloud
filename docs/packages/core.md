@@ -196,6 +196,12 @@ minting for an inactive account; `stats/read.ts` reads
 `v_kpi_work_items`/`v_kpi_runs`/`installations`; `runs/read.ts` and
 `work-items/read.ts` read `agent_runs` and `work_items` respectively.
 
+`setup-requests/` (D#598 P8a) reads and writes `setup_requests` (migration 0856): `kinds.ts` is the closed list of six step kinds, the
+plain-text limits, the provider-link host list (github.com, vercel.com) and the fixed title templates; `store.ts` proposes, lists,
+withdraws and marks done a request, keeps the derived public/private drift request in step with current state, and answers `setupHoldFor`
+(whether a request holds a work item: open holds it, withdrawn holds it until a person's next advance, done releases it). A request has
+no value field; text shaped like a credential is refused before the write.
+
 ## Security notes
 
 See [`../security.md`](../security.md) for the tenant-isolation model this
