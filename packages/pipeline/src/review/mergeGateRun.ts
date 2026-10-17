@@ -5,7 +5,7 @@ import { humanMergeOnly } from "@fx/db/src/humanMergeOnly.js";
 import { autoMergeAllowed } from "@fx/trust";
 import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
-import { gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
+import { carriedRunsHead, gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus } from "./githubReads.js";
 import { loadReviewContext, type ReviewContext } from "./context.js";
 import { reviewPlanFor } from "./reviewPlan.js";
@@ -60,17 +60,19 @@ export type MergeGateRunResult =
   | { outcome: "merged" | "ready_human_merges" | "pr_not_open" | "head_moved"; headSha: string; reasons: MergeBlockReason[]; status: StatusOutcome };
 
 /** Whether this head's code-reviewer run set the security flag: a succeeded production run whose envelope says `security_review_needed` is exactly true. */
-async function reviewerFlaggedSecurity(pool: Pool, accountId: string, workItemId: string, headSha: string, localOn: boolean): Promise<boolean> {
+export async function reviewerFlaggedSecurity(pool: Pool, accountId: string, workItemId: string, headSha: string, localOn: boolean): Promise<boolean> {
   return withTenant(pool, accountId, async (client) => {
+    // D#598 P7c: a head carried forward by a merge-only re-check keeps the flag its reviewed head's code reviewer set.
+    const carried = await carriedRunsHead(client, accountId, workItemId, headSha);
     // Amended for runner_local repos with local review on (D#6 C12): a trusted runner's run counts here exactly as it does in the gate.
     const { rows } = await client.query<{ flagged: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM agent_runs ar
-          WHERE ar.account_id = $1 AND ar.work_item_id = $2 AND ar.head_sha = $3 AND ar.role = 'code-reviewer'
+          WHERE ar.account_id = $1 AND ar.work_item_id = $2 AND ar.head_sha = ANY($3::text[]) AND ar.role = 'code-reviewer'
             AND ar.status = 'succeeded' AND (ar.runtime = 'production' OR ($4::boolean AND ${RUNNER_ADMIN_OK_SQL}))
             AND (ar.envelope -> 'security_review_needed') = 'true'::jsonb
        ) AS flagged`,
-      [accountId, workItemId, headSha, localOn],
+      [accountId, workItemId, carried === null ? [headSha] : [headSha, carried], localOn],
     );
     return rows[0]?.flagged === true;
   });

@@ -3842,6 +3842,30 @@
                         }
                       ]
                     },
+                    "review_recheck": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "merge_only"
+                            },
+                            "sentence": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "sentence"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "actions": {
                       "type": "array",
                       "items": {

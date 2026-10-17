@@ -155,6 +155,11 @@ export interface WorkItemActivity {
   /** Why the pipeline stopped and needs a person, or null. */
   notice: ActivityNotice | null;
   /**
+   * D#598 P7c: set when the newest review round of the item was a delta re-check (the head is only a merge of the base branch; no reviewer ran for it).
+   * The API route puts the approved sentence in; there is never a second full review row for such a head.
+   */
+  review_recheck: { kind: 'merge_only' } | null;
+  /**
    * What the CALLER may do to this item now, from the one table in operatorActions.ts (the routes ask the same table): Build
    * again, Re-spec, Back to discussion, Treat as a feature, Close. Empty for a member, an external item, a live run or a stage none applies to.
    * The Pipeline app draws a button only for an action listed here.
@@ -554,6 +559,15 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       if (sentence) notice = { kind: 'check_failed', reason: sentence };
     }
 
+    // D#598 P7c: the newest review round's record says whether it was a merge-only re-check (the code is written by the platform alone).
+    const lastRound = (
+      await client.query<{ code: string | null }>(
+        `SELECT e.code FROM work_item_driver_events e WHERE e.work_item_id = $1::uuid AND e.kind = 'review_verdicts' ORDER BY e.seq DESC LIMIT 1`,
+        [workItemId],
+      )
+    ).rows[0];
+    const reviewRecheck = lastRound?.code === 'merge_only_recheck' ? ({ kind: 'merge_only' } as const) : null;
+
     // What this caller may do now: the same table the action routes ask. A caller with no role gets none.
     const facts = ctx.principal.role ? await readOperatorFacts(client, workItemId, ctx.principal.role) : null;
 
@@ -594,6 +608,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         }))
         .reverse(),
       notice,
+      review_recheck: reviewRecheck,
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
     };

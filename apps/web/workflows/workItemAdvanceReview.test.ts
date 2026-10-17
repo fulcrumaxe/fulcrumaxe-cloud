@@ -64,6 +64,8 @@ interface World {
   /** `runner_local`: the repository's agents run on a runner; `recorded` is what its run's `done` recorded (null: nothing). */
   mode?: "runner_local" | "runner_verified" | "sandbox";
   recorded?: { number: number; branch: string } | null;
+  /** D#598 P7c: the worker's answer to "is this head only a merge of the base branch?", per call (the last one repeats). Default: a full review. */
+  mergeOnly?: Array<{ decision: string; reason?: string }>;
   /** D#6 R5b-2a: the worker's answer to "may the reviewers start?", per call (1-based). It may change the world (a push, a mode change) as the real check's wait would. */
   /** What the decision step answers after a succeeded fix round (D#7 DP4b-2); `none` when absent. */
   decision?: DecisionStepCode;
@@ -121,6 +123,10 @@ function setup(w: World, item: AdvanceItem = AT_PR) {
     advanceRecordRound: vi.fn(async (_who: unknown, input: Omit<AdvanceRoundInput, "accountId" | "workItemId">) => {
       const r = rounds.length > 1 ? rounds.shift()! : rounds[0]!;
       return { decision: r.decision, round: r.round ?? 0, ...(r.nextRound !== null ? { nextRound: r.nextRound ?? (r.round ?? 0) + 1 } : {}), recorded: input.verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, outcome: "passed" })) };
+    }),
+    advanceRecordMergeOnly: vi.fn(async (_who: unknown, _input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] }) => {
+      const list = w.mergeOnly ?? [{ decision: "full_review", reason: "no_prior_review" }];
+      return list.length > 1 ? list.shift()! : list[0]!;
     }),
     advanceStartFix: vi.fn(async (_who: unknown, req: AdvanceFixRequest) => {
       if (!w.fix.ok) return { ok: false as const, reason: w.fix.reason ?? "already_running" };
@@ -390,6 +396,72 @@ describe("D#6 R5b-2a: a cloud-verified pull request is reviewed after its quiet 
     const other = setup(verified({ verifiedGate: () => ({ state: "refused", reason: "target_not_found" }) }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "target_not_found" });
     expect(other.started).toEqual([]);
+  });
+});
+
+describe("D#598 P7c: a head that is only a merge of the base branch gets the delta re-check", () => {
+  it("is asked once per head with the plan's roles and the base branch; a full-review answer runs the reviewers as before", async () => {
+    const t = setup(fresh());
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(t.worker.advanceRecordMergeOnly).toHaveBeenCalledTimes(1);
+    const input = t.worker.advanceRecordMergeOnly.mock.calls[0]![1];
+    expect(input).toMatchObject({ headSha: H1, prNumber: 41, baseRef: "main" });
+    expect([...input.requiredRoles].sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    expect(rolesOf(t.started).sort()).toEqual(["acceptance-tester", "code-reviewer"]);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(1);
+  });
+
+  it("a merge-only head: no reviewer is started, no round is recorded, and the merge gate follows", async () => {
+    const t = setup(fresh({ mergeOnly: [{ decision: "all_passed" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "merged", detail: undefined });
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceRecordRound).not.toHaveBeenCalled();
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledWith(WHO, 41);
+    expect(logs.find((l) => l.event === "advance.reviewed")).toMatchObject({ decision: "merge_only", head: H1.slice(0, 12) });
+  });
+
+  it("waits for CI like a full review does (same minute cadence), then carries the head; CI that never settles stops for a person", async () => {
+    const t = setup(fresh({ mergeOnly: [{ decision: "ci_pending" }, { decision: "ci_pending" }, { decision: "all_passed" }] }));
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(world.sleeps).toBe(2);
+    expect(t.started).toEqual([]);
+
+    world.sleeps = 0;
+    const never = setup(fresh({ mergeOnly: [{ decision: "ci_pending" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
+    expect(never.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(never.started).toEqual([]);
+    expect(events()).toContain("advance.ci_wait_timeout");
+  });
+
+  it("a head that moved under the gate is looked at again, and the new head gets its own re-check", async () => {
+    const w = fresh({ mergeOnly: [{ decision: "all_passed" }, { decision: "full_review", reason: "code_changed" }] });
+    const t = setup(w);
+    t.worker.advanceMergeGate.mockImplementationOnce(async () => {
+      w.head = H2;
+      return { outcome: "head_moved", reasons: [] };
+    });
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceRecordMergeOnly.mock.calls.map((c) => c[1].headSha)).toEqual([H1, H2]);
+    // The second head had code changes: the full review ran on it, and only on it.
+    expect(t.started.map((s) => s.headSha)).toEqual([H2, H2]);
+  });
+
+  it("a head that moved while the re-check waited is looked at again, with nothing recorded for the stale one", async () => {
+    const w = fresh({ mergeOnly: [{ decision: "head_moved" }, { decision: "all_passed" }] });
+    const t = setup(w);
+    expect((await workItemAdvanceWorkflow(ARGS)).status).toBe("merged");
+    expect(t.worker.advanceRecordMergeOnly).toHaveBeenCalledTimes(2);
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a halt during the re-check ends the workflow with the halted stop", async () => {
+    const t = setup(fresh({ mergeOnly: [{ decision: "halted", reason: "item_halted" }] }));
+    const out = await workItemAdvanceWorkflow(ARGS);
+    expect(out.status).not.toBe("merged");
+    expect(t.started).toEqual([]);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
   });
 });
 

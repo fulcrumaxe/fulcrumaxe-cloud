@@ -275,6 +275,30 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
       expect((await noticeOf(accountId, userId, itemId))!.kind).toBe('check_failed');
     });
 
+    // D#598 P7c (customer-visible): the review section's line after a merge from main. The sentence is the Spec's, written once in the runner protocol's copy.
+    it('review_recheck: set only while the newest review round was a merge-only re-check, with the approved line; a later full review clears it', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const { itemId } = await seedItem(accountId, { stage: 'review_passed' });
+      const get2 = async () => {
+        const res = await get(itemId, { accountId, userId });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as Activity & { review_recheck?: unknown };
+        expect(activityResponseSchema.parse(body)).toEqual(body);
+        return body;
+      };
+      const round = (key: string, head: string, code: string | null) =>
+        admin.query(`INSERT INTO work_item_driver_events (account_id, work_item_id, kind, code, head_sha, dedupe_key) VALUES ($1, $2, 'review_verdicts', $3, $4, $5)`, [accountId, itemId, code, head, key]);
+      expect((await get2()).review_recheck).toBeUndefined();
+      await round('v1', 'a'.repeat(40), null);
+      expect((await get2()).review_recheck).toBeUndefined();
+      await round('merge_only:b', 'b'.repeat(40), 'merge_only_recheck');
+      expect((await get2()).review_recheck).toEqual({ kind: 'merge_only', sentence: 'Re-checked after a merge from main (no code changes)' });
+      expect(COPY.reviewMergeOnlyRecheck).toBe('Re-checked after a merge from main (no code changes)');
+      // The next review round is a full one: the line is gone.
+      await round('v2', 'c'.repeat(40), null);
+      expect((await get2()).review_recheck).toBeUndefined();
+    });
+
     it('check_failed is bound to the current attempt: it shows when nothing has happened since, and not once a new build has started', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const { itemId } = await seedItem(accountId, { stage: 'in_progress' });

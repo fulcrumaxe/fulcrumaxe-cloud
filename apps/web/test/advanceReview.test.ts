@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   runMergeGateForItem: vi.fn(),
   recordRound: vi.fn(),
   createCiGate: vi.fn(),
+  recordMergeOnlyRecheck: vi.fn(),
 }));
 vi.mock("@fx/pipeline", async (original) => ({
   ...(await original<typeof import("@fx/pipeline")>()),
@@ -12,6 +13,7 @@ vi.mock("@fx/pipeline", async (original) => ({
   runMergeGateForItem: mocks.runMergeGateForItem,
   recordRound: mocks.recordRound,
   createCiGate: mocks.createCiGate,
+  recordMergeOnlyRecheck: mocks.recordMergeOnlyRecheck,
 }));
 
 import { createReviewDeps } from "../lib/advanceReview";
@@ -137,5 +139,38 @@ describe("D#598 P7b: recording a round is behind the CI wait", () => {
   it("the pending answer reaches the workflow unchanged", async () => {
     const { pool } = fakePool(false);
     expect(await createReviewDeps(async () => ({}) as never).recordRound(pool, {} as never, input)).toMatchObject({ decision: "ci_pending", recorded: [] });
+  });
+});
+
+describe("D#598 P7c: the merge-only re-check reads GitHub the way the CI wait does", () => {
+  const input = { accountId: ACCOUNT, workItemId: ITEM, headSha: "a".repeat(40), prNumber: 7, baseRef: "main", requiredRoles: ["code-reviewer", "acceptance-tester"] };
+  const ctx = { workItemId: ITEM, stage: "review_passed", repoId: REPO, owner: "acme", name: "widgets", issue: 7, tier: "feature", specVersion: 1, fixRoundsStarted: 0, debaterMode: null, executionMode: "sandbox" };
+  beforeEach(() => {
+    mocks.recordMergeOnlyRecheck.mockReset();
+    mocks.createCiGate.mockReset();
+    mocks.loadReviewContext.mockReset();
+    mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));
+    mocks.loadReviewContext.mockResolvedValue({ ok: true, ctx });
+  });
+
+  it("is given a CI gate (the wait is not skippable) and a client opened with the merge gate's purpose", async () => {
+    mocks.recordMergeOnlyRecheck.mockResolvedValue({ decision: "ci_pending", ciReasons: ["check_running"] });
+    const http = { request: vi.fn() };
+    const open = vi.fn(async () => http as never);
+    const { pool } = fakePool(false);
+    expect(await createReviewDeps(open).recordMergeOnly!(pool, input)).toEqual({ decision: "ci_pending" });
+    expect(open).toHaveBeenCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets" });
+    const [, passedInput, deps] = mocks.recordMergeOnlyRecheck.mock.calls[0]! as [unknown, { baseRef: string; requiredRoles: string[] }, { http: unknown; ci: { gate: boolean } }];
+    expect(passedInput).toMatchObject({ baseRef: "main", requiredRoles: ["code-reviewer", "acceptance-tester"] });
+    expect(deps.http).toBe(http);
+    expect(deps.ci.gate).toBe(true);
+  });
+
+  it("a full-review answer carries its fixed reason; an item the review cannot load is a full review, not a throw", async () => {
+    mocks.recordMergeOnlyRecheck.mockResolvedValue({ decision: "full_review", reason: "code_changed" });
+    const { pool } = fakePool(false);
+    expect(await createReviewDeps(async () => ({}) as never).recordMergeOnly!(pool, input)).toEqual({ decision: "full_review", reason: "code_changed" });
+    mocks.loadReviewContext.mockResolvedValue({ ok: false, reason: "no_spec" });
+    expect(await createReviewDeps(async () => ({}) as never).recordMergeOnly!(pool, input)).toEqual({ decision: "full_review", reason: "no_spec" });
   });
 });

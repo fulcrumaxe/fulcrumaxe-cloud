@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { requiredReviewers, shouldDispatchDebater } from "./requiredReviewers.js";
 import type { PipelineRole, PullRequestRef, WorkItemTier } from "./types.js";
@@ -483,6 +483,23 @@ export function gateReviewerReasons(roles: readonly GatedRole[], rows: readonly 
   return reasons;
 }
 
+/**
+ * D#598 P7c: the head whose reviewer runs stand for `headSha`, when the platform recorded a merge-only re-check of it (a merge of the
+ * default branch into the branch, with the pull request's own diff unchanged). The fact is a `review_verdicts` driver event with the code
+ * `merge_only_recheck`; the head that holds the runs is its `rows_<sha>` reason. Null when there is none. Only the platform writes this
+ * event, after reading GitHub: a person's push cannot make one.
+ */
+export async function carriedRunsHead(client: PoolClient, accountId: string, workItemId: string, headSha: string): Promise<string | null> {
+  const { rows } = await client.query<{ reasons: string[] }>(
+    `SELECT reasons FROM work_item_driver_events
+      WHERE account_id = $1 AND work_item_id = $2 AND kind = 'review_verdicts' AND code = 'merge_only_recheck' AND head_sha = $3
+      ORDER BY seq DESC LIMIT 1`,
+    [accountId, workItemId, headSha],
+  );
+  const m = /^rows_([0-9a-f]{40})$/.exec((rows[0]?.reasons ?? []).find((r) => r.startsWith("rows_")) ?? "");
+  return m ? m[1]! : null;
+}
+
 export async function loadRunsOnSha(
   pool: Pool,
   accountId: string,
@@ -490,6 +507,9 @@ export async function loadRunsOnSha(
   headSha: string,
 ): Promise<RunRow[]> {
   return withTenant(pool, accountId, async (client) => {
+    // D#598 P7c: the runs of the head a merge-only re-check carried forward count for this head too (never more than one extra head).
+    const carried = await carriedRunsHead(client, accountId, workItemId, headSha);
+    const heads = carried === null ? [headSha] : [headSha, carried];
     // `envelope->>'verdict'` is NULL unless the top-level key exists, so a
     // nested or renamed verdict never reads as a pass. Rows are matched on
     // the work item AND the exact head SHA: a run on another item or on an
@@ -508,9 +528,9 @@ export async function loadRunsOnSha(
               isfinite(created_at) AS ts_ok,
               COALESCE(${RUNNER_ADMIN_OK_SQL}, false) AS runner_admin_ok
          FROM agent_runs ar
-        WHERE account_id = $1 AND work_item_id = $2 AND head_sha = $3 AND role = ANY($4::text[])
+        WHERE account_id = $1 AND work_item_id = $2 AND head_sha = ANY($3::text[]) AND role = ANY($4::text[])
         ORDER BY created_at DESC, id`,
-      [accountId, workItemId, headSha, [...ALL_GATED_ROLES], [...NON_TERMINAL_STATUSES]],
+      [accountId, workItemId, heads, [...ALL_GATED_ROLES], [...NON_TERMINAL_STATUSES]],
     );
     return rows;
   });

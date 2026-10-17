@@ -45,6 +45,7 @@ export type ReviewWorker = Pick<
   | "advanceStartRun"
   | "advanceRunOutcome"
   | "advanceRecordRound"
+  | "advanceRecordMergeOnly"
   | "advanceStartFix"
   | "advanceMergeGate"
   | "advanceVerifiedReviewGate"
@@ -310,6 +311,23 @@ export async function recordRoundBody(worker: ReviewWorker | null, who: StepWho,
   if (out.decision === "refused") return { decision: "reason" in out && (out.reason === "item_halted" || out.reason === "halted_since_approval") ? "halted" : "refused", round: 0, nextRound: null, recorded: [] };
   const done = out as Exclude<typeof out, { decision: "refused"; reason: string }>;
   return { decision: done.decision, round: done.round, nextRound: done.nextRound ?? null, recorded: done.recorded.map((r) => `${r.role}:${r.verdict}:${r.outcome}`) };
+}
+
+/** D#598 P7c: `all_passed` (a merge-only head, carried forward and recorded), `full_review` (run the reviewers), `ci_pending`, `halted` or `refused`. */
+export interface MergeOnlyOut {
+  decision: string;
+  reason: string | null;
+}
+
+/** Asks whether a new head is only a merge of the base branch. Any refusal or missing worker is `full_review`: the reviewers run as they always did. */
+export async function recordMergeOnlyBody(worker: ReviewWorker | null, who: StepWho, input: { headSha: string; prNumber: number; baseRef: string; requiredRoles: string[] }): Promise<MergeOnlyOut> {
+  if (!worker) return { decision: "full_review", reason: "worker_unavailable" };
+  const out = await worker.advanceRecordMergeOnly(who, input);
+  if (out.decision === "refused") {
+    const reason = "reason" in out ? out.reason : null;
+    return reason === "item_halted" || reason === "halted_since_approval" ? { decision: "halted", reason } : { decision: "full_review", reason: reason ?? "refused" };
+  }
+  return { decision: out.decision, reason: "reason" in out && typeof out.reason === "string" ? out.reason : null };
 }
 
 export interface FixOut {
