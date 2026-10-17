@@ -625,6 +625,28 @@ test.describe("D#483 live parity: the notice, Check the build, the board's polli
   });
 });
 
+// a11y: muted text (--text-muted: the totals line, the run rows, the kind tag) must reach WCAG 2.2 AA contrast (4.5:1).
+// axe runs over the whole Pipeline window, not a scoped part of it, on the board and on the open detail.
+test.describe("a11y: the Pipeline window has no serious or critical contrast violation", () => {
+  const contrast = async (page: Page) => {
+    const res = await new AxeBuilder({ page }).include(WIN).withTags(["wcag2aa", "wcag22aa"]).analyze();
+    const bad = res.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
+    expect(bad.map((v) => `${v.impact} ${v.id} ${v.nodes.map((n) => n.html.slice(0, 100)).join(" | ")}`)).toEqual([]);
+    // The contrast rule must really have run on the muted text rather than skipping it.
+    expect(res.passes.some((p) => p.id === "color-contrast")).toBe(true);
+  };
+
+  test("board (kind tag) and open detail (totals, run rows)", async ({ page }) => {
+    const { errors } = await setup(page, { status: 200, json: OK });
+    await expect(tid(page, "pl-kind").first()).toBeVisible();
+    await contrast(page);
+    await openDetail(page);
+    await expect(tid(page, "pl-totals")).toBeVisible();
+    await contrast(page);
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe("D#7 DP8-f1: halted and waiting for an answer (mocked API)", () => {
   const STATES: [string, boolean, boolean][] = [
     ["halted", true, false],

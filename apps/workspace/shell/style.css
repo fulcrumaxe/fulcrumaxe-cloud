@@ -8,7 +8,7 @@
   /* ── Text ────────────────────────── */
   --text-primary:     #1aff80;
   --text-secondary:   rgba(26, 255, 128, 0.7);
-  --text-muted:       rgba(26, 255, 128, 0.4);
+  --text-muted:       rgba(26, 255, 128, 0.55);
   --text-inverse:     #000000;
 
   /* ── Accent ──────────────────────── */
@@ -100,7 +100,7 @@ body[data-experience="classic-crt"], body:not([data-experience]) {
   --accent-secondary: #00D4FF;
   --text-primary:     #1aff80;
   --text-secondary:   rgba(26, 255, 128, 0.7);
-  --text-muted:       rgba(26, 255, 128, 0.4);
+  --text-muted:       rgba(26, 255, 128, 0.55);
   --border:           rgba(26, 255, 128, 0.3);
   --border-bright:    rgba(26, 255, 128, 0.8);
   --glow-accent:      0 0 8px rgba(26, 255, 128, 0.6);
@@ -129,8 +129,8 @@ body[data-experience="retro-amber"][data-theme="amber"] {
   --accent-rgb:       255, 176, 0;
   --accent-secondary: #FF6B00;
   --text-primary:     #FFB000;
-  --text-secondary:   rgba(255, 176, 0, 0.7);
-  --text-muted:       rgba(255, 176, 0, 0.4);
+  --text-secondary:   rgba(255, 176, 0, 0.8);
+  --text-muted:       rgba(255, 176, 0, 0.64);
   --border:           rgba(255, 176, 0, 0.3);
   --border-bright:    rgba(255, 176, 0, 0.8);
   --glow-accent:      0 0 8px rgba(255, 176, 0, 0.6);
@@ -146,8 +146,8 @@ body[data-experience="nord"][data-theme="blue"] {
   --accent-rgb:       0, 212, 255;
   --accent-secondary: #0080FF;
   --text-primary:     #00D4FF;
-  --text-secondary:   rgba(0, 212, 255, 0.7);
-  --text-muted:       rgba(0, 212, 255, 0.4);
+  --text-secondary:   rgba(0, 212, 255, 0.8);
+  --text-muted:       rgba(0, 212, 255, 0.63);
   --border:           rgba(0, 212, 255, 0.3);
   --border-bright:    rgba(0, 212, 255, 0.8);
   --glow-accent:      0 0 8px rgba(0, 212, 255, 0.6);
@@ -164,7 +164,7 @@ body[data-experience="corporate"][data-theme="white"] {
   --accent-secondary: #C0C0C0;
   --text-primary:     #E0E0E0;
   --text-secondary:   rgba(224, 224, 224, 0.7);
-  --text-muted:       rgba(224, 224, 224, 0.4);
+  --text-muted:       rgba(224, 224, 224, 0.54);
   --border:           rgba(224, 224, 224, 0.3);
   --border-bright:    rgba(224, 224, 224, 0.8);
   --glow-accent:      0 0 8px rgba(224, 224, 224, 0.4);
@@ -180,8 +180,8 @@ body[data-experience="cyberpunk"][data-theme="red"] {
   --accent-rgb:       255, 65, 65;
   --accent-secondary: #FF8800;
   --text-primary:     #FF4141;
-  --text-secondary:   rgba(255, 65, 65, 0.7);
-  --text-muted:       rgba(255, 65, 65, 0.4);
+  --text-secondary:   rgba(255, 170, 170, 0.85);
+  --text-muted:       rgba(255, 150, 150, 0.68);
   --border:           rgba(255, 65, 65, 0.3);
   --border-bright:    rgba(255, 65, 65, 0.8);
   --glow-accent:      0 0 8px rgba(255, 65, 65, 0.6);
