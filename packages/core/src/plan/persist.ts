@@ -170,14 +170,20 @@ const PROPOSALS_SQL = `
         state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
         last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
 
-/** An open issue or Discussion becomes a proposal; a withdrawn one comes back to new; an approved or rejected one keeps its state. The owner is fixed when the row is created and never rewritten by an import. */
+/**
+ * An open issue or Discussion becomes a proposal; a withdrawn one comes back to new; an approved or rejected one keeps its state.
+ * The owner is fixed when the row is created and never rewritten by an import. The text (title, summary) follows the source only
+ * while the row is `new`, or `withdrawn` (which this same statement turns back into `new`): once a person has decided, an edit
+ * to the source issue must not change what they read and acted on (CWE-367).
+ */
 const ITEM_PROPOSALS_SQL = `
   INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, discussion_number, title, summary, provenance, owner_process, state, last_import_id)
   SELECT $1::uuid, $2::uuid, p.dedupe_key, ARRAY[p.source], p.gh_number, p.discussion_number, left(p.title, 256), left(p.summary, 2000),
          'external', p.owner, 'new', $3::uuid
     FROM jsonb_to_recordset($4::jsonb) AS p(dedupe_key text, source text, gh_number int, discussion_number int, title text, summary text, owner text)
   ON CONFLICT (repo_id, dedupe_key) DO UPDATE
-    SET title = EXCLUDED.title, summary = EXCLUDED.summary,
+    SET title = CASE WHEN proposals.state IN ('new', 'withdrawn') THEN EXCLUDED.title ELSE proposals.title END,
+        summary = CASE WHEN proposals.state IN ('new', 'withdrawn') THEN EXCLUDED.summary ELSE proposals.summary END,
         state = CASE WHEN proposals.state = 'withdrawn' THEN 'new' ELSE proposals.state END,
         last_import_id = EXCLUDED.last_import_id, updated_at = now()`;
 
