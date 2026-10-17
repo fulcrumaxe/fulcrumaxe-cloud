@@ -11,6 +11,7 @@ import {
   type MemoryEntry,
 } from "@fx/core/src/memory/index.js";
 import { MEMORY_BATCH_DECISIONS, MEMORY_BATCH_MAX, decideMemoryBatch, markMemoryOpened } from "@fx/core/src/memory/batch.js";
+import { memoryRunsOf } from "@fx/core/src/memory/runCounts.js";
 import { MEMORY_LIST_MAX, listMemory, memoryMoveRef, memoryPendingCounts, memoryQueue, type MemoryScopeFilter } from "@fx/core/src/memory/view.js";
 import { ApiError } from "../errors.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
@@ -145,6 +146,7 @@ const cardSchema = z.object({
 export const memoryQueueResponseSchema = z.object({ cards: z.array(cardSchema), truncated: z.boolean() });
 const openResponseSchema = z.object({ opened: z.boolean() });
 const decideResponseSchema = z.object({ outcome: z.enum(["decided", "already_decided"]), entry: entrySchema });
+const runsResponseSchema = z.object({ total: z.number().int().min(0), truncated: z.boolean(), runs: z.array(z.object({ id: z.string().uuid(), recorded_at: z.string() })) });
 const editResponseSchema = z.object({ entry: entrySchema, previous_id: z.string().uuid() });
 const countMap = z.record(z.string(), z.number().int().min(0));
 export const memoryPendingCountsResponseSchema = z.object({ repos: countMap, items: countMap });
@@ -344,6 +346,28 @@ export const memoryRoutes: RouteEntry[] = [
       try {
         const q = input.query as z.infer<typeof countsQuerySchema>;
         return await memoryPendingCounts(mctx(ctx), { repoIds: q.repo_ids ?? [], itemIds: q.item_ids ?? [] });
+      } catch (err) {
+        throw mapMemoryError(err);
+      }
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/v1/memory/{id}/runs",
+    operationId: "listMemoryRuns",
+    summary: "The runs that used a memory entry",
+    description:
+      "Session only, member. The runs behind the entry's \"Used in N runs\": the newest at most 50 (`runs`, each with its run `id` and when the recall was recorded), and `total`, the number of runs, which equals the `runs` figure the list shows for the same entry. An edit does not reset it: the count follows the entry's versions. `truncated` is true when `total` is above what `runs` holds. An id that is not one of the caller's entries, another account's included, answers 404.",
+    principals: ["session"],
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    paramsSchema: idParamsSchema,
+    responseSchema: runsResponseSchema,
+    async handler(ctx, input) {
+      try {
+        const r = await memoryRunsOf(mctx(ctx), input.params.id!);
+        return { total: r.total, truncated: r.total > r.runs.length, runs: r.runs.map((x) => ({ id: x.runId, recorded_at: x.recordedAt.toISOString() })) };
       } catch (err) {
         throw mapMemoryError(err);
       }

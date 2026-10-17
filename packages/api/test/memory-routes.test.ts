@@ -15,7 +15,7 @@ import { effectivePrincipals } from '../src/registry.js';
 import { ROUTES } from '../src/routes/index.js';
 
 const NODE = 'R_kgDOApiMem01';
-const MEMORY_OPS = ['listMemory', 'getMemoryQueue', 'getMemoryPendingCounts', 'openMemoryCard', 'decideMemory', 'editMemory', 'decideMemoryBatch'];
+const MEMORY_OPS = ['listMemory', 'listMemoryRuns', 'getMemoryQueue', 'getMemoryPendingCounts', 'openMemoryCard', 'decideMemory', 'editMemory', 'decideMemoryBatch'];
 
 interface Identity {
   accountId: string;
@@ -104,7 +104,7 @@ describe('D#601 MEM-4a2: memory routes', () => {
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end()]);
   });
 
-  it('registers the seven operations, session only (no token principal can decide memory)', () => {
+  it('registers the eight operations, session only (no token principal can decide memory)', () => {
     for (const op of MEMORY_OPS) {
       const entry = ROUTES.find((r) => r.operationId === op);
       expect(entry, op).toBeDefined();
@@ -416,6 +416,73 @@ describe('D#601 MEM-4a2: memory routes', () => {
       const successors = await admin.query(`SELECT status FROM memory_entries WHERE supersedes_id = $1`, [id]);
       expect(successors.rows).toEqual([{ status: 'proposed' }]);
       expect(await status(id)).toBe('superseded');
+    });
+  });
+
+  describe('the runs behind "Used in N runs"', () => {
+    type Runs = { total: number; truncated: boolean; runs: Array<{ id: string; recorded_at: string }> };
+    async function runRecalling(accountId: string, entries: Array<{ id: string; version: number }>): Promise<string> {
+      const id = randomUUID();
+      await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status) VALUES ($1, $2, 'executor', 'production', 'succeeded')`, [id, accountId]);
+      await admin.query(`INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions) VALUES ($1, $2, $3::uuid[], $4::integer[])`, [accountId, id, entries.map((e) => e.id), entries.map((e) => e.version)]);
+      return id;
+    }
+    const runsOf = (who: Identity, id: string) => call(who, 'GET', `/memory/${id}/runs`);
+    const listedRuns = async (who: Identity, id: string) => {
+      const body = await ok<{ groups: Array<{ entries: Array<{ id: string; runs: number }> }> }>(await call(who, 'GET', '/memory?status=proposed,approved'), 'listMemory');
+      return body.groups.flatMap((g) => g.entries).find((e) => e.id === id)!.runs;
+    };
+
+    it('lists the specific runs, and the total equals the count the list shows; none gives 0 and an empty list', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const none = await ok<Runs>(await runsOf(aMember, id), 'listMemoryRuns');
+      expect(none).toEqual({ total: 0, truncated: false, runs: [] });
+      expect(await listedRuns(aMember, id)).toBe(0);
+      const runs = [await runRecalling(a.accountId, [{ id, version: 1 }]), await runRecalling(a.accountId, [{ id, version: 1 }]), await runRecalling(a.accountId, [{ id, version: 1 }])];
+      const three = await ok<Runs>(await runsOf(aMember, id), 'listMemoryRuns');
+      expect(three.total).toBe(3);
+      expect(three.runs.map((r) => r.id).sort()).toEqual([...runs].sort());
+      expect(three.total).toBe(three.runs.length);
+      expect(await listedRuns(aMember, id)).toBe(three.total);
+      for (const r of three.runs) expect((await admin.query(`SELECT 1 FROM agent_runs WHERE id = $1 AND account_id = $2`, [r.id, a.accountId])).rowCount).toBe(1);
+    });
+
+    it('an edit does not reset it: asking about either version names the runs of both', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const r1 = await runRecalling(a.accountId, [{ id, version: 1 }]);
+      const edited = await ok<{ entry: { id: string } }>(await call(aAdmin, 'POST', `/memory/${id}/edit`, { body: text('second') }), 'editMemory');
+      const r2 = await runRecalling(a.accountId, [{ id: edited.entry.id, version: 2 }]);
+      for (const ask of [id, edited.entry.id]) {
+        const r = await ok<Runs>(await runsOf(aMember, ask), 'listMemoryRuns');
+        expect(r.runs.map((x) => x.id).sort()).toEqual([r1, r2].sort());
+        expect(r.total).toBe(2);
+      }
+      expect(await listedRuns(aMember, edited.entry.id)).toBe(2);
+    });
+
+    it('caps the list at 50 and says so: total keeps counting', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      for (let i = 0; i < 51; i++) await runRecalling(a.accountId, [{ id, version: 1 }]);
+      const r = await ok<Runs>(await runsOf(aMember, id), 'listMemoryRuns');
+      expect(r.runs).toHaveLength(50);
+      expect(r).toMatchObject({ total: 51, truncated: true });
+    });
+
+    // Row-level security already isolates tenants; this guards that the query stays on the tenant session
+    // (a privileged pool or a SECURITY DEFINER function would let account B's run into A's list and total).
+    it('another account gets 404 (the same answer as no such entry), its own runs never appear, a malformed id is 404, a token is 403', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const mine = await runRecalling(a.accountId, [{ id, version: 1 }]);
+      const foreign = await runRecalling(b.accountId, [{ id, version: 1 }]);
+      const own = await ok<Runs>(await runsOf(aMember, id), 'listMemoryRuns');
+      expect(own.runs.map((r) => r.id)).toEqual([mine]);
+      expect(own.runs.map((r) => r.id)).not.toContain(foreign);
+      expect(own).toMatchObject({ total: 1, truncated: false });
+      expect(await listedRuns(aMember, id)).toBe(1);
+      expect((await runsOf(bAdmin, id)).status).toBe(404);
+      expect((await runsOf(bAdmin, randomUUID())).status).toBe(404);
+      expect((await runsOf(aMember, 'not-a-uuid')).status).toBe(404);
+      expect((await call(await tokenFor(aAdmin, ['read']), 'GET', `/memory/${id}/runs`)).status).toBe(403);
     });
   });
 
