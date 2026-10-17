@@ -3594,6 +3594,21 @@ export interface Operations {
       };
     };
   };
+  listMemoryRuns: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      total: number;
+      truncated: boolean;
+      runs: Array<{
+        id: string;
+        recorded_at: string;
+      }>;
+    };
+  };
   editMemory: {
     path: {
       id: string;
@@ -5228,6 +5243,17 @@ export const operations = {
     idempotency: "never",
     pathParams: [],
     queryParams: ["repo_ids","item_ids"],
+    hasBody: false,
+  },
+  listMemoryRuns: {
+    method: "GET",
+    path: "/api/v1/memory/{id}/runs",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
     hasBody: false,
   },
   editMemory: {

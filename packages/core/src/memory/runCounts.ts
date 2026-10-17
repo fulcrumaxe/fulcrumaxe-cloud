@@ -1,3 +1,4 @@
+import { NotFoundError } from '../tenancy/errors.js';
 import { assertActiveMembership } from '../tenancy/scopedAccess.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { MemoryInputError, type MemoryCtx } from './index.js';
@@ -56,4 +57,45 @@ export async function memoryRunCounts(ctx: Pick<MemoryCtx, 'pool' | 'principal'>
   const byRoot = new Map(rows.map((r) => [r.root, r.n]));
   for (const id of entryIds) out[id] = byRoot.get(id.toLowerCase()) ?? 0;
   return out;
+}
+
+/** The most run ids one read returns. `total` still says how many runs used the entry. */
+export const MEMORY_RUN_IDS_MAX = 50;
+
+export interface MemoryRunRef {
+  runId: string;
+  recordedAt: Date;
+}
+
+/**
+ * Which runs "Used in N runs" counts: the newest runs (at most 50) in the caller's account whose recorded entry ids overlap the entry's lineage,
+ * the same lineage walk and the same overlap as `memoryRunCounts`, so `total` equals the count the list shows. An id the caller cannot see (another
+ * account's, or none) is NotFound, the same answer for both. Display data, never a gate.
+ */
+export async function memoryRunsOf(ctx: Pick<MemoryCtx, 'pool' | 'principal'>, entryId: string): Promise<{ total: number; runs: MemoryRunRef[] }> {
+  if (typeof entryId !== 'string' || !UUID_RE.test(entryId)) throw new NotFoundError('memory entry not found');
+  const { accountId, userId } = ctx.principal;
+  return withTenant(ctx.pool, accountId, userId, async (client) => {
+    await assertActiveMembership(client, accountId, userId);
+    const seen = await client.query('SELECT 1 FROM memory_entries WHERE id = $1::uuid AND account_id = $2::uuid', [entryId, accountId]);
+    if (seen.rowCount === 0) throw new NotFoundError('memory entry not found');
+    const { rows } = await client.query<{ run_id: string; recorded_at: Date; total: number }>(
+      `WITH RECURSIVE up(id, sup) AS (
+           SELECT m.id, m.supersedes_id FROM memory_entries m WHERE m.id = $2::uuid AND m.account_id = $1::uuid
+           UNION
+           SELECT m.id, m.supersedes_id FROM up u JOIN memory_entries m ON m.id = u.sup AND m.account_id = $1::uuid
+         ),
+         down(id) AS (
+           SELECT m.id FROM memory_entries m WHERE m.id = $2::uuid AND m.account_id = $1::uuid
+           UNION
+           SELECT m.id FROM down d JOIN memory_entries m ON m.supersedes_id = d.id AND m.account_id = $1::uuid
+         ),
+         ids AS (SELECT array_agg(DISTINCT id) AS ids FROM (SELECT id FROM up UNION SELECT id FROM down) l),
+         hit AS (SELECT c.run_id, c.recorded_at FROM run_context_inputs c, ids WHERE c.account_id = $1::uuid AND c.recalled_entry_ids && ids.ids)
+       SELECT run_id::text AS run_id, recorded_at, (SELECT count(*) FROM hit)::int AS total FROM hit ORDER BY recorded_at DESC, run_id LIMIT ${MEMORY_RUN_IDS_MAX}`,
+      [accountId, entryId.toLowerCase()],
+    );
+    if (rows.length > 0) return { total: rows[0]!.total, runs: rows.map((r) => ({ runId: r.run_id, recordedAt: r.recorded_at })) };
+    return { total: 0, runs: [] };
+  });
 }
