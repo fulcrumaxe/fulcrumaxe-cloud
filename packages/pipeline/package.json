@@ -19,6 +19,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@fulcrumaxe/runner-protocol": "workspace:*",
     "@fx/core": "workspace:*",
     "@fx/discussions": "workspace:*",
     "@fx/runner": "workspace:*",
