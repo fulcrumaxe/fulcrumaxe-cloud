@@ -1,0 +1,5 @@
+{
+  "id": "memory",
+  "entry": "memory-app.js",
+  "styles": ["memory-app.css"]
+}
