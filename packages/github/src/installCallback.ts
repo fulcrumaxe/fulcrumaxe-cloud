@@ -5,6 +5,7 @@ import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import type { AppCredentialsSource, AppKind } from "./appCredentials.js";
 import { verifyUserInstallation } from "./userInstallations.js";
 import { syncClaimedInstallation, type SyncRepos } from "./syncInstallationRepos.js";
+import { queueInstallDiscovery } from "./installDiscovery.js";
 import { recheckInstallationActive, type InstallationRecheck } from "./installationRecheck.js";
 
 /**
@@ -39,6 +40,8 @@ export interface CompleteInstallDeps {
   recheck?: InstallationRecheck;
   /** H17b-2: repo sync, run after the claim commits; its failure never changes the outcome. */
   syncRepos?: SyncRepos;
+  /** D#483 S4-c: the tenant pool the discovery is queued through after the repo sync; absent, nothing is queued here (the delivery still does). */
+  appUserPool?: Pool;
   warn?: (message: string) => void;
 }
 
@@ -194,6 +197,10 @@ export async function completeInstall(deps: CompleteInstallDeps, input: Complete
     path: "callback",
   });
   // Post-commit: bindClaim's transaction is over. Never fails the claim.
-  if (outcome === "ok") await syncClaimedInstallation(deps, input.kind, ghInstallationId);
+  if (outcome === "ok") {
+    await syncClaimedInstallation(deps, input.kind, ghInstallationId);
+    // After the sync, so the repositories exist; the same reference as the delivery's, so the second of the two is a no-op.
+    await queueInstallDiscovery(deps, input.kind, input.accountId, ghInstallationId);
+  }
   return outcome;
 }

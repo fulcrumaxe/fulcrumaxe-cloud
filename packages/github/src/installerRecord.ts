@@ -5,6 +5,7 @@ import { emitDomainEvent } from "@fx/core/src/domain-events/emit.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import type { AppKind } from "./appCredentials.js";
 import { syncClaimedInstallation } from "./syncInstallationRepos.js";
+import { queueInstallDiscovery } from "./installDiscovery.js";
 import { bindClaim, type CompleteInstallDeps } from "./installCallback.js";
 
 /**
@@ -120,6 +121,7 @@ export async function recordInstallationLifecycle(
         );
         // Both kinds list repos: the read-only install feeds the free preview's repo picker.
         if (kind === "team" || kind === "team_readonly") await syncClaimedInstallation(deps, kind, ghInstallationId);
+        await queueInstallDiscovery(deps, kind, c.account_id, ghInstallationId);
       }
     } catch (err) {
       reportError(err, { stage: "github.bind_pending_claim" });

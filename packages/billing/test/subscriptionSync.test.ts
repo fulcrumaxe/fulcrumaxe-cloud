@@ -583,4 +583,88 @@ describe('D#69 B2 subscription sync (real Postgres, fake Stripe, no network)', (
       expect(fake.retrieve).toHaveBeenCalledTimes(15); // exactly one fetch per event, all five types
     });
   });
+  describe('D#483 S4-c P6: the activation hook', () => {
+    const subOf = (id: string, customer: string) => ({ id, customer });
+    const seen = (): { calls: Array<{ accountId: string; subscriptionId: string }>; d: StripeWebhookDeps } => {
+      const calls: Array<{ accountId: string; subscriptionId: string }> = [];
+      return { calls, d: { ...deps, onSubscriptionActivated: async (a) => void calls.push(a) } };
+    };
+
+    it('a paid checkout that makes the account active calls the hook once, with the account and the subscription', async () => {
+      const a = await seedCheckout();
+      fake.set({ ...subOf('sub_p6a', a.cus), status: 'active' });
+      const { calls, d } = seen();
+      expect((await deliver(checkout(a, { subscriptionId: 'sub_p6a' }), d)).body).toMatchObject({ handled: true });
+      expect(calls).toEqual([{ accountId: a.accountId, subscriptionId: 'sub_p6a' }]);
+    });
+
+    it('a replay of the same signed event calls it no second time, and the later events of the same activation do not either', async () => {
+      const a = await seedCheckout();
+      fake.set({ ...subOf('sub_p6b', a.cus), status: 'active' });
+      const { calls, d } = seen();
+      const payload = checkout(a, { subscriptionId: 'sub_p6b' });
+      await deliver(payload, d);
+      expect((await deliver(payload, d)).body).toMatchObject({ handled: true, deduped: true });
+      await deliver(rawInvoicePaid({ eventId: evt(), stripeCustomerId: a.cus, subscriptionId: 'sub_p6b' }), d);
+      await deliver(rawSubscriptionEvent('customer.subscription.updated', { eventId: evt(), subscriptionId: 'sub_p6b', stripeCustomerId: a.cus }), d);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('an unpaid session, a past_due subscription and a recovery from past_due call nothing', async () => {
+      const a = await seedCheckout();
+      fake.set({ ...subOf('sub_p6c', a.cus), status: 'active' });
+      const { calls, d } = seen();
+      await deliver(checkout(a, { subscriptionId: 'sub_p6c', paymentStatus: 'unpaid' }), d);
+      expect(calls).toHaveLength(0);
+      await deliver(checkout(a, { subscriptionId: 'sub_p6c' }), d);
+      expect(calls).toHaveLength(1);
+      fake.set({ ...subOf('sub_p6c', a.cus), status: 'past_due' });
+      await deliver(rawSubscriptionEvent('customer.subscription.updated', { eventId: evt(), subscriptionId: 'sub_p6c', stripeCustomerId: a.cus }), d);
+      fake.set({ ...subOf('sub_p6c', a.cus), status: 'active' });
+      await deliver(rawInvoicePaid({ eventId: evt(), stripeCustomerId: a.cus, subscriptionId: 'sub_p6c' }), d);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('a resubscription after a cancellation calls it again, for the new subscription', async () => {
+      const a = await seedCheckout();
+      const { calls, d } = seen();
+      fake.set({ ...subOf('sub_p6d', a.cus), status: 'active' });
+      await deliver(checkout(a, { subscriptionId: 'sub_p6d' }), d);
+      fake.set({ ...subOf('sub_p6d', a.cus), status: 'canceled' });
+      await deliver(rawSubscriptionEvent('customer.subscription.deleted', { eventId: evt(), subscriptionId: 'sub_p6d', stripeCustomerId: a.cus }), d);
+      fake.set({ ...subOf('sub_p6e', a.cus), status: 'active' });
+      await deliver(checkout(a, { subscriptionId: 'sub_p6e' }), d);
+      expect(calls.map((c) => c.subscriptionId)).toEqual(['sub_p6d', 'sub_p6e']);
+    });
+
+    it('an account that pays while paused by its owner still calls the hook (activation is the subscription moving to active, not the derived status)', async () => {
+      const a = await seedCheckout();
+      await admin.query(`UPDATE accounts SET owner_paused_at = now() WHERE id = $1`, [a.accountId]);
+      fake.set({ ...subOf('sub_p6g', a.cus), status: 'active' });
+      const { calls, d } = seen();
+      await deliver(checkout(a, { subscriptionId: 'sub_p6g' }), d);
+      expect((await admin.query(`SELECT status FROM accounts WHERE id = $1`, [a.accountId])).rows[0].status).toBe('paused');
+      expect(calls).toEqual([{ accountId: a.accountId, subscriptionId: 'sub_p6g' }]);
+    });
+
+    it('a trialing subscription activates; a move from trialing to active does not call it a second time', async () => {
+      const a = await seedCheckout();
+      const { calls, d } = seen();
+      fake.set({ ...subOf('sub_p6h', a.cus), status: 'trialing' });
+      await deliver(checkout(a, { subscriptionId: 'sub_p6h' }), d);
+      fake.set({ ...subOf('sub_p6h', a.cus), status: 'active' });
+      await deliver(rawSubscriptionEvent('customer.subscription.updated', { eventId: evt(), subscriptionId: 'sub_p6h', stripeCustomerId: a.cus }), d);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('a hook that throws does not fail the webhook, and the event stays recorded as processed', async () => {
+      const a = await seedCheckout();
+      fake.set({ ...subOf('sub_p6f', a.cus), status: 'active' });
+      const reports = captureReports();
+      const res = await deliver(checkout(a, { subscriptionId: 'sub_p6f' }), { ...deps, onSubscriptionActivated: async () => { throw new Error('queue down'); } });
+      expect(res).toMatchObject({ status: 200, body: { handled: true } });
+      expect(await ledger(a.accountId)).toBe(1);
+      expect(reports.classes.map((c) => c.stage)).toContain('billing.on_activated');
+    });
+  });
 });

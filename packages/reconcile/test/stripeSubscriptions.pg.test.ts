@@ -139,6 +139,29 @@ describe('stripe subscriptions reconcile job', () => {
     });
   });
 
+  describe('reports a paying subscription for the discovery queue (D#483 S4-c)', () => {
+    it('a subscription that becomes active reports activated; one already current reports live and not activated', async () => {
+      const seen: Array<{ activated?: unknown; live?: unknown }> = [];
+      const spy = createStripeSubscriptionsJob({
+        stripe: client(),
+        apply: async (sub, clock) => {
+          const res = await applyFetchedSubscription({ platformOpsPool: platformOps, livemode: false, priceMap: PRICES }, sub, clock);
+          seen.push({ activated: res.activated, live: res.live });
+          return res;
+        },
+        reportError: report,
+      });
+      const a = await seed({ status: 'cancelled' });
+      await admin.query(`UPDATE accounts SET stripe_subscription_status = 'canceled' WHERE id = $1`, [a.id]);
+      stripeSub(a);
+      await tick(spy);
+      expect(seen).toEqual([{ activated: { accountId: a.id, subscriptionId: a.sub }, live: { accountId: a.id, subscriptionId: a.sub } }]);
+      await admin.query(`UPDATE reconcile_jobs SET cursor = NULL, next_due_at = now() - interval '1 second', lease_owner = NULL, lease_expires_at = NULL WHERE name = $1`, [JOB]);
+      await tick(spy);
+      expect(seen[1]).toEqual({ activated: undefined, live: { accountId: a.id, subscriptionId: a.sub } });
+    });
+  });
+
   describe('changes nothing it cannot positively confirm', () => {
     it('canceled WITHOUT ended_at is reported and left alone', async () => {
       const a = await seed();

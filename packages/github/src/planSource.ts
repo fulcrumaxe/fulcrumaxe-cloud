@@ -1,5 +1,6 @@
 import type { RepoPermission } from "@fx/trust";
 import { createPlanReadClient, PlanReadError, type PlanReadDeps, type PlanReadTarget } from "./planReadClient.js";
+import { listRecentOpenItems, type RecentItem } from "./discoveryReaders.js";
 import { listDiscussionComments, listDiscussions, listIssuesAndPulls, readAuthorPermission, readRepoFile, readRepoHead, type IssuesAndPulls } from "./planReaders.js";
 
 /**
@@ -24,6 +25,8 @@ export interface PlanSourceShape {
   discussionComments(number: number, match: { isCorrection(body: string): boolean }): Promise<{ comments: Array<{ body: string; createdAt: string; authorLogin: string | null }> }>;
   issues(): Promise<{ issues: Array<{ number: number; title: string; state: "open" | "closed" }>; truncated: boolean }>;
   authorPermission(login: string): Promise<RepoPermission>;
+  /** D#483 S4-c: the most recently updated open issues and Discussions together (pull requests excluded). */
+  recentOpen(): Promise<{ items: RecentItem[] }>;
   evidence(): { requests: Array<{ method: string; path: string; status: number }>; tokenPermissions: Record<string, string> | null };
 }
 
@@ -57,6 +60,7 @@ export function createPlanSourceFactory(deps: PlanReadDeps): (target: PlanReadTa
         return { issues: r.issues.map((i) => ({ number: i.number, title: i.title, state: i.state })), truncated: r.truncated };
       },
       authorPermission: (login) => readAuthorPermission(client, repo, login),
+      recentOpen: () => listRecentOpenItems(client, repo),
       evidence() {
         return { requests: client.requestLog.map((e) => ({ ...e })), tokenPermissions: client.tokenPermissions ? { ...client.tokenPermissions } : null };
       },

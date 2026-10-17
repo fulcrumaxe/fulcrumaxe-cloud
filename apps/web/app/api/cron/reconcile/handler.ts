@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { isStagingPaused, runGatedTick } from "@fx/core/src/pendingWork";
 import { createPool } from "@fx/db/src/pool";
+import { queueDiscoveries } from "@fx/db/src/discoveryRuns";
 import { reportError } from "@fx/telemetry";
 import { githubInstallationsJobFromEnv } from "../../../../lib/github/installationReconcile";
 import { githubReposJobFromEnv } from "../../../../lib/github/repoReconcile";
@@ -88,7 +89,21 @@ export function stripeSubscriptionsJobFromEnv(pool: TickDeps["pool"], report: Re
   const livemode = stripeKeyIsLive(key);
   return createStripeSubscriptionsJob({
     stripe: reconcileStripeClient(key),
-    apply: (subscription, clock) => applyFetchedSubscription({ platformOpsPool: pool, livemode }, subscription, clock),
+    apply: async (subscription, clock) => {
+      const result = await applyFetchedSubscription({ platformOpsPool: pool, livemode }, subscription, clock);
+      // D#483 S4-c: queue the account's install discovery for a paying subscription, under the subscription id the webhook uses, so a
+      // lost webhook or a hook that threw is backfilled and a subscription already queued is a no-op. A failure never fails the apply.
+      const paying = result.activated ?? result.live;
+      if (paying && process.env.DATABASE_URL_APP_USER) {
+        try {
+          cachedAppUserPool ??= createPool(requireEnv("DATABASE_URL_APP_USER"));
+          await queueDiscoveries(cachedAppUserPool, paying.accountId, { kind: "account" }, "activation", paying.subscriptionId);
+        } catch (err) {
+          reportError(err, { stage: "reconcile.stripe_subscriptions.discovery", route: RECONCILE_ROUTE });
+        }
+      }
+      return result;
+    },
     reportError: report,
   });
 }
