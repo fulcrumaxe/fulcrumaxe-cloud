@@ -15,6 +15,29 @@ const cloudSrc = path.join(here, "..", "src");
 
 const BANNED = /planePushGit|planePushTransport|planePushRoute|node:child_process|from\s+["']child_process["']|from\s+["']@fx\/pipeline|from\s+["']node:worker_threads["']/;
 
+/**
+ * The runner-protocol package carries the push route and transport (it spawns git) under its `/planePush` subpath. Hosted code may not reach
+ * them from the package root or the subpath: this flags a named import or re-export of a git-running export, any import of a planePush subpath,
+ * and a star re-export of the root.
+ */
+const GIT_EXPORTS = ["routeAndPush", "createGitTransport", "assertSafeLocalConfig", "gitCommitSource", "PublicGitTransport"];
+const PROTOCOL_STATEMENT = /\b(?:import|export)\b[^;]*?\bfrom\s*["'](@fulcrumaxe\/runner-protocol[^"']*)["']|\bimport\s*\(\s*["'](@fulcrumaxe\/runner-protocol[^"']*)["']\s*\)/g;
+
+function protocolGitReach(text: string): string[] {
+  const found: string[] = [];
+  for (const m of text.matchAll(PROTOCOL_STATEMENT)) {
+    const spec = (m[1] ?? m[2])!;
+    if (/\/planePush|\/repoPairing/.test(spec)) found.push(`subpath ${spec}`);
+    for (const name of GIT_EXPORTS) if (new RegExp(`\\b${name}\\b`).test(m[0])) found.push(`${name} from ${spec}`);
+    if (spec === "@fulcrumaxe/runner-protocol" && /\bexport\s*\*|\bimport\s*\*\s*as\b/.test(m[0])) found.push(`namespace or star form from ${spec}`);
+  }
+  return found;
+}
+
+function allCloudSource(): string[] {
+  return readdirSync(cloudSrc).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => path.join(cloudSrc, f));
+}
+
 function entries(): string[] {
   const dirs = readdirSync(runnerRoutes).filter((d) => d.startsWith("plane-push-"));
   const files = dirs.flatMap((d) => readdirSync(path.join(runnerRoutes, d)).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => path.join(runnerRoutes, d, f)));
@@ -62,5 +85,24 @@ describe("the public-push routes never run git or a process (import graph)", () 
     expect(BANNED.test(imp("{ createGitTransport }", ["@fx", "pipeline/src/build/planePushTransport.js"].join("/")))).toBe(true);
     expect(BANNED.test(imp("{ spawn }", ["node", "child_process"].join(":")))).toBe(true);
     expect(BANNED.test(imp("{ x }", "./gitTicket.js"))).toBe(false);
+  });
+
+  it("no runner-cloud source, and no route file the handlers reach, imports a git-running export from the runner protocol package", () => {
+    const files = [...new Set([...allCloudSource(), ...closure(entries()).keys()])];
+    expect(files.length).toBeGreaterThan(10);
+    const offenders = files.flatMap((f) => protocolGitReach(readFileSync(f, "utf8")).map((why) => `${path.relative(repoRoot, f)}: ${why}`));
+    expect(offenders).toEqual([]);
+  });
+
+  it("control: the protocol-import check fires on the root, the subpath, a re-export and a dynamic import, and not on an ordinary protocol import", () => {
+    const from = (names: string, spec: string): string => ["import", names, "from", JSON.stringify(spec)].join(" ") + ";";
+    const root = ["@fulcrumaxe", "runner-protocol"].join("/");
+    expect(protocolGitReach(from("{ routeAndPush }", root))).toEqual([`routeAndPush from ${root}`]);
+    expect(protocolGitReach(from("{ type X, createGitTransport as t }", root))).toEqual([`createGitTransport from ${root}`]);
+    expect(protocolGitReach(from("{ routeAndPush }", `${root}/planePush`))).toEqual([`subpath ${root}/planePush`, `routeAndPush from ${root}/planePush`]);
+    expect(protocolGitReach(`export { createGitTransport } from ${JSON.stringify(root)};`)).toEqual([`createGitTransport from ${root}`]);
+    expect(protocolGitReach(`export * from ${JSON.stringify(root)};`)).toEqual([`namespace or star form from ${root}`]);
+    expect(protocolGitReach(`const m = await import(${JSON.stringify(`${root}/planePush`)});`)).toEqual([`subpath ${root}/planePush`]);
+    expect(protocolGitReach(from("{ normalizeRepoPath, isKnownStreamJsonType }", root))).toEqual([]);
   });
 });
