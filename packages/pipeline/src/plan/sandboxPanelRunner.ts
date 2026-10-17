@@ -17,7 +17,7 @@ import {
   type StartAgentRunInput,
   type StartAgentRunResult,
 } from "@fx/runner";
-import type { PanelRunner, PanelSeatRequest, PanelSeatResult } from "./panel.js";
+import type { PanelSeatRequest, PanelSeatResult } from "./panel.js";
 
 /**
  * D#2 H14c-4 (C41 section 4): the real `PanelRunner`. One seat is one agent
@@ -132,7 +132,7 @@ function whenAborted(signal: AbortSignal): { promise: Promise<"aborted">; dispos
   return { promise, dispose: () => signal.removeEventListener("abort", onAbort) };
 }
 
-export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): PanelRunner {
+export function createSandboxPanelRunner(deps: SandboxPanelRunnerDeps): { runSeat(request: PanelSeatRequest, signal: AbortSignal): Promise<PanelSeatResult> } {
   const { pool, accountId } = deps;
   const pollMs = deps.pollMs ?? 1000;
 

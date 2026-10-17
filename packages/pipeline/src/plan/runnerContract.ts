@@ -1,4 +1,4 @@
-import type { PanelRunner, PanelSeatRequest } from "./panel.js";
+import { isSeatDenied, type PanelRunner, type PanelSeatRequest, type PanelSeatResult } from "./panel.js";
 
 /**
  * The contract test for a `PanelRunner` (C41 section 4, H14c-PANEL-1).
@@ -41,7 +41,12 @@ export async function checkPanelRunnerContract(runner: PanelRunner, probe: Runne
   const violations: string[] = [];
   const prefix = probe.keyPrefix ?? `contract:${Math.random().toString(36).slice(2)}`;
   const live = new AbortController().signal;
-  const call = (key: string, signal: AbortSignal = live) => runner.runSeat(probe.request(key), signal);
+  const call = async (key: string, signal: AbortSignal = live): Promise<PanelSeatResult> => {
+    const out = await runner.runSeat(probe.request(key), signal);
+    // The probe sets no limit, so a runner that answers a spending denial here is answering something it was not asked.
+    if (isSeatDenied(out)) throw new Error("the runner answered a spend denial to a probe with no limit");
+    return out;
+  };
 
   const seqKey = `${prefix}:sequential`;
   const first = await call(seqKey);

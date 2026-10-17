@@ -630,6 +630,8 @@ export async function runSpecStep(deps: SpecStepDeps, input: { workItemId: strin
   // The panel: replaying it starts nothing new (idempotent keys, one signed comment per run).
   const panel = await runPanel(deps, { workItemId: wi });
   if (panel.status === "refused") return { status: "refused", reason: panel.reason };
+  // D#483 S5-k1e: a seat a spending limit denied on this re-entry is the same named pause the PM's start gives: the Spec step answers it as its refusal and is asked again.
+  if (panel.status === "paused") return { status: "refused", reason: panel.reason };
 
   // "Posted" is a signed row in the database for an expected role.
   // The Spec is written from THIS panel's comments (an earlier panel's, from before "Back to discussion", stay in the record only).

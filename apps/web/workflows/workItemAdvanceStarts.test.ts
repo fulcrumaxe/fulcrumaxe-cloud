@@ -254,7 +254,7 @@ describe("the wiring the workflow bundle cannot import", () => {
     const m = /type EarlyWaitStage = ([^;]+);/.exec(src);
     expect(m).not.toBeNull();
     const names = [...m![1]!.matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
-    expect(names).toEqual(["classify", "spec", "respec"]);
+    expect(names).toEqual(["classify", "spec", "respec", "panel"]);
     const core = readFileSync(join(here, "..", "..", "..", "packages", "core", "src", "work-items", "driverEvents.ts"), "utf8");
     for (const n of names) expect(core).toContain(`'${n}'`);
   });

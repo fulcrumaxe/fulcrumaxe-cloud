@@ -1,5 +1,7 @@
 import type { Pool } from "pg";
-import { PanelYieldError, runPanel } from "../plan/panel.js";
+import { PanelYieldError, runPanel, type PanelDeps } from "../plan/panel.js";
+import { nextSeatStep, seatTail } from "./panelStarts.js";
+import { pauseForDenial } from "./reservationPauses.js";
 import { runSpecStep } from "../plan/spec.js";
 import { createFollowedRunner, type FollowedRunnerOptions } from "./followedRunner.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -69,16 +71,34 @@ export interface SpecFlowOptions extends FollowedRunnerOptions {
   spendAttempt?: number;
 }
 
+/**
+ * D#483 S5-k1e: the whole-round headroom check of the panel step. Only the seats that would START a run are counted (a seat with a finished or live run is followed and
+ * spends nothing new); when none would, nothing is asked. A denial that is a spending limit is its named pause; any other answer (the account is not active, a seat
+ * that cannot be resolved) is not a pause and lets the seats go on as they always did.
+ */
+export function roundHeadroomOf(ports: AdvanceRunPorts): NonNullable<PanelDeps["roundHeadroom"]> {
+  return async (round, roles, keyPrefix) => {
+    if (ports.headroom === undefined) return null;
+    const starting: string[] = [];
+    for (const role of roles) if ((await nextSeatStep(ports, `${keyPrefix}${seatTail(round, role)}`, round, role)).fresh) starting.push(role);
+    if (starting.length === 0) return null;
+    const answer = await ports.headroom(starting);
+    return answer.ok ? null : pauseForDenial(answer.reason);
+  };
+}
+
 export async function runPanelForItem(pool: Pool, accountId: string, workItemId: string, ports: AdvanceRunPorts, options: SpecFlowOptions = {}): Promise<PanelForItemResult> {
   const { panel } = createFollowedRunner(ports, { yieldAfterMs: STEP_YIELD_MS, ...options });
   let out;
   try {
-    out = await runPanel({ pool, accountId, runner: panel, timeoutMs: options.roundTimeoutMs ?? SEAT_ROUND_TIMEOUT_MS }, { workItemId });
+    out = await runPanel({ pool, accountId, runner: panel, timeoutMs: options.roundTimeoutMs ?? SEAT_ROUND_TIMEOUT_MS, roundHeadroom: roundHeadroomOf(ports) }, { workItemId });
   } catch (err) {
     if (err instanceof PanelYieldError) return { status: "waiting", reason: QUEUED_ON_RUNNER };
     throw err;
   }
   if (out.status === "refused") return { status: "refused", reason: out.reason };
+  // A spending limit stopped the round: the pause is the step's refusal, as the Spec PM's is, and the workflow waits and asks again. Seats that posted stay posted.
+  if (out.status === "paused") return { status: "refused", reason: out.reason };
   return { status: "completed", complete: out.complete, missingRoles: [...out.missingRoles], round2Ran: out.round2Ran };
 }
 

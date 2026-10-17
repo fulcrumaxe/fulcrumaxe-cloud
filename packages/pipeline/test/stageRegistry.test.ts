@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { WAITING_STAGES as CORE_WAITING_STAGES } from "@fx/core/src/work-items/driverEvents.js";
-import { PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
+import { PANEL_PROGRESS_KINDS, PANEL_WHOLE_CODE, PARKED_STAGE_REGISTRY, UNREGISTERED_STAGES, registeredStages } from "../src/advance/stageRegistry.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, isWaitingStage, stageOfFact } from "../src/advance/waitingStages.js";
 import { RESERVATION_PAUSE_REASONS } from "../src/advance/reservationPauses.js";
 import { attemptOfKey } from "../src/advance/attemptKeys.js";
@@ -23,9 +23,17 @@ describe("the parked-stage registry", () => {
     for (const stage of UNREGISTERED_STAGES) expect(WAITING_STAGES).toContain(stage);
   });
 
-  it("S5k1c-8 and S5k1d-8: the allowlist lost classify, spec and respec (the short Spec waits as `spec`), then the review and the fix round; the panel is the last row's to remove", () => {
-    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round"]);
-    expect([...UNREGISTERED_STAGES]).toEqual(["panel"]);
+  it("S5k1c-8 and S5k1d-8 held, and S5k1e-7: the panel was the last row to leave the allowlist, so it is empty and every stage has an entry", () => {
+    expect(registeredStages().map((e) => e.stage)).toEqual(["build", "classify", "spec", "respec", "review", "fix_round", "panel"]);
+    expect([...UNREGISTERED_STAGES]).toEqual([]);
+    expect(UNREGISTERED_STAGES).toHaveLength(0);
+    for (const stage of WAITING_STAGES) expect(PARKED_STAGE_REGISTRY[stage], stage).toBeDefined();
+  });
+
+  it("S5k1e: the panel lists the fact its workflow writes once the panel is whole again among its progress kinds, so a whole panel is not the sweep's to restart", () => {
+    expect(PANEL_WHOLE_CODE).toBe("panel_whole");
+    expect(PARKED_STAGE_REGISTRY.panel!.progressKinds).toContain("stopped");
+    expect(PARKED_STAGE_REGISTRY.panel!.progressKinds).toBe(PANEL_PROGRESS_KINDS);
   });
 
   it("an entry is keyed by its own stage and parks only for a spend pause at stage positions the table lists", () => {

@@ -3,6 +3,7 @@ import { attemptOfKey } from "./attemptKeys.js";
 import { WAITING_STAGES, WAITING_STAGE_POSITIONS, type WaitingStage } from "./waitingStages.js";
 import { stageKeyLikes } from "./stageStarts.js";
 import { fixKeyLikes, reviewKeyLikes } from "./reviewStarts.js";
+import { nextPanelAttempt, panelKeyLikes } from "./panelStarts.js";
 
 /**
  * D#483 S5-k1b: the registry of stages the parked-stage sweep can resume.
@@ -53,6 +54,12 @@ export interface ParkedStageEntry {
    * item alone until a new waiting fact or a person's approval. Absent: the build's pair (`build_refused`, `stopped`).
    */
   progressKinds?: readonly string[];
+  /**
+   * D#483 S5-k1e: the stage's asks do not each leave a run row (the panel's whole-round check denies before any seat starts), so the attempt numbers the workflow wrote
+   * on its waiting facts can run ahead of the run keys. The restart then begins above both: a workflow's fact is keyed by its attempt, and a restart that reused a
+   * number would find its facts already written and leave the card with no fresh wait. Only the facts the workflow wrote count (not the sweep's own refreshes).
+   */
+  attemptAfterFacts?: boolean;
   /** The attempt the restart begins at, from the keys that match `runKeyLike`: one more than the highest, or 0 when no run exists. Never the bare key once a run holds it. */
   nextAttempt(keys: readonly string[]): number;
   /** A denial of the spend check as a pause name, or null when it is not one: the mapping the start itself uses. */
@@ -84,6 +91,14 @@ export const REVIEW_PROGRESS_KINDS: readonly string[] = Object.freeze([
   "merged_by_gate",
   "stopped",
 ]);
+
+/**
+ * D#483 S5-k1e: the code of the `stopped` fact the workflow writes once a panel that had waited on a limit is no longer held by one (the panel step answered something
+ * that is not a pause). It ends the sweep's claim on the panel: what comes of the Spec step after it is the Spec's own outcome, not a reason to restart the panel.
+ */
+export const PANEL_WHOLE_CODE = "panel_whole";
+/** The facts that, after the panel's latest waiting fact, mean the panel is not the sweep's to resume: the panel is whole again (or the driver stopped, or the build refused). */
+export const PANEL_PROGRESS_KINDS: readonly string[] = Object.freeze(["build_refused", "stopped"]);
 
 export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = Object.freeze({
   build: {
@@ -168,10 +183,29 @@ export const PARKED_STAGE_REGISTRY: Readonly<Partial<Record<WaitingStage, Parked
     nextAttempt: nextAfterHighest,
     pauseForDenial,
   },
+  // D#483 S5-k1e: the panel's seats. The item parks at Discussing under the approval that started the workflow (which may sit on the card the pipeline's own card replaced,
+  // as the first Spec's does). Seats that posted have finished runs beside the denied ones, so runs that really started are expected; the restart is the same workflow
+  // again, which follows the posted seats by their keys and asks again only for the seats a limit denied. The seat the sweep's headroom check meets is the technical
+  // architect's, which sits on every panel; the workflow's own whole-round check then covers the rest.
+  panel: {
+    stage: "panel",
+    itemStages: WAITING_STAGE_POSITIONS.panel,
+    pauses: RESERVATION_PAUSE_REASONS,
+    role: "technical-architect",
+    approval: { kind: "advance_work_item", from: "origin" },
+    needsSpec: false,
+    respec: false,
+    startedRunsOk: true,
+    attemptAfterFacts: true,
+    progressKinds: PANEL_PROGRESS_KINDS,
+    runKeyLikes: (workItemId) => panelKeyLikes(workItemId),
+    nextAttempt: nextPanelAttempt,
+    pauseForDenial,
+  },
 });
 
-/** The stages that wait on a limit but are not parked yet: they keep today's refusal after the wait. Each later row removes its stage; the last empties the list. */
-export const UNREGISTERED_STAGES: readonly WaitingStage[] = Object.freeze(["panel"] as const);
+/** The stages that wait on a limit but are not parked yet: they keep today's refusal after the wait. Every stage is registered now, so the list is empty (a test holds it so). */
+export const UNREGISTERED_STAGES: readonly WaitingStage[] = Object.freeze([] as WaitingStage[]);
 
 /** The registered stages, in the order of the closed list. */
 export const registeredStages = (registry: Readonly<Partial<Record<WaitingStage, ParkedStageEntry>>> = PARKED_STAGE_REGISTRY): ParkedStageEntry[] =>

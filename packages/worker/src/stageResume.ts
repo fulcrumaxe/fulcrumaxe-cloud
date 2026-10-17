@@ -51,6 +51,8 @@ export interface ParkedStageEntryInput {
   startedRunsOk?: boolean;
   /** D#483 S5-k1d: the facts that, written after the latest waiting fact, end the sweep's claim on the item. Absent: `build_refused` and `stopped`. */
   progressKinds?: readonly string[];
+  /** D#483 S5-k1e: begin above the attempts the workflow wrote on its own waiting facts too, not only above the run keys (the panel's asks leave facts and no run row). */
+  attemptAfterFacts?: boolean;
   /** The next attempt number, given the idempotency keys of the stage's earlier runs for this approval (0 when there are none). */
   nextAttempt(keys: readonly string[]): number;
   /** A denial of the spend check as a pause name, or null when it is not one (the same mapping the start itself uses). */
@@ -181,7 +183,17 @@ export function createStageResume(runnerPool: Pool, deps: StageResumeDeps) {
       // A run of this stage that really started (it did not end `refused_spend`) means the stage was allowed once: what came of it is the workflow's own outcome.
       // (A review starts several reviewers; a started one beside a denied one is the normal partial start, and the restart finds it by its key.)
       if (entry.startedRunsOk !== true && keys.rows.some((r) => r.status !== "refused_spend")) return { skip: "stage_already_ran" };
-      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt: entry.nextAttempt(keys.rows.map((r) => r.idempotency_key)), head } };
+      let attempt = entry.nextAttempt(keys.rows.map((r) => r.idempotency_key));
+      if (entry.attemptAfterFacts === true) {
+        // Only the facts the workflow wrote (`wait:...`); the sweep's own refreshes and claims are not counted, so a pass does not move the number it will use.
+        const written = await client.query<{ top: number | null }>(
+          "SELECT max(attempt) AS top FROM work_item_driver_events WHERE account_id = $1 AND work_item_id = $2 AND kind = 'stage_waiting' AND stage = $3 AND dedupe_key LIKE 'wait:%'",
+          [accountId, workItemId, entry.stage],
+        );
+        const top = written.rows[0]?.top;
+        if (top !== null && top !== undefined) attempt = Math.max(attempt, Number(top) + 1);
+      }
+      return { plan: { userId: who[1]!, actionId: approval.id, haltEpoch: item.halt_epoch, specVersion: item.version === null ? null : Number(item.version), attempt, head } };
     });
   }
 

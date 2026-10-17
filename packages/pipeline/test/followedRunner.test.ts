@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createFollowedRunner } from "../src/advance/followedRunner.js";
+import type { PanelSeatResult } from "../src/plan/panel.js";
 import { PanelSeatAbortedError, PanelSeatFailedError } from "../src/plan/sandboxPanelRunner.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts } from "../src/advance/runPorts.js";
 
@@ -119,7 +120,7 @@ describe("createFollowedRunner", () => {
 
   it("a blip in reading the run is retried; a run that cannot be read at all gives up with a fixed word", async () => {
     const blip = ports([new Error("db blip"), { status: "succeeded", done: true, envelope: { comment: "ok" } }]);
-    expect((await createFollowedRunner(blip, { pollMs: 1 }).panel.runSeat(seat, live())).agentOutput).toEqual({ comment: "ok" });
+    expect(((await createFollowedRunner(blip, { pollMs: 1 }).panel.runSeat(seat, live())) as PanelSeatResult).agentOutput).toEqual({ comment: "ok" });
     const dead = ports([new Error("db down")]);
     await expect(createFollowedRunner(dead, { pollMs: 1, maxReadFailures: 3 }).panel.runSeat(seat, live())).rejects.toMatchObject({ runStatus: "status_unreadable" });
     expect(dead.outcome).toHaveBeenCalledTimes(3);

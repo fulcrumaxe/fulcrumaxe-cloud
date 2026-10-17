@@ -358,7 +358,7 @@ export async function advanceMergeGateStep(accountId: string, userId: string, wo
 type Result = { status: string; detail?: string };
 
 /** D#483 S5-k1c: the stages before the build that wait on a limit (packages/pipeline waitingStages.ts; a test holds the names). */
-type EarlyWaitStage = "classify" | "spec" | "respec";
+type EarlyWaitStage = "classify" | "spec" | "respec" | "panel";
 /** D#483 S5-k1d: and the two after it, which wait on one head of the open pull request. */
 type WaitStage = EarlyWaitStage | "review" | "fix_round";
 
@@ -513,7 +513,17 @@ async function specPhase(args: AdvanceStartArgs, rootId: string, firstAttempt: n
     return out;
   };
 
-  const panel = await reenter(() => advancePanelStep(accountId, userId, rootId, args.haltEpoch));
+  // D#483 S5-k1e: a seat's start can be denied by a spending limit; the step then answers the pause as its refusal (the seats that posted stay posted) and is asked again,
+  // which starts only the seats that were denied. After four hours the workflow ends `panel_paused:<pause>` and the sweep takes over.
+  const panelAsk = await askUntilAllowed(args, "panel", rootId, firstAttemptOf(args), () => reenter(() => advancePanelStep(accountId, userId, rootId, args.haltEpoch)), (r) => (r.status === "refused" ? r.reason : null));
+  const panel = panelAsk.answer;
+  if (panelAsk.pause !== null) return pausedEnd(rootId, "panel", panelAsk.pause, panelAsk.attempt);
+  // D#483 S5-k1e: the panel waited on a limit (this run's own waits, or a restart by the sweep) and no limit holds it now, whatever comes of the Spec. The fact is also written
+  // when a sweep restart passes through the panel without it having waited (a spec or classify restart) and when the panel answered failed or halted; that is harmless, since
+  // any later pause writes a newer waiting fact. Without a fact after the
+  // last wait the sweep would restart a whole panel on every pass whenever the Spec step then ends without a stop (needs_owner_action, spec_too_large). The code is
+  // packages/pipeline PANEL_WHOLE_CODE (a test holds the two equal); the panel entry lists `stopped` among its progress kinds.
+  if (firstAttemptOf(args) > 0 || panelAsk.attempt > firstAttemptOf(args)) await advanceEventStep(accountId, userId, rootId, { kind: "stopped", dedupeKey: `panel_whole:${actionId}:${panelAsk.attempt}`, code: "panel_whole" });
   await advanceLogStep(panel.status === "completed" ? "advance.panelled" : "advance.failed", {
     work_item_id: rootId,
     at: "panel",
