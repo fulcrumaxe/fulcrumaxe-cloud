@@ -9,5 +9,6 @@ export * from './roadmapFile.js';
 export * from './roadmapWriter.js';
 export * from './specTables.js';
 export * from './proposals.js';
+export * from './proposalVerification.js';
 export * from './approve.js';
 export * from './remove.js';

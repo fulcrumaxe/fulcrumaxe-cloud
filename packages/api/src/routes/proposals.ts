@@ -11,6 +11,7 @@ import {
   withdrawApproval,
   type RequestStart,
 } from "@fx/core/src/plan/index.js";
+import { INBOX_SECTIONS, VERIFICATIONS } from "@fx/core/src/plan/proposalVerification.js";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { ApiError, ProposalRefusedApiError, RunActionsUnavailableError } from "../errors.js";
@@ -34,6 +35,7 @@ import { UNAVAILABLE_TEXT, mapDbError, runActionDeps } from "./run-actions.js";
 function refuse(err: unknown): never {
   if (err instanceof ProposalRefusedError) {
     if (err.code === "invalid_cursor") throw new ApiError(400, "invalid_cursor", "cursor is malformed");
+    if (err.code === "invalid_filter") throw new ApiError(400, "invalid_filter", "section is accepted only with state=new");
     if (err.code === "invalid_resurface_date") throw new ApiError(400, "invalid_resurface_date", "resurface_after must be in the future and at most 365 days away");
     throw new ProposalRefusedApiError(err.code);
   }
@@ -69,16 +71,63 @@ const proposalSchema = z.object({
   work_item_stage: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+  verification: z.enum(VERIFICATIONS).describe("What the verifier last saw. `pending` until the first check."),
+  verified_at: z.string().nullable().describe("When the last check finished; null until the first one."),
+  verified_sha: z.string().nullable().describe("The commit the last check read; null until the first one."),
+  verify_attempts: z.number().int().describe("Consecutive failed checks. A real verdict resets it to 0."),
+  verify_attempts_max: z.number().int().describe("The number of failed checks after which the verifier stops trying."),
+  verify_retry: z.boolean().describe("True only when the last check failed (`check_failed`) and `verify_attempts` is below `verify_attempts_max`: another try is coming."),
+  inbox_section: z
+    .enum(INBOX_SECTIONS)
+    .nullable()
+    .describe("Which Inbox section the proposal belongs in, derived on each read. Null unless `state` is `new` and `owner_process` is `product`."),
+  claim_counts: z.object({
+    supported: z.number().int(),
+    refuted: z.number().int(),
+    unverifiable: z.number().int(),
+    pending: z.number().int(),
+  }),
+  evidence_count: z.number().int(),
+});
+
+const claimSchema = z.object({
+  id: z.string().uuid(),
+  text: z.string().describe("Untrusted text; it can come from an outsider's issue. Render it as plain text."),
+  verdict: z.enum(["supported", "refuted", "unverifiable", "pending"]),
+  refute_code: z.enum(["cite_not_found", "cite_mismatch", "contradicted"]).nullable(),
+  checked_sha: z.string().nullable(),
+  checked_at: z.string().nullable(),
+});
+
+const evidenceSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(["file_lines", "issue", "discussion", "doc_passage", "interview_answer", "preview"]),
+  ref: z.string().describe("`<path>:<start>-<end>` or `<path>:<line>` for file and document kinds; `#<n>` for issue, discussion and preview; the section key for an interview answer."),
+  excerpt: z.string().describe("The text as read at `commit_sha`, byte for byte. Untrusted; render it as plain text."),
+  commit_sha: z.string().nullable(),
+  url: z
+    .string()
+    .nullable()
+    .describe("A GitHub link the server built from the repository, the parsed `ref` and `commit_sha`. Null when the kind has no link or the `ref` could not be parsed."),
+  created_at: z.string(),
+});
+
+const proposalDetailSchema = proposalSchema.extend({
+  claims: z.array(claimSchema).describe("Refuted first, then unverifiable, pending and supported; then by text."),
+  evidence: z.array(evidenceSchema).describe("Oldest first."),
 });
 
 const listQuery = z.object({
   repo_id: z.string().uuid().optional(),
   state: z.enum(["new", "approved", "rejected", "withdrawn"]).optional(),
   owner: z.enum(["product", "internal_loop"]).optional(),
+  // A plain string on purpose: C9 rules that an unknown value is 400 `invalid_filter`, where a zod enum would answer 422. The handler checks it.
+  section: z.string().max(200).optional().describe("One of `new`, `being_checked`, `couldnt_confirm`, `not_checked`. Only with `state=new`."),
   cursor: z.string().max(200).optional(),
 });
 
 const one = z.object({ proposal: proposalSchema });
+const oneDetail = z.object({ proposal: proposalDetailSchema });
 
 /** `kind` is required: a rejection is either "Not now" or "Never", and the caller says which. A date goes only with "Not now". */
 const rejectBody = z
@@ -123,8 +172,9 @@ export const proposalRoutes: RouteEntry[] = [
     operationId: "listProposals",
     summary: "The proposal inbox",
     description:
-      "Proposals newest first, 50 to a page, filtered by `repo_id`, `state` and `owner` (`product` or `internal_loop`). `next_cursor` is the last row's `created_at|id` and is null on the last page; pass it back as `cursor`. " +
-      "Each row carries its task and milestone when it has one, and an approved row carries its work item's live stage (read from the work item, never stored on the proposal).",
+      "Proposals newest first, 50 to a page, filtered by `repo_id`, `state`, `owner` (`product` or `internal_loop`) and `section` (`new`, `being_checked`, `couldnt_confirm` or `not_checked`; only with `state=new`, and it means product-owned). `next_cursor` is the last row's `created_at|id` and is null on the last page; pass it back as `cursor`. " +
+      "Each row carries its task and milestone when it has one, and an approved row carries its work item's live stage (read from the work item, never stored on the proposal). " +
+      "Each row also carries what the verifier saw: `verification`, `verified_at`, `verified_sha`, `verify_attempts`, `verify_attempts_max` and `verify_retry`, the derived `inbox_section`, and `claim_counts` and `evidence_count`. The claims and evidence themselves are on the detail route only.",
     principals: ["session", "token"],
     minRole: "member",
     scope: "read",
@@ -132,13 +182,15 @@ export const proposalRoutes: RouteEntry[] = [
     rateClass: "read",
     querySchema: listQuery,
     responseSchema: z.object({ proposals: z.array(proposalSchema), next_cursor: z.string().nullable() }),
-    extraResponses: { "400": "Error `invalid_cursor`.", "404": "Error `not_found`: `repo_id` names no repository in this account." },
+    extraResponses: { "400": "Error `invalid_cursor` or `invalid_filter` (`section` unknown, or given without `state=new`).", "404": "Error `not_found`: `repo_id` names no repository in this account." },
     async handler(ctx, input) {
       const q = (input.query ?? {}) as z.infer<typeof listQuery>;
+      if (q.section !== undefined && !(INBOX_SECTIONS as readonly string[]).includes(q.section)) throw new ApiError(400, "invalid_filter", "section must be one of new, being_checked, couldnt_confirm, not_checked");
       return listProposals(proposalCtx(ctx), {
         ...(q.repo_id ? { repoId: q.repo_id } : {}),
         ...(q.state ? { state: q.state } : {}),
         ...(q.owner ? { owner: q.owner } : {}),
+        ...(q.section ? { section: q.section as (typeof INBOX_SECTIONS)[number] } : {}),
         ...(q.cursor ? { cursor: q.cursor } : {}),
       }).catch(refuse);
     },
@@ -148,14 +200,17 @@ export const proposalRoutes: RouteEntry[] = [
     path: "/api/v1/proposals/{id}",
     operationId: "getProposal",
     summary: "One proposal",
-    description: "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage.",
+    description:
+      "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. " +
+      "`claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. " +
+      "`excerpt` and claim `text` are untrusted and returned as stored; render them as plain text.",
     principals: ["session", "token"],
     minRole: "member",
     scope: "read",
     idempotency: "never",
     rateClass: "read",
     paramsSchema: idParams,
-    responseSchema: one,
+    responseSchema: oneDetail,
     extraResponses: { "404": "Error `not_found`." },
     async handler(ctx, input) {
       return { proposal: await getProposal(proposalCtx(ctx), input.params.id!) };

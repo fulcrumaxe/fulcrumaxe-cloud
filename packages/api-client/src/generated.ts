@@ -2610,6 +2610,7 @@ export interface Operations {
       repo_id?: string;
       state?: "new" | "approved" | "rejected" | "withdrawn";
       owner?: "product" | "internal_loop";
+      section?: string;
       cursor?: string;
     };
     body: undefined;
@@ -2641,6 +2642,20 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
       }>;
       next_cursor: string | null;
     };
@@ -2679,6 +2694,37 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
+        claims: Array<{
+          id: string;
+          text: string;
+          verdict: "supported" | "refuted" | "unverifiable" | "pending";
+          refute_code: ("cite_not_found" | "cite_mismatch" | "contradicted") | (null);
+          checked_sha: string | null;
+          checked_at: string | null;
+        }>;
+        evidence: Array<{
+          id: string;
+          kind: "file_lines" | "issue" | "discussion" | "doc_passage" | "interview_answer" | "preview";
+          ref: string;
+          excerpt: string;
+          commit_sha: string | null;
+          url: string | null;
+          created_at: string;
+        }>;
       };
     };
   };
@@ -2716,6 +2762,20 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
       };
       work_item_id: string;
       started: boolean;
@@ -2760,6 +2820,20 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
       };
     };
   };
@@ -2797,6 +2871,20 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
       };
     };
   };
@@ -2834,6 +2922,20 @@ export interface Operations {
         work_item_stage: string | null;
         created_at: string;
         updated_at: string;
+        verification: "pending" | "verified" | "partly_verified" | "refuted" | "not_checked" | "check_failed";
+        verified_at: string | null;
+        verified_sha: string | null;
+        verify_attempts: number;
+        verify_attempts_max: number;
+        verify_retry: boolean;
+        inbox_section: ("new" | "being_checked" | "couldnt_confirm" | "not_checked") | (null);
+        claim_counts: {
+          supported: number;
+          refuted: number;
+          unverifiable: number;
+          pending: number;
+        };
+        evidence_count: number;
       };
     };
   };
@@ -4354,7 +4456,7 @@ export const operations = {
     tokenSelfOnly: false,
     idempotency: "never",
     pathParams: [],
-    queryParams: ["repo_id","state","owner","cursor"],
+    queryParams: ["repo_id","state","owner","section","cursor"],
     hasBody: false,
   },
   getProposal: {
