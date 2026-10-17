@@ -55,6 +55,21 @@ describe("the spend_past_envelope ask under approval rules [pg]", { timeout: 60_
   const receipts = async (a: SeedRefs, itemId: string) => (await admin.query(`SELECT * FROM decision_receipts WHERE account_id = $1 AND work_item_id = $2 ORDER BY created_at`, [a.accountId, itemId])).rows;
   const call = (a: SeedRefs, itemId: string, extra: object = {}) => createEnvelopeAsk(receiptPool)({ accountId: a.accountId, workItemId: itemId, runUsd: 0.411, ...extra } as never);
 
+  it("the invoker login holds no direct INSERT on envelope_pause_asks, and an ask and a deny rule each still write their memory row", async () => {
+    // The crossing this guards: 0864 wrote the memory row (ask or receipt) directly, 0865 revoked that INSERT. Both paths go through a definer now.
+    const priv = await admin.query(`SELECT has_table_privilege('app_user', 'envelope_pause_asks', 'INSERT') AS t, has_table_privilege('${INVOKER_LOGIN}', 'envelope_pause_asks', 'INSERT') AS l, has_any_column_privilege('${INVOKER_LOGIN}', 'envelope_pause_asks', 'INSERT') AS c`);
+    expect(priv.rows[0]).toEqual({ t: false, l: false, c: false });
+    const a = await seedAccount(admin, randomUUID());
+    const withAsk = await setup(a);
+    expect(await call(a, withAsk.itemId)).toBe("raised");
+    expect(await memory(a, withAsk.itemId)).toMatchObject([{ receipt_id: null }]);
+    const b = await seedAccount(admin, randomUUID());
+    await writeRules(b, null, DENY_ALL);
+    const withDeny = await setup(b);
+    expect(await call(b, withDeny.itemId)).toBe("denied_by_rule");
+    expect(await memory(b, withDeny.itemId)).toMatchObject([{ ask_id: null }]);
+  });
+
   it("no rules: the ask is raised exactly as before, with version 0 and no receipt", async () => {
     const a = await seedAccount(admin, randomUUID());
     const s = await setup(a);

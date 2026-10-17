@@ -95,18 +95,18 @@ describe('envelope definers (0865)', () => {
       expect(Number((await admin.query('SELECT count(*) n FROM envelope_run_charges WHERE run_id = $1', [r])).rows[0].n)).toBe(0);
     });
 
-    it('the three functions are owned by envelope_definer, pinned, and executable by app_user alone', async () => {
+    it('the four functions are owned by envelope_definer, pinned, and executable by app_user alone', async () => {
       const { rows } = await admin.query<{ name: string; owner: string; secdef: boolean; config: string[]; grantees: string[] }>(
         `SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS secdef, p.proconfig AS config,
                 COALESCE((SELECT array_agg(DISTINCT pg_get_userbyid(g.grantee)::text) FROM aclexplode(p.proacl) g WHERE g.grantee <> p.proowner), '{}') AS grantees
-           FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('work_item_set_envelope', 'envelope_charge_record', 'envelope_pause_ask_record') ORDER BY p.proname`,
+           FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('work_item_set_envelope', 'envelope_charge_record', 'envelope_pause_ask_record', 'envelope_pause_receipt_record') ORDER BY p.proname`,
       );
-      expect(rows.map((r) => r.name)).toEqual(['envelope_charge_record', 'envelope_pause_ask_record', 'work_item_set_envelope']);
+      expect(rows.map((r) => r.name)).toEqual(['envelope_charge_record', 'envelope_pause_ask_record', 'envelope_pause_receipt_record', 'work_item_set_envelope']);
       for (const r of rows) {
         expect(r, r.name).toMatchObject({ owner: 'envelope_definer', secdef: true, config: ['search_path=pg_catalog, public, pg_temp'], grantees: ['app_user'] });
       }
       const { rows: po } = await admin.query<{ ok: boolean }>(
-        `SELECT bool_or(has_function_privilege('platform_ops', p.oid, 'EXECUTE')) AS ok FROM pg_proc p WHERE p.proname IN ('work_item_set_envelope', 'envelope_charge_record', 'envelope_pause_ask_record')`,
+        `SELECT bool_or(has_function_privilege('platform_ops', p.oid, 'EXECUTE')) AS ok FROM pg_proc p WHERE p.proname IN ('work_item_set_envelope', 'envelope_charge_record', 'envelope_pause_ask_record', 'envelope_pause_receipt_record')`,
       );
       expect(po[0]!.ok).toBe(false);
     });
@@ -281,6 +281,56 @@ describe('envelope definers (0865)', () => {
       const theirItem = await item(b, { envelope: theirEnv });
       const ask = await askFor(b, theirItem);
       await expect(record(a, theirItem, theirEnv, 1, ask)).rejects.toMatchObject({ code: 'P0002' });
+    });
+  });
+
+  describe('envelope_pause_receipt_record (0866)', () => {
+    async function receiptFor(refs: SeedRefs, workItemId: string, over: { type?: string; chosen?: string } = {}): Promise<string> {
+      const id = randomUUID();
+      await admin.query(
+        `INSERT INTO decision_receipts (id, account_id, work_item_id, decision_type, class, chosen, actor, catalogue_version)
+         VALUES ($1, $2, $3, $4, 'human_in_the_loop', $5, 'policy', 1)`,
+        [id, refs.accountId, workItemId, over.type ?? 'spend_past_envelope', over.chosen ?? 'deny'],
+      );
+      return id;
+    }
+    const record = (refs: SeedRefs, wi: string, env: string, version: number, receiptId: string) =>
+      asPerson(refs, null, async (c) => (await c.query<{ r: boolean }>('SELECT envelope_pause_receipt_record($1::uuid, $2::uuid, $3::integer, $4::uuid) AS r', [wi, env, version, receiptId])).rows[0]!.r);
+    const rows = async (wi: string) => (await admin.query('SELECT ask_id, receipt_id FROM envelope_pause_asks WHERE work_item_id = $1', [wi])).rows;
+
+    it('app_user has no direct INSERT on the table, yet the receipt writer records the memory, once per item and version', async () => {
+      const env = await envelope(a);
+      const wi = await item(a, { envelope: env });
+      const receipt = await receiptFor(a, wi);
+      const direct = await admin.query(`SELECT has_any_column_privilege('app_user', 'envelope_pause_asks', 'INSERT') AS p`);
+      expect(direct.rows[0].p).toBe(false);
+      await expect(
+        asPerson(a, null, (c) => c.query(`INSERT INTO envelope_pause_asks (account_id, work_item_id, envelope_id, envelope_version, receipt_id) VALUES ($1, $2, $3, 1, $4)`, [a.accountId, wi, env, receipt])),
+      ).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+      expect(await record(a, wi, env, 1, receipt)).toBe(true);
+      expect(await record(a, wi, env, 1, receipt)).toBe(false);
+      expect(await rows(wi)).toEqual([{ ask_id: null, receipt_id: receipt }]);
+    });
+
+    it('refuses a missing receipt, a receipt of another type, one that is not a deny, one for another item, an unknown version and another envelope', async () => {
+      const env = await envelope(a);
+      const wi = await item(a, { envelope: env });
+      const other = await item(a, { envelope: env });
+      await expect(record(a, wi, env, 1, randomUUID())).rejects.toMatchObject({ code: '55000', message: 'no_such_receipt' });
+      await expect(record(a, wi, env, 1, await receiptFor(a, wi, { type: 'start_parent_item' }))).rejects.toMatchObject({ code: '55000', message: 'no_such_receipt' });
+      await expect(record(a, wi, env, 1, await receiptFor(a, wi, { chosen: 'raise_limit' }))).rejects.toMatchObject({ code: '55000', message: 'no_such_receipt' });
+      await expect(record(a, wi, env, 1, await receiptFor(a, other))).rejects.toMatchObject({ code: '55000', message: 'no_such_receipt' });
+      const receipt = await receiptFor(a, wi);
+      await expect(record(a, wi, env, 2, receipt)).rejects.toMatchObject({ code: 'P0002' });
+      await expect(record(a, wi, await envelope(a), 1, receipt)).rejects.toMatchObject({ code: '55000', message: 'envelope_mismatch' });
+      expect(await rows(wi)).toEqual([]);
+    });
+
+    it("RLS: another account's item is not found", async () => {
+      const theirEnv = await envelope(b);
+      const theirItem = await item(b, { envelope: theirEnv });
+      const receipt = await receiptFor(b, theirItem);
+      await expect(record(a, theirItem, theirEnv, 1, receipt)).rejects.toMatchObject({ code: 'P0002' });
     });
   });
 });
