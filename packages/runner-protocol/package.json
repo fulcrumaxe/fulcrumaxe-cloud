@@ -15,7 +15,11 @@
     "./envelope": "./src/envelope.ts",
     "./streamJson": "./src/streamJson.ts",
     "./toolActivity": "./src/toolActivity.ts",
-    "./contextLedger": "./src/contextLedger.ts"
+    "./contextLedger": "./src/contextLedger.ts",
+    "./planePush": "./src/planePush/index.ts",
+    "./planePushIdentity": "./src/planePush/planePushIdentity.ts",
+    "./planePushText": "./src/planePush/planePushText.ts",
+    "./repoPairing": "./src/planePush/repoPairing.ts"
   },
   "engines": {
     "node": ">=22.22.2"

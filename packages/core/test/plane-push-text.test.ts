@@ -175,7 +175,7 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
       }
     };
     for (const top of ["packages", "apps"]) walk(path.join(root, top));
-    expect(importers.sort()).toEqual(["packages/pipeline/src/build/planePushRoute.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/replies.ts"]);
+    expect(importers.sort()).toEqual(["packages/pipeline/src/build/planePushRoute.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts"]);
   });
 });
 
