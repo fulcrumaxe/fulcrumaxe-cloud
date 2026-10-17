@@ -109,7 +109,7 @@ export interface ActivityStep {
  * (`specHasNoFileList`, `respecListUnreadable`), not the sentence: @fx/core has no dependency on that package, so the API route puts the words in.
  */
 export interface ActivityNotice {
-  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait';
+  kind: 'not_feasible' | 'needs_human' | 'check_failed' | 'no_file_list' | 'respec_failed' | 'build_slot_wait' | 'resume_refused';
   reason: string;
   /**
    * `build_slot_wait` only (D#483): `reason` is the fixed wait code (`one_build_per_repo_until_d598`, `waiting_for_build_slot_repo` or `waiting_for_build_slot_account`;
@@ -129,6 +129,15 @@ export const BUILD_WAIT_FRESH_SECONDS = 180;
 
 /** The `COPY` key each Re-spec notice carries as its `reason` until the API route replaces it with the sentence. */
 export const FILE_LIST_NOTICE_COPY_KEY = Object.freeze({ no_file_list: 'specHasNoFileList', respec_failed: 'respecListUnreadable' } as const);
+/**
+ * D#7 DP11c: a `resume_refused` notice is an answered question whose resume did not happen (the answer was saved, the item sat where the question left it). `reason`
+ * is the FIXED CODE the resume recorded (`prompt_not_retained`, `principal_not_authorised`, `work_item_not_resumable`, `ask_no_run`, `fix_round_context_missing`,
+ * `spec_unavailable`, `execution_mode_changed`, `resume_pause_expired`, `resume_failed`, or the start's own closed code), never a sentence: the words are the owner's
+ * to approve (D#7 C22 A6 assigns the per-code sentences to DP8-f1), and the code is all this read carries until they are. Shown only while the item sits at the stage
+ * the question parked it at, nothing of it is running, and no executor run is newer than the refusal.
+ */
+export const RESUME_REFUSAL_STAGES: readonly string[] = Object.freeze(['in_progress', 'changes_requested']);
+
 export interface WorkItemActivity {
   stage: string;
   /** A customer halted this item and no person has resumed it since (the halt marker, not the stage: a halted item can sit at any stage). */
@@ -334,6 +343,24 @@ export async function readRunLines(
 }
 
 /**
+ * D#7 DP11c: the newest fixed code a refused or failed resume left on the item, while it still counts: no run of the item is live, and no executor run was made
+ * after the refusal (a person's Approve or Build again, or a resume that went through, ends it). Null when there is none.
+ */
+async function readResumeRefusal(client: PoolClient, workItemId: string): Promise<string | null> {
+  const row = (
+    await client.query<{ code: string | null }>(
+      `SELECT e.code FROM work_item_driver_events e
+        WHERE e.work_item_id = $1::uuid AND e.kind = 'resume_refused'
+          AND e.created_at > COALESCE((SELECT max(r.created_at) FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.role = 'executor'), '-infinity'::timestamptz)
+          AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.status NOT IN ('succeeded', 'failed', 'timed_out', 'killed_spend', 'refused_spend', 'cancelled'))
+        ORDER BY e.seq DESC LIMIT 1`,
+      [workItemId],
+    )
+  ).rows[0];
+  return row?.code != null && CODE_RE.test(row.code) ? row.code : null;
+}
+
+/**
  * D#483: an item at Spec ready or Needs a person whose build is waiting for a slot. The worker leaves one waiting fact (`stage_waiting`, stage `build`; `build_waiting`
  * before D#483 S5-k1b) on every ask of the wait, so the item is waiting while its LATEST such fact names a slot reason and is younger than three polls. A halted item
  * is not waiting. For a repository wait the holder is the oldest other item that holds a slot on the repository. Fixed codes and numbers only.
@@ -492,6 +519,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     // Why the pipeline stopped, read from what the runs stored. The newest short-Spec run that judged the request not
     // buildable counts only while no Spec was published after it (an edited issue approved again supersedes it).
     let notice: ActivityNotice | null = null;
+    let resumeCode: string | null = null;
     const pm = (
       await client.query<{ reason: string | null }>(
         `SELECT left(envelope->>'reason', $2::int) AS reason FROM agent_runs
@@ -509,6 +537,8 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice = fileListNotice;
     } else if (waitNotice) {
       notice = waitNotice;
+    } else if (RESUME_REFUSAL_STAGES.includes(item.stage) && (resumeCode = await readResumeRefusal(client, workItemId)) !== null) {
+      notice = { kind: 'resume_refused', reason: resumeCode };
     } else if (item.stage === 'needs_human') {
       // Build again was pressed and the driver stopped before starting anything (an open pull request, or GitHub could not be asked):
       // the newest such stop since the item reached Needs a person, by a fixed code.

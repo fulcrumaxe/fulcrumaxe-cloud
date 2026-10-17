@@ -431,6 +431,8 @@ export async function workItemAdvanceWorkflow(started: AdvanceStartArgs): Promis
 
   // Re-spec (`respec_work_item`): not an advance. It needs no issue read and stops once the next Spec version is published.
   if (args.respec === true) return respecPhase(args);
+  // D#7 DP11c: `resume_decision` has already started the resumed executor run. Follow it as a build is followed (outcome, decisions, pull request, review).
+  if (args.resumeRunId !== undefined) return buildPhase(args, args.specVersion ?? null);
 
   const loaded = await advanceLoadStep(accountId, workItemId);
   if (!loaded.ok) {
@@ -701,7 +703,10 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
 
   // D#483 S5-k1b: a restart by the parked-stage sweep begins at the next unused attempt, never the unsuffixed key (that key's run is the first `refused_spend` one).
   let spendAttempt = Number.isSafeInteger(args.startAttempt) && args.startAttempt! > 0 ? args.startAttempt! : 0;
-  let started = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
+  let started: StepOutcome =
+    args.resumeRunId !== undefined
+      ? { status: "started", reason: null, stage: null, version: null, complete: null, missing: null, runId: args.resumeRunId }
+      : await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
   // Three waits, each with its own bound. A reaper claim on the sandbox: a few backoffs. No build slot (the person's concurrency setting, D#483 S5-c1): the
   // item stays at Spec ready and asks again every minute, up to four hours (as many polls as the run wait below already makes in one workflow, so no new event-count risk); a start that finds no slot has run nothing and spent nothing. A halt or any other
   // refusal ends the loop at once.
@@ -759,7 +764,7 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       outcome = await advanceBuildOutcomeStep(accountId, runId);
     }
     // D#599 PL-2: the run was queued on a side the item has left. The same step starts again on the new side; the wait goes on with that run.
-    if (outcome.done && outcome.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX) {
+    if (outcome.done && outcome.failureReason === PLACEMENT_CHANGED && restarts < PLACEMENT_RESTARTS_MAX && args.resumeRunId === undefined) {
       const again = await advanceBuildStep(accountId, userId, workItemId, args.haltEpoch, actionId, pinned, spendAttempt > 0 ? spendAttempt : undefined);
       if (again.status === "started" && again.runId !== null && again.runId !== runId) {
         await advanceLogStep("advance.build_restarted", { work_item_id: workItemId, from_run_id: runId, run_id: again.runId, reason: PLACEMENT_CHANGED });

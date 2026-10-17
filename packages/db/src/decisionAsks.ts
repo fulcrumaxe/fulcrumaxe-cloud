@@ -346,6 +346,27 @@ export async function isItemWaitingOnAnswer(client: Pick<PoolClient, 'query'>, w
   return rows[0]?.waiting === true;
 }
 
+/** The most one reconcile enqueues; the definer refuses a limit outside 1..500. */
+export const RESUME_RECONCILE_DEFAULT_LIMIT = 100;
+
+export interface EnqueuedResume {
+  actionId: string;
+  askId: string;
+}
+
+/**
+ * D#7 DP11c (DP-C9 section 5, criterion 7): one pass of `resume_decision_reconcile()` (migration 0860) on the RECEIPT pool. Every answered or
+ * proceeded ask that has no `resume_decision` request, of any state, gets a system request. Across tenants, for the worker's tick only; nothing in
+ * the result is user text. A repeat finds nothing new, and two passes at once cannot both enqueue the same ask (a unique index decides).
+ */
+export async function reconcileResumeRequests(pool: Pick<Pool, 'query'>, limit: number = RESUME_RECONCILE_DEFAULT_LIMIT): Promise<EnqueuedResume[]> {
+  const { rows } = await pool.query<{ o_action_id: string; o_ask_id: string }>(
+    'SELECT o_action_id, o_ask_id FROM resume_decision_reconcile($1::integer)',
+    [limit],
+  );
+  return rows.map((r) => ({ actionId: r.o_action_id, askId: r.o_ask_id }));
+}
+
 /** The most one window-end sweep lists; the definer refuses a limit outside 1..500. */
 export const ASK_DUE_DEFAULT_LIMIT = 100;
 

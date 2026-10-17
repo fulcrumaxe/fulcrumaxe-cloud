@@ -104,6 +104,11 @@ export interface AdvanceStartArgs {
    * every start a person's approval makes. The restarted review asks its reviewers at this round, so their keys are the ones the earlier asks used.
    */
   startRereview?: number;
+  /**
+   * D#7 DP11c: set by `resume_decision` when it has started the resumed executor run. The workflow does not start a build: it follows this run
+   * (outcome, decisions, pull request, review) exactly as it follows a build's. Absent on every other start, and on a workflow started before it existed.
+   */
+  resumeRunId?: string;
 }
 
 /**
@@ -136,6 +141,14 @@ export interface AdvanceStepResult {
   round2Ran?: boolean;
   replayed?: boolean;
 }
+
+/**
+ * D#483 S5-k1d: the admit denials that are a spending limit (packages/pipeline reservationPauses.ts RESERVATION_DENIAL_PAUSES keys; a test holds the lists equal).
+ * One list for every worker start that has to tell a limit from a refusal: the fix-round start here, and the resume of a parked item (resumeDecision.ts).
+ */
+export const SPEND_DENIAL_REASONS: readonly string[] = Object.freeze(["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "model_credits_exhausted"]);
+/** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (RESERVATION_DENIAL_PAUSES values; a test holds the lists equal). */
+export const RESERVATION_PAUSE_REASONS: readonly string[] = Object.freeze(["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"]);
 
 /** Who the steps run for: the workflow's own arguments. */
 export interface AdvanceStepWho {
@@ -360,6 +373,8 @@ export interface AdvanceRunRequest {
   contextSections?: readonly ContextSection[];
   /** D#601 MEM-3: the token estimate of the memory in the prompt, stored on the run's context ledger. Absent: not recorded. */
   memoryTokens?: number;
+  /** D#7 DP11c: the run this one continues the work of (a resume's parked run). Linked on the new run's row; the parked run is not touched. The run must belong to this item. */
+  parentRunId?: string;
 }
 
 /** The assembler's section list when it is an array the ledger can hold (at most 64 entries); anything else is dropped, and the run is simply not given sections. The definer checks every entry. */
@@ -792,6 +807,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (req.pr !== undefined && !(Number.isSafeInteger(req.pr) && req.pr > 0)) return { ok: false, reason: "invalid_input" };
     if (req.expectedExecutionMode !== undefined && !MODE_RE.test(req.expectedExecutionMode)) return { ok: false, reason: "invalid_input" };
     if (req.specVersionId !== undefined && !UUID_RE.test(req.specVersionId)) return { ok: false, reason: "invalid_input" };
+    if (req.parentRunId !== undefined && !UUID_RE.test(req.parentRunId)) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -849,6 +865,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       prompt: req.prompt,
       ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
       ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
+      ...(req.parentRunId !== undefined ? { parentRunId: req.parentRunId } : {}),
       ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
       ...(Number.isSafeInteger(req.memoryTokens) && req.memoryTokens! >= 0 ? { memoryTokens: req.memoryTokens } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
@@ -1102,7 +1119,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
    * D#483 S5-k1d: the admit denials that are a spending limit (packages/pipeline reservationPauses.ts RESERVATION_DENIAL_PAUSES; a test holds the lists equal). The
    * web step turns each one into its named pause.
    */
-  const SPEND_DENIALS: readonly string[] = ["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "model_credits_exhausted"];
+  const SPEND_DENIALS: readonly string[] = SPEND_DENIAL_REASONS;
 
   /** The spending-limit denial a run ended with (`refused_spend` and the closed reason the admit gave), or null when the run did not end that way. */
   async function deniedRunReason(who: AdvanceStepWho, runId: string): Promise<string | null> {
@@ -1144,8 +1161,6 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   const BUILD_SLOT_WAIT_REASONS: readonly string[] = ["one_build_per_repo_until_d598", "waiting_for_build_slot_repo", "waiting_for_build_slot_account"];
   /** How long after a limit pause is first seen the sweep first looks: a workflow's own wait is four hours, so the sweep's first look is just after it (apps/web BUILD_SPEND_WAIT_MS). */
   const STAGE_RESUME_FIRST_LOOK_MS = 4 * 3_600_000;
-  /** D#483 S5-k1: the refusals that mean "a spending limit denied the run, ask again" (packages/pipeline reservationPauses.ts RESERVATION_PAUSE_REASONS; a test holds the lists equal). */
-  const RESERVATION_PAUSE_REASONS: readonly string[] = ["account_budget_reached", "compute_cap_reached", "item_cap_reached", "run_limit_below_estimate", "envelope_reached", "model_credits_exhausted"];
 
   async function advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult> {
     if (!deps.build) return { status: "refused", reason: "build_unavailable" };

@@ -240,6 +240,44 @@ describe("C3/C4: the workflow's steps over a fake facade", () => {
     expect(bare.settles).toEqual([[ID, { state: "refused", errorCode: "advance_unavailable", outcome: { reason: "advance_unavailable" } }]]);
   });
 
+  it("resume_decision (D#7 DP11c): performResumeDecision gets the id and its outcome settles done; a refusal settles refused; a worker without the method refuses resume_unavailable", async () => {
+    const out = { work_item_id: "w1", run_id: "r2", cause: "decision_resolved" };
+    const done = fakeWorker({ claimed: { id: ID, kind: "resume_decision", attempts: 1 }, performResumeDecision: vi.fn(async (): Promise<PerformResult> => ({ result: "done", outcome: out })) });
+    await runActionSteps(done.worker, ID);
+    expect(done.worker.performResumeDecision).toHaveBeenCalledWith(ID);
+    expect(done.settles).toEqual([[ID, { state: "done", outcome: out }]]);
+    const denied = fakeWorker({ claimed: { id: ID, kind: "resume_decision", attempts: 1 }, performResumeDecision: vi.fn(async (): Promise<PerformResult> => ({ result: "refused", errorCode: "work_item_not_resumable" })) });
+    await runActionSteps(denied.worker, ID);
+    expect(denied.settles).toEqual([[ID, { state: "refused", errorCode: "work_item_not_resumable", outcome: { reason: "work_item_not_resumable" } }]]);
+    const bare = fakeWorker({ claimed: { id: ID, kind: "resume_decision", attempts: 1 } });
+    await runActionSteps(bare.worker, ID);
+    expect(bare.settles).toEqual([[ID, { state: "refused", errorCode: "resume_unavailable", outcome: { reason: "resume_unavailable" } }]]);
+  });
+
+  it("a deferred resume (a sandbox being reaped, no starter yet) waits a minute and spends no attempt: the real reason resume_deferred, settled as a deferral", async () => {
+    const err = Object.assign(new Error("x"), { name: "ResumeDeferredError" });
+    const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "resume_decision", attempts: 2 }, performResumeDecision: vi.fn(async () => Promise.reject(err)) });
+    await runActionSteps(worker, ID);
+    expect(settles).toEqual([[ID, { state: "accepted", errorCode: "resume_deferred", retryAfterSeconds: 60, defer: true }]]);
+  });
+
+  it("a paused resume (a spending limit, another run still live) waits fifteen minutes and spends no attempt, however many attempts it has had", async () => {
+    const err = Object.assign(new Error("x"), { name: "ResumePausedError" });
+    for (const attempts of [1, 5, 40]) {
+      const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "resume_decision", attempts }, performResumeDecision: vi.fn(async () => Promise.reject(err)) });
+      await runActionSteps(worker, ID);
+      expect(settles, String(attempts)).toEqual([[ID, { state: "accepted", errorCode: "resume_paused", retryAfterSeconds: 900, defer: true }]]);
+    }
+  });
+
+  it("only a resume is deferred: the same error codes on any other kind stay counted retries with backoff", () => {
+    for (const errorCode of ["resume_deferred", "resume_paused"]) {
+      expect(settleInputFor({ id: ID, kind: "advance_work_item", attempts: 2 }, { result: "error", errorCode })).toStrictEqual({ state: "accepted", errorCode, retryAfterSeconds: 20 });
+    }
+    // and a resume that failed for any other reason is still a counted retry, so the 5th attempt settles it failed (and leaves resume_failed on the item)
+    expect(settleInputFor({ id: ID, kind: "resume_decision", attempts: 2 }, { result: "error", errorCode: "perform_failed" })).toStrictEqual({ state: "accepted", errorCode: "perform_failed", retryAfterSeconds: 20 });
+  });
+
   it("an AuthorCheckUnavailableError is a counted retry with the real reason, author_check_unavailable, not perform_failed", async () => {
     const err = Object.assign(new Error("x"), { name: "AuthorCheckUnavailableError" });
     const { worker, settles } = fakeWorker({ claimed: { id: ID, kind: "retry_run", attempts: 2 }, performRetryRun: vi.fn(async () => Promise.reject(err)) });

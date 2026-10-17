@@ -77,7 +77,7 @@ describe("the sentences", () => {
 
 describe("the lists and numbers the workflow and the worker repeat", () => {
   const listIn = (src: string): string[] => {
-    const m = /RESERVATION_PAUSE_REASONS: readonly string\[\] = \[([^\]]*)\]/.exec(src);
+    const m = /(?:const|let|var)?\s*RESERVATION_PAUSE_REASONS: readonly string\[\] = (?:Object\.freeze\()?\[([^\]]*)\]/.exec(src);
     expect(m).not.toBeNull();
     return [...m![1]!.matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1]!);
   };

@@ -29,6 +29,12 @@ export interface SettleInput {
   retryAfterSeconds?: number;
   /** A page of a paged cancel made progress: re-queue without spending an attempt (only with state "accepted"). */
   progress?: true;
+  /**
+   * D#7 DP11c: a `resume_decision` whose start is waiting on something that clears by itself (a spending limit, a sandbox being reaped, another run still
+   * live). Back to accepted, due after `retryAfterSeconds`, WITHOUT spending an attempt: a pause a person ends can outlast the five attempts a failure gets.
+   * Only with state "accepted"; the worker stops it at the definer's age limit and settles it failed.
+   */
+  defer?: true;
 }
 
 export interface RunActionsWorker {
@@ -49,6 +55,8 @@ export interface RunActionsWorker {
   performRespecWorkItem?(actionId: string): Promise<PerformResult>;
   /** Optional the same way: a worker without it refuses `amend_unavailable`. Publishes the next Spec version for accepted Spec amendments (D#597 CC-2b). */
   performAmendSpec?(actionId: string): Promise<PerformResult>;
+  /** Optional the same way: a worker without it refuses `resume_unavailable`. Resumes an item parked on an answered ask (D#7 DP11c). */
+  performResumeDecision?(actionId: string): Promise<PerformResult>;
 }
 
 /** A performer is handed the action id and nothing else: the facade derives who it runs as from the database. */
@@ -63,6 +71,7 @@ const PERFORMERS: Readonly<Record<string, Performer>> = Object.freeze({
   advance_work_item: async (worker, actionId) => (await worker.performAdvanceWorkItem?.(actionId)) ?? { result: "refused", errorCode: "advance_unavailable" },
   respec_work_item: async (worker, actionId) => (await worker.performRespecWorkItem?.(actionId)) ?? { result: "refused", errorCode: "respec_unavailable" },
   amend_spec_work_item: async (worker, actionId) => (await worker.performAmendSpec?.(actionId)) ?? { result: "refused", errorCode: "amend_unavailable" },
+  resume_decision: async (worker, actionId) => (await worker.performResumeDecision?.(actionId)) ?? { result: "refused", errorCode: "resume_unavailable" },
 });
 
 /** The performer for a kind, or undefined (a kind nobody performs is settled refused, never retried). */

@@ -33,7 +33,8 @@ describe('work item driver events', () => {
     const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'db', 'migrations');
     const latest = readdirSync(dir).filter((f) => f.endsWith('.sql') && /work_item_driver_events_kind_check/.test(readFileSync(path.join(dir, f), 'utf8'))).sort().pop()!;
     const sql = readFileSync(path.join(dir, latest), 'utf8');
-    const list = /CHECK \(kind IN \(([^)]*)\)\)/.exec(sql)![1]!;
+    // The constraint by name: a migration that restates this list can hold other CHECKs on other tables (0860 widens run_action_requests_kind_check too).
+    const list = /work_item_driver_events_kind_check\s+CHECK \(kind IN \(([^)]*)\)\)/.exec(sql)![1]!;
     expect([...list.matchAll(/'([a-z_]+)'/g)].map((m) => m[1])).toEqual([...DRIVER_EVENT_KINDS]);
   });
 

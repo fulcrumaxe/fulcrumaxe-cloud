@@ -68,7 +68,7 @@ describe('answerAsk (DP11b)', () => {
   const refused = (p: Promise<unknown>, status: number, code: string) => expect(p).rejects.toMatchObject({ name: 'AskAnswerError', status, code });
   const receiptOf = async (id: string) => (await admin.query(`SELECT * FROM decision_receipts WHERE id = $1`, [id])).rows[0];
 
-  it('writes the receipt, answers the ask and links them; no run-action request, one event with ids only', async () => {
+  it('writes the receipt, answers the ask and links them; one resume request (DP11c), one event with ids only', async () => {
     const id = await raise(a);
     const [r0, e0, q0] = [await nReceipts(a), await nEvents(a), await nActions(a)];
     const res = await answerAsk(as(a), { askId: id, choice: 'skip' });
@@ -78,9 +78,56 @@ describe('answerAsk (DP11b)', () => {
       account_id: a.accountId, run_id: a.runId, work_item_id: a.workItemId, decision_type: 'test_strategy_choice', class: 'human_over_the_loop',
       chosen: 'skip', rejected_alternative: 'apply', dial_version: 0, actor: a.userId, input_trust_classes: ['trusted'],
     });
-    expect([await nReceipts(a), await nEvents(a), await nActions(a)]).toEqual([r0 + 1, e0 + 1, q0]);
+    expect([await nReceipts(a), await nEvents(a), await nActions(a)]).toEqual([r0 + 1, e0 + 1, q0 + 1]);
     const ev = (await admin.query(`SELECT payload FROM domain_events WHERE account_id = $1 AND type = 'decision.ask_answered' AND subject_id = $2`, [a.accountId, id])).rows[0].payload;
     expect(ev).toEqual({ ask_id: id, work_item_id: a.workItemId, run_id: a.runId, receipt_id: res.receiptId, decision_type: 'test_strategy_choice', answered_option: 'skip' });
+  });
+
+  describe('the resume request (D#7 DP11c, DP-C9 section 5 criterion 6)', () => {
+    const requestsOf = async (askId: string) => (await admin.query(`SELECT * FROM run_action_requests WHERE kind = 'resume_decision' AND target_id = $1`, [askId])).rows;
+
+    it('is the answering person\'s own request, keyed by the ask, made in the answer\'s transaction; a replayed answer makes no second one', async () => {
+      const id = await raise(a);
+      await answerAsk(as(a, aAdmin), { askId: id, choice: 'skip' });
+      const rows = await requestsOf(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ requested_by: `session:${aAdmin}`, principal_kind: 'session', idempotency_key: `ask:${id}`, state: 'accepted', resume_halt_epoch: 0 });
+      await refused(answerAsk(as(a), { askId: id, choice: 'skip' }), 409, 'already_answered');
+      expect(await requestsOf(id)).toHaveLength(1);
+    });
+
+    it('deny asks for a resume too (the resumed role is told it was refused)', async () => {
+      const id = await raise(a);
+      await answerAsk(as(a), { askId: id, choice: 'deny' });
+      expect(await requestsOf(id)).toHaveLength(1);
+    });
+
+    it('a refused answer makes no request, and a request that cannot be made rolls the whole answer back (no receipt, ask still open)', async () => {
+      const id = await raise(a);
+      await refused(answerAsk(as(a, aMember), { askId: id, choice: 'skip' }), 403, 'forbidden');
+      await refused(answerAsk(as(a), { askId: id, choice: 'merge' }), 422, 'invalid_choice');
+      expect(await requestsOf(id)).toEqual([]);
+      // Force the request to fail: a request for this ask already exists under another requester with a different hash for the same key.
+      await admin.query(`INSERT INTO run_action_requests (account_id, kind, target_id, requested_by, principal_kind, idempotency_key, request_hash, resume_halt_epoch)
+                         VALUES ($1, 'resume_decision', $2, $3, 'session', $4, 'other', 0)`, [a.accountId, randomUUID(), `session:${a.userId}`, `ask:${id}`]);
+      const before = await nReceipts(a);
+      await expect(answerAsk(as(a), { askId: id, choice: 'skip' })).rejects.toMatchObject({ code: '22023' });
+      expect(await nReceipts(a)).toBe(before);
+      expect((await readAsk(id)).state).toBe('open');
+    });
+
+    it('kicks the run-action workflow after the commit, for a new request only; a signal that fails changes nothing', async () => {
+      const sent: unknown[] = [];
+      const signal = { signal: async (m: unknown) => void sent.push(m) };
+      const id = await raise(a);
+      await answerAsk({ ...as(a), signal }, { askId: id, choice: 'skip' });
+      const [req] = await requestsOf(id);
+      expect(sent).toEqual([{ actionId: req.id, accountId: a.accountId, kind: 'resume_decision' }]);
+      const boom = { signal: async () => { throw new Error('queue down'); } };
+      const id2 = await raise(a);
+      await expect(answerAsk({ ...as(a), signal: boom }, { askId: id2, choice: 'skip' })).resolves.toMatchObject({ askId: id2 });
+      expect(await requestsOf(id2)).toHaveLength(1);
+    });
   });
 
   it('choosing the proposal rejects deny; choosing deny rejects the proposal', async () => {

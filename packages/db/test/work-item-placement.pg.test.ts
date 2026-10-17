@@ -472,15 +472,19 @@ describe('migration 0781 gives platform_ops nothing', () => {
           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
           CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) AS p(privilege_type)
          WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ${TABLES} AND has_column_privilege('platform_ops', c.oid, a.attnum, p.privilege_type)
+           -- 0860 (D#7 DP11c) lets the resume_decision request definer read the item's halt epoch: that one column, for SELECT and no other privilege. What 0860
+           -- grants is pinned in full (columns, privileges and policy text) in resume-decision.pg.test.ts, so a later widening fails there too.
+           AND NOT (c.relname = 'work_items' AND a.attname = 'halt_epoch' AND p.privilege_type = 'SELECT')
          ORDER BY 1`),
       policies: await q(`
         SELECT tablename || ' ' || policyname || ' ' || cmd || ' ' || coalesce(qual, '') || ' ' || coalesce(with_check, '') AS x FROM pg_policies
-         WHERE schemaname = 'public' AND tablename IN ${TABLES} AND 'platform_ops' = ANY(roles) ORDER BY 1`),
+         WHERE schemaname = 'public' AND tablename IN ${TABLES} AND 'platform_ops' = ANY(roles)
+           AND policyname <> 'platform_ops_resume_reconcile' ORDER BY 1`) /* 0860 (D#7 DP11c): the one added policy, for the resume reconcile */,
       // 0844 (S5-f) re-creates reject_proposal with two more parameters and adds resurface_proposals, both platform_ops-owned like the other
       // proposal definers. Those two exact signatures are the only difference allowed (reject_proposal compared by name, resurface_proposals
       // left out); any other change to what platform_ops owns still fails this test.
       ownedFunctions: await q(`SELECT CASE WHEN p.proname = 'reject_proposal' THEN 'reject_proposal(...)' ELSE p.oid::regprocedure::text END AS x FROM pg_proc p
-         WHERE p.proowner = 'platform_ops'::regrole AND p.oid::regprocedure::text <> 'resurface_proposals(uuid,uuid)' ORDER BY 1`),
+         WHERE p.proowner = 'platform_ops'::regrole AND p.oid::regprocedure::text NOT IN ('resurface_proposals(uuid,uuid)', 'resume_decision_reconcile(integer)', 'run_action_defer_resume(uuid,integer)') ORDER BY 1`),
       memberships: await q(`SELECT pg_get_userbyid(roleid) || ' ' || admin_option::text || ' ' || coalesce(inherit_option::text, '') || ' ' || coalesce(set_option::text, '') AS x FROM pg_auth_members WHERE member = 'platform_ops'::regrole ORDER BY 1`),
       newDefinersOwnedByPlatformOps: await q(`SELECT p.proname AS x FROM pg_proc p WHERE p.proowner = 'platform_ops'::regrole AND p.proname IN ('work_item_cancel_pending_runs', 'work_item_placement_audit') ORDER BY 1`),
     };

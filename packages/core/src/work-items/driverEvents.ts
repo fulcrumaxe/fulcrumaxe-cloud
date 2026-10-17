@@ -34,6 +34,9 @@ import type { PoolClient } from 'pg';
  *                         driver itself saw (code: observed). Its created_at, the database clock, starts the quiet period of a cloud-verified review.
  *   correction_applied    the build or fix run carried accepted run notes (D#597 CC-3; migration 0788). run_id: the run; reasons: the notes' ids as codes
  *                         (`c` + the id without hyphens). Ids only: the text of a note never reaches this store.
+ *   resume_refused        D#7 DP11c: a resume of a parked item did not happen. code: the fixed reason (ask_no_run, prompt_not_retained, principal_not_authorised,
+ *                         work_item_not_resumable, resume_pause_expired, resume_failed, or the start's own closed code). The item sits where the question left it; the
+ *                         activity read shows the newest such code while no run of the item is live. Written by the resume performer alone.
  *   platform_check        the invariant sweep found a platform defect on this item's run (D#597 CC-8; migration 0776). code: stage_not_moved | no_activity |
  *                         usage_not_recorded; run_id: the run. Written by the sweep alone, never by the driver.
  */
@@ -56,6 +59,7 @@ export const DRIVER_EVENT_KINDS = [
   'pr_head_pushed',
   'platform_check',
   'correction_applied',
+  'resume_refused',
 ] as const;
 export type DriverEventKind = (typeof DRIVER_EVENT_KINDS)[number];
 

@@ -490,7 +490,7 @@ export interface Operations {
         finished_at: string | null;
       }>;
       notice: ({
-        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait";
+        kind: "not_feasible" | "needs_human" | "check_failed" | "no_file_list" | "respec_failed" | "build_slot_wait" | "resume_refused";
         reason: string;
       }) | (null);
       review_recheck?: ({
