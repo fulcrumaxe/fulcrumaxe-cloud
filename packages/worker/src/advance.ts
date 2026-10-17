@@ -1035,7 +1035,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
    * D#483 S5-k1d: the admit denials that are a spending limit (packages/pipeline reservationPauses.ts RESERVATION_DENIAL_PAUSES; a test holds the lists equal). The
    * web step turns each one into its named pause.
    */
-  const SPEND_DENIALS: readonly string[] = ["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded"];
+  const SPEND_DENIALS: readonly string[] = ["model_budget_exceeded", "compute_cap_exceeded", "work_item_cap_exceeded", "per_spawn_cap_exceeded", "envelope_exceeded", "model_credits_exhausted"];
 
   /** The spending-limit denial a run ended with (`refused_spend` and the closed reason the admit gave), or null when the run did not end that way. */
   async function deniedRunReason(who: AdvanceStepWho, runId: string): Promise<string | null> {
