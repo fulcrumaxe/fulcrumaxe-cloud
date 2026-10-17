@@ -1,12 +1,12 @@
 import { sleep } from "workflow";
-import type { AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult } from "@fx/worker";
+import type { AdvanceRunStart, AdvanceStartArgs, AdvanceTriageResult, DecisionStepCode } from "@fx/worker";
 import { getWorker } from "../lib/worker";
 import { getIssueReader } from "../lib/github/issueRead";
 import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -214,6 +214,12 @@ export async function advanceStageStep(accountId: string, workItemId: string): P
 export async function advanceBuildFailedStep(accountId: string, workItemId: string, runId: string | null, reason: string, attempt?: string): Promise<StepOutcome> {
   "use step";
   return buildFailedBody(await getWorker(), accountId, workItemId, runId, reason, attempt);
+}
+
+/** D#7 DP4b-2: reads a succeeded executor run's decision fields. The answer is one fixed word (`parked`, a halt, or carry on). */
+export async function advanceDecisionStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string): Promise<DecisionStepCode> {
+  "use step";
+  return decisionBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, runId);
 }
 
 /** Stops a live run of the item (the wait for it ran out). The existing cancel path, as the approver. Safe on a finished run. */
@@ -768,6 +774,11 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
     return { status: "failed", detail: `build_${outcome.status}` };
   }
 
+  // D#7 DP4b-2: a succeeded run may have asked a question or reported decisions. A question parks the item (this workflow ends, the stage stays); the rest carries on.
+  const decision = await advanceDecisionStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
+  if (isHaltReason(decision)) return haltedEnd(args, "decision");
+  if (decision === "parked") return waitingOnAnswer(args, outcome.tailRunId);
+
   // The run says it finished. The pull request it opened reaches the item through the webhook; give it a moment.
   let stage = await advanceStageStep(accountId, workItemId);
   for (let i = 0; i < PR_GRACE_POLLS && stage === "in_progress"; i++) {
@@ -1008,6 +1019,13 @@ const isHaltReason = (reason: string | null | undefined): boolean => reason === 
 async function haltedEnd(args: AdvanceStartArgs, at: string): Promise<Result> {
   await stopped(args, at, "halted");
   return { status: "stopped", detail: "halted" };
+}
+
+/** D#7 DP4b-2: the run asked a question that waits for a person. One `stopped` fact, then this workflow ends: it does not poll and does not retry. The stage is unchanged. */
+async function waitingOnAnswer(args: AdvanceStartArgs, runId: string): Promise<Result> {
+  await advanceLogStep("advance.stopped", { work_item_id: args.workItemId, at: "decision", reason: "waiting_on_answer", run_id: runId });
+  await advanceEventStep(args.accountId, args.userId, args.workItemId, { kind: "stopped", dedupeKey: `decision:${runId}`, code: "waiting_on_answer", runId });
+  return { status: "stopped", detail: "waiting_on_answer" };
 }
 
 /** A fact of the item: the driver stopped, and why. One per approval and reason. */
@@ -1255,6 +1273,12 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       return { status: "fix_failed", detail: "wait_timeout" };
     }
     await advanceLogStep("advance.fixed", { work_item_id: workItemId, round: round.nextRound ?? round.round + 1, run_id: fix.runId, run_status: fixed.status });
+    if (fixed.status === "succeeded") {
+      // D#7 DP4b-2: the same read after a succeeded fix round, before the next review.
+      const decision = await advanceDecisionStep(accountId, userId, workItemId, args.haltEpoch, fixed.tailRunId);
+      if (isHaltReason(decision)) return haltedEnd(args, "decision");
+      if (decision === "parked") return waitingOnAnswer(args, fixed.tailRunId);
+    }
     // A runner fix run whose agent finished and pushed nothing ends `failed no_commit`; a sandbox one ends `succeeded` with the head unmoved. Both are
     // "no change", and the head decides it (below), so only a fix that failed some other way, or is not the runner's no-commit, stops here.
     const noCommit = fixed.status === "failed" && fixed.failureReason === "no_commit";

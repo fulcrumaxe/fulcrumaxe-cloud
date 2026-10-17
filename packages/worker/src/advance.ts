@@ -16,6 +16,8 @@ import { envelopeRunUsd } from "@fx/spend";
 import { checkRoundHeadroom } from "./panelHeadroom.js";
 import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
+import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
+import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
 import type { ContextSection } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
@@ -196,6 +198,8 @@ export interface AdvanceModuleDeps {
   buildWaitReason?: ((pool: Pool, accountId: string, workItemId: string) => Promise<string | null>) | null;
   /** D#483 S5-d: raises the `spend_past_envelope` ask (receipt login) when a start is denied by the item's spend envelope. Absent, the denial still pauses the item and no ask is raised. */
   raiseEnvelopeAsk?: RaiseEnvelopeAsk | null;
+  /** D#7 DP4b-2: reads a succeeded executor run's decision fields (receipts, asks, refusals) on the receipt login. Absent, `advanceDecision` answers `none`. */
+  decisionIntake?: DecisionIntake | null;
   /** The execution registry `cancelRun` dispatches through. Absent, a step's cancel is a no-op that the lost-run sweep backs up. */
   registry?: ExecutionTargetRegistry | null;
   /** D#483 P3, injected from apps/web the same way: the review stage's pipeline pieces. Absent, the review steps answer `review_unavailable`. */
@@ -457,6 +461,11 @@ export interface AdvanceFacade {
    * A refused start is recorded as a `build_refused` driver event. D#483 S5-k1: `spendAttempt` is the workflow's count of asks that a spend limit denied (absent for the first ask); it keys the run so a later ask is a new start.
    */
   advanceBuild(who: AdvanceStepWho, approvalId: string, expectedVersion?: number, spendAttempt?: number): Promise<AdvanceStepResult>;
+  /**
+   * D#7 DP4b-2 (R-7-DP4b-2): after a `succeeded` executor run, reads its `decision_request` and `decisions_taken`. One fixed word back: `none` and `resolved` (carry on),
+   * `parked` (an ask is waiting for a person: the workflow ends, the stage stays), `refused` (a field was dropped; carry on), `item_halted` / `halted_since_approval`.
+   */
+  advanceDecision(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string): Promise<DecisionStepCode>;
   /** D#483 P2: records a build that ended without a pull request as `in_progress -> needs_human`. `code` is a fixed word. */
   advanceBuildFailed(accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string): Promise<AdvanceStepResult>;
   /**
@@ -1139,8 +1148,17 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
   async function advanceBuildFailed(accountId: string, workItemId: string, runId: string | null, code: string, attempt?: string): Promise<AdvanceStepResult> {
     if (!deps.buildFailed) return { status: "refused", reason: "build_unavailable" };
     if (!UUID_RE.test(accountId) || !UUID_RE.test(workItemId) || (runId !== null && !UUID_RE.test(runId)) || (attempt !== undefined && !UUID_RE.test(attempt)) || !/^[a-z_]{1,40}$/.test(code)) return { status: "refused", reason: "invalid_input" };
+    // D#7 DP4b-2: an item parked on a question is not a failed build, whoever asks (the driver, the sweeper, "Check the build"). A person's Build again makes a newer run, which ends the wait.
+    if (await withTenant(runnerPool, accountId, (client) => isItemWaitingOnAnswer(client, workItemId))) return { status: "refused", reason: "waiting_on_answer" };
     const out = await deps.buildFailed(runnerPool, accountId, workItemId, runId, code, ...(attempt === undefined ? [] : [attempt]));
     console.info(JSON.stringify({ event: "advance.build_failed", work_item_id: workItemId, run_id: runId, code, status: out.status, stage: out.stage ?? null }));
+    return out;
+  }
+
+  async function advanceDecision(accountId: string, userId: string, workItemId: string, haltEpoch: number, runId: string): Promise<DecisionStepCode> {
+    if (!deps.decisionIntake || !UUID_RE.test(userId)) return "none";
+    const out = await deps.decisionIntake({ accountId, workItemId, haltEpoch, runId });
+    console.info(JSON.stringify({ event: "advance.decision", work_item_id: workItemId, run_id: runId, code: out }));
     return out;
   }
 
@@ -1589,6 +1607,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceSpec,
     advanceBuild,
     advanceBuildFailed,
+    advanceDecision,
     advancePrFound,
     advanceLightSpec,
     advanceRespec,

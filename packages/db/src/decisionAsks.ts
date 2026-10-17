@@ -328,3 +328,20 @@ export async function withdrawStaleAsks(pool: Pick<Pool, 'query'>, limit: number
     return { askId: r.o_ask_id, reason };
   });
 }
+
+/**
+ * D#7 DP4b-2 (R-7-DP4b-2): is this item waiting on an answer? Derived from current truth, never a stamp: the item has an `open` or `overdue` ask whose
+ * run is the item's newest executor run. An ask on an older run (the item has moved on), or one that is answered, proceeded or withdrawn, is not a wait.
+ * The one definition the worker's `advanceBuildFailed` check and the activity read both use. `client` must come from `withTenant`.
+ */
+export async function isItemWaitingOnAnswer(client: Pick<PoolClient, 'query'>, workItemId: string): Promise<boolean> {
+  const { rows } = await client.query<{ waiting: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM decision_asks a
+        WHERE a.work_item_id = $1::uuid AND a.state IN ('open', 'overdue')
+          AND a.run_id = (SELECT r.id FROM agent_runs r WHERE r.work_item_id = $1::uuid AND r.role = 'executor' ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+     ) AS waiting`,
+    [workItemId],
+  );
+  return rows[0]?.waiting === true;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdvanceItem, AdvanceStepResult } from "@fx/worker";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, decisionBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
 import type { AdvanceWorker } from "./advanceSteps";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
@@ -159,5 +159,17 @@ describe("stageBody and buildFailedBody", () => {
     const w = worker();
     expect(await buildFailedBody(w, ACCOUNT, ITEM, "run-b", reason)).toMatchObject({ status: "recorded", stage: "needs_human" });
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", code);
+  });
+});
+
+describe("D#7 DP4b-2: the decision step hands the workflow one fixed word", () => {
+  it.each(["none", "resolved", "parked", "refused", "item_halted", "halted_since_approval"] as const)("passes %s through, asking with the step's own ids and the halt epoch", async (code) => {
+    const advanceDecision = vi.fn(async () => code);
+    expect(await decisionBody({ advanceDecision }, { ...WHO, haltEpoch: 3 }, "run-b")).toBe(code);
+    expect(advanceDecision).toHaveBeenCalledWith(ACCOUNT, USER, ITEM, 3, "run-b");
+  });
+  it("answers none when there is no worker, and does not swallow a failure (the step is retried)", async () => {
+    expect(await decisionBody(null, WHO, "run-b")).toBe("none");
+    await expect(decisionBody({ advanceDecision: async () => { throw new Error("db down"); } }, WHO, "run-b")).rejects.toThrow("db down");
   });
 });

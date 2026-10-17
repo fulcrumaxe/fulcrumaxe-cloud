@@ -357,6 +357,42 @@ describe('GET /api/v1/work-items/{id}/activity (D#483 P4)', { timeout: 60_000 },
     });
   });
 
+  it('D#7 DP4b-2: waiting_on_answer is derived from an open or overdue ask on the newest executor run, and is its own fact, not halted', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const { itemId, repoId } = await seedItem(accountId, { stage: 'in_progress' });
+    const runId = await seedRun(accountId, itemId, { role: 'executor', status: 'succeeded' });
+    const read = async (): Promise<Activity & { waiting_on_answer: boolean; halted: boolean }> => {
+      const res = await get(itemId, { accountId, userId });
+      const body = (await res.json()) as Activity & { waiting_on_answer: boolean; halted: boolean };
+      expect(activityResponseSchema.parse(body)).toEqual(body);
+      return body;
+    };
+    expect((await read()).waiting_on_answer).toBe(false);
+    const askId = randomUUID();
+    await admin.query(
+      `INSERT INTO decision_asks (id, account_id, repo_id, work_item_id, run_id, decision_type, options, proposed, rationale, input_trust_classes, answer_due_at, timeout_outcome)
+       VALUES ($1, $2, $3, $4, $5, 'test_strategy_choice', $6::jsonb, 'keep', 'why', '[]'::jsonb, now() + interval '1 day', 'stop_and_flag')`,
+      [askId, accountId, repoId, itemId, runId, JSON.stringify([{ id: 'keep', label: 'Keep' }, { id: 'split', label: 'Split' }])],
+    );
+    expect(await read()).toMatchObject({ waiting_on_answer: true, halted: false, stage: 'in_progress' });
+    await admin.query(`UPDATE decision_asks SET state = 'overdue' WHERE id = $1`, [askId]);
+    expect((await read()).waiting_on_answer).toBe(true);
+    // The item moves on: a newer executor run (a person pressed Build again). The ask is no longer this item's wait.
+    await seedRun(accountId, itemId, { role: 'executor', status: 'running', createdAt: new Date(Date.now() + 60_000).toISOString() });
+    expect((await read()).waiting_on_answer).toBe(false);
+    // A halted item that is also waiting says both, separately.
+    const other = await seedItem(accountId, { stage: 'in_progress' });
+    const otherRun = await seedRun(accountId, other.itemId, { role: 'executor', status: 'succeeded' });
+    await admin.query(
+      `INSERT INTO decision_asks (account_id, repo_id, work_item_id, run_id, decision_type, options, proposed, rationale, input_trust_classes, answer_due_at, timeout_outcome)
+       VALUES ($1, $2, $3, $4, 'test_strategy_choice', $5::jsonb, 'keep', 'why', '[]'::jsonb, now() + interval '1 day', 'stop_and_flag')`,
+      [accountId, other.repoId, other.itemId, otherRun, JSON.stringify([{ id: 'keep', label: 'Keep' }, { id: 'split', label: 'Split' }])],
+    );
+    await admin.query(`UPDATE work_items SET halted_at = now(), halt_action_id = $2, halt_epoch = halt_epoch + 1 WHERE id = $1`, [other.itemId, randomUUID()]);
+    const res = await get(other.itemId, { accountId, userId });
+    expect(await res.json()).toMatchObject({ waiting_on_answer: true, halted: true });
+  });
+
   it('reads the signed comments, the newest Spec, the runs oldest first with summary and lines, the steps and the real auto-merge setting', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);
     const { itemId } = await seedItem(accountId, { autoMerge: true, stage: 'review_passed' });

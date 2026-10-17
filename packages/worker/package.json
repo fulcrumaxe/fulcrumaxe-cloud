@@ -29,6 +29,7 @@
     "@fx/runner": "workspace:*",
     "@fx/spend": "workspace:*",
     "@fx/telemetry": "workspace:*",
+    "@fx/trust": "workspace:*",
     "@vercel/oidc": "3.2.0",
     "pg": "^8.13.1"
   },

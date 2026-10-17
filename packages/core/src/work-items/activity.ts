@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { isItemWaitingOnAnswer } from '@fx/db/src/decisionAsks.js';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { HANDOFF_KIND, PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYPES, RUNNER_WAITING_KIND, buildFeed } from '../onboarding/previewProgress.js';
@@ -132,6 +133,8 @@ export interface WorkItemActivity {
   stage: string;
   /** A customer halted this item and no person has resumed it since (the halt marker, not the stage: a halted item can sit at any stage). */
   halted: boolean;
+  /** The item is parked on a question an agent asked (D#7 DP4b-2): an open or overdue ask on its newest executor run. Derived from that ask, never a stamp. */
+  waiting_on_answer: boolean;
   repo: { owner: string; name: string } | null;
   issue_number: number | null;
   /**
@@ -557,6 +560,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
     return {
       stage: item.stage,
       halted: item.halted,
+      waiting_on_answer: await isItemWaitingOnAnswer(client, workItemId),
       repo: item.gh_owner && item.gh_name ? { owner: item.gh_owner, name: item.gh_name } : null,
       issue_number: item.gh_number === null ? null : Number(item.gh_number),
       pr_number: prNumber,

@@ -90,6 +90,7 @@ function setup(script: Script = {}) {
     advanceCancel: vi.fn(async () => undefined),
     advanceVerifiedReviewGate: vi.fn(async () => ({ state: "dispatch" })),
     advanceBuildFailed: vi.fn(async () => ({ status: "recorded", stage: "needs_human" })),
+    advanceDecision: vi.fn(async () => "none"),
     advancePrFound: vi.fn(async () => ({ status: "recorded", stage: "pr_opened" })),
   };
   setWorkerWiringForTests({ provider: () => ({}) as never, createWorker: async () => worker as unknown as Worker });

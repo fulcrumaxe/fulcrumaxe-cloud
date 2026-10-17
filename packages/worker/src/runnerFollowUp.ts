@@ -189,6 +189,9 @@ export function createFollowUpPorts(deps: FollowUpPortsDeps): FollowUpPorts {
 
     async failWorkItem({ accountId, workItemId, runId, reason }) {
       const out = await deps.buildFailed(accountId, workItemId, runId, workItemCodeFor(reason));
+      // A refusal here includes `waiting_on_answer` (an open ask on the newest executor run). That cannot be reached in practice: a parent whose
+      // follow-up allowance is exhausted ended in failure, and the decision step reads only a `succeeded` run, so no ask sits on it. If it ever
+      // did, throwing is right: the sweeper retries once the person has answered or the ask has been withdrawn.
       if (out.status === "refused") throw new Error("follow-up: the work item's failure was refused");
       // `unchanged` with a stage is a work item that is no longer in progress (the driver wrote the same failure first, or a person closed it).
       // `unchanged` with no stage is a write that never happened: a code the driver does not know, or an item that is gone.

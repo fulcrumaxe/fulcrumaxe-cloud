@@ -430,6 +430,7 @@ export interface Operations {
     response: {
       stage: string;
       halted: boolean;
+      waiting_on_answer: boolean;
       repo: ({
         owner: string;
         name: string;

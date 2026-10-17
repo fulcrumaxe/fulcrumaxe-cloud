@@ -11,6 +11,7 @@ import { createStartAdvance } from "./advance";
 import { createReviewDeps } from "./advanceReview";
 import { createFollow, createHooksPort } from "./hooks";
 import type { AdvanceWorker } from "./advanceSteps";
+import type { DecisionWorker } from "./advanceStageSteps";
 import type { ReviewWorker } from "./advanceReviewSteps";
 import type { LightPublishWorker } from "./advanceLightSteps";
 import type { RespecPublishWorker } from "./advanceRespecSteps";
@@ -51,7 +52,7 @@ export type InvariantSweepWorker = InvariantSweeper;
 export type StageResumeSweepWorker = Pick<Worker, "sweepParkedStages">;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 
