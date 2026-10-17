@@ -11,11 +11,11 @@
  * Exit codes: 0 plan written; 1 the plan was written (or could not be) because of a refusal of a pack the
  * caller named, or EMPTY-SELECTION; 2 usage, manifest or target errors.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPacks, ManifestError, TIERS, type Pack, type Tier } from "./manifest.js";
-import { GithubError, syncIssues } from "./issues.js";
+import { failingPackIds, GithubError, postTeamLog, syncIssues, wantsTeamLog } from "./issues.js";
 import { LAST_TESTED_OUTCOMES, LastTestedError, readLastTested, recordLastTested, type LastTestedOutcome } from "./last-tested.js";
 import { MASK_FILE_ENV, MaskError, MaskRegistry } from "./mask.js";
 import { BYPASS_ENV, readHostProbe, type HostProbe, type NeedsContext } from "./needs.js";
@@ -222,13 +222,13 @@ function flagMap(argv: string[], allowed: readonly string[]): Record<string, str
 }
 
 /**
- * `live-e2e issues --results <results.json> --repo <owner/name> [--run-url <url>]`: opens, comments on or closes
+ * `live-e2e issues --results <results.json> --repo <owner/name> [--run-url <url>] [--tier t] [--summary file]`: opens, comments on or closes
  * the one issue per failing pack (see issues.ts). The token is read from GITHUB_TOKEN; the API address from
  * GITHUB_API_URL (set by Actions), default https://api.github.com. Exit 0 done, 1 GitHub refused or was
  * unreachable, 2 usage.
  */
 async function issuesCommand(argv: string[], io: Io): Promise<number> {
-  const flags = flagMap(argv, ["--results", "--repo", "--run-url"]);
+  const flags = flagMap(argv, ["--results", "--repo", "--run-url", "--tier", "--summary"]);
   const token = io.env["GITHUB_TOKEN"];
   if (flags === null || flags["--results"] === undefined || flags["--repo"] === undefined || token === undefined || token === "") {
     io.stderr("usage: live-e2e issues --results <file> --repo <owner/name> [--run-url <url>]   (GITHUB_TOKEN in the environment)");
@@ -249,6 +249,26 @@ async function issuesCommand(argv: string[], io: Io): Promise<number> {
       scrub: { registry, env: io.env },
     });
     for (const a of actions) io.stdout(`issues: ${a.pack} ${a.action}${a.number !== undefined ? ` #${a.number}` : ""}`);
+    // An unattended run with a failing pack leaves one scrubbed line in the team log (a dispatch does not).
+    const failing = failingPackIds(results);
+    if (wantsTeamLog(results.trigger, failing)) {
+      const summaryFile = flags["--summary"] ?? io.env["GITHUB_STEP_SUMMARY"];
+      const posted = await postTeamLog(
+        { target: results.target, tier: flags["--tier"] ?? "unknown", trigger: results.trigger as string, packs: failing, runUrl: flags["--run-url"] },
+        {
+          repo: flags["--repo"],
+          token,
+          ...(api !== undefined && api !== "" ? { apiBase: api } : {}),
+          ...(io.githubCa !== undefined ? { ca: io.githubCa } : {}),
+          scrub: { registry, env: io.env },
+          ...(io.now !== undefined ? { now: io.now } : {}),
+          summary: (line) => {
+            if (summaryFile) appendFileSync(summaryFile, `${line}\n\n`);
+          },
+        },
+      );
+      io.stdout(`team-log: ${posted.where}${posted.number !== undefined ? ` #${posted.number}` : ""}`);
+    }
     return 0;
   } catch (err) {
     // Only our own messages: they carry a status and a route, never a response body or the token.

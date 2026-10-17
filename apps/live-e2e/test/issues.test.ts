@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ghError, type GhReply, type GhRequest } from "../../../packages/github/test/helpers/strictGithub.js";
 import { startStrictGithubServer, type LocalTlsServer } from "../../../packages/github/test/helpers/localTlsServer.js";
 import { main } from "../src/cli.js";
-import { GithubError, syncIssues, type IssueOptions } from "../src/issues.js";
+import { GithubError, postTeamLog, syncIssues, teamLogLine, wantsTeamLog, type IssueOptions } from "../src/issues.js";
 import { buildResults, issueTitle, type PackResult } from "../src/report.js";
 
 const TOKEN = "test-bearer-not-a-real-credential-0001";
@@ -215,7 +215,81 @@ describe("cli: live-e2e issues", () => {
       stdout: (l) => out.push(l),
       stderr: (l) => err.push(l),
     });
-    expect({ code, out, err }).toEqual({ code: 0, out: ["issues: platform created #1"], err: [] });
+    // No team-log issue exists in this fake, so the nightly failure's line goes to the summary (none given here) and the step still succeeds.
+    expect({ code, out, err }).toEqual({ code: 0, out: ["issues: platform created #1", "team-log: summary"], err: [] });
+  });
+
+  async function runIssuesCli(fake: FakeGithub, res: ReturnType<typeof results>, extra: string[] = []) {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const opts = await start(fake);
+    const dir = mkdtempSync(join(tmpdir(), "le2e-issues-"));
+    writeFileSync(join(dir, "results.json"), JSON.stringify(res));
+    const out: string[] = [];
+    const code = await main(["issues", "--results", "results.json", "--repo", REPO, "--run-url", "https://example.test/run/7", "--tier", "standard", ...extra], {
+      root: dir,
+      cwd: dir,
+      env: { GITHUB_TOKEN: TOKEN, GITHUB_API_URL: opts.apiBase },
+      host: { loadavg1: 0, memAvailableKb: 1e9 } as never,
+      githubCa: opts.ca as string,
+      now: () => Date.UTC(2026, 9, 16, 3, 7),
+      stdout: (l) => out.push(l),
+      stderr: () => undefined,
+    });
+    return { code, out, dir };
+  }
+
+  it("a failing nightly leaves one line in the open team-log issue: target, tier, trigger, failing pack ids, run URL", async () => {
+    const fake = new FakeGithub();
+    const log = fake.seed({ title: "Team log", labels: ["team-log"] });
+    const { code, out } = await runIssuesCli(fake, results("staging", [pack("platform", "FAIL", "boom"), pack("auth", "FAIL", "x"), pack("ok", "PASS"), pack("skipped", "SKIPPED-NEED")]));
+    expect(code).toBe(0);
+    expect(out).toContain("team-log: issue #1");
+    expect(log.comments).toEqual(["[03:07] live-e2e: red target=staging tier=standard trigger=nightly packs=auth,platform run=https://example.test/run/7"]);
+    // The line is the only thing the failure messages never reach.
+    expect(log.comments[0]).not.toContain("boom");
+    expect(server?.seen.every((r) => r.headers["user-agent"] === "live-e2e")).toBe(true);
+  });
+
+  it("a green run, a dispatch and a run with only skips leave no line", async () => {
+    for (const [trigger, packs] of [
+      ["nightly", [pack("a", "PASS")]],
+      ["dispatch", [pack("a", "FAIL", "x")]],
+      ["nightly", [pack("a", "SKIPPED-NEED"), pack("b", "FLAKY")]],
+    ] as const) {
+      const fake = new FakeGithub();
+      const log = fake.seed({ title: "Team log", labels: ["team-log"] });
+      const res = buildResults({ target: "staging", trigger, commit: null, started_at: "2026-10-08T00:00:00Z", finished_at: "2026-10-08T00:01:00Z", packs: [...packs] });
+      const { code, out } = await runIssuesCli(fake, res);
+      expect(code).toBe(0);
+      expect(out.some((l) => l.startsWith("team-log"))).toBe(false);
+      expect(log.comments).toEqual([]);
+      await server?.close();
+      server = undefined;
+    }
+  });
+
+  it("with no team-log issue the line goes to the job summary and the step does not fail", async () => {
+    const fake = new FakeGithub();
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const summary = `${mkdtempSync(`${tmpdir()}/le2e-sum-`)}/summary.md`;
+    const { code, out } = await runIssuesCli(fake, results("staging", [pack("platform", "FAIL", "boom")]), ["--summary", summary]);
+    const { readFileSync } = await import("node:fs");
+    expect(code).toBe(0);
+    expect(out).toContain("team-log: summary");
+    expect(readFileSync(summary, "utf8")).toContain("live-e2e: red target=staging tier=standard trigger=nightly packs=platform run=https://example.test/run/7");
+    // The only writes are the pack's own issue: nothing was posted as a team-log comment.
+    expect(fake.issues.flatMap((i) => i.comments)).toEqual([]);
+  });
+
+  it("a pull request labelled team-log is not a log", async () => {
+    const fake = new FakeGithub();
+    const pr = fake.seed({ title: "Team log", labels: ["team-log"], pull_request: {} });
+    const { out } = await runIssuesCli(fake, results("staging", [pack("platform", "FAIL", "boom")]));
+    expect(out).toContain("team-log: summary");
+    expect(pr.comments).toEqual([]);
   });
 
   it("is a usage error without a token", async () => {
@@ -223,5 +297,48 @@ describe("cli: live-e2e issues", () => {
     const code = await main(["issues", "--results", "r.json", "--repo", REPO], { root: ".", cwd: ".", env: {}, host: {} as never, stdout: () => undefined, stderr: (l) => err.push(l) });
     expect(code).toBe(2);
     expect(err[0]).toContain("usage");
+  });
+});
+
+describe("team-log line: nothing secret, and only what the spec fixes", () => {
+  const at = new Date(Date.UTC(2026, 9, 16, 3, 7));
+  const base = { target: "staging", tier: "smoke", trigger: "poll", packs: ["platform"], runUrl: "https://example.test/run/1" };
+
+  it("a secret planted in a pack id and in the run URL is in neither the line nor any request", async () => {
+    const fake = new FakeGithub();
+    const log = fake.seed({ title: "Team log", labels: ["team-log"] });
+    const opts = await start(fake);
+    const where = await postTeamLog({ ...base, packs: ["platform", SECRET], runUrl: `https://example.test/run/${SECRET}` }, { ...opts, now: () => at.getTime() });
+    expect(where).toEqual({ where: "issue", number: log.number });
+    expect(log.comments).toHaveLength(1);
+    expect(log.comments[0]).toContain("platform");
+    expect(log.comments[0]).not.toContain(SECRET);
+    expect(JSON.stringify(server?.seen)).not.toContain(SECRET);
+  });
+
+  it("a field that is not a plain word never reaches the line (a newline cannot start a second line)", () => {
+    const line = teamLogLine({ ...base, target: "staging\n[00:00] forged", packs: ["a b", "ok-pack"], runUrl: "javascript:alert(1)" }, {}, at);
+    expect(line).toBe("[03:07] live-e2e: red target=? tier=smoke trigger=poll packs=?,ok-pack");
+  });
+
+  it("an API refusal on the log falls back to the summary and does not throw", async () => {
+    const fake = new FakeGithub();
+    fake.seed({ title: "Team log", labels: ["team-log"] });
+    const opts = await start(fake);
+    const lines: string[] = [];
+    const where = await postTeamLog(base, { ...opts, token: "wrong-bearer-not-a-real-credential-0002", summary: (l) => lines.push(l) });
+    expect(where.where).toBe("summary");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("live-e2e: red");
+  });
+
+  it("wantsTeamLog: only unattended triggers with something failing", () => {
+    expect(wantsTeamLog("nightly", ["a"])).toBe(true);
+    expect(wantsTeamLog("deploy", ["a"])).toBe(true);
+    expect(wantsTeamLog("poll", ["a"])).toBe(true);
+    expect(wantsTeamLog("weekly", ["a"])).toBe(true);
+    expect(wantsTeamLog("dispatch", ["a"])).toBe(false);
+    expect(wantsTeamLog("nightly", [])).toBe(false);
+    expect(wantsTeamLog(null, ["a"])).toBe(false);
   });
 });

@@ -254,3 +254,96 @@ export async function syncStoreIssue(
   }
   return { pack, action: "none", ...(existing !== undefined ? { number: existing.number } : {}) };
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The team-log line (T2c, G4)
+
+export const TEAM_LOG_LABEL = "team-log";
+/** Runs that post a team-log line: the unattended ones. An owner dispatch is watched by the person who started it. */
+export const TEAM_LOG_TRIGGERS = ["deploy", "poll", "nightly", "weekly", "keepalive"] as const;
+const PLAIN_WORD = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const PLAIN_PACK = /^[a-z0-9][a-z0-9:_-]{0,79}$/;
+
+export interface TeamLogEvent {
+  target: string;
+  /** `smoke`, `standard`, `full`, or `none` for the session keep-alive. */
+  tier: string;
+  trigger: string;
+  /** Failing pack ids, or `session:<role>` for a lapse. */
+  packs: string[];
+  runUrl?: string | undefined;
+}
+
+/** True when this run should leave a line: an unattended trigger with something to report. */
+export const wantsTeamLog = (trigger: string | null | undefined, packs: readonly string[]): boolean =>
+  trigger !== null && trigger !== undefined && (TEAM_LOG_TRIGGERS as readonly string[]).includes(trigger) && packs.length > 0;
+
+/** The pack ids of a run that need a line: the failed ones (a skip, a flaky pass and a refusal are not). */
+export const failingPackIds = (results: Results): string[] => results.packs.filter(isFailure).map((p) => p.id);
+
+function plain(value: string, pattern: RegExp): string {
+  return pattern.test(value) ? value : "?";
+}
+
+function plainUrl(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" && !/\s/.test(value) ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One line, in the team log's own format: `[HH:MM] live-e2e: ...`. Every field is checked to be a plain word (a pack id,
+ * a target, a URL) before it goes in, so nothing free-form such as a failure message reaches the line at all; then the
+ * whole line goes through the same scrub as every other artifact. If the scrub still finds a secret, the pack ids and
+ * run link are dropped and only the outcome is said.
+ */
+export function teamLogLine(ev: TeamLogEvent, scrub: ScrubContext, at: Date): string {
+  const hhmm = `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")}`;
+  const head = `[${hhmm}] live-e2e: red`;
+  const fields = [`target=${plain(ev.target, PLAIN_WORD)}`, `tier=${plain(ev.tier, PLAIN_WORD)}`, `trigger=${plain(ev.trigger, PLAIN_WORD)}`];
+  const packs = ev.packs.map((p) => plain(p, PLAIN_PACK)).join(",");
+  const url = plainUrl(ev.runUrl);
+  const full = `${head} ${[...fields, `packs=${packs}`, ...(url !== undefined ? [`run=${url}`] : [])].join(" ")}`;
+  try {
+    return scrubbedText(full, scrub);
+  } catch {
+    return `${head} ${fields.join(" ")} (pack ids and run link left out: they still looked like a secret after redaction)`;
+  }
+}
+
+export interface TeamLogOptions extends Pick<IssueOptions, "repo" | "token" | "apiBase" | "ca" | "scrub"> {
+  now?: () => number;
+  /** Where the fallback line goes (the job summary). Called with the line only. */
+  summary?: (line: string) => void;
+}
+
+export interface TeamLogResult {
+  where: "issue" | "summary";
+  number?: number;
+}
+
+/**
+ * Posts the line as a comment on the open `team-log` issue. With no such issue, or when GitHub refuses the call,
+ * the line goes to the job summary instead and nothing throws: a missing log must never turn a red run into a broken
+ * workflow step.
+ */
+export async function postTeamLog(ev: TeamLogEvent, opts: TeamLogOptions): Promise<TeamLogResult> {
+  if (!REPO_PATTERN.test(opts.repo)) throw new GithubError("repo must be owner/name", 0);
+  const line = teamLogLine(ev, opts.scrub, new Date((opts.now ?? Date.now)()));
+  try {
+    const rows = (await request(opts, "GET", `/repos/${opts.repo}/issues?labels=${TEAM_LOG_LABEL}&state=open&per_page=30`)) as IssueRow[];
+    const log = rows.filter((r) => r.pull_request === undefined).sort((a, b) => a.number - b.number)[0];
+    if (log !== undefined) {
+      await request(opts, "POST", `/repos/${opts.repo}/issues/${log.number}/comments`, { body: line });
+      return { where: "issue", number: log.number };
+    }
+  } catch (err) {
+    if (!(err instanceof GithubError)) throw err;
+  }
+  opts.summary?.(`No open team-log issue could be written to; the line is here instead: ${line}`);
+  return { where: "summary" };
+}
