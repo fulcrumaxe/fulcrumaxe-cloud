@@ -118,6 +118,12 @@ const PR_GRACE_POLLS = 9;
 /** Reviewer runs: how often they are read, and how long a review may take before the driver cancels it and counts it as a fail. */
 const REVIEW_POLL_MS = 30_000;
 const REVIEW_WAIT_MS = 45 * 60_000;
+/** D#598 P7b: how often a round that met unfinished CI or repo-wide guards asks again, and how long it waits before the driver stops (`ci_wait_timeout`). */
+const CI_POLL_MS = 60_000;
+/** After the first ten minutes the round asks every two minutes: a long wait costs about half the GitHub calls. */
+const CI_POLL_SLOW_MS = 120_000;
+const CI_POLL_FAST_FOR_MS = 10 * 60_000;
+const CI_WAIT_MS = 120 * 60_000;
 /**
  * A bound on review rounds in one workflow, so no path loops. The real bound is the fix-round limit (from the plan data), enforced by
  * the round decision; this one must exceed it (a test pins MAX_REVIEW_ROUNDS >= the fix-round limit + 2): the rounds, one more
@@ -1069,6 +1075,25 @@ async function awaitVerifiedQuiet(args: AdvanceStartArgs, ctx: ReviewCtx, first:
 }
 
 /**
+ * D#598 P7b: records a round's verdicts once the head's CI and repo-wide guards have finished. The recording step itself refuses (`ci_pending`, nothing
+ * written) while they run; this only asks again every minute. After two hours the answer is `ci_wait_timeout`, which stops the item for a person.
+ */
+async function recordWhenCiSettled(args: AdvanceStartArgs, input: Parameters<typeof advanceRecordRoundStep>[4]): Promise<RoundOut> {
+  let round = await advanceRecordRoundStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
+  for (let waited = 0; round.decision === "ci_pending" && waited < CI_WAIT_MS; ) {
+    const pause = waited < CI_POLL_FAST_FOR_MS ? CI_POLL_MS : CI_POLL_SLOW_MS;
+    await sleep(pause);
+    waited += pause;
+    round = await advanceRecordRoundStep(args.accountId, args.userId, args.workItemId, args.haltEpoch, input);
+  }
+  if (round.decision === "ci_pending") {
+    await advanceLogStep("advance.ci_wait_timeout", { work_item_id: args.workItemId, pr: input.prNumber, head: input.headSha.slice(0, 12) });
+    return { ...round, decision: "ci_wait_timeout" };
+  }
+  return round;
+}
+
+/**
  * The review of an open pull request: reviewers on the head, all verdicts gathered, then recorded; the merge gate when
  * everyone passed; a fix round (a RESUME of the build's session) when someone asked for changes; then the review again on
  * the new head. See the file header for every way it stops.
@@ -1142,7 +1167,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     }
 
     // Every verdict is in: record them, passes first and non-passes last, in ONE step.
-    const round = await advanceRecordRoundStep(accountId, userId, workItemId, args.haltEpoch, {
+    const round = await recordWhenCiSettled(args, {
       headSha: pr.headSha,
       prNumber: pr.number,
       // The debater is required only once it has been started: it runs after everyone else passed, so a needs-fix from
@@ -1155,6 +1180,8 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
 
     if (round.decision === "halted") return haltedEnd(args, "review");
+    // D#598 P7b: the head moved while the round waited for CI (a push to the pull request): nothing was recorded; review the new head.
+    if (round.decision === "head_moved") continue;
     if (round.decision === "all_passed") {
       const gate = await advanceMergeGateStep(accountId, userId, workItemId, args.haltEpoch, pr.number);
       await advanceLogStep("advance.merge_gate", { work_item_id: workItemId, pr: pr.number, outcome: gate.outcome, reasons: gate.reasons.join(","), status: gate.status });

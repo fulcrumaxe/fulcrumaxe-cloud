@@ -1,5 +1,5 @@
 import type { AdvanceReviewDeps } from "@fx/worker";
-import { createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type VerdictRole } from "@fx/pipeline";
+import { createCiGate, createPgLocalReviewOptIn, debaterEnabledFor, loadReviewContext, recordRound, resumeAgentRun, runMergeGateForItem, type GatheredVerdict, type GitHubHttp, type VerdictRole } from "@fx/pipeline";
 import { openInstallationHttp } from "./github/installationHttp";
 import { openForRepo } from "./github/localOnlyHttp";
 
@@ -10,6 +10,8 @@ import { openForRepo } from "./github/localOnlyHttp";
  *
  *  - load: the review context as plain data, with the repo's debater setting folded into one boolean.
  *  - recordRound: every verdict of a head recorded, passes first (the worker has already checked the roles and verdict words).
+ *    D#598 P7b: only once the head's CI and repo-wide guards have finished; until then it answers `ci_pending` and records nothing,
+ *    for every repository alike (nothing here looks at whose repository it is).
  *  - resume: the pipeline's `resumeAgentRun` (same sandbox, same session).
  *  - mergeGate: the pipeline's merge gate over the real GitHub port, with a `merge_gate` token. A failure to read GitHub is
  *    an answer (`error`), not a throw, so the driver can record it and stop instead of retrying a step that cannot succeed.
@@ -23,15 +25,21 @@ export function createReviewDeps(open: typeof openInstallationHttp = openInstall
       return { ok: true, ctx: { workItemId: c.workItemId, stage: c.stage, repoId: c.repoId, owner: c.owner, name: c.name, issue: c.issue, tier: c.tier, specVersion: c.specVersion, fixRoundsStarted: c.fixRoundsStarted, debaterEnabled: debaterEnabledFor(c.debaterMode, c.tier) } };
     },
     recordRound: (pool, registry, input) =>
-      recordRound(pool, registry, {
-        accountId: input.accountId,
-        workItemId: input.workItemId,
-        headSha: input.headSha,
-        prNumber: input.prNumber,
-        ...(input.round !== undefined ? { round: input.round } : {}),
-        requiredRoles: input.requiredRoles as VerdictRole[],
-        verdicts: input.verdicts as GatheredVerdict[],
-      }),
+      recordRound(
+        pool,
+        registry,
+        {
+          accountId: input.accountId,
+          workItemId: input.workItemId,
+          headSha: input.headSha,
+          prNumber: input.prNumber,
+          ...(input.round !== undefined ? { round: input.round } : {}),
+          requiredRoles: input.requiredRoles as VerdictRole[],
+          verdicts: input.verdicts as GatheredVerdict[],
+        },
+        // D#598 P7b: the head's CI is read with the merge gate's token purpose (check runs, statuses, branch protection) and, for a runner_local repo, its fence.
+        createCiGate({ pool, openHttp: (c) => openForRepo(open, c.executionMode, "merge_gate", { repoId: c.repoId, owner: c.owner, name: c.name }) as Promise<GitHubHttp> }),
+      ),
     resume: (pool, registry, input) => resumeAgentRun(pool, registry, input),
     async mergeGate(pool, input) {
       const loaded = await loadReviewContext(pool, input.accountId, input.workItemId);

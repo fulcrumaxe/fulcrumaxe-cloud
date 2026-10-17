@@ -3,11 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   loadReviewContext: vi.fn(),
   runMergeGateForItem: vi.fn(),
+  recordRound: vi.fn(),
+  createCiGate: vi.fn(),
 }));
 vi.mock("@fx/pipeline", async (original) => ({
   ...(await original<typeof import("@fx/pipeline")>()),
   loadReviewContext: mocks.loadReviewContext,
   runMergeGateForItem: mocks.runMergeGateForItem,
+  recordRound: mocks.recordRound,
+  createCiGate: mocks.createCiGate,
 }));
 
 import { createReviewDeps } from "../lib/advanceReview";
@@ -97,5 +101,41 @@ describe("the review stage's context load", () => {
     // The worker hands this object on as the step's context; the workflow's load step turns it into the round the prompt gets.
     const body = await reviewLoadBody({ advanceLoadReview: async () => ({ ok: true, ctx: loaded.ctx }) } as never, { accountId: ACCOUNT, workItemId: ITEM } as never, 3);
     expect(body.ok && body.fixRoundsStarted).toBe(2);
+  });
+});
+
+describe("D#598 P7b: recording a round is behind the CI wait", () => {
+  const input = { accountId: ACCOUNT, workItemId: ITEM, headSha: "a".repeat(40), prNumber: 7, requiredRoles: ["code-reviewer"], verdicts: [] };
+  beforeEach(() => {
+    mocks.recordRound.mockReset();
+    mocks.createCiGate.mockReset();
+    mocks.recordRound.mockResolvedValue({ decision: "ci_pending", round: 0, recorded: [] });
+    mocks.createCiGate.mockImplementation((d: unknown) => ({ gate: true, d }));
+  });
+
+  it("never records without a gate: the pipeline's recordRound is always given one, built over the item's pool", async () => {
+    const { pool } = fakePool(false);
+    await createReviewDeps(async () => ({}) as never).recordRound(pool, {} as never, input);
+    expect(mocks.recordRound).toHaveBeenCalledTimes(1);
+    const gate = mocks.recordRound.mock.calls[0]![3] as { gate: boolean; d: { pool: unknown } };
+    expect(gate.gate).toBe(true);
+    expect(gate.d.pool).toBe(pool);
+  });
+
+  it("the gate reads CI with the merge gate's token purpose, plain for a sandbox repo and fenced (GraphQL allowed) for a runner_local one", async () => {
+    const plain = { request: vi.fn(async () => ({ status: 200, body: {} })) };
+    const open = vi.fn(async () => plain as never);
+    const { pool } = fakePool(false);
+    await createReviewDeps(open).recordRound(pool, {} as never, input);
+    const d = (mocks.recordRound.mock.calls[0]![3] as { d: { openHttp: (c: { repoId: string; owner: string; name: string; executionMode: string }) => Promise<unknown> } }).d;
+    await d.openHttp({ repoId: REPO, owner: "acme", name: "widgets", executionMode: "sandbox" });
+    expect(open).toHaveBeenLastCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets" });
+    await d.openHttp({ repoId: REPO, owner: "acme", name: "widgets", executionMode: "runner_local" });
+    expect(open).toHaveBeenLastCalledWith("merge_gate", { repoId: REPO, owner: "acme", name: "widgets", allowGraphql: true });
+  });
+
+  it("the pending answer reaches the workflow unchanged", async () => {
+    const { pool } = fakePool(false);
+    expect(await createReviewDeps(async () => ({}) as never).recordRound(pool, {} as never, input)).toMatchObject({ decision: "ci_pending", recorded: [] });
   });
 });

@@ -7,7 +7,7 @@ import { readRecordedRunnerPullRequest } from "@fx/runner";
 import { createGitHubMergeGatePort, isLocalGitHubHttp, type GitHubHttp } from "../build/githubMergePort.js";
 import { gateReviewerReasons, loadRunsOnSha, runMergeGate, RUNNER_ADMIN_OK_SQL, SHA_PATTERN, type MergeBlockReason, type ReviewMode } from "../build/mergeGate.js";
 import { listChangedFiles, listChangedFilesLocal, postReviewStatus } from "./githubReads.js";
-import { loadReviewContext } from "./context.js";
+import { loadReviewContext, type ReviewContext } from "./context.js";
 import { reviewPlanFor } from "./reviewPlan.js";
 import { securityTriggers } from "./securityTrigger.js";
 
@@ -76,25 +76,17 @@ async function reviewerFlaggedSecurity(pool: Pool, accountId: string, workItemId
   });
 }
 
-export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
+/**
+ * The GitHub port the review stage reads through, for one item's pull request: the merge gate's port, over the injected transport. For a
+ * `runner_local` repo it is built on the local-only client and the run's recorded branch (D#6 R3c), and a transport that is not the local-only
+ * one is refused before a call. The merge gate and the CI wait (ciWait.ts) both use it, so they read the same way.
+ */
+export function createReviewGitHubPort(deps: { pool: Pool; http: GitHubHttp }, ctx: ReviewContext, ids: MergeGateRunInput) {
   const { pool, http } = deps;
-  const { accountId, workItemId, prNumber } = input;
-  const loaded = await loadReviewContext(pool, accountId, workItemId);
-  if (!loaded.ok) return { outcome: "refused", reason: loaded.reason };
-  const ctx = loaded.ctx;
-  // D#6 R3b: how this repo's reviews are judged. Only a runner_local repo with the admin's opt-in on is "on"; a failed read is off.
-  let reviewMode: ReviewMode = "cloud";
-  if (ctx.executionMode === "runner_local") {
-    const optedIn = await (deps.localReviewOptIn ?? localReviewOptInOff).enabled({ accountId, repoId: ctx.repoId }).then((v) => v === true, () => false);
-    reviewMode = optedIn ? "runner_local_on" : "runner_local_off";
-  }
-  const debaterEnabled = ctx.debaterMode === "always" || ctx.debaterMode === "feature_critical";
-
-  const pr = { repoId: ctx.repoId, prNumber };
-  // D#6 R3c: a runner_local repo's whole review and merge path goes through the local-only client. Anything else refuses before a call.
+  const { accountId, workItemId, prNumber } = ids;
   const localHttp = ctx.executionMode === "runner_local" ? http : null;
   if (localHttp !== null && !isLocalGitHubHttp(localHttp)) throw new Error("merge gate: a runner_local repo needs the local-only GitHub client");
-  const port = createGitHubMergeGatePort({
+  return createGitHubMergeGatePort({
     http,
     ...(localHttp !== null && isLocalGitHubHttp(localHttp)
       ? {
@@ -114,6 +106,26 @@ export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; 
     markReadyForHumanMerge: async () => undefined,
     mergeMethod: "squash",
   });
+}
+
+export async function runMergeGateForItem(deps: { pool: Pool; http: GitHubHttp; localReviewOptIn?: LocalReviewOptInPort }, input: MergeGateRunInput): Promise<MergeGateRunResult> {
+  const { pool, http } = deps;
+  const { accountId, workItemId, prNumber } = input;
+  const loaded = await loadReviewContext(pool, accountId, workItemId);
+  if (!loaded.ok) return { outcome: "refused", reason: loaded.reason };
+  const ctx = loaded.ctx;
+  // D#6 R3b: how this repo's reviews are judged. Only a runner_local repo with the admin's opt-in on is "on"; a failed read is off.
+  let reviewMode: ReviewMode = "cloud";
+  if (ctx.executionMode === "runner_local") {
+    const optedIn = await (deps.localReviewOptIn ?? localReviewOptInOff).enabled({ accountId, repoId: ctx.repoId }).then((v) => v === true, () => false);
+    reviewMode = optedIn ? "runner_local_on" : "runner_local_off";
+  }
+  const debaterEnabled = ctx.debaterMode === "always" || ctx.debaterMode === "feature_critical";
+
+  const pr = { repoId: ctx.repoId, prNumber };
+  // D#6 R3c: a runner_local repo's whole review and merge path goes through the local-only client. Anything else refuses before a call.
+  const localHttp = ctx.executionMode === "runner_local" ? http : null;
+  const port = createReviewGitHubPort({ pool, http }, ctx, { accountId, workItemId, prNumber });
 
   // 1. The head the gate will bind to.
   const head = await port.getPullRequest(pr);

@@ -558,6 +558,47 @@ describe("what happens after the verdicts are recorded", () => {
     expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "not_started_acceptance_tester" }));
   });
 
+  // D#598 P7b: the recording step answers `ci_pending` (and records nothing) while the head's CI or a repo-wide guard runs; the workflow asks again every minute.
+  it("CI still running: the round is asked again after each minute, the reviewers are not started twice, and the gate waits for the settled answer", async () => {
+    const t = setup(fresh({ rounds: [{ decision: "ci_pending" }, { decision: "ci_pending" }, { decision: "ci_pending" }, { decision: "all_passed", round: 0 }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "merged" });
+    expect(world.sleeps).toBe(3);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(4);
+    // Every ask carries the same head and the same gathered verdicts (the runs are not repeated).
+    const asks = t.worker.advanceRecordRound.mock.calls.map((c) => c[1]);
+    expect(new Set(asks.map((a) => JSON.stringify(a))).size).toBe(1);
+    expect(rolesOf(t.started)).toEqual(["code-reviewer", "acceptance-tester"]);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("CI that never settles: after two hours the driver stops for a person (ci_wait_timeout), records the stop, and never asks the merge gate", async () => {
+    const t = setup(fresh({ rounds: [{ decision: "ci_pending" }] }));
+    expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "ci_wait_timeout" });
+    // One-minute asks for the first ten minutes, two-minute asks after that, up to the two-hour cap.
+    expect(world.sleeps).toBe(10 + (120 - 10) / 2);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(10 + (120 - 10) / 2 + 1);
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.worker.advanceRecordEvent).toHaveBeenCalledWith(WHO, expect.objectContaining({ kind: "stopped", code: "ci_wait_timeout" }));
+    expect(events()).toContain("advance.ci_wait_timeout");
+  });
+
+  // Fix round 1 on #325: on a runner_local repo the CI read follows the PR's last commit, so a push during the review answers head_moved.
+  it("the head moved while the round waited for CI: nothing is waited for, no timeout, and the new head is reviewed (one re-review)", async () => {
+    const w = fresh({ rounds: [{ decision: "ci_pending" }, { decision: "head_moved" }, { decision: "all_passed", round: 0 }] });
+    const t = setup(w);
+    const moved = vi.spyOn(w, "head", "get");
+    moved.mockReturnValueOnce(H1).mockReturnValue(H2);
+    expect(await workItemAdvanceWorkflow(ARGS)).toMatchObject({ status: "merged" });
+    // The old head was reviewed once, the new head once; the wait was one minute, not two hours.
+    expect(t.started.map((s) => s.headSha)).toEqual([H1, H1, H2, H2]);
+    expect(world.sleeps).toBe(1);
+    expect(t.worker.advanceRecordRound).toHaveBeenCalledTimes(3);
+    expect(t.worker.advanceMergeGate).toHaveBeenCalledTimes(1);
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(events()).not.toContain("advance.ci_wait_timeout");
+  });
+
   it("a reviewer's fail stops the driver: no fix round, no gate", async () => {
     const t = setup(fresh({ rounds: [{ decision: "reviewer_fail" }] }));
     expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "needs_human", detail: "reviewer_fail" });
