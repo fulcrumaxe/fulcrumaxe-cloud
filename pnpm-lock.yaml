@@ -956,6 +956,9 @@ importers:
 
   packages/pipeline:
     dependencies:
+      '@fulcrumaxe/runner-protocol':
+        specifier: workspace:*
+        version: link:../runner-protocol
       '@fx/core':
         specifier: workspace:*
         version: link:../core
