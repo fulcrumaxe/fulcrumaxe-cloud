@@ -246,64 +246,251 @@ async function press(page: Page, locator: ReturnType<typeof tid>) {
   if (test.info().project.name === "phone") await locator.tap();
   else await locator.click();
 }
-const groupBadge = (page: Page, scope: "repo" | "item") => page.locator(`${WIN} [data-testid="mem-group"][data-scope="${scope}"] [data-testid="mem-badge"]`).first();
+/** The batch dialog is a modal <dialog> on the document body, outside the window. */
+const gid = (page: Page, id: string) => page.locator(`[data-testid="${id}"]`);
+const cardOf = (page: Page, id: string) => page.locator(`${WIN} [data-card="${id}"]`);
+const scopeOf = (page: Page, label: string) => page.locator(`${WIN} [data-testid="mem-queue-scope"][aria-label="${label}"]`);
 
-test.describe("D#601 MEM-4a3: Memory app, all memory (mocked routes)", () => {
-  test("states: loading, then the groups, the rows and the badges; no null or undefined text anywhere", async ({ page }) => {
-    const { errors, tt } = await setup(page, (m) => (m.delayMs = 400));
+test.describe("D#601 MEM-4a3: Memory app (mocked routes)", () => {
+  test("states: loading, then the queue, the lists and the badges; no null or undefined text anywhere", async ({ page }) => {
+    const { mock, errors, tt } = await setup(page, (m) => (m.delayMs = 400));
     await expect(tid(page, "mem-status")).toHaveText("Loading memory…");
-    await expect(tid(page, "mem-row")).toHaveCount(8);
+    await expect(tid(page, "mem-card")).toHaveCount(5);
     await expect(tid(page, "mem-status")).toBeHidden();
+    expect(mock.requests.some((r) => r.startsWith("GET /api/v1/memory/queue"))).toBe(true);
     const text = await page.locator(WIN).innerText();
     expect(text).not.toMatch(/\bnull\b|\bundefined\b|NaN/);
     expect(errors).toEqual([]);
     expect(await tt()).toEqual([]);
   });
 
-  test("states: nothing yet is words, not a blank", async ({ page }) => {
+  test("states: nothing yet is words, not a blank; an empty queue says so", async ({ page }) => {
     await setup(page, (m) => {
       m.cards = [];
       m.rows = [];
     });
+    await expect(tid(page, "mem-queue-state")).toHaveText("Nothing is waiting for review.");
     await expect(tid(page, "mem-group-empty").first()).toHaveText("No memory here yet.");
     expect(await page.locator(WIN).innerText()).not.toMatch(/\bnull\b|\bundefined\b/);
   });
 
-  test("states: an unavailable list says so and Try again recovers", async ({ page }) => {
-    const { mock } = await setup(page, (m) => (m.listStatus = 500));
+  test("states: an unavailable list and queue say so and Try again recovers", async ({ page }) => {
+    const { mock } = await setup(page, (m) => {
+      m.listStatus = 500;
+      m.queueStatus = 500;
+    });
     await expect(tid(page, "mem-status")).toHaveText("Memory isn't available right now.");
+    await expect(tid(page, "mem-queue-state")).toHaveText("Memory isn't available right now.");
     mock.listStatus = 200;
+    mock.queueStatus = 200;
     await press(page, tid(page, "mem-retry"));
-    await expect(tid(page, "mem-row")).toHaveCount(8);
+    await expect(tid(page, "mem-card")).toHaveCount(5);
     expect(await page.locator(WIN).innerText()).not.toContain("Memory isn't available");
   });
 
   test("states: a counts failure says the count is unavailable, never a number made up", async ({ page }) => {
     await setup(page, (m) => (m.countsStatus = 500));
-    await expect(groupBadge(page, "repo")).toHaveText("Count unavailable");
+    await expect(scopeOf(page, REPO_NAME).locator('[data-testid="mem-badge"]')).toHaveText("Count unavailable");
   });
 
-  test("Acceptance 5 (headers): the badge on the repo header and on the item equals the pending count from the route, and follows it after a decision and a reload", async ({ page }) => {
+  test("Acceptance 5: the badge on the repo header and on the item equals the pending count from the route, before and after a decision and a reload", async ({ page }) => {
     const { mock } = await setup(page);
-    const badges = async () => ({ repo: await groupBadge(page, "repo").getAttribute("data-count"), item: await groupBadge(page, "item").getAttribute("data-count") });
-    await expect(tid(page, "mem-row")).toHaveCount(8);
-    expect({ repo: repoCards(mock).length, item: itemCards(mock).length }).toEqual({ repo: 4, item: 1 });
-    expect(await badges()).toEqual({ repo: "4", item: "1" });
-    await expect(groupBadge(page, "repo")).toHaveText("4 waiting");
-    // a decision is made elsewhere (the review queue): after a reload the badge is the route's new number
-    mock.cards = mock.cards.filter((c) => c.id !== uuid(3));
+    const countsNow = () => ({ repo: repoCards(mock).length, item: itemCards(mock).length });
+    const badges = async () => ({
+      queueRepo: await scopeOf(page, REPO_NAME).locator('[data-testid="mem-badge"]').getAttribute("data-count"),
+      queueItem: await scopeOf(page, ITEM_LABEL).locator('[data-testid="mem-badge"]').getAttribute("data-count"),
+      listRepo: await page.locator(`${WIN} [data-testid="mem-group"][data-scope="repo"] [data-testid="mem-badge"]`).first().getAttribute("data-count"),
+      listItem: await page.locator(`${WIN} [data-testid="mem-group"][data-scope="item"] [data-testid="mem-badge"]`).first().getAttribute("data-count"),
+    });
+    await expect(tid(page, "mem-card")).toHaveCount(5);
+    let c = countsNow();
+    expect(c).toEqual({ repo: 4, item: 1 });
+    expect(await badges()).toEqual({ queueRepo: "4", queueItem: "1", listRepo: "4", listItem: "1" });
+    await scopeOf(page, REPO_NAME).locator('[data-testid="mem-approve"]').first().click();
+    await expect(tid(page, "mem-card")).toHaveCount(4);
+    c = countsNow();
+    expect(await badges()).toEqual({ queueRepo: String(c.repo), queueItem: String(c.item), listRepo: String(c.repo), listItem: String(c.item) });
+    expect(c.repo).toBe(3);
+    // after a reload of the whole page the badges are the route's number again
     await page.reload();
     await waitForDesktop(page);
     await openMemory(page);
-    await expect(tid(page, "mem-row")).toHaveCount(7);
-    expect(await badges()).toEqual({ repo: "3", item: "1" });
+    await expect(tid(page, "mem-card")).toHaveCount(4);
+    expect(await badges()).toEqual({ queueRepo: "3", queueItem: "1", listRepo: "3", listItem: "1" });
     const counts = mock.requests.filter((r) => r.startsWith("GET /api/v1/memory/pending-counts"));
-    expect(counts.length).toBeGreaterThan(1);
+    expect(counts.length).toBeGreaterThan(0);
     expect(counts.at(-1)).toContain(`repo_ids=${REPO_ID}`);
-    expect(counts.at(-1)).toContain(`item_ids=${ITEM_ID}`);
   });
 
-  test("Acceptance 3 (rows): status is text plus an icon on every row, and axe finds no serious or critical violation", async ({ page }) => {
+  test("Approve, Reject: one call each, the card leaves the queue, focus moves to the next card, and a reload keeps the result", async ({ page }) => {
+    const { mock } = await setup(page);
+    await expect(tid(page, "mem-card")).toHaveCount(5);
+    const first = cardOf(page, uuid(3));
+    await press(page, first.locator('[data-testid="mem-approve"]'));
+    await expect(cardOf(page, uuid(3))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(3)}/decide {"to":"approved"}`);
+    await expect(cardOf(page, uuid(4))).toBeFocused();
+    await press(page, cardOf(page, uuid(4)).locator('[data-testid="mem-reject"]'));
+    await expect(cardOf(page, uuid(4))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(4)}/decide {"to":"rejected"}`);
+    await page.reload();
+    await waitForDesktop(page);
+    await openMemory(page);
+    await expect(tid(page, "mem-card")).toHaveCount(3);
+    await expect(cardOf(page, uuid(3))).toHaveCount(0);
+  });
+
+  test("Acceptance 1: A, E and R act on the focused card and focus moves to the next; the dialog returns focus", async ({ page }) => {
+    test.skip(test.info().project.name === "phone", "keyboard shortcuts need a hardware keyboard");
+    const { mock } = await setup(page);
+    await expect(tid(page, "mem-card")).toHaveCount(5);
+    await cardOf(page, uuid(3)).focus();
+    await page.keyboard.press("a");
+    await expect(cardOf(page, uuid(3))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(3)}/decide {"to":"approved"}`);
+    await expect(cardOf(page, uuid(4))).toBeFocused();
+    await page.keyboard.press("r");
+    await expect(cardOf(page, uuid(4))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(4)}/decide {"to":"rejected"}`);
+    await expect(cardOf(page, uuid(5))).toBeFocused();
+    await page.keyboard.press("e");
+    await expect(tid(page, "mem-editor")).toBeVisible();
+    await expect(tid(page, "mem-edit-body")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(tid(page, "mem-editor")).toHaveCount(0);
+    await expect(cardOf(page, uuid(5))).toBeFocused();
+    // typing in the editor does not trigger a shortcut
+    await page.keyboard.press("e");
+    await page.keyboard.type("arar");
+    await expect(tid(page, "mem-edit-body")).toHaveValue(/^arar/);
+    expect(mock.requests.filter((r) => r.includes("/decide"))).toHaveLength(2);
+    await page.keyboard.press("Escape");
+
+    // the batch dialog returns focus to the button that opened it
+    await cardOf(page, uuid(1)).focus();
+    await page.keyboard.press("a"); // the first key on a card nobody opened opens it
+    await expect(cardOf(page, uuid(1))).toHaveAttribute("data-open-state", "opened");
+    await cardOf(page, uuid(2)).focus();
+    await page.keyboard.press("a");
+    await expect(cardOf(page, uuid(2))).toHaveAttribute("data-open-state", "opened");
+    const approveAll = tid(page, "mem-batch-approve").first();
+    await expect(approveAll).toHaveText("Approve all 2");
+    await approveAll.focus();
+    await page.keyboard.press("Enter");
+    await expect(gid(page, "mem-batch-dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(gid(page, "mem-batch-dialog")).toHaveCount(0);
+    await expect(approveAll).toBeFocused();
+  });
+
+  test("Edit then approve: the edit is saved as a new version, then that new version is approved; Escape and Cancel leave nothing behind", async ({ page }) => {
+    const { mock } = await setup(page);
+    const card = cardOf(page, uuid(4));
+    await press(page, card.locator('[data-testid="mem-edit"]'));
+    await expect(tid(page, "mem-edit-body")).toHaveValue("Use the staging database for live checks");
+    await press(page, tid(page, "mem-edit-cancel"));
+    await expect(tid(page, "mem-editor")).toHaveCount(0);
+    expect(mock.requests.filter((r) => r.includes("/edit"))).toEqual([]);
+    await press(page, card.locator('[data-testid="mem-edit"]'));
+    await tid(page, "mem-edit-body").fill("Use the staging database for live checks, never production");
+    await tid(page, "mem-edit-why").fill("Production is read only");
+    await press(page, tid(page, "mem-edit-approve"));
+    await expect(cardOf(page, uuid(4))).toHaveCount(0);
+    const edit = mock.requests.findIndex((r) => r.startsWith(`POST /api/v1/memory/${uuid(4)}/edit `));
+    expect(edit).toBeGreaterThan(-1);
+    expect(mock.requests[edit]).toContain('"body":"Use the staging database for live checks, never production"');
+    expect(mock.requests[edit]).toContain('"why":"Production is read only"');
+    // the approve is on the id the edit answered with, and comes after it
+    expect(mock.requests[edit + 1]).toBe(`POST /api/v1/memory/${uuid(100)}/decide {"to":"approved"}`);
+  });
+
+  test("Acceptance 4: editing an agent proposal still shows 'Proposed by agent (run <id>)'", async ({ page }) => {
+    await setup(page);
+    const card = cardOf(page, uuid(3));
+    await expect(card.locator('[data-testid="mem-card-proposed-by"]')).toHaveText("Proposed by agent (run run-77)");
+    await press(page, card.locator('[data-testid="mem-edit"]'));
+    await tid(page, "mem-edit-body").fill("The retry test is flaky on the first run of the day");
+    await press(page, tid(page, "mem-edit-save"));
+    const edited = cardOf(page, uuid(100));
+    await expect(edited).toBeVisible();
+    await expect(edited.locator('[data-testid="mem-card-body"]')).toHaveText("The retry test is flaky on the first run of the day");
+    await expect(edited.locator('[data-testid="mem-card-proposed-by"]')).toHaveText("Proposed by agent (run run-77)");
+  });
+
+  test("Edit: a text over the limit is refused on the screen before any call, and a secret the server refuses is a visible sentence", async ({ page }) => {
+    const { mock } = await setup(page);
+    await press(page, cardOf(page, uuid(3)).locator('[data-testid="mem-edit"]'));
+    await tid(page, "mem-edit-body").fill("x".repeat(1025));
+    await press(page, tid(page, "mem-edit-save"));
+    await expect(tid(page, "mem-edit-error")).toContainText("at most 1024 bytes");
+    expect(mock.requests.filter((r) => r.includes("/edit"))).toEqual([]);
+    mock.editError = { status: 422, code: "secret_detected" };
+    await tid(page, "mem-edit-body").fill("a perfectly fine memory");
+    await press(page, tid(page, "mem-edit-save"));
+    await expect(cardOf(page, uuid(3)).locator('[data-testid="mem-card-error"]')).toContainText("looks like it holds a credential");
+    await expect(cardOf(page, uuid(3))).toHaveCount(1); // nothing changed
+  });
+
+  test("Acceptance 2: the batch button for imported cards is disabled with 'Open each card first (2 left)' and enabled when none is left; forced, the server's must_open_first is shown", async ({ page }) => {
+    const { mock } = await setup(page);
+    const bar = (source: string) => page.locator(`${WIN} [data-testid="mem-batch"][data-source="${source}"]`);
+    const approve = bar("Imported from CLAUDE.md").locator('[data-testid="mem-batch-approve"]');
+    await expect(approve).toHaveText("Open each card first (2 left)");
+    await expect(approve).toBeDisabled();
+    // a card nobody opened shows its title only, with its state as text
+    await expect(cardOf(page, uuid(1)).locator('[data-testid="mem-open-state"]')).toHaveText(/Not opened yet/);
+    await expect(cardOf(page, uuid(1)).locator('[data-testid="mem-card-body"]')).toHaveCount(0);
+    await press(page, cardOf(page, uuid(1)).locator('[data-testid="mem-open"]'));
+    await expect(approve).toHaveText("Open each card first (1 left)");
+    await expect(cardOf(page, uuid(1)).locator('[data-testid="mem-open-state"]')).toHaveText(/Opened/);
+    await expect(cardOf(page, uuid(1)).locator('[data-testid="mem-card-body"]')).toHaveText("The build needs Node 24");
+    expect(mock.requests).toContain(`POST /api/v1/memory/${uuid(1)}/open`);
+    await press(page, cardOf(page, uuid(2)).locator('[data-testid="mem-open"]'));
+    await expect(approve).toHaveText("Approve all 2");
+    await expect(approve).toBeEnabled();
+
+    // a stale screen: the server still says an imported card was not opened. The screen shows the server's sentence and changes nothing.
+    mock.batchError = { status: 422, code: "must_open_first", message: "2 of these cards have not been opened yet; open each one first" };
+    await press(page, approve);
+    await expect(gid(page, "mem-batch-dialog")).toBeVisible();
+    await expect(gid(page, "mem-batch-dialog")).toContainText("Approve 2 cards from Imported from CLAUDE.md?");
+    await press(page, gid(page, "mem-batch-confirm"));
+    await expect(gid(page, "mem-batch-error")).toHaveText("2 of these cards have not been opened yet; open each one first");
+    await expect(tid(page, "mem-card")).toHaveCount(5);
+    mock.batchError = null;
+    await press(page, gid(page, "mem-batch-confirm"));
+    await expect(gid(page, "mem-batch-dialog")).toHaveCount(0);
+    await expect(cardOf(page, uuid(1))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/decide-batch {"ids":["${uuid(1)}","${uuid(2)}"],"to":"approved"}`);
+  });
+
+  test("a batch is one source: the agent cards have their own batch, which needs no open record, and the dialog names the count and the source", async ({ page }) => {
+    const { mock } = await setup(page);
+    const agentBar = page.locator(`${WIN} [data-testid="mem-batch"][data-source="Proposed by an agent"]`);
+    await expect(agentBar).toContainText("2 cards");
+    await expect(agentBar.locator('[data-testid="mem-batch-reject"]')).toHaveText("Reject all 2");
+    await press(page, agentBar.locator('[data-testid="mem-batch-reject"]'));
+    await expect(gid(page, "mem-batch-dialog")).toContainText("Reject 2 cards from Proposed by an agent?");
+    await press(page, gid(page, "mem-batch-cancel"));
+    await expect(gid(page, "mem-batch-dialog")).toHaveCount(0);
+    await expect(agentBar.locator('[data-testid="mem-batch-reject"]')).toBeFocused();
+    expect(mock.requests.filter((r) => r.includes("decide-batch"))).toEqual([]);
+    await press(page, agentBar.locator('[data-testid="mem-batch-reject"]'));
+    await press(page, gid(page, "mem-batch-confirm"));
+    await expect(cardOf(page, uuid(3))).toHaveCount(0);
+    expect(mock.requests).toContain(`POST /api/v1/memory/decide-batch {"ids":["${uuid(3)}","${uuid(4)}"],"to":"rejected"}`);
+  });
+
+  test("a refusal of a single decision is a sentence on the card, and the card stays", async ({ page }) => {
+    const { mock } = await setup(page);
+    await page.route((u) => u.pathname === `/api/v1/memory/${uuid(3)}/decide`, (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "forbidden", message: "server text that must never be shown", request_id: "r" } }) }));
+    await press(page, cardOf(page, uuid(3)).locator('[data-testid="mem-approve"]'));
+    await expect(cardOf(page, uuid(3)).locator('[data-testid="mem-card-error"]')).toHaveText("Only an owner or admin can do that for this memory.");
+    await expect(cardOf(page, uuid(3))).toHaveCount(1);
+    expect(mock.cards.some((c) => c.id === uuid(3))).toBe(true);
+  });
+
+  test("Acceptance 3: status is text plus an icon on every row, and axe finds no serious or critical violation", async ({ page }) => {
     await setup(page);
     const statuses = tid(page, "mem-row-status");
     await expect(statuses.first()).toBeVisible();
@@ -314,6 +501,43 @@ test.describe("D#601 MEM-4a3: Memory app, all memory (mocked routes)", () => {
     }
     const res = await new AxeBuilder({ page }).include(WIN).exclude(`${WIN} .window-titlebar`).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
     expect(res.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
+    // the open dialog and an open editor too
+    await press(page, cardOf(page, uuid(3)).locator('[data-testid="mem-edit"]'));
+    const editing = await new AxeBuilder({ page }).include(WIN).exclude(`${WIN} .window-titlebar`).analyze();
+    expect(editing.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
+    await page.keyboard.press("Escape");
+    await expect(tid(page, "mem-editor")).toHaveCount(0);
+    // the open batch dialog, which sits on the document body outside the window
+    const agentBar = page.locator(`${WIN} [data-testid="mem-batch"][data-source="Proposed by an agent"]`);
+    await press(page, agentBar.locator('[data-testid="mem-batch-reject"]'));
+    await expect(gid(page, "mem-batch-dialog")).toBeVisible();
+    const dialogRes = await new AxeBuilder({ page }).include('[data-testid="mem-batch-dialog"]').withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).analyze();
+    expect(dialogRes.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
+    await press(page, gid(page, "mem-batch-cancel"));
+    await expect(gid(page, "mem-batch-dialog")).toHaveCount(0);
+  });
+
+  test("a memory body that holds markup is shown as text: no element is created from it and nothing runs", async ({ page }) => {
+    const payload = "<img src=x onerror=alert(1)>";
+    let alerted = false;
+    page.on("dialog", (d) => {
+      alerted = true;
+      void d.dismiss();
+    });
+    const { errors } = await setup(page, (m) => {
+      m.cards.push({ id: uuid(6), scope: "repo", author: "agent", body: payload });
+    });
+    const body = cardOf(page, uuid(6)).locator('[data-testid="mem-card-body"]');
+    await expect(body).toHaveText(payload);
+    await expect(page.locator(`${WIN} img`)).toHaveCount(0);
+    await expect(body.locator("*")).toHaveCount(0);
+    // an edit opens the same words in a field, still not markup
+    await press(page, cardOf(page, uuid(6)).locator('[data-testid="mem-edit"]'));
+    await expect(tid(page, "mem-edit-body")).toHaveValue(payload);
+    await expect(page.locator(`${WIN} img`)).toHaveCount(0);
+    await page.waitForTimeout(300); // an onerror handler would fire on the next task, so give it that
+    expect(alerted).toBe(false);
+    expect(errors).toEqual([]);
   });
 
   test("Acceptance 6: 'Used in N runs' shows 0 when none, goes straight to a single run's page, and lists several", async ({ page }) => {
@@ -349,5 +573,4 @@ test.describe("D#601 MEM-4a3: Memory app, all memory (mocked routes)", () => {
     await tid(page, "mem-filter-status").selectOption("approved");
     await expect.poll(() => mock.requests.some((r) => r === "GET /api/v1/memory?kind=command&status=approved")).toBe(true);
   });
-
 });
