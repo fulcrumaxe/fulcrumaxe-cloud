@@ -528,19 +528,20 @@ export type RecordRefreshResult =
  */
 export async function recordHeadRefresh(
   client: Queryable,
-  input: { accountId: string; entryId: string; holder: string; fromSha: string; toSha: string; baseSha: string },
+  input: { accountId: string; entryId: string; holder: string; fromSha: string; toSha: string; baseSha: string; filesOverlap?: boolean },
 ): Promise<RecordRefreshResult> {
   assertSha(input.fromSha);
   assertSha(input.toSha);
   assertSha(input.baseSha);
   const { rows } = await client.query<{ id: string }>(
-    `INSERT INTO head_refreshes (account_id, repo_id, work_item_id, entry_id, from_sha, to_sha, base_sha)
-     SELECT e.account_id, e.repo_id, e.work_item_id, e.id, $3, $4, $5
+    `INSERT INTO head_refreshes (account_id, repo_id, work_item_id, entry_id, from_sha, to_sha, base_sha, files_overlap)
+     SELECT e.account_id, e.repo_id, e.work_item_id, e.id, $3, $4, $5, $7
        FROM merge_queue_entries e
       WHERE e.account_id = $1 AND e.id = $2 AND e.state = 'in_flight' AND e.slot_holder = $6
      ON CONFLICT (account_id, entry_id, to_sha) DO NOTHING
      RETURNING id`,
-    [input.accountId, input.entryId, input.fromSha, input.toSha, input.baseSha, input.holder],
+    // No answer reads as overlapping: a row nobody classified carries nothing (migration 0862).
+    [input.accountId, input.entryId, input.fromSha, input.toSha, input.baseSha, input.holder, input.filesOverlap ?? true],
   );
   if (rows.length === 0) {
     const current = await getEntry(client, input.accountId, input.entryId);
@@ -555,6 +556,52 @@ export async function recordHeadRefresh(
   );
   if (!entry) throw new MergeQueueError("bad_input");
   return { recorded: true, entry };
+}
+
+export interface HeadRefreshRow {
+  fromSha: string;
+  toSha: string;
+  baseSha: string;
+  filesOverlap: boolean;
+}
+
+/** The refreshes recorded for one entry, oldest first. */
+export async function listHeadRefreshes(client: Queryable, accountId: string, entryId: string): Promise<HeadRefreshRow[]> {
+  const { rows } = await client.query<{ from_sha: string; to_sha: string; base_sha: string; files_overlap: boolean }>(
+    `SELECT from_sha, to_sha, base_sha, files_overlap FROM head_refreshes WHERE account_id = $1 AND entry_id = $2 ORDER BY created_at, id`,
+    [accountId, entryId],
+  );
+  return rows.map((r) => ({ fromSha: r.from_sha, toSha: r.to_sha, baseSha: r.base_sha, filesOverlap: r.files_overlap }));
+}
+
+/**
+ * D#519 MQ3-a: the entry's record that the step asked GitHub to update the branch from `fromSha` (null clears it). Written BEFORE the
+ * update-branch call, by the slot holder; read by a later step to decide whether a head it did not leave behind can be our own refresh
+ * that finished after a crash. A head nobody asked for is never treated as one. False when the caller no longer holds the slot.
+ */
+export async function markRefreshRequested(client: Queryable, input: { accountId: string; entryId: string; holder: string; fromSha: string | null }): Promise<boolean> {
+  if (input.fromSha !== null) assertSha(input.fromSha);
+  const { rows } = await client.query<{ id: string }>(
+    `UPDATE merge_queue_entries SET refresh_requested_from = $4
+      WHERE account_id = $1 AND id = $2 AND state = 'in_flight' AND slot_holder = $3
+      RETURNING id`,
+    [input.accountId, input.entryId, input.holder, input.fromSha],
+  );
+  return rows.length === 1;
+}
+
+/** The head the last recorded update-branch request was made from, or null. */
+export async function readRefreshRequested(client: Queryable, accountId: string, entryId: string): Promise<string | null> {
+  const { rows } = await client.query<{ refresh_requested_from: string | null }>(
+    `SELECT refresh_requested_from FROM merge_queue_entries WHERE account_id = $1 AND id = $2`,
+    [accountId, entryId],
+  );
+  return rows[0]?.refresh_requested_from ?? null;
+}
+
+/** Notes the run a round started on an entry that is already `awaiting_work` (the run is started after the slot is released). */
+export async function attachWorkRun(client: Queryable, input: { accountId: string; entryId: string; runId: string }): Promise<MergeQueueEntry | null> {
+  return one(client, `UPDATE merge_queue_entries SET work_run_id = $3 WHERE account_id = $1 AND id = $2 AND state = 'awaiting_work' RETURNING ${COLUMNS}`, [input.accountId, input.entryId, input.runId]);
 }
 
 // ---- plan write-back entries (D#598 P5b, migration 0825) -------------------------------------------------------------------------

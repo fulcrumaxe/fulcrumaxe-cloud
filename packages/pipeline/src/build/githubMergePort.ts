@@ -14,6 +14,7 @@ import {
   type UpdateBranchOutcome,
   type RequiredAppCheck,
 } from "./mergeGate.js";
+import { readCleanMerge, type CleanMergeReading } from "./treeMerge.js";
 import type { PullRequestRef } from "./types.js";
 
 /**
@@ -128,7 +129,34 @@ function segment(s: string): string {
   return s.split("/").map(encodeURIComponent).join("/");
 }
 
-export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort {
+/**
+ * D#519 MQ3-a: one commit as GitHub reports it, structured fields only. `authorLogin` is the GitHub account the commit's AUTHOR
+ * resolves to (`author.login`; null when it resolves to none), `verified` is GitHub's own signature verdict for the commit
+ * (`commit.verification.verified`). `files` are the paths the commit changed against its FIRST parent (a rename lists both names), or
+ * `null` when the list is cut at GitHub's cap (`filesTruncated`), in which case the set is unknown.
+ */
+export interface CommitInfo {
+  sha: string;
+  parents: readonly string[];
+  authorLogin: string | null;
+  committerLogin: string | null;
+  verified: boolean;
+  verificationReason: string | null;
+  files: readonly string[] | null;
+  filesTruncated: boolean;
+}
+
+/** D#519 MQ3-a: the one read the refresh verification adds to the merge port. Kept apart so `MergeGateGitHubPort` is unchanged. */
+export interface CommitReaderPort {
+  getCommit(pr: PullRequestRef, sha: string): Promise<CommitInfo>;
+  /**
+   * Whether `head`'s tree is exactly the clean three-way merge of `from` and `other` over their unique merge base (see `treeMerge.ts`).
+   * Any read that fails, a truncated tree or a non-unique merge base answers `clean: false`; only a transport failure throws.
+   */
+  checkCleanMerge(pr: PullRequestRef, args: { from: string; other: string; head: string }): Promise<CleanMergeReading>;
+}
+
+export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateGitHubPort & CommitReaderPort {
   async function repoPath(pr: PullRequestRef): Promise<string> {
     if (!Number.isSafeInteger(pr.prNumber) || pr.prNumber <= 0) throw new Error("invalid PR number");
     const { owner, name } = await deps.resolveRepo(pr.repoId);
@@ -580,6 +608,43 @@ export function createGitHubMergeGatePort(deps: GitHubMergePortDeps): MergeGateG
         if (params.strict_required_status_checks_policy) return true;
       }
       return false;
+    },
+
+    async getCommit(pr, sha): Promise<CommitInfo> {
+      if (deps.local) throw new Error(`GitHub get commit: ${LOCAL_REFUSED}`);
+      if (!SHA_PATTERN.test(sha)) throw new Error("getCommit: malformed SHA");
+      const body = await okBody(await get(`${await repoPath(pr)}/commits/${sha}`), "get commit");
+      if (body.sha !== sha) bad("commit.sha");
+      if (!Array.isArray(body.parents)) bad("commit.parents");
+      const parents = body.parents.map((p) => {
+        if (!isObj(p) || typeof p.sha !== "string" || !SHA_PATTERN.test(p.sha)) bad("commit.parents.sha");
+        return p.sha;
+      });
+      if (body.author !== null && !isObj(body.author)) bad("commit.author");
+      const authorLogin = body.author === null ? null : typeof body.author.login === "string" ? body.author.login : null;
+      if (body.committer !== null && !isObj(body.committer)) bad("commit.committer");
+      const committerLogin = body.committer === null ? null : typeof body.committer.login === "string" ? body.committer.login : null;
+      const verification = isObj(body.commit) && isObj(body.commit.verification) ? body.commit.verification : null;
+      if (verification === null || typeof verification.verified !== "boolean") bad("commit.verification.verified");
+      if (!Array.isArray(body.files)) bad("commit.files");
+      const files = new Set<string>();
+      for (const f of body.files) {
+        if (!isObj(f) || typeof f.filename !== "string") bad("commit.files.filename");
+        if (f.previous_filename !== undefined && typeof f.previous_filename !== "string") bad("commit.files.previous_filename");
+        files.add(f.filename);
+        if (typeof f.previous_filename === "string") files.add(f.previous_filename);
+      }
+      // At the cap the list may be cut short: withheld, so it cannot be mistaken for a complete set.
+      const truncated = body.files.length >= COMPARE_FILES_CAP;
+      const verificationReason = typeof verification.reason === "string" ? verification.reason : null;
+      return { sha, parents, authorLogin, committerLogin, verified: verification.verified, verificationReason, files: truncated ? null : [...files], filesTruncated: truncated };
+    },
+
+    async checkCleanMerge(pr, args): Promise<CleanMergeReading> {
+      if (deps.local) throw new Error(`GitHub tree check: ${LOCAL_REFUSED}`);
+      for (const sha of [args.from, args.other, args.head]) if (!SHA_PATTERN.test(sha)) throw new Error("checkCleanMerge: malformed SHA");
+      const { owner, name } = await deps.resolveRepo(pr.repoId);
+      return readCleanMerge(deps.http, { owner, name, ...args });
     },
 
     markReadyForHumanMerge: (pr, args) => deps.markReadyForHumanMerge(pr, args),
