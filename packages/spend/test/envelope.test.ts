@@ -287,7 +287,26 @@ describe('approval envelopes', () => {
 
     it('two writers racing to the same next version: one wins, the other gets version_conflict', async () => {
       const f = await fixture(10);
-      const results = await Promise.allSettled([1, 2].map(() => asPerson(f.accountId, f.userId, (c) => writeEnvelopeVersion(c, { accountId: f.accountId, envelopeId: f.envelopeId, scope: 'batch', amountUsd: 6 }))));
+      // The writers must both have read version 1 before either inserts version 2. Without that, one can finish before the other starts, and the
+      // second then legitimately writes version 3 (two successes, not a race). So each writer waits at its INSERT until both have reached it.
+      let arrived = 0;
+      let release!: () => void;
+      const both = new Promise<void>((resolve) => { release = resolve; });
+      const gated = (c: PoolClient): PoolClient =>
+        new Proxy(c, {
+          get(target, prop, receiver) {
+            if (prop !== 'query') return Reflect.get(target, prop, receiver);
+            return async (...args: unknown[]) => {
+              if (typeof args[0] === 'string' && args[0].includes('INSERT INTO approval_envelopes')) {
+                arrived += 1;
+                if (arrived === 2) release();
+                await both;
+              }
+              return (target.query as (...a: unknown[]) => unknown)(...args);
+            };
+          },
+        });
+      const results = await Promise.allSettled([1, 2].map(() => asPerson(f.accountId, f.userId, (c) => writeEnvelopeVersion(gated(c), { accountId: f.accountId, envelopeId: f.envelopeId, scope: 'batch', amountUsd: 6 }))));
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect(results.filter((r) => r.status === 'rejected' && (r.reason as EnvelopeWriteError).code === 'version_conflict')).toHaveLength(1);
     });
