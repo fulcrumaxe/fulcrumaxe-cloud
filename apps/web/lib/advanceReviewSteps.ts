@@ -268,6 +268,8 @@ export interface ReviewerOutcome {
   verdict: string;
   /** The code reviewer asked for a security review (the JSON boolean true). */
   securityNeeded: boolean;
+  /** D#598 P7d: the reviewer says it could not run the tests (the JSON boolean true). */
+  environmentFailure: boolean;
   /** The run is `pending` on a runner (a queued runner run): the workflow credits that wait to the pending ceiling, not to the work budget. */
   queuedOnRunner: boolean;
   /** The end of the follow-up chain that starts at the run asked about (D#6 R2b-3, C22 section 7): the id to cancel when the wait runs out. */
@@ -278,10 +280,10 @@ export interface ReviewerOutcome {
 
 /** How a reviewer run stands. The findings and the summary stay in the run: only the verdict word and the flag leave. */
 export async function reviewerOutcomeBody(worker: ReviewWorker | null, accountId: string, runId: string): Promise<ReviewerOutcome> {
-  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, queuedOnRunner: false, tailRunId: runId };
+  if (!worker) return { status: "missing", done: true, verdict: "fail", securityNeeded: false, environmentFailure: false, queuedOnRunner: false, tailRunId: runId };
   const out = await worker.advanceRunOutcome(accountId, runId);
   const v = readVerdict(out.status, out.envelope);
-  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
+  return { status: out.status, done: out.done, verdict: v.verdict, securityNeeded: v.securityNeeded, environmentFailure: v.environmentFailure, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason === "placement_changed" ? { failureReason: out.failureReason } : {}) };
 }
 
 export interface RoundOut {
@@ -297,6 +299,7 @@ export interface GatheredInput {
   role: string;
   runId: string;
   verdict: string;
+  environmentFailure?: boolean;
 }
 
 /** Every verdict of the head recorded in one step: passes first, non-passes last, then the decision. */

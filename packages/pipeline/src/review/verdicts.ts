@@ -31,6 +31,11 @@ export interface ReadVerdict {
   summary: string;
   /** The code reviewer asked for a security review. Only the JSON boolean `true` counts. */
   securityNeeded: boolean;
+  /**
+   * D#598 P7d: the reviewer says it could not run the tests (the test command would not start, or a tool it needs was refused).
+   * That is a fact about the environment, not a judgment of the code. Only the JSON boolean `true` counts.
+   */
+  environmentFailure: boolean;
 }
 
 /** The exact words only. `Pass`, ` pass`, `PASS`, `passed`, `ok`, 1 and true are all `fail`. */
@@ -45,11 +50,13 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
   const findingsRaw = env && Object.hasOwn(env, "findings") ? env.findings : undefined;
   const summaryRaw = env && Object.hasOwn(env, "summary") ? env.summary : undefined;
   const flag = env && Object.hasOwn(env, "security_review_needed") ? env.security_review_needed : undefined;
+  const envFlag = env && Object.hasOwn(env, "environment_failure") ? env.environment_failure : undefined;
   return {
     verdict: normalizeVerdict(raw),
     findings: Array.isArray(findingsRaw) ? findingsRaw.filter((f): f is string => typeof f === "string").slice(0, MAX_FINDINGS).map((f) => f.slice(0, MAX_FINDING_CHARS)) : [],
     summary: typeof summaryRaw === "string" ? summaryRaw.slice(0, MAX_SUMMARY_CHARS) : "",
     securityNeeded: flag === true,
+    environmentFailure: envFlag === true,
   };
 }
 
@@ -62,6 +69,8 @@ export interface GatheredVerdict {
   role: VerdictRole;
   runId: string;
   verdict: ReviewVerdict;
+  /** D#598 P7d: the reviewer could not run the tests. Absent is false. */
+  environmentFailure?: boolean;
   /** The debater only: which reviewer it debated (its needs-fix is recorded as that reviewer's). */
   debatedRole?: "code-reviewer" | "security-reviewer";
 }

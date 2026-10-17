@@ -269,6 +269,28 @@ describe("reviews on the pull request's exact head", () => {
     expect(out).toEqual({ status: "needs_human", detail: "reviewer_fail" });
     expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
   });
+
+  // D#598 P7d: a reviewer that could not run the tests says so with the JSON boolean true; the item stops for a person, no fix round starts.
+  it("a reviewer that could not run the tests is sent as an environment failure, and the item stops with no fix round and no merge", async () => {
+    const w = fresh({
+      verdict: (role) => ({ status: "succeeded", envelope: { verdict: role === "acceptance-tester" ? "fail" : "needs-fix", findings: [], summary: "pnpm: command not found", ...(role === "acceptance-tester" ? { environment_failure: true } : {}) } }),
+      rounds: [{ decision: "environment_failure" }],
+    });
+    const t = setup(w);
+    const out = await workItemAdvanceWorkflow(ARGS);
+    const byRole = Object.fromEntries(t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.map((v) => [v.role, v.environmentFailure]));
+    expect(byRole).toEqual({ "code-reviewer": undefined, "acceptance-tester": true });
+    expect(out).toEqual({ status: "needs_human", detail: "reviewer_environment" });
+    expect(t.worker.advanceStartFix).not.toHaveBeenCalled();
+    expect(t.worker.advanceMergeGate).not.toHaveBeenCalled();
+  });
+
+  it.each(["true", 1, "yes", { a: 1 }])("an environment_failure that is not the JSON boolean true (%j) is not sent", async (flag) => {
+    const w = fresh({ verdict: () => ({ status: "succeeded", envelope: { verdict: "fail", findings: [], summary: "", environment_failure: flag } }), rounds: [{ decision: "reviewer_fail" }] });
+    const t = setup(w);
+    await workItemAdvanceWorkflow(ARGS);
+    expect(t.worker.advanceRecordRound.mock.calls[0]![1].verdicts.every((v) => v.environmentFailure === undefined)).toBe(true);
+  });
 });
 
 describe("D#6 R5b-2a: a cloud-verified pull request is reviewed after its quiet period, on the customer's key", () => {

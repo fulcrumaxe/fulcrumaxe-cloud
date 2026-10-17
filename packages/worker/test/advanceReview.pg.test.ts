@@ -875,12 +875,21 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       ["a debated role that is not a reviewer", { verdicts: [{ role: "debater", runId: run1, verdict: "pass", debatedRole: "executor" }] }],
       ["five verdicts", { verdicts: Array.from({ length: 5 }, () => ({ role: "code-reviewer", runId: run1, verdict: "pass" })) }],
       ["a round outside 0..20", { round: 21 }],
+      ["an environment failure flag that is not a boolean", { verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", environmentFailure: "true" }] }],
     ])("%s is refused before the pipeline is asked", async (_n, over) => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);
       const rd = review();
       expect(await build({}, rd).module.advanceRecordRound(who(a, w), input(over))).toEqual({ decision: "refused", reason: "invalid_input" });
       expect(rd.recordRound).not.toHaveBeenCalled();
+    });
+
+    it("D#598 P7d: a boolean environment failure flag is handed to the pipeline as it is", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const rd = review();
+      await build({}, rd).module.advanceRecordRound(who(a, w), input({ verdicts: [{ role: "code-reviewer", runId: run1, verdict: "fail", environmentFailure: true }, { role: "acceptance-tester", runId: run2, verdict: "pass" }] }));
+      expect((rd.recordRound as ReturnType<typeof vi.fn>).mock.calls[0]![2].verdicts[0]).toMatchObject({ environmentFailure: true });
     });
 
     it("an external item is refused; without the dependencies it is unavailable", async () => {

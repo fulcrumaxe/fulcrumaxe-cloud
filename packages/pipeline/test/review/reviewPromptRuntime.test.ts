@@ -42,6 +42,11 @@ describe("buildReviewPrompt by runtime", () => {
     expect(buildReviewPrompt({ ...BASE, role: "debater", prior: PRIOR, runtime: "sandbox" })).toBe(golden("review-prompt.sandbox.debater-prior.txt"));
   });
 
+  it.each(ROLES)("D#598 P7d: the runner prompt for %s tells the reviewer how to report that the tests could not run, and the sandbox prompt is unchanged", (role) => {
+    expect(buildReviewPrompt({ ...BASE, role, runtime: "runner" })).toContain('set "environment_failure" to true');
+    expect(buildReviewPrompt({ ...BASE, role })).not.toContain("environment_failure");
+  });
+
   it.each(ROLES)("G7: the runner prompt for %s names none of the sandbox's git steps, the head sha and the three-dot diff from HEAD", (role) => {
     const p = buildReviewPrompt({ ...BASE, role, runtime: "runner", ...(role === "debater" ? { prior: PRIOR } : {}) });
     expect(noneOf(p)).toEqual([]);

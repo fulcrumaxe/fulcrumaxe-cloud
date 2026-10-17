@@ -49,6 +49,9 @@ describe("recordRound [pg]", () => {
     (await db.admin.query<{ to_stage: string; reviewer: string | null }>("SELECT to_stage, reviewer FROM work_item_transitions WHERE work_item_id = $1 AND to_stage IN ('changes_requested', 'review_passed') ORDER BY created_at, id", [workItemId])).rows;
   const events = (accountId: string, workItemId: string) => withTenant(db.runWriterPool, accountId, (c) => listDriverEvents(c, workItemId));
 
+  const gatherEnv = async (accountId: string, workItemId: string, spec: Array<[GatheredVerdict["role"], "pass" | "needs-fix" | "fail", boolean]>): Promise<GatheredVerdict[]> =>
+    Promise.all(spec.map(async ([role, verdict, environmentFailure]) => ({ role, verdict, runId: await reviewerRun(accountId, workItemId, role, verdict), ...(environmentFailure ? { environmentFailure } : {}) })));
+
   const gather = async (accountId: string, workItemId: string, spec: Array<[GatheredVerdict["role"], "pass" | "needs-fix" | "fail"]>): Promise<GatheredVerdict[]> =>
     Promise.all(spec.map(async ([role, verdict]) => ({ role, verdict, runId: await reviewerRun(accountId, workItemId, role, verdict) })));
 
@@ -118,6 +121,40 @@ describe("recordRound [pg]", () => {
     const verdicts = await gather(accountId, workItemId, [["code-reviewer", "needs-fix"], ["acceptance-tester", "pass"]]);
     const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
     expect(out).toMatchObject({ decision: "fix", round: 2, nextRound: 3 });
+    expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
+  });
+
+  // D#598 P7d. Two accounts, same input, no setting anywhere: the decision cannot depend on the account or its repo.
+  it.each([["first account"], ["second account"]])("a reviewer that could not run the tests (%s): an environment failure is recorded, no code verdict, no fix round", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const verdicts = await gatherEnv(accountId, workItemId, [["code-reviewer", "needs-fix", false], ["acceptance-tester", "fail", true]]);
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(out.decision).toBe("environment_failure");
+    expect(out.recorded).toEqual([]);
+    expect(out.nextRound).toBeUndefined();
+    // No verdict reached the stage: the item is where the pull request put it, and nothing says changes were requested or the review passed.
+    expect(await stageOf(accountId, workItemId)).toBe("pr_opened");
+    expect(await transitions(workItemId)).toEqual([]);
+    const ev = await events(accountId, workItemId);
+    expect(ev.filter((e) => e.kind === "fix_round_started")).toEqual([]);
+    expect(ev.filter((e) => e.kind === "review_verdicts")).toEqual([]);
+    expect(ev.filter((e) => e.kind === "escalated")).toEqual([]);
+    const stopped = ev.filter((e) => e.kind === "stopped");
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0]).toMatchObject({ code: "reviewer_environment", head_sha: HEAD, pr_number: 41, reasons: ["acceptance_tester"], run_id: verdicts[1]!.runId });
+    expect(await fixRoundsStarted(db.runWriterPool, accountId, workItemId)).toBe(0);
+    // A replay writes nothing twice.
+    const again = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(again.decision).toBe("environment_failure");
+    expect((await events(accountId, workItemId)).filter((e) => e.kind === "stopped")).toHaveLength(1);
+  });
+
+  it("a normal needs-fix without the flag still starts a fix round (P7d changes nothing for it)", async () => {
+    const { accountId, workItemId, registry } = await seed();
+    const verdicts = await gatherEnv(accountId, workItemId, [["code-reviewer", "pass", false], ["acceptance-tester", "needs-fix", false]]);
+    const out = await recordRound(db.runWriterPool, registry, { accountId, workItemId, headSha: HEAD, prNumber: 41, requiredRoles: REQUIRED, verdicts }, SETTLED);
+    expect(out.decision).toBe("fix");
+    expect(out.nextRound).toBe(1);
     expect(await stageOf(accountId, workItemId)).toBe("changes_requested");
   });
 

@@ -328,7 +328,7 @@ export async function advanceRecordRoundStep(
   userId: string,
   workItemId: string,
   haltEpoch: number,
-  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string }> },
+  input: { headSha: string; prNumber: number; requiredRoles: string[]; verdicts: Array<{ role: string; runId: string; verdict: string; environmentFailure?: boolean }> },
 ): Promise<RoundOut> {
   "use step";
   return recordRoundBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, input);
@@ -882,6 +882,7 @@ interface Verdict {
   runId: string;
   verdict: string;
   securityNeeded: boolean;
+  environmentFailure: boolean;
 }
 
 /** Waits for one reviewer run. A run still going when the wait ends is cancelled and counts as a fail (a review that could not finish is not a pass). */
@@ -913,9 +914,9 @@ async function waitForReviewer(accountId: string, userId: string, workItemId: st
   if (!out.done) {
     await advanceCancelStep(accountId, userId, workItemId, out.tailRunId);
     await advanceLogStep("advance.review_wait_timeout", { work_item_id: workItemId, run_id: runId, role });
-    return { role, runId, verdict: "fail", securityNeeded: false };
+    return { role, runId, verdict: "fail", securityNeeded: false, environmentFailure: false };
   }
-  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded };
+  return { role, runId, verdict: out.verdict, securityNeeded: out.securityNeeded, environmentFailure: out.environmentFailure };
 }
 
 /**
@@ -1202,7 +1203,7 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
       // another reviewer must start a fix round, not stop as "incomplete" for want of a debater verdict. (The merge gate
       // still demands its pass: it reads the full plan.)
       requiredRoles: plan.roles.filter((r) => (r !== "debater" || debaterRan) && !carried.some((c) => c.role === r)),
-      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict })),
+      verdicts: verdicts.map((v) => ({ role: v.role, runId: v.runId, verdict: v.verdict, ...(v.environmentFailure ? { environmentFailure: true } : {}) })),
     });
     again = null;
     await advanceLogStep("advance.reviewed", { work_item_id: workItemId, round: attempt, rereview, pr: pr.number, head: pr.headSha.slice(0, 12), decision: round.decision, recorded: round.recorded.join(",") });
@@ -1221,6 +1222,11 @@ async function reviewPhase(args: AdvanceStartArgs, pinned: number | null): Promi
     if (round.decision === "escalated") {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "max_fix_rounds" });
       return { status: "escalated", detail: "max_fix_rounds" };
+    }
+    if (round.decision === "environment_failure") {
+      // D#598 P7d: a reviewer could not run the tests. The worker recorded the fact; no verdict was recorded and no fix round starts.
+      await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_environment" });
+      return { status: "needs_human", detail: "reviewer_environment" };
     }
     if (round.decision === "reviewer_fail") {
       await advanceLogStep("advance.stopped", { work_item_id: workItemId, at: "review", reason: "reviewer_fail" });

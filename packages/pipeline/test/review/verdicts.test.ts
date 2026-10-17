@@ -14,10 +14,10 @@ describe("normalizeVerdict: only the exact words", () => {
 
 describe("readVerdict", () => {
   it("reads the verdict, findings, summary and flag of a succeeded run", () => {
-    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], summary: "s", securityNeeded: true });
+    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], summary: "s", securityNeeded: true, environmentFailure: false });
   });
   it.each(["failed", "timed_out", "cancelled", "killed_spend", "refused_spend", "running", "pending", "missing", "weird"])("a run that is %s has no verdict: fail, and no flag", (status) => {
-    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], summary: "", securityNeeded: false });
+    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], summary: "", securityNeeded: false, environmentFailure: false });
   });
   it("a missing or non-object envelope is a fail", () => {
     for (const env of [null, [] as unknown as Record<string, unknown>, "pass" as unknown as Record<string, unknown>]) expect(readVerdict("succeeded", env).verdict).toBe("fail");
@@ -28,6 +28,12 @@ describe("readVerdict", () => {
   });
   it.each(["true", 1, "yes", {}, [], null, "TRUE"])("the flag %j is not the JSON boolean true", (flag) => {
     expect(readVerdict("succeeded", { verdict: "pass", security_review_needed: flag }).securityNeeded).toBe(false);
+  });
+  it("D#598 P7d: environment_failure is read only as the JSON boolean true, from a run that succeeded", () => {
+    expect(readVerdict("succeeded", { verdict: "fail", environment_failure: true }).environmentFailure).toBe(true);
+    for (const flag of ["true", 1, "yes", {}, [], null, "TRUE", false]) expect(readVerdict("succeeded", { verdict: "fail", environment_failure: flag }).environmentFailure).toBe(false);
+    expect(readVerdict("failed", { verdict: "fail", environment_failure: true }).environmentFailure).toBe(false);
+    expect(readVerdict("succeeded", Object.create({ environment_failure: true }) as Record<string, unknown>).environmentFailure).toBe(false);
   });
   it("findings: strings only, at most 20, each cut to 600 characters; a non-array is none", () => {
     const r = readVerdict("succeeded", { verdict: "needs-fix", findings: [...Array.from({ length: 30 }, () => "x".repeat(900)), 7, null, { a: 1 }] });
@@ -89,6 +95,17 @@ describe("decideRound", () => {
   });
   it("two reviewers asking for changes on one head are ONE round", () => {
     expect(d([["code-reviewer", "needs-fix"], ["acceptance-tester", "needs-fix"]], 2)).toBe("fix");
+  });
+  it("D#598 P7d: a reviewer that could not run the tests is an environment_failure, whatever its word, and never a fix round (even beside a needs-fix or at the fix limit)", () => {
+    const e = (verdicts: Array<[string, string, boolean?]>, started = 0) =>
+      decideRound({ requiredRoles: REQ as never, verdicts: verdicts.map(([role, verdict, environmentFailure]) => ({ role: role as never, verdict, ...(environmentFailure ? { environmentFailure } : {}) })), fixRoundsStarted: started });
+    expect(e([["code-reviewer", "pass"], ["acceptance-tester", "fail", true]])).toBe("environment_failure");
+    expect(e([["code-reviewer", "pass"], ["acceptance-tester", "needs-fix", true]])).toBe("environment_failure");
+    expect(e([["code-reviewer", "needs-fix"], ["acceptance-tester", "fail", true]])).toBe("environment_failure");
+    expect(e([["code-reviewer", "pass"], ["acceptance-tester", "needs-fix", true]], maxFixRounds())).toBe("environment_failure");
+    // The same words without the flag keep their meaning: a needs-fix is a fix round, a fail is a reviewer fail.
+    expect(e([["code-reviewer", "pass"], ["acceptance-tester", "needs-fix"]])).toBe("fix");
+    expect(e([["code-reviewer", "pass"], ["acceptance-tester", "fail"]])).toBe("reviewer_fail");
   });
   it("the debater, when required, must pass too", () => {
     const req = [...REQ, "debater"];

@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
-import { recordDriverEvent } from "@fx/core/src/work-items/driverEvents.js";
+import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.js";
 import { checkFixRound, maxFixRounds } from "@fx/spend";
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { escalate } from "../build/fixLoop.js";
@@ -16,6 +16,8 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  *   reviewer_fail  a reviewer said `fail` (wrong approach, or it could not review): no fix round is worth starting. The
  *                item stays at Changes requested and the driver stops, with the stop recorded.
  *   incomplete   a required role has no verdict (it could not be started): nothing is decided, the driver stops.
+ *   environment_failure  (D#598 P7d) a reviewer could not run the tests (its environment failed, not the code): NO verdict is recorded,
+ *                no fix round starts, and the driver stops with the fact `reviewer_environment`. The same for every account.
  *   ci_pending   (D#598 P7b) the head's CI or a repo-wide guard is still running: NOTHING is recorded, not even a needs-fix.
  *                The driver waits and asks again with the same verdicts; the decision is made once CI has finished.
  *   head_moved   (D#598 P7b) the pull request's head is no longer the reviewed one: NOTHING is recorded. The driver reviews the new head.
@@ -25,7 +27,7 @@ import { recordVerdictsInOrder, type GatheredVerdict, type RecordedVerdict, type
  * count is therefore not used here (`recordReviewVerdict` runs in its `deferred` mode).
  */
 
-export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "incomplete" | "ci_pending" | "head_moved";
+export type RoundDecision = "all_passed" | "fix" | "escalated" | "reviewer_fail" | "incomplete" | "ci_pending" | "head_moved" | "environment_failure";
 
 export interface RoundInput {
   accountId: string;
@@ -59,7 +61,9 @@ export async function fixRoundsStarted(pool: Pool, accountId: string, workItemId
 }
 
 /** The decision for gathered verdicts, with no database. Pure. */
-export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string }[]; fixRoundsStarted: number }): RoundDecision {
+export function decideRound(input: { requiredRoles: readonly VerdictRole[]; verdicts: readonly { role: VerdictRole; verdict: string; environmentFailure?: boolean }[]; fixRoundsStarted: number }): RoundDecision {
+  // A reviewer that could not run the tests has said nothing about the code: it is never a needs-fix (so never a fix round) and never a pass.
+  if (input.verdicts.some((v) => v.environmentFailure === true)) return "environment_failure";
   const byRole = new Map(input.verdicts.map((v) => [v.role, v.verdict]));
   if (input.requiredRoles.some((r) => !byRole.has(r))) return "incomplete";
   const verdicts = input.requiredRoles.map((r) => byRole.get(r));
@@ -78,6 +82,23 @@ export async function recordRound(pool: Pool, registry: ExecutionTargetRegistry,
   if (wait.state === "head_moved") return { decision: "head_moved", round, recorded: [] };
   if (wait.state === "pending") return { decision: "ci_pending", round, recorded: [], ciReasons: wait.reasons };
   const decision = decideRound({ requiredRoles: input.requiredRoles, verdicts: input.verdicts, fixRoundsStarted: round });
+  if (decision === "environment_failure") {
+    const failed = input.verdicts.filter((v) => v.environmentFailure === true);
+    await withTenant(pool, input.accountId, (client) =>
+      recordDriverEvent(client, input.accountId, {
+        workItemId: input.workItemId,
+        kind: "stopped",
+        dedupeKey: `reviewer_environment:${input.headSha}`,
+        code: "reviewer_environment",
+        reasons: [...new Set(failed.map((v) => toCode(v.role)))].slice(0, 4),
+        headSha: input.headSha,
+        prNumber: input.prNumber,
+        round: Math.min(round, 20),
+        runId: failed[0]!.runId,
+      }),
+    );
+    return { decision, round, recorded: [] };
+  }
   // Every verdict first, then the records: passes first, non-passes last (see verdicts.ts). An incomplete round records no pass.
   const { recorded } = await recordVerdictsInOrder(pool, registry, {
     accountId: input.accountId,
