@@ -1,0 +1,12 @@
+{
+  "envelope_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+  "version": 2,
+  "amount_usd": 40,
+  "enabled": true,
+  "week_starts_at": "2026-10-12T00:00:00.000Z",
+  "renews_at": "2026-10-19T00:00:00.000Z",
+  "spent_this_week_usd": 12.5,
+  "remaining_this_week_usd": 27.5,
+  "off_sentence": null,
+  "note": "The weekly auto-start limit renews every Monday at 00:00 UTC. What is not spent does not carry over."
+}

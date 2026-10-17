@@ -77,6 +77,13 @@ describe("the error-code allowlist", () => {
     expect(source).toContain("// Envelope on an approval (D#483 S5-e1)");
   });
 
+  it("keeps the weekly auto-start confirmation code (D#483 S5-e2) instead of folding it into other, in a block of its own", () => {
+    expect(errorCodeOrOther("confirmation_required")).toBe("confirmation_required");
+    expect(OWN_ERROR_CODES[OWN_ERROR_CODES.length - 1]).toBe("confirmation_required");
+    const source = readFileSync(path.join(REPO_ROOT, "packages", "telemetry", "src", "errorCodes.ts"), "utf8");
+    expect(source).toContain("// Envelope edits and the weekly auto-start envelope (D#483 S5-e2)");
+  });
+
   it("keeps the cloud runner approval codes (D#6 R2b-4a) instead of folding them into other, in a block of their own", () => {
     const codes = ["runner_not_for_repo", "dial_changed"];
     for (const code of codes) expect(errorCodeOrOther(code), code).toBe(code);
