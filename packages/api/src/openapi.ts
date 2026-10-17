@@ -12,6 +12,16 @@ import type { RouteEntry } from "./registry.js";
 export const PRE_TOKEN_DESCRIPTION =
   "The fulcrumaxe public API. API tokens aren't available yet. This reference may change until they launch.";
 
+/** The opening sentences of the reference once tokens can be minted. The committed file carries the pre-token text; the served copy swaps it (see `describeTokens`). */
+export const TOKENS_DESCRIPTION =
+  "The fulcrumaxe public API. Create an API token in the Developer app to call it. This reference may change.";
+
+/** The document with its description matching whether tokens are available now. The committed file is not rewritten. */
+export function describeTokens<T extends { info: { description?: string } }>(doc: T, available: boolean): T {
+  if (!available) return doc;
+  return { ...doc, info: { ...doc.info, description: TOKENS_DESCRIPTION } };
+}
+
 const ERROR_SCHEMA_NAME = "Error";
 
 /** The shared error envelope every 4xx/5xx response references (criterion 1). */

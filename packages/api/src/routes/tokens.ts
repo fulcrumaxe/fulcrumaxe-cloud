@@ -1,3 +1,4 @@
+import { tokensAvailable } from "../tokens/availability.js";
 import { z } from "zod";
 import {
   assertScopesAllowedForRole,
@@ -89,11 +90,7 @@ const tokenIdParamsSchema = z.object({ id: z.string() });
 
 /** Criterion 12 + C13b: production minting needs FX_API_TOKENS_ENABLED="1" AND an empty blocker list. Exported so a test can inject a list directly. */
 export function assertTokensAvailable(blockers: readonly string[] = TOKEN_GA_BLOCKERS): void {
-  if (process.env.NODE_ENV === "production") {
-    if (process.env.FX_API_TOKENS_ENABLED !== "1" || blockers.length > 0) {
-      throw new TokensNotAvailableError();
-    }
-  }
+  if (!tokensAvailable(blockers)) throw new TokensNotAvailableError();
 }
 
 /** "The v1 contract" > route table: `POST /api/v1/tokens`, `GET /api/v1/tokens`, `POST /api/v1/tokens/revoke-mine` | S, member; `DELETE /api/v1/tokens/{id}` | S (own; any for owner/admin), or a token deleting itself. */

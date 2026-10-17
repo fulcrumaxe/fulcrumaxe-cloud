@@ -181,6 +181,24 @@ test.describe("D#483 S3-L2b: Plan states", () => {
     await clean(page, errors);
   });
 
+  test("the plan table's column headings never break inside a word (Tasks, Done, Remaining)", async ({ page }) => {
+    const m = newMock();
+    m.plan = withLatest({ id: "99999999-9999-4999-8999-999999999999", state: "failed", error_code: "internal_error", error_detail: null, counts: {} });
+    await start(page, m);
+    await expect(tid(page, "pl-plan-table")).toBeVisible();
+    // A word that fits its cell has the width of its own text; one that broke mid-word has a scroll width wider than the cell or more than one line.
+    const heads = await tid(page, "pl-plan-table").locator('th[scope="col"]').evaluateAll((els) =>
+      els.map((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const lines = new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+        return { text: el.textContent, lines, overflow: el.scrollWidth > el.clientWidth };
+      })
+    );
+    expect(heads.map((h) => h.text)).toEqual(["Milestone", "Tasks", "Done", "Remaining"]);
+    for (const h of heads) expect(h, h.text ?? "").toMatchObject({ lines: 1, overflow: false });
+  });
+
   test("a queued or running import disables Import and the page follows it to the end", async ({ page }) => {
     const m = newMock();
     const started = new Date(Date.now() - 5000).toISOString();

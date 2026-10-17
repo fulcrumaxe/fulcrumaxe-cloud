@@ -495,6 +495,35 @@ function linkedRun(label, run, openRun) {
   );
 }
 
+/**
+ * The header total of a run on the person's own machine. It is the API-equivalent figure the cloud computed from the run's tokens: information, never a
+ * charge, so the words say it ran on the customer's Claude plan (or own API key). With no figure yet it says whose plan, as the run list does.
+ */
+export function runnerHeadTotal(insight) {
+  if (!insight || !isRunner(insight)) return null;
+  const u = isObj(insight.runner_usage) ? insight.runner_usage : null;
+  const own = u !== null && u.credential_mode === "api_key";
+  const price = u !== null && Number.isFinite(u.api_equivalent_usd) ? usd(u.api_equivalent_usd) : null;
+  if (own) return price ? price + " at API prices · on your own API key" : "On your own API key";
+  return price ? "API-equivalent " + price + " · on your Claude plan" : "On your Claude plan";
+}
+
+const RUN_ID = /^[0-9a-f-]{36}$/i;
+export const EXPORT_LABEL = "Export events";
+
+/** Where the export of one run's events is, and the file name it downloads as; null for a run id that is not a UUID. */
+export function exportTarget(runId) {
+  if (typeof runId !== "string" || !RUN_ID.test(runId)) return null;
+  return { href: "/api/v1/runs/" + runId + "/events/export", filename: "run-" + runId + "-events.ndjson" };
+}
+
+/** The control that downloads one run's events (the API's NDJSON export), for a runner run and a sandbox run alike. */
+export function exportLink(runId) {
+  const t = exportTarget(runId);
+  if (t === null) return null;
+  return h("a", { class: "runs-link", href: t.href, download: t.filename, "data-testid": "runs-export" }, EXPORT_LABEL);
+}
+
 /** The header links: back to the work item, out to the issue and the PR. */
 export function headLinks(insight, { openPipeline }) {
   const links = [];

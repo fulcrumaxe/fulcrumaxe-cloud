@@ -17,6 +17,8 @@ export async function isolatedShot(page: Page, section: Locator): Promise<Buffer
     for (const k of ["fontFamily", "fontSize", "fontWeight", "lineHeight", "color", "letterSpacing", "textTransform", "textShadow"] as const) box.style[k] = at[k];
     box.appendChild(el.cloneNode(true));
     document.body.appendChild(box);
+    // A box whose height is fractional leaves its last pixel row half covered, and the page behind it shows through there; whole pixels make the shot depend on the box alone.
+    box.style.height = Math.ceil(box.getBoundingClientRect().height) + "px";
     // A touch leaves a selection or a focus mark behind that fades on its own clock.
     getSelection()?.removeAllRanges();
     (document.activeElement as HTMLElement | null)?.blur();

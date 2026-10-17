@@ -9,7 +9,7 @@ import { h, timeNode } from "../_lib/dom.js";
 import { renderMarkdown } from "../_lib/markdown.js";
 import { crossesBoundary, displayText, hasToolName, nextCarry } from "./runs-display-filter.js";
 import { openRunStream } from "../_lib/stream.js";
-import { foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerNotes, titleOf } from "./runs-detail.js";
+import { exportLink, foldBox, guardToolName, headLinks, headMeta, readContext, readInsight, renderInsight, runnerEventLine, runnerHeadTotal, runnerNotes, titleOf } from "./runs-detail.js";
 import {
   EVENT_CAP, STATUS_LABELS, approvalLine, approveRunnerRun, coalesce, loadRunApproval, formatUsd, isLiveStatus, isTruncated, launchRunId, loadRun, loadRunContext, loadRunDetail, loadRunEvent, loadRunInsight, loadRunsPage, mergeFirstPage, upsertRow, watchAccount,
 } from "./runs-storage.js";
@@ -263,11 +263,12 @@ function mountApp(contentEl, launchArg) {
           { class: "runs-head", "data-testid": "runs-head" },
           h("h3", { class: "runs-head-name" }, ins ? titleOf(ins.run.role) : roleName(run.role)),
           statusChip(run.status),
-          h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, runUsd(run))
+          h("span", { class: "runs-head-usd", "data-testid": "runs-head-usd" }, (ins && runnerHeadTotal(ins)) || runUsd(run))
         ),
         approvalBlock(run, detail.approval, () => approve(detail)),
         ins ? headMeta(ins) : null,
         ...(ins ? runnerNotes(ins) : []),
+        h("div", { class: "runs-links" }, exportLink(run.id)),
         ins ? headLinks(ins, { openPipeline: () => window.FULCWM && window.FULCWM.open("pipeline", { workItemId: ins.work_item.id }) }) : null,
         insight,
         foldBox(

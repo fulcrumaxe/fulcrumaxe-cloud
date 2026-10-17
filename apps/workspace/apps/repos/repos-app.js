@@ -32,6 +32,9 @@ const RETURN_NOTES = {
   claimed: "That GitHub installation already belongs to another account.",
   pay_first: "Start your subscription first, then install the write App.",
   rate_limited: "Too many tries. Wait a minute, then install again.",
+  pending: "GitHub hasn't confirmed the install yet. Wait a minute, then refresh this page.",
+  not_installer: "Only the GitHub user who installed the App can connect it. Ask them to open this page, or install it again yourself.",
+  inactive: "That GitHub installation is suspended or removed. Reinstall the App, then try again.",
 };
 
 const FULC = window.FULC;
