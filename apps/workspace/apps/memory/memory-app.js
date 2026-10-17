@@ -1,11 +1,12 @@
-// D#601 MEM-4a3: the Memory app. All memory grouped by scope: a repo as owner/name, an item as its number and title, the account, a role. Each repo
-// and item header carries the number of proposals waiting, read from the pending-counts route (the queue's own count), and each row says how many
-// runs used the entry and links to them. The review queue is the next change.
+// D#601 MEM-4a3: the Memory app. A review queue of proposals (approve, edit then approve, reject, batch inside one source), and below it all
+// memory grouped by scope: a repo as owner/name, an item as its number and title, the account, a role. Each repo and item header carries the number
+// of proposals waiting, read from the pending-counts route (the queue's own count), and each row says how many runs used the entry and links to them.
 //
 // Registration goes through the FULC global (see the Runs app's header comment: an ES import of the SDK would blow the boot request budget).
 import { h, timeNode } from "../_lib/dom.js";
+import { mountQueue } from "./memory-queue.js";
 import {
-  COPY, KINDS, STATUSES, loadCounts, loadList, loadRepos, loadRuns, runName, runsWords, statusView, text, waitingWords,
+  COPY, KINDS, STATUSES, loadCounts, loadList, loadQueue, loadRepos, loadRuns, runName, runsWords, statusView, text, waitingWords,
 } from "./memory-storage.js";
 
 const FULC = window.FULC;
@@ -28,6 +29,7 @@ function mountApp(contentEl) {
   const ac = new AbortController();
   let phase = "loading"; // loading | ready | error
   let list = { groups: [], truncated: false };
+  let queue = { cards: [], truncated: false };
   let repos = [];
   let counts = null; // { repos, items } or null when the route failed
   let places = new Map(); // "scope|label" -> { kind, id }
@@ -36,6 +38,7 @@ function mountApp(contentEl) {
   let seq = 0;
 
   const status = h("p", { class: "mem-status", role: "status", "aria-live": "polite", "data-testid": "mem-status" });
+  const queueHost = h("section", { class: "mem-section", "aria-label": COPY.queueTitle });
   const listBody = h("div", { "data-testid": "mem-list" });
   const kindSel = h("select", { id: "mem-f-kind", class: "mem-input", "data-testid": "mem-filter-kind", onChange: () => (filters.kinds = kindSel.value ? [kindSel.value] : [], load(false)) }, h("option", { value: "" }, "All kinds"), KINDS.map(([v, l]) => h("option", { value: v }, l)));
   const statusSel = h("select", { id: "mem-f-status", class: "mem-input", "data-testid": "mem-filter-status", onChange: () => (filters.statuses = statusSel.value ? [statusSel.value] : [], load(false)) }, h("option", { value: "" }, "Any status"), STATUSES.map(([v, l]) => h("option", { value: v }, l)));
@@ -45,6 +48,7 @@ function mountApp(contentEl) {
     h("div", { class: "mem-main" },
       h("h1", { class: "mem-title-h" }, COPY.title),
       status,
+      queueHost,
       h("section", { class: "mem-section", "aria-label": COPY.listTitle },
         h("h2", { class: "mem-h" }, COPY.listTitle),
         h("div", { class: "mem-filters" }, h("label", { for: "mem-f-kind" }, "Kind"), kindSel, h("label", { for: "mem-f-status" }, "Status"), statusSel),
@@ -52,22 +56,34 @@ function mountApp(contentEl) {
   );
   contentEl.replaceChildren(root);
 
+  const q = mountQueue({
+    host: queueHost,
+    countFor: (place, cards) => {
+      if (!place) return cards.length;
+      if (counts === null) return null;
+      const n = (place.kind === "repo" ? counts.repos : counts.items)[place.id];
+      return Number.isInteger(n) ? n : null;
+    },
+    reload: (focusId, quiet) => load(true, focusId, quiet),
+  });
+
   function indexPlaces() {
     places = new Map();
     for (const r of repos) places.set("repo|" + r.name, { kind: "repo", id: r.id });
     for (const g of list.groups) if (g.targetId && (g.scope === "repo" || g.scope === "item")) places.set(g.scope + "|" + g.label, { kind: g.scope, id: g.targetId });
   }
 
-  async function load(silent) {
+  async function load(silent, focusId, quietQueue) {
     const my = ++seq;
     if (!silent && phase !== "ready") {
       phase = "loading";
       paint();
     }
     try {
-      const [l, rp] = await Promise.all([loadList(filters, undefined, ac.signal), loadRepos(undefined, ac.signal)]);
+      const [l, qu, rp] = await Promise.all([loadList(filters, undefined, ac.signal), loadQueue(undefined, ac.signal), loadRepos(undefined, ac.signal)]);
       if (my !== seq) return;
       list = l;
+      queue = qu;
       repos = rp;
       indexPlaces();
       const repoIds = [...new Set([...repos.map((r) => r.id), ...[...places.values()].filter((p) => p.kind === "repo").map((p) => p.id)])];
@@ -79,9 +95,10 @@ function mountApp(contentEl) {
       if (e && e.name === "AbortError") return;
       if (my !== seq) return;
       if (phase !== "ready") phase = "error";
-      else status.textContent = COPY.unavailable;
+      else if (!quietQueue) status.textContent = COPY.unavailable;
     }
     paint();
+    if (focusId !== undefined) q.focus(focusId);
   }
 
   // ── all memory, grouped by scope ──
@@ -167,6 +184,7 @@ function mountApp(contentEl) {
   function paint() {
     status.textContent = phase === "loading" ? COPY.loading : phase === "error" ? COPY.unavailable : "";
     status.dataset.state = phase;
+    q.set({ cards: queue.cards, truncated: queue.truncated, phase, places });
     if (phase === "loading") listBody.replaceChildren();
     else if (phase === "error") listBody.replaceChildren(h("button", { type: "button", class: "mem-btn", "data-testid": "mem-retry", onClick: () => load(false) }, COPY.retry));
     else {
@@ -175,7 +193,7 @@ function mountApp(contentEl) {
       const groups = list.groups.map((g) => group(g));
       const any = list.groups.some((g) => g.entries.length > 0);
       listBody.replaceChildren(
-        ...(any || extra.length > 0 ? [] : [h("p", { class: "mem-muted", "data-testid": "mem-empty" }, COPY.emptyAll)]),
+        ...(any || extra.length > 0 || queue.cards.length > 0 ? [] : [h("p", { class: "mem-muted", "data-testid": "mem-empty" }, COPY.emptyAll)]),
         ...groups,
         ...extra,
         ...(list.truncated ? [h("p", { class: "mem-muted" }, "More memory matches than this shows. Narrow it with a kind or a status.")] : [])
@@ -189,6 +207,7 @@ function mountApp(contentEl) {
   return {
     destroy() {
       ac.abort();
+      q.destroy();
       contentEl.replaceChildren();
     },
   };
