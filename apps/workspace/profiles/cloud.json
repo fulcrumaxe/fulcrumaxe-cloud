@@ -1,12 +1,13 @@
 {
   "name": "cloud",
-  "app_modules": ["themes", "heritage", "developer", "repos", "runners", "model-key", "pipeline", "runs", "roles", "site-review", "budget-billing", "onboarding"],
+  "app_modules": ["themes", "heritage", "developer", "repos", "runners", "model-key", "pipeline", "runs", "memory", "roles", "site-review", "budget-billing", "onboarding"],
   "excluded_themes": ["windows-aero", "ubuntu-gnome"],
   "default_theme": "classic-crt",
   "dock_order": [
     "onboarding",
     "pipeline",
     "runs",
+    "memory",
     "repos",
     "runners",
     "roles",
