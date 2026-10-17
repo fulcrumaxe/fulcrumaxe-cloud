@@ -358,3 +358,37 @@ export async function memoryPendingCounts(ctx: ReadCtx, input: { repoIds?: reado
     return out;
   });
 }
+
+/** Where "Change scope" moves an entry, named by the ids the app holds. The memory key is derived here, never taken from the caller. */
+export interface MemoryMoveTarget {
+  scope: MemoryScope;
+  repoId?: string;
+  itemId?: string;
+  role?: string;
+}
+
+/**
+ * The `scope_ref` for a move: null for the account, the repo's node id plus installation for a repo, the work item id for an item, the name for
+ * a role. A repo with no stored node id has no key, so it is refused (`invalid_message`) instead of falling back to another one. Whether the item
+ * exists, and whether the caller may write there, is the edit definer's check, not this one's.
+ */
+export async function memoryMoveRef(ctx: ReadCtx, target: MemoryMoveTarget): Promise<string | null> {
+  assertEnumScope(target.scope);
+  const named = [target.repoId, target.itemId, target.role].filter((v) => v !== undefined).length;
+  const need = target.scope === 'account' ? 0 : 1;
+  const right = target.scope === 'repo' ? target.repoId : target.scope === 'item' ? target.itemId : target.scope === 'role' ? target.role : undefined;
+  if (named !== need || (need === 1 && right === undefined)) throw new MemoryInputError('invalid_message', 'name exactly the place the entry moves to');
+  if (target.scope === 'account') return null;
+  if (target.scope === 'role') return target.role!;
+  if (target.scope === 'item') {
+    assertUuid('item', target.itemId!);
+    return target.itemId!.toLowerCase();
+  }
+  const ref = await inSession(ctx, (client) => repoScopeRefOf(client, target.repoId!));
+  if (ref === null) throw new MemoryInputError('invalid_message', 'that repository has no memory key yet');
+  return ref;
+}
+
+function assertEnumScope(scope: unknown): void {
+  if (typeof scope !== 'string' || !(MEMORY_SCOPES as readonly string[]).includes(scope)) throw new MemoryInputError('invalid_message', 'unknown scope');
+}

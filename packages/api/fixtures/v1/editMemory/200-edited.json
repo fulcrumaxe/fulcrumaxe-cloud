@@ -1,0 +1,18 @@
+{
+  "entry": {
+    "id": "7d1f0c52-3b8e-4a64-9c10-5e2a8b6f4d93",
+    "scope": "repo",
+    "kind": "command",
+    "body": "Run the unit tests with pnpm test --filter api",
+    "why": "The full suite needs a database",
+    "author_kind": "agent",
+    "status": "proposed",
+    "version": 2,
+    "content_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "created_at": "2026-10-17T08:30:00.000Z",
+    "updated_at": "2026-10-17T09:00:00.000Z",
+    "approved_at": null,
+    "expires_at": "2026-10-31T08:30:00.000Z"
+  },
+  "previous_id": "2b9c3f40-5d6e-4f70-8182-93a40526c7d8"
+}

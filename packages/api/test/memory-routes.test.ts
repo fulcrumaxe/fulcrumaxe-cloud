@@ -4,7 +4,8 @@ import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { seedAccount, type SeedRefs } from '@fx/db/test/helpers/seed.js';
 import { withTenant } from '@fx/core/src/tenancy/withTenant.js';
-import { repoScopeRef } from '@fx/core/src/memory/index.js';
+import { listMemoryVersions, repoScopeRef } from '@fx/core/src/memory/index.js';
+import { memoryEditDeps } from '../src/routes/memory.js';
 import { insertApiToken, type Scope } from '@fx/core/src/tokens/service.js';
 import { SESSION_COOKIE_NAME, signSession } from '@fx/core/src/auth/session.js';
 import { generateToken } from '../src/tokens/format.js';
@@ -14,7 +15,7 @@ import { effectivePrincipals } from '../src/registry.js';
 import { ROUTES } from '../src/routes/index.js';
 
 const NODE = 'R_kgDOApiMem01';
-const MEMORY_OPS = ['listMemory', 'getMemoryQueue', 'openMemoryCard', 'decideMemory', 'decideMemoryBatch'];
+const MEMORY_OPS = ['listMemory', 'getMemoryQueue', 'getMemoryPendingCounts', 'openMemoryCard', 'decideMemory', 'editMemory', 'decideMemoryBatch'];
 
 interface Identity {
   accountId: string;
@@ -103,7 +104,7 @@ describe('D#601 MEM-4a2: memory routes', () => {
     await Promise.all([adminPool.end(), platformOpsPool.end(), appUserPool.end()]);
   });
 
-  it('registers the five operations, session only (no token principal can decide memory)', () => {
+  it('registers the seven operations, session only (no token principal can decide memory)', () => {
     for (const op of MEMORY_OPS) {
       const entry = ROUTES.find((r) => r.operationId === op);
       expect(entry, op).toBeDefined();
@@ -119,6 +120,8 @@ describe('D#601 MEM-4a2: memory routes', () => {
       ['GET', '/memory/queue', undefined],
       ['POST', `/memory/${id}/open`, undefined],
       ['POST', `/memory/${id}/decide`, { to: 'approved' }],
+      ['POST', `/memory/${id}/edit`, { body: 'x' }],
+      ['GET', `/memory/pending-counts?repo_ids=${a.repoId}`, undefined],
       ['POST', '/memory/decide-batch', { ids: [id], to: 'approved' }],
     ] as const) {
       expect((await call(t, method, p, body)).status, `${method} ${p}`).toBe(403);
@@ -270,6 +273,182 @@ describe('D#601 MEM-4a2: memory routes', () => {
       const id = await proposal(a.accountId, { author: 'agent' });
       expect((await call(aMember, 'POST', '/memory/decide-batch', { ids: [id], to: 'approved' })).status).toBe(403);
       expect(await status(id)).toBe('proposed');
+    });
+  });
+
+  describe('edit (a new version; the author kind stays)', () => {
+    type EditBody = { entry: { id: string; status: string; version: number; author_kind: string; body: string; scope: string; kind: string }; previous_id: string };
+    const edit = (who: Identity | string, id: string, body: unknown) => call(who, 'POST', `/memory/${id}/edit`, body);
+
+    it('editing an agent proposal records version 2, keeps it proposed and agent-authored, and leaves the old text readable as superseded', async () => {
+      const id = await proposal(a.accountId, { author: 'agent', prov: { source_run_id: 'run-edit-1', evidence: 'the failing test' } });
+      const newBody = text('edited by a person');
+      const r = await ok<EditBody>(await edit(aAdmin, id, { body: newBody, why: 'it warms a cache', kind: 'gotcha' }), 'editMemory');
+      expect(r.previous_id).toBe(id);
+      expect(r.entry).toMatchObject({ version: 2, status: 'proposed', author_kind: 'agent', body: newBody, kind: 'gotcha', scope: 'repo' });
+      expect(r.entry.id).not.toBe(id);
+      expect(await status(id)).toBe('superseded');
+      const chain = { v: await listMemoryVersions({ pool: appUserPool, principal: aAdmin, liveSecrets: () => [] }, r.entry.id) };
+      expect(chain.v.map((e) => [e.version, e.status, e.authorKind])).toEqual([[1, 'superseded', 'agent'], [2, 'proposed', 'agent']]);
+      // The card still says who proposed it, and the edit did not move the text out of the fence (the author kind is the fence's key).
+      const q = await ok<{ cards: Array<{ entry: { id: string }; proposed_by: string }> }>(await call(aAdmin, 'GET', `/memory/queue?repo_id=${a.repoId}`), 'getMemoryQueue');
+      expect(q.cards.find((c) => c.entry.id === r.entry.id)!.proposed_by).toBe('Proposed by agent (run run-edit-1)');
+      expect(q.cards.some((c) => c.entry.id === id)).toBe(false);
+      // Edit then approve: the answer's id is the one to decide on.
+      const approved = await ok<{ entry: { status: string } }>(await call(aAdmin, 'POST', `/memory/${r.entry.id}/decide`, { to: 'approved' }), 'decideMemory');
+      expect(approved.entry.status).toBe('approved');
+    });
+
+    it('editing an approved entry keeps it approved as the new version, and "restore previous" is an edit back to the old text (history keeps all three)', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      await call(aAdmin, 'POST', `/memory/${id}/decide`, { to: 'approved' });
+      const original = (await admin.query<{ body: string }>(`SELECT body FROM memory_entries WHERE id = $1`, [id])).rows[0]!.body;
+      const v2 = await ok<EditBody>(await edit(aAdmin, id, { body: text('second') }), 'editMemory');
+      expect(v2.entry).toMatchObject({ status: 'approved', version: 2, author_kind: 'agent' });
+      const v3 = await ok<EditBody>(await edit(aAdmin, v2.entry.id, { body: original }), 'editMemory');
+      expect(v3.entry).toMatchObject({ status: 'approved', version: 3, body: original });
+      expect(await Promise.all([id, v2.entry.id].map(status))).toEqual(['superseded', 'superseded']);
+    });
+
+    it('moves an entry ("Change scope") from the repo to an item and back; an agent\'s text cannot become an account entry; a place needs its one id', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const toItem = await ok<EditBody>(await edit(aAdmin, id, { body: text('moved'), scope: 'item', item_id: a.workItemId }), 'editMemory');
+      expect(toItem.entry).toMatchObject({ scope: 'item', author_kind: 'agent', version: 2 });
+      const toRepo = await ok<EditBody>(await edit(aAdmin, toItem.entry.id, { body: text('home'), scope: 'repo', repo_id: a.repoId }), 'editMemory');
+      expect(toRepo.entry).toMatchObject({ scope: 'repo', version: 3 });
+      expect(await err(await edit(aAdmin, toRepo.entry.id, { body: text('up'), scope: 'account' }))).toBe('invalid_message');
+      for (const body of [
+        { body: 'x', scope: 'repo' },
+        { body: 'x', scope: 'repo', repo_id: a.repoId, item_id: a.workItemId },
+        { body: 'x', scope: 'account', repo_id: a.repoId },
+        { body: 'x', repo_id: a.repoId },
+      ]) {
+        expect((await edit(aAdmin, toRepo.entry.id, body)).status, JSON.stringify(body)).toBe(422);
+      }
+      expect((await edit(aAdmin, toRepo.entry.id, { body: 'x', scope: 'item', item_id: randomUUID() })).status).toBe(404);
+      expect(await status(toRepo.entry.id)).toBe('proposed');
+    });
+
+    it('refuses a text that holds a live token value or a credential shape (422 secret_detected), stores nothing, and the refusal does not echo the text', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const live = `live-${randomUUID()}-${randomUUID()}`;
+      const before = (await admin.query<{ n: number }>(`SELECT count(*)::int AS n FROM memory_entries WHERE account_id = $1`, [a.accountId])).rows[0]!.n;
+      memoryEditDeps.liveSecrets = () => [live];
+      try {
+        for (const body of [`use ${live} to log in`, `ghs_${'A1b2C3d4E5'.repeat(4)}`]) {
+          const res = await edit(aAdmin, id, { body });
+          expect(res.status).toBe(422);
+          const raw = await res.text();
+          expect((JSON.parse(raw) as ErrBody).error.code).toBe('secret_detected');
+          expect(raw).not.toContain(live);
+        }
+      } finally {
+        memoryEditDeps.liveSecrets = () => [];
+      }
+      const after = (await admin.query<{ n: number }>(`SELECT count(*)::int AS n FROM memory_entries WHERE account_id = $1`, [a.accountId])).rows[0]!.n;
+      expect(after).toBe(before);
+      expect(await status(id)).toBe('proposed');
+      expect((await admin.query(`SELECT 1 FROM memory_entries WHERE account_id = $1 AND body LIKE $2`, [a.accountId, `%${live}%`])).rowCount).toBe(0);
+    });
+
+    it('the registered live-secret source is read at each edit, not once', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const live = `late-${randomUUID()}-${randomUUID()}`;
+      expect((await edit(aAdmin, id, { body: `ok ${live}` })).status).toBe(200);
+      const id2 = await proposal(a.accountId, { author: 'agent' });
+      memoryEditDeps.liveSecrets = () => [live];
+      try {
+        expect(await err(await edit(aAdmin, id2, { body: `ok ${live}` }))).toBe('secret_detected');
+      } finally {
+        memoryEditDeps.liveSecrets = () => [];
+      }
+    });
+
+    it('a member may not edit a repo entry they did not propose (403, nothing changed); another account gets 404; a malformed id is 404; a token is 403', async () => {
+      const id = await proposal(a.accountId, { author: 'import' });
+      expect((await edit(aMember, id, { body: text('nope') })).status).toBe(403);
+      expect(await status(id)).toBe('proposed');
+      expect((await edit(bAdmin, id, { body: text('nope') })).status).toBe(404);
+      expect((await edit(aAdmin, 'not-a-uuid', { body: 'x' })).status).toBe(404);
+      const t = await tokenFor(aAdmin, ['read', 'work_items:write']);
+      expect((await edit(t, id, { body: 'x' })).status).toBe(403);
+      expect((await admin.query(`SELECT 1 FROM memory_entries WHERE supersedes_id = $1`, [id])).rowCount).toBe(0);
+    });
+
+    it('a member edits the proposal they made themselves, in place, but a pipeline proposal is nobody\'s own (migration 0868)', async () => {
+      const mine = await withTenant(appUserPool, a.accountId, aMember.userId, async (c) => {
+        const { rows } = await c.query<{ id: string }>(`SELECT memory_propose('repo', $1, 'fact', $2, NULL, 'person', '{}'::jsonb) AS id`, [repoRef, text('mine')]);
+        return rows[0]!.id;
+      });
+      const r = await ok<EditBody>(await edit(aMember, mine, { body: text('mine, reworded') }), 'editMemory');
+      expect(r.entry).toMatchObject({ author_kind: 'person', status: 'proposed', version: 2 });
+      // Moving it to another scope is not "in place": a repo or account entry is for an owner or admin.
+      expect((await edit(aMember, r.entry.id, { body: text('moved'), scope: 'account' })).status).toBe(403);
+      const pipeline = await proposal(a.accountId, { author: 'runner_agent' });
+      expect((await edit(aMember, pipeline, { body: text('rewrite') })).status).toBe(403);
+      expect(await status(pipeline)).toBe('proposed');
+    });
+
+    it('an item member edits an item entry; a rejected entry cannot be edited (422) and a superseded one is a conflict (409)', async () => {
+      const item = await proposal(a.accountId, { author: 'agent', scope: 'item', ref: a.workItemId });
+      expect((await edit(aMember, item, { body: text('item edit') })).status).toBe(200);
+      const rejected = await proposal(a.accountId, { author: 'agent' });
+      await call(aAdmin, 'POST', `/memory/${rejected}/decide`, { to: 'rejected' });
+      expect(await err(await edit(aAdmin, rejected, { body: text('late') }))).toBe('invalid_transition');
+      // The first edit made `item` a superseded version: a second edit of it lost the race, which the database reports as a conflict.
+      expect(await err(await edit(aAdmin, item, { body: text('stale') }))).toBe('conflict');
+    });
+
+    it('strict bodies: no body, an empty or over-1-KiB body, an unknown key, a reason over 256 B, an unknown kind and a non-object are 422', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      for (const body of [{}, { body: '' }, { body: 'x'.repeat(1025) }, { body: 'x', extra: 1 }, { body: 'x', why: 'w'.repeat(257) }, { body: 'x', kind: 'bogus' }, 'text']) {
+        expect((await edit(aAdmin, id, body)).status, JSON.stringify(body).slice(0, 50)).toBe(422);
+      }
+      expect(await status(id)).toBe('proposed');
+    });
+
+    it('two edits of one version at once: one wins, the other is 409 conflict, and the table holds one superseded row and one new version', async () => {
+      const id = await proposal(a.accountId, { author: 'agent' });
+      const results = await Promise.all([edit(aAdmin, id, { body: text('first') }), edit(aAdmin, id, { body: text('second') })]);
+      expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+      const loser = results.find((r) => r.status === 409)!;
+      expect(((await loser.json()) as ErrBody).error.code).toBe('conflict');
+      const successors = await admin.query(`SELECT status FROM memory_entries WHERE supersedes_id = $1`, [id]);
+      expect(successors.rows).toEqual([{ status: 'proposed' }]);
+      expect(await status(id)).toBe('superseded');
+    });
+  });
+
+  describe('pending counts (the badge equals the queue)', () => {
+    type Counts = { repos: Record<string, number>; items: Record<string, number> };
+    const counts = async (who: Identity, qs: string) => ok<Counts>(await call(who, 'GET', `/memory/pending-counts?${qs}`), 'getMemoryPendingCounts');
+    const queueSize = async (who: Identity, qs: string) => (await ok<{ cards: unknown[] }>(await call(who, 'GET', `/memory/queue?${qs}`), 'getMemoryQueue')).cards.length;
+
+    it('a repo and an item count the same cards the queue holds, and the number drops after a decision', async () => {
+      const ids = [await proposal(a.accountId), await proposal(a.accountId, { author: 'agent' })];
+      await proposal(a.accountId, { author: 'agent', scope: 'item', ref: a.workItemId });
+      const c = await counts(aMember, `repo_ids=${a.repoId}&item_ids=${a.workItemId}`);
+      expect(c.repos[a.repoId]).toBe(await queueSize(aMember, `repo_id=${a.repoId}`));
+      expect(c.items[a.workItemId]).toBe(await queueSize(aMember, `item_id=${a.workItemId}`));
+      expect(c.repos[a.repoId]).toBeGreaterThanOrEqual(2);
+      await call(aAdmin, 'POST', `/memory/${ids[1]}/decide`, { to: 'approved' });
+      const after = await counts(aMember, `repo_ids=${a.repoId}`);
+      expect(after.repos[a.repoId]).toBe(c.repos[a.repoId]! - 1);
+      expect(after.repos[a.repoId]).toBe(await queueSize(aMember, `repo_id=${a.repoId}`));
+      expect(after.items).toEqual({});
+    });
+
+    it('answers a number for every id asked; another account\'s ids read 0 and reveal nothing, and its own counts are unaffected', async () => {
+      const stranger = randomUUID();
+      const c = await counts(bAdmin, `repo_ids=${a.repoId}&item_ids=${a.workItemId},${stranger}`);
+      expect(c).toEqual({ repos: { [a.repoId]: 0 }, items: { [a.workItemId]: 0, [stranger]: 0 } });
+    });
+
+    it('needs at least one list; refuses 201 ids, a malformed id, an empty list and an unknown key (422)', async () => {
+      const many = Array.from({ length: 201 }, () => randomUUID()).join(',');
+      for (const qs of ['', `repo_ids=${many}`, 'repo_ids=nope', 'repo_ids=', 'item_ids=,,', `repo_ids=${a.repoId}&extra=1`]) {
+        expect((await call(aMember, 'GET', `/memory/pending-counts?${qs}`)).status, qs.slice(0, 40)).toBe(422);
+      }
     });
   });
 });

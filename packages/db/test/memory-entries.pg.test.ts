@@ -236,6 +236,20 @@ describe('memory_entries (D#601 MEM-1)', () => {
       const agent = await propose(a.accountId, null, { author: 'agent' });
       await expect(edit(a.accountId, aOwner, agent, 'x', [null, 'account', null])).rejects.toMatchObject({ message: /invalid_message/ });
     });
+    it('a member cannot edit a proposal the pipeline wrote (no created_by is nobody\'s own: migration 0868), and an admin can', async () => {
+      for (const author of ['agent', 'import', 'runner_agent']) {
+        const pipeline = await propose(a.accountId, null, { author });
+        await expect(edit(a.accountId, aMember, pipeline, 'rewritten by a member')).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+        expect(await row(pipeline)).toMatchObject({ status: 'proposed', body: 'run pnpm test before pushing', version: 1 });
+        expect((await admin.query(`SELECT 1 FROM memory_entries WHERE supersedes_id = $1`, [pipeline])).rowCount).toBe(0);
+      }
+      const agent = await propose(a.accountId, null, { author: 'agent' });
+      const v2 = await edit(a.accountId, aAdmin, agent, 'edited by an admin');
+      expect(await row(v2)).toMatchObject({ status: 'proposed', author_kind: 'agent', version: 2, created_by: aAdmin });
+      // A member's own proposal may be edited in place but not moved to another scope.
+      const mine = await propose(a.accountId, aMember);
+      await expect(edit(a.accountId, aMember, mine, 'moved', [null, 'account', null])).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
+    });
     it('"Change scope" inserts a new version in the new scope and keeps the old one in history', async () => {
       const first = await write(a.accountId, aAdmin, { body: 'tests live under test/' });
       const second = await edit(a.accountId, aAdmin, first, 'tests live under test/', [null, 'role', 'executor']);
