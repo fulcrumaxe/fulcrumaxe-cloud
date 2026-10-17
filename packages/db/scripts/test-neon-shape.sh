@@ -580,7 +580,9 @@ check_receipt_writer_role_shape() {
             OR (p.proname = 'decision_receipt_write_class1'
               AND p.proargtypes = array_to_string('{text,text,text,integer,jsonb,uuid,uuid,integer}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_raise'
-              AND p.proargtypes = array_to_string('{text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text}'::regtype[]::oid[], ' ')::oidvector)
+              AND p.proargtypes = array_to_string('{text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text,integer}'::regtype[]::oid[], ' ')::oidvector)
+            OR (p.proname = 'decision_receipt_write_ruled'
+              AND p.proargtypes = array_to_string('{text,text,text,text,integer,jsonb,uuid,uuid,integer,integer,text}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_answer'
               AND p.proargtypes = array_to_string('{uuid,text,uuid}'::regtype[]::oid[], ' ')::oidvector)
             OR (p.proname = 'decision_ask_withdraw'

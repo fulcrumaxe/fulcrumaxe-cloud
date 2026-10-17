@@ -68,7 +68,7 @@ describe('decision_ask_withdraw (0826)', () => {
   const setStage = (workItemId: string, stage: string): Promise<unknown> => admin.query(`UPDATE work_items SET stage = $2 WHERE id = $1`, [workItemId, stage]);
 
   const RAISE_SQL = `SELECT decision_ask_raise('human_over_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'apply',
-                                                'because', '["trusted"]'::jsonb, 60, 'stop_and_flag') AS id`;
+                                                'because', '["trusted"]'::jsonb, 60, 'stop_and_flag', 0) AS id`;
   const raise = (t: SeedRefs, workItemId: string, runId: string | null): Promise<string> =>
     withTenant(invokerPool, t.accountId, async (c) => (await c.query<{ id: string }>(RAISE_SQL, [TYPE, workItemId, runId, JSON.stringify(OPTIONS)])).rows[0]!.id);
   const readAsk = async (id: string) => (await admin.query(`SELECT * FROM decision_asks WHERE id = $1`, [id])).rows[0];

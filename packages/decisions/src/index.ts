@@ -84,6 +84,8 @@ export type {
   RuleValue,
   ValidationResult,
 } from "./rules.js";
+export { PLATFORM_ASK_FACTS, platformAskRequest, usdCeilCents } from "./platformAskFacts.js";
+export type { PlatformAskFact, PlatformAskFactType, PlatformAskType } from "./platformAskFacts.js";
 export { globMatch } from "./ruleGlob.js";
 export { parsePointer, resolvePointer } from "./rulePointer.js";
 export type {

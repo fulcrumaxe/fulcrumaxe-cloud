@@ -73,7 +73,7 @@ describe('resume_decision (0860)', () => {
     const { itemId, runId } = await seedItem(t);
     const id = (await withTenant(invokerPool, t.accountId, async (c) =>
       (await c.query<{ id: string }>(
-        `SELECT decision_ask_raise('human_over_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'apply', 'because', '["trusted"]'::jsonb, 60, 'stop_and_flag') AS id`,
+        `SELECT decision_ask_raise('human_over_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'apply', 'because', '["trusted"]'::jsonb, 60, 'stop_and_flag', 0) AS id`,
         [TYPE, itemId, o.noRun ? null : runId, JSON.stringify(OPTIONS)])).rows[0]!.id));
     if (state === 'answered') {
       await admin.query(`UPDATE decision_asks SET state = 'answered', answered_option = 'skip', answered_by = $2, answered_at = now() - $3::interval WHERE id = $1`, [id, t.userId, o.age ?? '0 seconds']);

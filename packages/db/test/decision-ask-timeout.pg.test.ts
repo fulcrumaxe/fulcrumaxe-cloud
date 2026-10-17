@@ -48,7 +48,7 @@ describe('decision_ask_due and decision_ask_time_out (0853)', () => {
   });
 
   const RAISE_SQL = `SELECT decision_ask_raise('human_over_the_loop', $1::text, $2::uuid, $3::uuid, $4::jsonb, 'apply',
-                                                'because', '["trusted"]'::jsonb, 15, $5::text) AS id`;
+                                                'because', '["trusted"]'::jsonb, 15, $5::text, 0) AS id`;
   const raise = (t: SeedRefs, outcome: 'stop_and_flag' | 'proceed_recommended' = 'proceed_recommended', runId: string | null = t.runId): Promise<string> =>
     withTenant(invokerPool, t.accountId, async (c) => (await c.query<{ id: string }>(RAISE_SQL, [TYPE, t.workItemId, runId, JSON.stringify(OPTIONS), outcome])).rows[0]!.id);
   /** Moves an ask's whole window two days into the past (the guard freezes both columns, so it is bypassed for this one admin statement only). */

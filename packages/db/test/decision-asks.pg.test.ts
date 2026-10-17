@@ -13,7 +13,7 @@ import { PG_ERROR } from './helpers/pgErrors.js';
  */
 const INVOKER_LOGIN = 'fx_receipt_invoker_test';
 const RAISE_SQL = `SELECT decision_ask_raise($1::text, $2::text, $3::uuid, $4::uuid, $5::jsonb, $6::text,
-                                              $7::text, $8::jsonb, $9::integer, $10::text) AS id`;
+                                              $7::text, $8::jsonb, $9::integer, $10::text, 0::integer) AS id`;
 const OPTIONS = [
   { id: 'apply', label: 'Apply the change' },
   { id: 'skip', label: 'Skip it' },
@@ -352,7 +352,7 @@ describe('decision_asks (0666)', () => {
       const wi = randomUUID();
       await admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, provenance) VALUES ($1, $2, $3, 'feature', 'internal')`, [wi, refs.accountId, refs.repoId]);
       const { rows } = await admin.query<{ def: string }>(
-        `SELECT pg_get_functiondef('decision_ask_raise(text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text)'::regprocedure) AS def`,
+        `SELECT pg_get_functiondef('decision_ask_raise(text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text,integer)'::regprocedure) AS def`,
       );
       const mutated = rows[0]!.def.replace('IF p_run_id IS NOT NULL AND NOT EXISTS', 'IF false AND NOT EXISTS');
       expect(mutated).not.toBe(rows[0]!.def);
@@ -370,7 +370,7 @@ describe('decision_asks (0666)', () => {
 
     it('with the check removed from the definer, a proposed option outside options is stored', async () => {
       const { rows } = await admin.query<{ def: string }>(
-        `SELECT pg_get_functiondef('decision_ask_raise(text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text)'::regprocedure) AS def`,
+        `SELECT pg_get_functiondef('decision_ask_raise(text,text,uuid,uuid,jsonb,text,text,jsonb,integer,text,integer)'::regprocedure) AS def`,
       );
       const mutated = rows[0]!.def.replace('IF p_proposed IS NULL OR NOT EXISTS', 'IF false AND NOT EXISTS');
       expect(mutated).not.toBe(rows[0]!.def);
