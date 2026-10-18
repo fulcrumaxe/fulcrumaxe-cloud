@@ -418,6 +418,9 @@ describe('ask_routes (0836)', () => {
       'envelope.changed',
       'autostart_envelope.changed',
       'envelope_margin.changed',
+      'context_rule.saved',
+      'context_rule.replaced',
+      'context_rule.removed',
     ];
 
     it('audit_write accepts every expected action', async () => {
