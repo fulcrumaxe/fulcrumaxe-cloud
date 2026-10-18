@@ -63,7 +63,8 @@ function recordingSdk() {
   return { log, sdk: { create: get, get } };
 }
 
-const startOpts = (workdir: string | undefined = WORKDIR): StartDetachedOptions => ({
+const startOpts = (workdir: string | undefined = WORKDIR, excludes?: readonly string[]): StartDetachedOptions => ({
+  ...(excludes === undefined ? {} : { excludes }),
   runId: "run-1",
   role: "reviewer",
   roleCard: "card",
@@ -76,12 +77,12 @@ const startOpts = (workdir: string | undefined = WORKDIR): StartDetachedOptions 
   onEvent: () => {},
 });
 
-async function startAndResume(workdir: string | undefined = WORKDIR) {
+async function startAndResume(workdir: string | undefined = WORKDIR, excludes?: readonly string[]) {
   const { log, sdk } = recordingSdk();
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk });
   const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
-  await port.startDetached(handle, startOpts(workdir)).hookFired.catch(() => undefined);
-  await port.resume(handle, "sess-9", "next", startOpts(workdir)).hookFired.catch(() => undefined);
+  await port.startDetached(handle, startOpts(workdir, excludes)).hookFired.catch(() => undefined);
+  await port.resume(handle, "sess-9", "next", startOpts(workdir, excludes)).hookFired.catch(() => undefined);
   return log;
 }
 
@@ -184,6 +185,28 @@ describe("SS-ARGV, SS-FILES, SS-CONTENT: claude-code start and resume", () => {
       expect(byPath[FX_LIMIT_HOOK_PATH]!.content).toBe(FX_LIMIT_HOOK_SCRIPT);
       expect(byPath[FX_LIMIT_HOOK_PATH]!.mode).toBe(0o444);
       expect(byPath[FX_RUN_LIMITS_PATH]!.mode).toBe(0o444);
+    }
+  });
+
+  it("D#600 CX-5b: excludes are deny entries in the settings written before the start AND before the resume, with nothing else changed", async () => {
+    const excludes = ["secret/a.txt", "app/[id]/page.tsx"];
+    const log = await startAndResume(WORKDIR, excludes);
+    const settings = log
+      .filter((o) => o.op === "write")
+      .map((o) => (o.params as { files: { path: string; content: string }[] }).files.find((f) => f.path === FX_AGENT_SETTINGS_PATH)!.content);
+    expect(settings).toHaveLength(2);
+    for (const content of settings) {
+      expect(JSON.parse(content)).toEqual(agentSettingsFor(START_OPTS_ROLE, excludes));
+      const deny = (JSON.parse(content) as { permissions: { deny: string[] } }).permissions.deny;
+      expect(deny).toContain("Read(secret/a.txt)");
+      expect(deny).toContain("Read(secret/a.txt/**)");
+      expect(deny).toEqual(expect.arrayContaining(["Grep", "Glob"]));
+    }
+    // No excludes: the deny list is empty, as before this row.
+    const plain = await startAndResume();
+    for (const o of plain.filter((x) => x.op === "write")) {
+      const f = (o.params as { files: { path: string; content: string }[] }).files.find((x) => x.path === FX_AGENT_SETTINGS_PATH)!;
+      expect((JSON.parse(f.content) as { permissions: { deny: string[] } }).permissions.deny).toEqual([]);
     }
   });
 

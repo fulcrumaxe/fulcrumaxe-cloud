@@ -43,6 +43,11 @@ export interface RunContextPanel {
   tool_output: { tool: string; bytes: number }[];
   compactions: number | null;
   /**
+   * D#600 CX-5b: tool calls the run's permission rules refused (an excluded path read or searched), counted by the sandbox runner. Null ("Not recorded") for a run on the
+   * person's machine, for a run that predates the count, and for a run with no ledger; 0 is a measured "none".
+   */
+  denied_tool_calls: number | null;
+  /**
    * The memory entries the run's prompt held, in prompt order, by display name and id@version (D#601; recorded when the build starts, migration
    * 0833). The name is derived from the entry's row now, never stored: a deleted entry reads "Deleted entry". Empty for a run that recalled nothing,
    * for a run that predates the record. A run on the person's machine lists the memory its job carried, the same way (D#601 MEM-3b).
@@ -71,6 +76,7 @@ interface Row {
   memory_tokens: string | null;
   tool_output_bytes: unknown;
   compactions: number | null;
+  denied_tool_calls: number | null;
   recalled_ids: string[] | null;
   recalled_versions: number[] | null;
   map_version: string | null;
@@ -110,7 +116,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       await client.query<Row>(
         `SELECT r.id, r.runtime, r.status, (l.run_id IS NOT NULL) AS has_ledger, l.basis, l.sections,
                 l.first_turn_input_tokens, l.peak_context_tokens, l.cache_read_tokens, l.cache_write_tokens, l.memory_tokens,
-                l.tool_output_bytes, l.compactions,
+                l.tool_output_bytes, l.compactions, l.denied_tool_calls,
                 i.recalled_entry_ids AS recalled_ids, i.recalled_entry_versions AS recalled_versions, i.map_version, i.map_sha256
            FROM agent_runs r
            LEFT JOIN run_context_ledger l ON l.account_id = r.account_id AND l.run_id = r.id
@@ -135,6 +141,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         memory_tokens: null,
         tool_output: [],
         compactions: null,
+        denied_tool_calls: null,
         recalled_memory: [],
         repo_map_version: null,
       };
@@ -172,6 +179,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       memory_tokens: num(r.memory_tokens),
       tool_output,
       compactions: r.compactions,
+      denied_tool_calls: r.denied_tool_calls,
       recalled_memory,
       repo_map_version,
     };

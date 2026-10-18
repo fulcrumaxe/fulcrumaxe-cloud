@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ContextLedgerCapture, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
 import { buildExecutionRun, startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
-import type { SandboxPort } from "../src/sandboxPort.js";
+import type { SandboxPort, StartDetachedOptions } from "../src/sandboxPort.js";
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createSandboxTargetHarness } from "./helpers/sandboxTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
@@ -110,5 +110,168 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
       expect(sections).toEqual(uncutSections);
       expect(sections.every((x) => x.trimmed_bytes === 0 && !("trimmed_reason" in x))).toBe(true);
     });
+  });
+});
+
+/** [pg] D#600 CX-5b: the denial count lands on the sandbox row, and the excludes the port is given are the rules as they stand at each launch. */
+describe("sandbox target: excludes and the denial count [pg] (D#600 CX-5b)", () => {
+  const db = pgHarness();
+  const measureOf = (): ContextLedgerMeasure => {
+    const c = new ContextLedgerCapture();
+    c.observe({ type: "assistant", message: { id: "m1", content: [], usage: { input_tokens: 4, cache_creation_input_tokens: 6, cache_read_input_tokens: 90 } } });
+    return c.snapshot();
+  };
+
+  async function world() {
+    const accountId = randomUUID();
+    const userId = randomUUID();
+    const repoId = randomUUID();
+    const workItemId = randomUUID();
+    await seedAccount(db.admin, accountId);
+    await seedMember(db.admin, accountId, userId);
+    await seedRepo(db.admin, accountId, repoId);
+    await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 5 });
+    const rule = (scope: "repo" | "item", kind: "pin" | "exclude", path: string) =>
+      db.admin.query(`INSERT INTO context_rules (account_id, scope, repo_id, work_item_id, kind, path, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [accountId, scope, scope === "repo" ? repoId : null, scope === "item" ? workItemId : null, kind, path, userId]);
+    const input: StartAgentRunInput = {
+      accountId, repoId, workItemId, role: "code-reviewer", product: "team", roleCard: "rc", prompt: "p", model: "haiku-4.5", capUsd: 5,
+      spend: { plan: "starter", estimateComputeUsd: 1, trigger: "foreground" },
+    };
+    // The target's own pool, failing ONLY the query on context_rules while `rulesFail.on` (every other query passes through to the real database).
+    const rulesFail = { on: false };
+    const pool = new Proxy(db.runWriterPool, {
+      get(target, prop, receiver) {
+        if (prop !== "connect") return Reflect.get(target, prop, receiver) as unknown;
+        return async () => {
+          const client = await target.connect();
+          const query = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
+          (client as unknown as { query: unknown }).query = (text: unknown, ...rest: unknown[]) =>
+            rulesFail.on && typeof text === "string" && text.includes("context_rules") ? Promise.reject(new Error("rules unavailable")) : query(text, ...rest);
+          return client;
+        };
+      },
+    });
+    const h = createSandboxTargetHarness(pool);
+    const created = { n: 0 };
+    const seen: Array<{ op: "start" | "resume"; excludes: readonly string[] | undefined }> = [];
+    let measure: ContextLedgerMeasure | undefined;
+    const port: SandboxPort = {
+      ...h.deps.sandboxPort,
+      createSandbox(opts) {
+        created.n += 1;
+        return h.deps.sandboxPort.createSandbox(opts);
+      },
+      startDetached(handle, opts: StartDetachedOptions) {
+        seen.push({ op: "start", excludes: opts.excludes });
+        const out = h.deps.sandboxPort.startDetached(handle, opts);
+        if (measure !== undefined) opts.onContextLedger?.(measure);
+        return out;
+      },
+      resume(handle, sessionId, prompt, opts) {
+        seen.push({ op: "resume", excludes: opts.excludes });
+        const out = h.deps.sandboxPort.resume(handle, sessionId, prompt, opts);
+        if (measure !== undefined) opts.onContextLedger?.(measure);
+        return out;
+      },
+    };
+    const target = new SandboxTarget({ ...h.deps, sandboxPort: port });
+    const start = async (m?: ContextLedgerMeasure) => {
+      measure = m;
+      const result = await startAgentRun(db.runWriterPool, { sandbox: target }, input);
+      if (result.status !== "running") throw new Error("run did not start");
+      await sleep(30);
+      return { id: result.id, run: buildExecutionRun(result.id, input) };
+    };
+    return { accountId, rule, seen, target, start, rulesFail, created, input };
+  }
+  const denied = async (accountId: string, id: string) => (await db.admin.query("SELECT denied_tool_calls AS d FROM run_context_ledger WHERE account_id = $1 AND run_id = $2", [accountId, id])).rows.map((r) => r.d);
+
+  it("acceptance 2: a sandbox run with no excludes records 0 refused calls; one whose stream refused 2 records 2; a measure with no count (a runner's) leaves null", async () => {
+    for (const [count, expected] of [[0, 0], [2, 2], [undefined, null]] as const) {
+      const w = await world();
+      const s = await w.start({ ...measureOf(), ...(count === undefined ? {} : { denied_tool_calls: count }) });
+      await w.target.finalize(s.run, { status: "succeeded", usd: 0.1 });
+      expect(await denied(w.accountId, s.id), String(count)).toEqual([expected]);
+    }
+  });
+
+  it("the port gets the item's exclude paths at the start, with pins left out, an item rule over the repository's for the same path, and no other account's rules", async () => {
+    const w = await world();
+    await w.rule("repo", "exclude", "secret/a.txt");
+    await w.rule("repo", "exclude", "docs/api.md");
+    await w.rule("repo", "pin", "README.md");
+    await w.rule("item", "pin", "docs/api.md"); // the item pins what the repository excludes: the item's rule wins
+    await w.rule("item", "exclude", "keys/**");
+    const other = await world();
+    await other.rule("repo", "exclude", "other-account.txt");
+    await w.start();
+    expect(w.seen).toEqual([{ op: "start", excludes: expect.arrayContaining(["keys/**", "secret/a.txt"]) }]);
+    expect(w.seen[0]!.excludes).toHaveLength(2);
+  });
+
+  it("a run with no excludes is given none (the port's settings are as before this row)", async () => {
+    const w = await world();
+    await w.rule("repo", "pin", "README.md");
+    await w.start();
+    expect(w.seen).toEqual([{ op: "start", excludes: undefined }]);
+  });
+
+  it("acceptance 4 and the undo path: a resume reads the rules as they stand at the resume; an exclude removed since stops denying, one added since applies", async () => {
+    const w = await world();
+    await w.rule("repo", "exclude", "secret/a.txt");
+    const s = await w.start();
+    // A fix round resumes a run that is queued again (`pending`), as `resumeAgentRun` leaves it.
+    const resume = async () => {
+      await db.admin.query("UPDATE agent_runs SET status = 'pending' WHERE id = $1", [s.id]);
+      await w.target.resume(s.run, "sess-1");
+      await sleep(30);
+    };
+    await resume();
+    await w.rule("repo", "exclude", "added/later.txt");
+    await resume();
+    await db.admin.query("DELETE FROM context_rules WHERE account_id = $1", [w.accountId]);
+    await resume();
+    const sorted = (x: readonly string[] | undefined) => (x === undefined ? undefined : [...x].sort());
+    expect(w.seen.map((x) => [x.op, sorted(x.excludes)])).toEqual([
+      ["start", ["secret/a.txt"]],
+      ["resume", ["secret/a.txt"]],
+      ["resume", ["added/later.txt", "secret/a.txt"]],
+      ["resume", undefined],
+    ]);
+  });
+
+  it("fails closed on a RESUME: when the rules query fails, nothing reaches the port, and the failure is the rules' own", async () => {
+    const w = await world();
+    await w.rule("repo", "exclude", "secret/a.txt");
+    const s = await w.start();
+    w.seen.length = 0;
+    w.created.n = 0;
+    // The run is pending, as a fix round leaves it, so the only thing that can stop this launch is the failed read.
+    await db.admin.query("UPDATE agent_runs SET status = 'pending' WHERE id = $1", [s.id]);
+    w.rulesFail.on = true;
+    await expect(w.target.resume(s.run, "sess-1")).rejects.toThrow("rules unavailable");
+    w.rulesFail.on = false;
+    expect(w.seen).toEqual([]);
+    expect(w.created.n).toBe(0);
+    // Nothing was marked as requested or started: the run is still pending, and the same call works once the rules can be read.
+    expect((await db.admin.query("SELECT status FROM agent_runs WHERE id = $1", [s.id])).rows).toEqual([{ status: "pending" }]);
+    await w.target.resume(s.run, "sess-1");
+    expect(w.seen.map((x) => x.op)).toEqual(["resume"]);
+  });
+
+  it("fails closed on a START: when the rules query fails, no sandbox is created, the agent is never started, and the run does not go to running", async () => {
+    const w = await world();
+    await w.rule("repo", "exclude", "secret/a.txt");
+    w.rulesFail.on = true;
+    const outcome = await startAgentRun(db.runWriterPool, { sandbox: w.target }, w.input).then(
+      (r) => r.status,
+      () => "threw",
+    );
+    w.rulesFail.on = false;
+    expect(outcome).not.toBe("running");
+    expect(w.created.n).toBe(0);
+    expect(w.seen).toEqual([]);
+    const rows = (await db.admin.query("SELECT status FROM agent_runs WHERE account_id = $1", [w.accountId])).rows;
+    expect(rows.every((r) => r.status !== "running")).toBe(true);
   });
 });

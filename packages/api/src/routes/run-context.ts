@@ -24,6 +24,7 @@ export const runContextResponseSchema = z.object({
   memory_tokens: count.nullable(),
   tool_output: z.array(z.object({ tool: z.enum(CONTEXT_TOOL_ENUM), bytes: count })).max(32),
   compactions: count.nullable(),
+  denied_tool_calls: count.nullable(),
   recalled_memory: z.array(z.object({ id: z.string().uuid(), name: z.string().max(120), version: z.number().int().min(1) })).max(50),
   repo_map_version: z.string().max(64).nullable(),
 });

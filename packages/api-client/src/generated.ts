@@ -674,7 +674,7 @@ export interface Operations {
         code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "output" | "repo_instructions" | "pinned";
         bytes: number;
         trimmed_bytes: number;
-        trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget";
+        trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget" | "pin_missing" | "pins_over_budget" | "pin_too_large" | "pin_excluded";
       }>;
       first_turn_input_tokens: (number) | (null);
       peak_context_tokens: (number) | (null);
@@ -686,6 +686,7 @@ export interface Operations {
         bytes: number;
       }>;
       compactions: (number) | (null);
+      denied_tool_calls: (number) | (null);
       recalled_memory: Array<{
         id: string;
         name: string;

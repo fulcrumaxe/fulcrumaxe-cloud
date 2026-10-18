@@ -987,8 +987,36 @@ describe("D#600 CX-1a: the context measure of the command's own stream", () => {
         cache_write_tokens: 4_975,
         tool_output_bytes: { Bash: 100_000 },
         compactions: 1,
+        // D#600 CX-5b: a sandbox command always reports its count of refused tool calls (here none).
+        denied_tool_calls: 0,
       },
     ]);
+  });
+
+  it("D#600 CX-5b: the count of refused tool calls is reported with the measure: a refused result and the final result's permission_denials, one id once", async () => {
+    const measures: Array<{ denied_tool_calls?: number }> = [];
+    const refused = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: "Permission to use Read has been denied." }] } });
+    await run(
+      [
+        turn("m1", 9, 10, 20, { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/work/secret/a.txt" } }, { type: "tool_use", id: "t2", name: "Grep", input: { pattern: "x" } }),
+        refused,
+        result(envelope("pass"), { permission_denials: [{ tool_name: "Read", tool_use_id: "t1", tool_input: {} }, { tool_name: "Grep", tool_use_id: "t2", tool_input: {} }] }),
+      ],
+      0,
+      { onContextLedger: (m) => void measures.push(m) },
+    );
+    expect(measures).toHaveLength(1);
+    expect(measures[0]!.denied_tool_calls).toBe(2);
+  });
+
+  it("D#600 CX-5b: a run with excludes counts the 'No such tool available: Grep' answer as refused (Grep and Glob are disabled); a run without excludes does not", async () => {
+    const noGrep = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", is_error: true, content: "<tool_use_error>Error: No such tool available: Grep. Grep is not available in this session — search file contents with `grep` via the Bash tool instead.</tool_use_error>" }] } });
+    const lines = [turn("m1", 9, 10, 20, { type: "tool_use", id: "t2", name: "Grep", input: { pattern: "x" } }), noGrep, result(envelope("pass"))];
+    for (const [excludes, expected] of [[["secret/a.txt"], 1], [undefined, 0]] as const) {
+      const measures: Array<{ denied_tool_calls?: number }> = [];
+      await run(lines, 0, { onContextLedger: (m) => void measures.push(m), ...(excludes ? { excludes } : {}) });
+      expect(measures[0]!.denied_tool_calls).toBe(expected);
+    }
   });
 
   it("a line the port drops (non-JSON, unknown type, malformed assistant) adds nothing to the measure", async () => {

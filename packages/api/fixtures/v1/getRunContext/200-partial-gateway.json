@@ -15,6 +15,7 @@
   "memory_tokens": null,
   "tool_output": [],
   "compactions": 0,
+  "denied_tool_calls": 0,
   "recalled_memory": [],
   "repo_map_version": null
 }

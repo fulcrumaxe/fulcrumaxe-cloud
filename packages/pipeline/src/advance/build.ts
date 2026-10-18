@@ -5,19 +5,21 @@ import { recordStage } from "@fx/core/src/work-items/recordStage.js";
 import { stampPlanePush } from "@fx/core/src/repos/planePushRecord.js";
 import { IllegalStageTransitionError, WorkItemHaltedError } from "@fx/core/src/work-items/stages.js";
 import { isBuildableKind } from "@fx/discussions";
-import { effectiveModeSql, isRunnerMode, runsInOurSandbox } from "@fx/runner";
+import { EXCLUDE_PROMPT_LINE, effectiveModeSql, isRunnerMode, runsInOurSandbox, type ContextSection } from "@fx/runner";
 import { attachRunNotes, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
+import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { decideStackStart, type StackBasePort, type StackParentFacts, type StackStartRefusal } from "./stackBase.js";
 import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
-import { assemblePrompt, renderMemorySlot, MEMORY_MARKER_ROOM, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { assemblePrompt, renderMemorySlot, sha256Of, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
+import { excludeCovers, type PinContentPort } from "../prompt/pinContent.js";
 import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
@@ -77,6 +79,10 @@ export interface ExecutorPromptInput {
   map?: { version: string; text: string };
   /** D#600 CX-2: notes and corrections to carry; the same text twice is one section. */
   notes?: readonly NoteItem[];
+  /** D#600 CX-5b: the files a person pinned, read in full on the cloud side (absent: none). Sandbox runs only. */
+  pins?: readonly PinnedItem[];
+  /** D#600 CX-5b: the run has excluded paths; the prompt carries the one line about them. Sandbox runs only. */
+  excludeLine?: boolean;
   /** D#598 P3b: the item builds on its stack parent's open pull request. The sandbox run starts from this branch at exactly this commit and opens its pull request against the branch. Absent: the default branch, as always. */
   stackBase?: { branch: string; sha: string };
 }
@@ -131,8 +137,10 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     `   The pull request body MUST start with the exact line \`Closes #${number}\`. Describe the change in your own words; do not paste the Spec or its text into the title, the body or any comment.`,
     "8. Check that the response holds the pull request's number. If it does not, fix the request and send it again.",
     ].join("\n"),
+    ...(input.excludeLine === true ? { contextRulesLine: EXCLUDE_PROMPT_LINE } : {}),
     spec: { version, body: input.spec },
     ...(input.map ? { map: input.map } : {}),
+    ...(input.pins && input.pins.length > 0 ? { pinned: input.pins } : {}),
     memoryStable: input.memory?.stable,
     memoryItem: input.memory?.item,
     runNotes: input.runNotes,
@@ -239,6 +247,34 @@ async function recallMemory(pool: Pool, accountId: string, repoId: string | null
   return { ...(first.text ? { stable: first } : {}), ...(second.text ? { item: second } : {}) };
 }
 
+/** The pinned files for a run. A port that is absent, or that fails, leaves every pin missing: a pin never blocks a run. */
+async function readPins(port: PinContentPort | undefined, request: Parameters<PinContentPort["forRun"]>[0]): Promise<Awaited<ReturnType<PinContentPort["forRun"]>>> {
+  if (port === undefined) return { items: [], missing: request.paths.length, tooLarge: 0 };
+  try {
+    return await port.forRun(request);
+  } catch {
+    // fx-swallow-ok: pins that cannot be read are counted as missing in the ledger; the run starts without them
+    return { items: [], missing: request.paths.length, tooLarge: 0 };
+  }
+}
+
+/**
+ * D#600 CX-5b: what the ledger says about the pins beyond their own sections: how many could not be read (`pin_missing`, in `bytes`), and how far the pins stand
+ * over the repository's budget (`pins_over_budget`, in bytes). Pins are never cut, so an overage is a note, not a trim. Figures and fixed hashes only: no path.
+ */
+function pinLedgerNotes(read: { items: ReadonlyArray<{ text: string }>; missing: number; tooLarge: number; excluded: number }, budgetBytes: number | undefined): ContextSection[] {
+  const notes: ContextSection[] = [];
+  const count = (n: number, reason: "pin_missing" | "pin_too_large" | "pin_excluded"): void => {
+    if (n > 0) notes.push({ code: "pinned", bytes: n, sha256: sha256Of(reason), trimmed_bytes: 0, trimmed_reason: reason });
+  };
+  count(read.missing, "pin_missing");
+  count(read.tooLarge, "pin_too_large");
+  count(read.excluded, "pin_excluded");
+  const total = read.items.reduce((n, p) => n + Buffer.byteLength(p.text, "utf8"), 0);
+  if (budgetBytes !== undefined && total > budgetBytes) notes.push({ code: "pinned", bytes: total - budgetBytes, sha256: sha256Of("pins_over_budget"), trimmed_bytes: 0, trimmed_reason: "pins_over_budget" });
+  return notes;
+}
+
 /**
  * D#598 P3b: where a stacked item's run starts. Fails closed at every step: a runner run (the platform checks the branch out and opens the
  * pull request itself, against the default branch) is refused, so is a parent with no recorded pull request, a start with no way to read
@@ -280,7 +316,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; spendAttempt?: number; stackBase?: StackBasePort } = {},
+  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; pins?: PinContentPort; spendAttempt?: number; stackBase?: StackBasePort } = {},
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -329,10 +365,30 @@ export async function startBuildForItem(
   // D#600 CX-4a: a sandbox prompt over its budget spills what it cuts to /fx/context. The budget is the repository's setting, else the role's default, derived now and never stored.
   const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
   const budgetBytes = sandboxPrompt && facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
-  const { prompt, sections, spill, memoryAside } = assembleExecutorPrompt(
-    { owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}) },
+  // D#600 CX-5b: the item's rules as they stand now (its own over the repository's). The excludes only add a prompt line here (the settings that refuse the reads are written
+  // at each launch, from the rules then); the pins are read on the cloud side at the run's start commit and go in full. A runner run gets neither from here (CX-5c).
+  const rules = sandboxPrompt && !prior ? await withTenant(pool, accountId, (client) => readItemRules(client, accountId, workItemId)) : [];
+  // An exclude wins over a pin (an admin's exclude is never bypassed by a member's pin): a pin under any exclude of the resolved set is never fetched.
+  const excludePatterns = rules.filter((r) => r.kind === "exclude").map((r) => r.path);
+  const allPins = rules.filter((r) => r.kind === "pin").map((r) => r.path);
+  const pinPaths = allPins.filter((path) => !excludePatterns.some((pattern) => excludeCovers(pattern, path)));
+  const excludedPins = allPins.length - pinPaths.length;
+  const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : {}) });
+  const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
+  const assembled = assembleExecutorPrompt(
+    {
+      owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
+      ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}),
+      ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),
+      ...(pinRead && pinRead.items.length > 0 ? { pins: pinRead.items.map((p, i) => ({ label: `PINNED FILE ${i + 1} of ${pinRead.items.length}`, text: `path: ${p.path}\n${p.text}` })) } : {}),
+    },
     { spill: sandboxPrompt, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
   );
+  const { prompt, spill: assembledSpill, memoryAside } = assembled;
+  const notesOfPins = pinRead ? pinLedgerNotes(pinRead, budgetBytes) : [];
+  const sections = [...assembled.sections, ...notesOfPins];
+  // A spill whose files could not be written sends its uncut prompt, and the ledger records that prompt's sections: they carry the same pin notes.
+  const spill = assembledSpill && notesOfPins.length > 0 ? { ...assembledSpill, uncut: { ...assembledSpill.uncut, sections: [...assembledSpill.uncut.sections, ...notesOfPins] } } : assembledSpill;
 
   // D#483 S5-c1: an item moves into `in_progress` only by taking a build slot, under the account's advisory lock. The run starts INSIDE that lock, so
   // two starts at once cannot both pass a limit that has room for one, and a start that finds no slot has started nothing (no run, no spend). An item

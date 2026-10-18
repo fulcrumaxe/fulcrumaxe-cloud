@@ -73,6 +73,13 @@ describe("the wire mapping", () => {
     expect(Object.keys(none)).not.toContain("peak_context");
     expect(contextLedgerFromWire(none).measure).toEqual(NOT_RECORDED_MEASURE);
   });
+
+  it("D#600 CX-5b: the count of refused calls is a sandbox figure. It is not on the wire (no wire change), and a body that sends one is refused", () => {
+    const wire = contextLedgerToWire({ ...NOT_RECORDED_MEASURE, denied_tool_calls: 3 });
+    expect(Object.keys(wire)).not.toContain("denied_tool_calls");
+    expect(ContextLedgerBody.safeParse({ ...wire, denied_tool_calls: 3 }).success).toBe(false);
+    expect(Object.keys(contextLedgerFromWire(wire).measure)).not.toContain("denied_tool_calls");
+  });
 });
 
 describe("ContextLedgerCapture follow-ups from the CX-1a review", () => {

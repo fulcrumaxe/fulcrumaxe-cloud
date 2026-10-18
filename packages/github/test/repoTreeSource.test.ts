@@ -4,7 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp } from "../src/installationHttp.js";
 import { BLOB_MAX_BYTES, createRepoTreeSource } from "../src/repoTreeSource.js";
-import type { PinTreeSource } from "@fx/pipeline";
+import { createPinContentPort, type PinTreeSource } from "@fx/pipeline";
 import { ghError, FETCH_DEFAULT_USER_AGENT, type GhReply, type GhRequest } from "./helpers/strictGithub.js";
 import { startStrictGithubServer, type LocalTlsServer } from "./helpers/localTlsServer.js";
 
@@ -157,6 +157,54 @@ describe("createRepoTreeSource over real TLS", () => {
     await server?.close();
     const binary = await setup(repoRoutes({ [`/repos/acme/widgets/git/blobs/${BLOB}`]: ok({ encoding: "base64", size: 2, content: Buffer.from([0xff, 0xfe]).toString("base64") }) }));
     expect(await binary.source.blob(BLOB)).toBeNull();
+  });
+
+  it("D#600 CX-5b: a larger cap reads a pinned file GitHub sends with a line break every 60 characters, and the cap is the caller's, not the map's", async () => {
+    // GitHub wraps the base64 of a blob at 60 characters with "\n"; a decoder that does not skip them returns wrong text.
+    const text = `${"héllo wörld, a pinned line of text.\n".repeat(3000)}end`;
+    const wrapped = Buffer.from(text, "utf8").toString("base64").replace(/(.{60})/g, "$1\n");
+    const size = Buffer.byteLength(text, "utf8");
+    expect(size).toBeGreaterThan(BLOB_MAX_BYTES);
+    const { source } = await setup(repoRoutes({ [`/repos/acme/widgets/git/blobs/${BLOB}`]: ok({ encoding: "base64", size, content: wrapped }) }));
+    expect(await source.blob(BLOB)).toBeNull();
+    expect(await source.blob(BLOB, size - 1)).toBeNull();
+    expect(await source.blob(BLOB, size)).toBe(text);
+  });
+});
+
+describe("pinned files over real TLS (D#600 CX-5b)", () => {
+  const PIN_BLOB = "4".repeat(40);
+  const OTHER_BLOB = "5".repeat(40);
+  const tree = ok({
+    sha: COMMIT,
+    truncated: false,
+    tree: [
+      { path: "docs", type: "tree", sha: "3".repeat(40) },
+      { path: "docs/guide.md", type: "blob", sha: PIN_BLOB, size: 11 },
+      { path: "app/[id]/page.tsx", type: "blob", sha: OTHER_BLOB, size: 7 },
+    ],
+  });
+  const routes = repoRoutes({
+    [`/repos/acme/widgets/git/trees/${COMMIT}`]: tree,
+    [`/repos/acme/widgets/git/blobs/${PIN_BLOB}`]: ok({ encoding: "base64", size: 11, content: Buffer.from("hello pins\n").toString("base64") }),
+    [`/repos/acme/widgets/git/blobs/${OTHER_BLOB}`]: ok({ encoding: "base64", size: 7, content: Buffer.from("page()\n").toString("base64") }),
+  });
+
+  it("reads the pins at the commit through the one-repository token, finds a bracketed path literally, and counts the missing one", async () => {
+    const { source, srv } = await setup(routes);
+    const port = createPinContentPort({ open: async () => source });
+    const got = await port.forRun({ accountId: "a", repoId: TARGET.repoId, owner: "acme", name: "widgets", paths: ["docs/guide.md", "app/[id]/page.tsx", "docs/gone.md"], sha: COMMIT });
+    expect(got).toEqual({ items: [{ path: "app/[id]/page.tsx", text: "page()\n" }, { path: "docs/guide.md", text: "hello pins\n" }], missing: 1, tooLarge: 0 });
+    // Exactly one tree and the two blobs: nothing is read by path, and the missing pin costs no call.
+    expect(srv.seen.map((r) => `${r.method} ${r.path}`)).toEqual([`GET /repos/acme/widgets/git/trees/${COMMIT}`, `GET /repos/acme/widgets/git/blobs/${OTHER_BLOB}`, `GET /repos/acme/widgets/git/blobs/${PIN_BLOB}`]);
+  });
+
+  it("GitHub answering an error leaves every pin missing and the port does not throw (a pin never blocks a run); the log is a fixed word", async () => {
+    const { source } = await setup(() => ghError(500, "boom token=ghs_secret acme/widgets"));
+    const logged: string[] = [];
+    const port = createPinContentPort({ open: async () => source, log: (r) => logged.push(r) });
+    expect(await port.forRun({ accountId: "a", repoId: TARGET.repoId, owner: "acme", name: "widgets", paths: ["docs/guide.md", "x.md"] })).toEqual({ items: [], missing: 2, tooLarge: 0 });
+    expect(logged).toEqual(["unavailable"]);
   });
 });
 

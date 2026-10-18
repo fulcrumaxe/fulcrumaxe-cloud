@@ -108,6 +108,7 @@ describe("the model, per state", () => {
       ["First turn", "9,800 tokens"],
       ["Largest context", "148,000 tokens"],
       ["Compacted", "Once"],
+      ["Calls refused (kept out of context)", "3 tool calls"],
     ]);
   });
 
@@ -138,6 +139,7 @@ describe("the model, per state", () => {
       ["First turn", CONTEXT_WORDS.notRecorded],
       ["Largest context", CONTEXT_WORDS.notRecorded],
       ["Compacted", "Not compacted"],
+      ["Calls refused (kept out of context)", "None"],
     ]);
     expect(m.cache).toBe("Cache use: Not recorded");
     const el = drawn(PARTIAL);
@@ -149,6 +151,50 @@ describe("the model, per state", () => {
     expect(m.facts[0]).toEqual(["First turn", "0 tokens"]);
     expect(m.cache).toBe("0 of 0 tokens from cache");
     expect(m.facts[2]).toEqual(["Compacted", "Not compacted"]);
+  });
+
+  it("D#600 CX-5b: the refused-call count is worded (none, one, many), an old row or a runner run says Not recorded, and a bad value is never drawn as a number", () => {
+    const refused = (value) => contextModel(readContext({ ...MEASURED, denied_tool_calls: value })).facts.at(-1);
+    expect(refused(0)).toEqual(["Calls refused (kept out of context)", "None"]);
+    expect(refused(1)).toEqual(["Calls refused (kept out of context)", "1 tool call"]);
+    expect(refused(12)).toEqual(["Calls refused (kept out of context)", "12 tool calls"]);
+    for (const absent of [null, undefined, -1, 1.5, "3", NaN]) expect(refused(absent), String(absent)).toEqual(["Calls refused (kept out of context)", CONTEXT_WORDS.notRecorded]);
+    expect(contextModel(readContext(RUNNER)).facts.at(-1)).toEqual(["Calls refused (kept out of context)", CONTEXT_WORDS.notRecorded]);
+    const old = { ...MEASURED };
+    delete old.denied_tool_calls;
+    expect(contextModel(readContext(old)).facts.at(-1)[1]).toBe(CONTEXT_WORDS.notRecorded);
+    expect(panelText(drawn({ ...MEASURED, denied_tool_calls: 3 }))).toContain("Calls refused (kept out of context)3 tool calls");
+    expect(panelText(drawn(RUNNER))).not.toMatch(BAD);
+  });
+
+  it("D#600 CX-5b: pinned files are a row with their size; the two pin notes are sentences, not rows, and say which happened", () => {
+    const pins = (extra) => ({
+      ...MEASURED,
+      sections: [...MEASURED.sections, { code: "pinned", bytes: 4096, trimmed_bytes: 0 }, ...extra],
+    });
+    const plain = contextModel(readContext(pins([])));
+    expect(plain.sections.find((r) => r.key === "section-pinned")).toMatchObject({ label: "Pinned files", size: "4 KiB" });
+    expect(plain.pinNotes).toEqual([]);
+    const both = contextModel(readContext(pins([{ code: "pinned", bytes: 2, trimmed_bytes: 0, trimmed_reason: "pin_missing" }, { code: "pinned", bytes: 2048, trimmed_bytes: 0, trimmed_reason: "pins_over_budget" }])));
+    // The notes carry a count and a size in bytes, so they are no rows with a share.
+    expect(both.sections.filter((r) => r.key === "section-pinned")).toHaveLength(1);
+    expect(both.pinNotes[0]).toContain("2 pinned files were not included");
+    expect(both.pinNotes[1]).toBe("Pinned files stand 2 KiB over this repository's context budget. They are never cut, so they were included in full.");
+    const one = contextModel(readContext(pins([{ code: "pinned", bytes: 1, trimmed_bytes: 0, trimmed_reason: "pin_missing" }])));
+    expect(one.pinNotes).toEqual(["1 pinned file was not included: it was missing or not text, or GitHub could not be read."]);
+    const el = drawn(pins([{ code: "pinned", bytes: 2, trimmed_bytes: 0, trimmed_reason: "pin_missing" }]));
+    expect(el.byTestId("runs-ctx-pin-note")).toHaveLength(1);
+    expect(panelText(el)).not.toMatch(BAD);
+  });
+
+  it("D#600 CX-5b: too-large and excluded pins are sentences that say why, with the count", () => {
+    const base = { ...MEASURED, sections: [...MEASURED.sections] };
+    const m = contextModel(readContext({ ...base, sections: [...base.sections, { code: "pinned", bytes: 2, trimmed_bytes: 0, trimmed_reason: "pin_too_large" }, { code: "pinned", bytes: 1, trimmed_bytes: 0, trimmed_reason: "pin_excluded" }] }));
+    expect(m.pinNotes).toEqual([
+      "2 pinned files were not included: over the 190,000-character limit for one pinned file. Pins are never cut.",
+      "1 pinned file was not included: the path is also kept out of context, and keeping out wins over pinning.",
+    ]);
+    expect(m.sections.some((r) => r.key === "section-pinned")).toBe(false);
   });
 
   it("a run with no ledger says so: Not recorded once it ended, and that it is recorded at the end while it is live", () => {

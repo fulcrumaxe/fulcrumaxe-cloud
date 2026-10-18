@@ -32,7 +32,7 @@ export interface ContextLedgerInput {
 export async function recordContextLedger(client: PoolClient, input: ContextLedgerInput): Promise<void> {
   const m = input.measure;
   try {
-    await client.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, $3::jsonb, $4::bigint, $5::bigint, $6::bigint, $7::bigint, $8::bigint, $9::jsonb, $10::integer, $11::text)", [
+    await client.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, $3::jsonb, $4::bigint, $5::bigint, $6::bigint, $7::bigint, $8::bigint, $9::jsonb, $10::integer, $11::text, $12::integer)", [
       input.accountId,
       input.runId,
       JSON.stringify(input.sections),
@@ -44,6 +44,8 @@ export async function recordContextLedger(client: PoolClient, input: ContextLedg
       JSON.stringify(m.tool_output_bytes),
       m.compactions,
       m.basis,
+      // D#600 CX-5b: a sandbox command's count of refused tool calls; a measure that carries none (a runner's) leaves the row's null.
+      m.denied_tool_calls ?? null,
     ]);
   } catch (err) {
     if ((err as { code?: unknown }).code === "22023" && (err as { message?: unknown }).message === "invalid_message") throw new ContextLedgerInvalid();
