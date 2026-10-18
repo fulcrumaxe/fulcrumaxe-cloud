@@ -245,6 +245,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       const { role, roleCard, prompt, model, capUsd } = opts;
       const started = await runtime.start({
         runId: opts.runId, role, roleCard, prompt, model, workdir, capUsd,
+        ...(opts.excludes === undefined || opts.excludes.length === 0 ? {} : { excludes: opts.excludes }),
         ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
         onEvent: (event: NormalizedEvent) => {
           last = event;

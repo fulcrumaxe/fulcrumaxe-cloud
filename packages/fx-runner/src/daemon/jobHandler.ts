@@ -141,6 +141,21 @@ export function withAllowances(port: SandboxPort, grant: JobAllowanceGrant): San
   };
 }
 
+/**
+ * D#600 CX-5c: a port whose every `startDetached` and `resume` carries this job's excluded paths, whatever the caller built, so the settings file written before each
+ * agent command holds the deny entries. The checkpoint turn of a handoff builds its own resume options; without this it would rewrite the file with the floor only, and the
+ * resumed session (and a later take-over, which reuses that file) could read excluded paths and use Grep and Glob. A job without excludes gets the port unchanged.
+ */
+export function withExcludes(port: SandboxPort, excludes: readonly string[] | undefined): SandboxPort {
+  if (excludes === undefined || excludes.length === 0) return port;
+  const carry = <T extends object>(opts: T): T => ({ ...opts, excludes });
+  return {
+    ...port,
+    startDetached: (handle, opts) => port.startDetached(handle, carry(opts)),
+    resume: (handle, sessionId, prompt, opts) => port.resume(handle, sessionId, prompt, carry(opts)),
+  };
+}
+
 /** A port whose sandbox is stopped as soon as `signal` aborts, which ends the agent and so the run. */
 function stopOnAbort(port: SandboxPort, signal: AbortSignal, held: HeldSandbox): SandboxPort {
   const gone = new Map<string, () => void>();
@@ -389,7 +404,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             await prepareDeps(job, workspace, promptNotes, stopRun, mark);
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
-          const allowed = grant === undefined ? granted : withAllowances(granted, grant);
+          const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
+          const allowed = withExcludes(withGrants, job.excludes);
           usedPort = allowed;
           result = await run(job, { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }

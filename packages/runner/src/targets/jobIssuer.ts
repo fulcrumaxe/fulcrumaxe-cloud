@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import {
   CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
   MEMORY_JOB_MIN_PROTOCOL,
+  EXCLUDES_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -17,6 +18,7 @@ import {
   type Job,
   type SignedJob,
 } from "@fulcrumaxe/runner-protocol";
+import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { toolsForRole } from "../agentConfig.js";
 import { RUNNER_RUN_BRANCH, readRecordedRunnerBranch, recordRunnerDispatchBase, writeRunnerJob } from "../runStatusWriter.js";
@@ -60,6 +62,7 @@ export type JobIssueErrorCode =
   | "review_without_head"
   | "review_sha_prompt_mismatch"
   | "sandbox_allowances_invalid"
+  | "excludes_unreadable"
   | "job_invalid"
   | "job_not_recorded";
 
@@ -386,6 +389,20 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };
       }
 
+      // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
+      // first start. Paths and globs only. A read that fails refuses the job (nothing is recorded): a job never goes out without the list it should have carried (fail closed).
+      let excludes: string[] = [];
+      if (run.workItemId !== undefined && run.workItemId !== null) {
+        const workItemId = run.workItemId;
+        try {
+          const rules = await withTenant(deps.pool, run.accountId, (client) => readItemRules(client, run.accountId, workItemId));
+          excludes = [...new Set(rules.filter((r) => r.kind === "exclude").map((r) => r.path))].sort();
+        } catch {
+          // fx-swallow-ok: the cause can carry a name or a path; only the closed code survives
+          throw new JobIssueError("excludes_unreadable");
+        }
+      }
+
       const issuedAt = now();
       const candidate: Job = {
         schema_version: 1,
@@ -403,6 +420,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
         // D#601 MEM-3b: the memory the pipeline recalled, as it split it. Omitted when the run has none (never null, never an empty pair), so such a job's signed bytes are unchanged.
         ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
+        // D#600 CX-5c: omitted when the item has none (never null, never empty), so such a job's signed bytes are unchanged.
+        ...(excludes.length > 0 ? { excludes } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),
@@ -429,8 +448,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0) || null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

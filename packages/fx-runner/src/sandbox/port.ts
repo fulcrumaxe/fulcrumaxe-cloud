@@ -41,6 +41,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   extraReadPaths?: readonly string[];
   /** D#6 R7b: the signed allowances of this job's repo. The host sandbox floor-checks them again and applies them; absent for a job without any. */
   allowances?: JobAllowanceGrant;
+  /** D#600 CX-5c: the repository paths and globs kept out of this run's context; they become deny entries in the agent's settings, for a start and a resume alike. Absent or empty: none. */
+  excludes?: readonly string[];
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

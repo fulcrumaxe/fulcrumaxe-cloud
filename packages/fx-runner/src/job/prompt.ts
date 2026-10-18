@@ -1,4 +1,4 @@
-import { isReviewJobRole, type Job } from "@fulcrumaxe/runner-protocol";
+import { EXCLUDE_PROMPT_LINE, isReviewJobRole, type Job } from "@fulcrumaxe/runner-protocol";
 import { TEST_ROLES } from "./depsRegistry.js";
 import { repoMapHeading } from "./repoMap.js";
 import { roleToolsFor } from "./roleTools.js";
@@ -128,7 +128,7 @@ export const NIX_FLAKE_CHANGED_NOTE =
   "NOTE: The dev shell toolchain for this run was built from the default branch, not from this change. This change's edits to flake.nix or flake.lock were not applied to it.";
 
 /** The fields of a job the prompt reads. */
-export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<Job, "memory">>;
+export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<Job, "memory" | "excludes">>;
 
 /**
  * The text written to the agent's standard input. The role card (the cloud's own text for the role, checked against
@@ -147,6 +147,8 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoM
     "",
     // D#601 MEM-3b: the person's own approved memory sits after the role card, sanitised and labelled. It is held in memory only: nothing here is written to disk.
     ...(job.memory === undefined || job.memory.person === "" ? [] : [PERSON_MEMORY_LABEL, sanitizePersonMemory(job.memory.person), ""]),
+    // D#600 CX-5c: the one fixed line about excluded paths (runner text, never from the job), once, only when the job has excludes. The settings are what refuse the reads.
+    ...(job.excludes === undefined || job.excludes.length === 0 ? [] : [EXCLUDE_PROMPT_LINE, ""]),
     "Complete the task described in the untrusted block below. Return an AGENT_OUTPUT JSON envelope at the end of your final message.",
     ...(PUBLISHING_ROLES.has(job.role) ? ["", PUBLISH_BACKSTOP] : []),
     ...(isReviewJobRole(job.role) ? ["", REVIEW_BACKSTOP] : []),

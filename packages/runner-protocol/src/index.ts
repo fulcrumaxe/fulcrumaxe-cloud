@@ -19,3 +19,4 @@ export { normalizeRepoPath } from "./toolActivity.js";
 export * from "./contextLedger.js";
 export * from "./contextSpill.js";
 export * from "./contextLevers.js";
+export * from "./excludeRules.js";

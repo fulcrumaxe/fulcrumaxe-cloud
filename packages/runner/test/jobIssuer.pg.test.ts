@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MEMORY_JOB_MIN_PROTOCOL, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -199,6 +199,110 @@ describe("JobIssuer [pg]", () => {
       const run = { ...(await runnerRun(w, "executor")), jobMemory: { person: "a".repeat(8193), fenced: "" } };
       expect(await codeOf(issuer().issuer.issue({ run }))).toBe("job_invalid");
       expect((await rowOf(run.id)).job_signed).toBeNull();
+    });
+  });
+
+  describe("a job carries the run's excluded paths (D#600 CX-5c)", () => {
+    const rowOf = async (id: string) => (await db.admin.query<{ job_signed: unknown; min_protocol_version: number | null }>("SELECT job_signed, min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!;
+    const rule = (w: { accountId: string; userId: string; repoId: string; workItemId: string }, scope: "repo" | "item", kind: "pin" | "exclude", path: string) =>
+      db.admin.query(`INSERT INTO context_rules (account_id, scope, repo_id, work_item_id, kind, path, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [w.accountId, scope, scope === "repo" ? w.repoId : null, scope === "item" ? w.workItemId : null, kind, path, w.userId]);
+
+    it("signs the excludes (sorted, glob syntax kept) and gates the job to a runner that applies them; pins never appear", async () => {
+      const w = await world();
+      await rule(w, "repo", "exclude", "secret/**/[ab].ts");
+      await rule(w, "item", "exclude", "keys");
+      await rule(w, "item", "pin", "docs/PIN-CONTENT-NEEDLE.md");
+      const run = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run });
+      const row = await rowOf(run.id);
+      const job = verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW });
+      expect(job.excludes).toEqual(["keys", "secret/**/[ab].ts"]);
+      expect(row.min_protocol_version).toBe(EXCLUDES_JOB_MIN_PROTOCOL);
+      // Paths and globs only: no pin path and no pin content anywhere in the stored job.
+      expect(JSON.stringify(row.job_signed)).not.toContain("PIN-CONTENT-NEEDLE");
+    });
+
+    it("an item rule on a path replaces the repository's for it, so an exclude the item turned into a pin is not sent", async () => {
+      const w = await world();
+      await rule(w, "repo", "exclude", "a.txt");
+      await rule(w, "repo", "exclude", "b.txt");
+      await rule(w, "item", "pin", "a.txt");
+      const run = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run });
+      expect(verifyJob((await rowOf(run.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).excludes).toEqual(["b.txt"]);
+    });
+
+    it("an item with no exclude (none saved, or only pins) gets a job with no excludes key and no protocol gate, exactly as before", async () => {
+      const w = await world();
+      const plain = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run: plain });
+      await rule(w, "repo", "pin", "docs/a.md");
+      const pinned = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run: pinned });
+      for (const run of [plain, pinned]) {
+        const row = await rowOf(run.id);
+        expect("excludes" in (row.job_signed as { job: object }).job).toBe(false);
+        expect(row.min_protocol_version).toBeNull();
+      }
+    });
+
+    it("undo: a removed exclude is not in the next job, and a job already issued keeps its list", async () => {
+      const w = await world();
+      await rule(w, "repo", "exclude", "secret/a.txt");
+      const first = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run: first });
+      await db.admin.query("DELETE FROM context_rules WHERE account_id = $1", [w.accountId]);
+      const second = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run: second });
+      expect(verifyJob((await rowOf(first.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).excludes).toEqual(["secret/a.txt"]);
+      expect(((await rowOf(second.id)).job_signed as { job: object }).job).not.toHaveProperty("excludes");
+    });
+
+    it("a fix round reads the rules as they stand at its own issue, not the first start's", async () => {
+      const w = await world();
+      const { parent, run } = await fixPair(w);
+      await rule(w, "repo", "exclude", "added-after-the-first-round.txt");
+      await issuer().issuer.issue({ run, continues: { parentRunId: parent.id, sessionId: "sess-1" } });
+      expect(verifyJob((await rowOf(run.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).excludes).toEqual(["added-after-the-first-round.txt"]);
+    });
+
+    it("fails closed: rules that cannot be read refuse the job (excludes_unreadable) and record nothing", async () => {
+      const w = await world();
+      await rule(w, "repo", "exclude", "secret/a.txt");
+      const run = await runnerRun(w, "executor");
+      // The issuer's own pool, failing ONLY the read of the rules.
+      const failing = new Proxy(db.runWriterPool, {
+        get(target, prop, receiver) {
+          if (prop !== "connect") return Reflect.get(target, prop, receiver);
+          return async () => {
+            const client = await target.connect();
+            const original = client.query;
+            const query = client.query.bind(client) as (...a: unknown[]) => unknown;
+            (client as unknown as { query: unknown }).query = (text: unknown, ...rest: unknown[]) => (typeof text === "string" && text.includes("context_rules") ? Promise.reject(new Error("rules unavailable")) : query(text, ...rest));
+            // The client goes back to the shared pool: hand it back as it was.
+            const release = client.release.bind(client);
+            client.release = (...args: Parameters<typeof release>) => {
+              (client as unknown as { query: unknown }).query = original;
+              client.release = release;
+              return release(...args);
+            };
+            return client;
+          };
+        },
+      });
+      const visibility = createFakeVisibility("private");
+      const failingIssuer = createJobIssuer({ pool: failing, signer, visibility, context: createPgJobContext(db.runWriterPool), continuationBase: { headOid: async () => "a".repeat(40) }, now: () => NOW });
+      expect(await codeOf(failingIssuer.issue({ run }))).toBe("excludes_unreadable");
+      expect((await rowOf(run.id)).job_signed).toBeNull();
+    });
+
+    it("another account's rules never reach the job", async () => {
+      const w = await world();
+      const other = await world();
+      await rule(other, "repo", "exclude", "OTHER-ACCOUNT-PATH.txt");
+      const run = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run });
+      expect(((await rowOf(run.id)).job_signed as { job: object }).job).not.toHaveProperty("excludes");
     });
   });
 

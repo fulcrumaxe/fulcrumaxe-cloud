@@ -38,7 +38,7 @@ function plantedStream(): string {
   return [...lines.slice(0, at), ...planted, ...lines.slice(at)].join("\n") + "\n";
 }
 
-async function run(stream: string): Promise<RunJobResult> {
+async function run(stream: string, excludes?: string[]): Promise<RunJobResult> {
   const fake = makeFake({ stream });
   const rig = makeRig({ fake });
   const stateDir = path.join(rig.root, "state");
@@ -52,7 +52,7 @@ async function run(stream: string): Promise<RunJobResult> {
     workspaceRoot: path.join(rig.root, "work"),
   });
   const workspaces = createWorkspaceStore(path.join(rig.root, "work"));
-  const job = { ...sampleJob(), job_id: "22222222-2222-4222-8222-222222222222", run_id: RUN_ID, continues: null, model_hint: null };
+  const job = { ...sampleJob(excludes === undefined ? {} : { excludes }), job_id: "22222222-2222-4222-8222-222222222222", run_id: RUN_ID, continues: null, model_hint: null };
   return runJob(job, { sandbox: host, workspaces, ledger: createMemoryLedger(), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" });
 }
 
@@ -87,6 +87,23 @@ describe("the runner's context ledger (D#600 CX-1b)", () => {
     for (const needle of [SECRET, "PLANTED", "/home/victim", "notes.txt"]) expect(bodies).not.toContain(needle);
     const done = cloud.seen.at(-1)!.body as { context_ledger?: { basis: string; peak_context: number } };
     expect(done.context_ledger).toMatchObject({ basis: "measured", peak_context: 20013 });
+  });
+
+  it("D#600 CX-5c: a run with excludes sends nothing more back: no denial count, no exclude path, and the same ledger fields as a run without", async () => {
+    const EXCLUDED = "PLANTED-EXCLUDE-9b1e/secret.txt";
+    const stream = plantedStream().replace(PATH_NEEDLE, `/work/${EXCLUDED}`).replace(`${SECRET} /work/${EXCLUDED}`, "Permission to use Read has been denied.").replace('"type":"tool_result","tool_use_id":"toolu_planted"', '"type":"tool_result","is_error":true,"tool_use_id":"toolu_planted"');
+    const out = await run(stream, [EXCLUDED]);
+    if (out.status !== "done") throw new Error(`run ended ${out.status}`);
+    // The refusal was counted on this machine (see the engine test), and the wire measure carries no such field.
+    expect(out.contextLedger).not.toHaveProperty("denied_tool_calls");
+    const wire = contextLedgerToWire(out.contextLedger!);
+    expect(JSON.stringify(wire)).not.toMatch(/denied/);
+    const { runId, leaseGeneration } = await claimOne();
+    expect((await client.done({ runId, leaseGeneration, contextLedger: wire })).kind).toBe("done");
+    const bodies = JSON.stringify(cloud.seen.map((s) => s.body));
+    expect(bodies).not.toContain("PLANTED-EXCLUDE");
+    expect(bodies).not.toMatch(/denied/);
+    expect(Object.keys((cloud.seen.at(-1)!.body as { context_ledger: object }).context_ledger).sort()).toEqual(Object.keys(contextLedgerToWire({ ...out.contextLedger! })).sort());
   });
 
   it("a cloud from before CX-1b refuses the field as an invalid message: the same done goes again without it, once, and later runs do not send it", async () => {

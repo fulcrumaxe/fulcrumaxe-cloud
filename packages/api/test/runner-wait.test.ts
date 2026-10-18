@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LIMITED_BY, WAIT_LINES, waitText } from '@fulcrumaxe/runner-protocol';
+import { EXCLUDES_JOB_MIN_PROTOCOL, LIMITED_BY, MEMORY_JOB_MIN_PROTOCOL, WAIT_LINES, waitText } from '@fulcrumaxe/runner-protocol';
 import { RUN_WAIT_REASONS } from '@fx/runner-cloud';
 import { runnerLimitsFor } from '@fx/spend';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -95,10 +95,20 @@ const CASES: Case[] = [
   {
     name: 'wait-runner-update',
     want: { reason: 'waiting_for_runner_update', limited_by: null },
-    wantText: 'Waiting for a runner update (version 4 or later) to continue this pull request',
+    wantText: 'Waiting for a runner update (version 4 or later) before this run can start',
     setup: async (c) => {
       await c.runner({ credential: 'api_key', online: true, protocol: 3, cap: { light: 8, heavy: 4 } });
       await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, minProtocol: 4 });
+    },
+  },
+  // D#600 CX-5c: a job that carries excludes is gated at the excludes floor. A runner of the memory era (it speaks the previous version) is not offered it, and the run says so and says what to do.
+  {
+    name: 'wait-runner-update-excludes',
+    want: { reason: 'waiting_for_runner_update', limited_by: null },
+    wantText: `Waiting for a runner update (version ${EXCLUDES_JOB_MIN_PROTOCOL} or later) before this run can start`,
+    setup: async (c) => {
+      await c.runner({ credential: 'api_key', online: true, protocol: MEMORY_JOB_MIN_PROTOCOL, cap: { light: 8, heavy: 4 } });
+      await c.run({ role: 'executor', status: 'pending', starter: true, item: 1, minProtocol: EXCLUDES_JOB_MIN_PROTOCOL });
     },
   },
 ];

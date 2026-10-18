@@ -46,6 +46,8 @@ function enginePort(over: { note?: Record<string, unknown> | null; holdResume?: 
   const calls: string[] = [];
   const resumes: { sessionId: string; prompt: string }[] = [];
   const checkpointTimeouts: number[] = [];
+  /** D#600 CX-5c: the excludes each start and each resume reached the port with (undefined: none). */
+  const seenExcludes: { start: Array<readonly string[] | undefined>; resume: Array<readonly string[] | undefined> } = { start: [], resume: [] };
   let release: (() => void) | undefined;
   let n = 0;
   const port: SandboxPort = {
@@ -56,11 +58,13 @@ function enginePort(over: { note?: Record<string, unknown> | null; holdResume?: 
     },
     startDetached(handle, opts: StartDetachedOptions): StartDetachedResult {
       calls.push("start");
+      seenExcludes.start.push(opts.excludes);
       void opts.onEvent(result(opts.runId, { type: "assistant", text: `model text ${CANARY}` } as Partial<NormalizedEvent>));
       return { handle, hookFired: new Promise<NormalizedEvent | undefined>((resolve) => { release = () => resolve(undefined); }) };
     },
     resume(handle, sessionId, prompt, opts) {
       calls.push("resume");
+      seenExcludes.resume.push(opts.excludes);
       resumes.push({ sessionId, prompt });
       n++;
       const agentOutput = over.note === null ? undefined : (over.note ?? { done: `finished the parser. ${CANARY}`, next: "wire the route", paths: ["src/a.ts", "/etc/passwd", "../x"] });
@@ -89,7 +93,7 @@ function enginePort(over: { note?: Record<string, unknown> | null; holdResume?: 
       return true;
     },
   };
-  return { port, calls, resumes, checkpointTimeouts, resumeCount: () => n };
+  return { port, calls, resumes, checkpointTimeouts, seenExcludes, resumeCount: () => n };
 }
 
 function rig(over: { handler?: Partial<JobHandlerDeps>; engine?: Parameters<typeof enginePort>[0]; seenSession?: string | null } = {}) {
@@ -122,8 +126,8 @@ function rig(over: { handler?: Partial<JobHandlerDeps>; engine?: Parameters<type
   };
   return {
     engine, interrupts, deps, handle: createJobHandler(deps),
-    async claim(): Promise<Claimed> {
-      cloud.enqueue(signedJob());
+    async claim(job: Parameters<typeof signedJob>[0] = {}): Promise<Claimed> {
+      cloud.enqueue(signedJob(job));
       const claimed = await client.claim();
       if (claimed.kind !== "claimed") throw new Error("expected a claim");
       return claimed;
@@ -142,8 +146,8 @@ const inMinutes = (m: number): Date => new Date(Date.now() + m * 60_000);
 const endedBy = (runId: string) => cloud.runs.get(runId)!.endedBy;
 
 /** Starts a run, waits until its agent is mid-turn, then makes the next heartbeat carry the handoff. */
-async function handoffRun(r: ReturnType<typeof rig>, deadline: Date) {
-  const claimed = await r.claim();
+async function handoffRun(r: ReturnType<typeof rig>, deadline: Date, job: Parameters<typeof signedJob>[0] = {}) {
+  const claimed = await r.claim(job);
   const running = r.handle(claimed);
   await until(() => r.engine.calls.includes("start"));
   cloud.force.heartbeat.push(handoffReply(deadline));
@@ -169,6 +173,19 @@ describe("a handoff request on a heartbeat reply (HO-3)", () => {
     expect(endedBy(claimed.runId)).toMatchObject({ type: "run_ended", reason: "handed_off", detail: "pushed" });
     expect(Object.keys(endedBy(claimed.runId)!).sort()).toEqual(["detail", "reason", "seq", "ts", "type"]);
     expect(cloud.seen.some((s) => s.path.endsWith("/done"))).toBe(false);
+  });
+
+  it("D#600 CX-5c: the job's excludes reach the first start AND the checkpoint resume, which builds its own options", async () => {
+    const r = rig();
+    await handoffRun(r, inMinutes(5), { excludes: ["secret/a.txt", "keys"] });
+    expect(r.engine.seenExcludes.start).toEqual([["secret/a.txt", "keys"]]);
+    expect(r.engine.seenExcludes.resume).toEqual([["secret/a.txt", "keys"]]);
+  });
+
+  it("D#600 CX-5c: a job without excludes sends none on either (golden)", async () => {
+    const r = rig();
+    await handoffRun(r, inMinutes(5));
+    expect(r.engine.seenExcludes).toEqual({ start: [undefined], resume: [undefined] });
   });
 
   it("keeps the note on this machine: capped and cleaned, and returned to the caller only", async () => {
