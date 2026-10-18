@@ -12,6 +12,8 @@ export interface RepoTreeEntry {
   path: string;
   type: "blob" | "tree" | "commit";
   sha: string;
+  /** A blob's size in bytes as the trees API reports it (D#600 CX-5a: the pins budget check). Absent for a tree or commit entry, or when GitHub sent no whole number. */
+  size?: number;
 }
 export interface RepoTree {
   /** GitHub cut the listing (more than about 100,000 entries or 7 MB). */
@@ -57,7 +59,8 @@ export function createRepoTreeSource(http: InstallationHttp, repo: { owner: stri
       const entries: RepoTreeEntry[] = [];
       for (const e of body.tree as unknown[]) {
         if (isObj(e) && typeof e.path === "string" && (e.type === "blob" || e.type === "tree" || e.type === "commit") && typeof e.sha === "string" && SHA_RE.test(e.sha)) {
-          entries.push({ path: e.path, type: e.type, sha: e.sha });
+          const size = e.type === "blob" && typeof e.size === "number" && Number.isSafeInteger(e.size) && e.size >= 0 ? e.size : undefined;
+          entries.push(size === undefined ? { path: e.path, type: e.type, sha: e.sha } : { path: e.path, type: e.type, sha: e.sha, size });
         }
       }
       return { truncated: body.truncated === true, entries };

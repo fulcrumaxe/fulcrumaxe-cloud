@@ -313,6 +313,11 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "envelope_scope",
   "envelope_repo_mismatch",
   "envelope_taken",
+  // Context rules (D#600 CX-5a): a pin or exclude path the store refuses, a pin set over the repository budget, and the pin budget check failing closed on GitHub.
+  "invalid_path",
+  "pins_exceed_budget",
+  "tree_truncated",
+  "tree_unavailable",
   // Envelope edits and the weekly auto-start envelope (D#483 S5-e2): the one new code the routes throw.
   "confirmation_required",
 ];

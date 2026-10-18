@@ -694,6 +694,24 @@ export interface Operations {
       repo_map_version: (string) | (null);
     };
   };
+  listContextRules: {
+    path: undefined;
+    query: {
+      repo_id?: string;
+      work_item_id?: string;
+    };
+    body: undefined;
+    response: {
+      data: Array<{
+        id: string;
+        scope: "repo" | "item";
+        kind: "pin" | "exclude";
+        path: string;
+        repo_id: (string) | (null);
+        work_item_id: (string) | (null);
+      }>;
+    };
+  };
   listWebhookEndpoints: {
     path: undefined;
     query: {
@@ -3924,6 +3942,17 @@ export const operations = {
     idempotency: "never",
     pathParams: ["id"],
     queryParams: [],
+    hasBody: false,
+  },
+  listContextRules: {
+    method: "GET",
+    path: "/api/v1/context-rules",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: ["repo_id","work_item_id"],
     hasBody: false,
   },
   listWebhookEndpoints: {
