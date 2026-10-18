@@ -12,13 +12,19 @@ import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunS
  */
 const h = pgHarness();
 
+const BASE = "a".repeat(40);
+const planeBase = { defaultHead: async () => BASE };
+
 class World implements AdvanceRunPorts {
   private readonly byStep = new Map<string, string>();
+  /** What each start asked for, in order. */
+  readonly starts: AdvanceRunRequest[] = [];
   constructor(
     private readonly accountId: string,
     private readonly workItemId: string,
   ) {}
   async startRun(req: AdvanceRunRequest): Promise<AdvanceRunStart> {
+    this.starts.push(req);
     const known = this.byStep.get(req.step);
     if (known) return { ok: true, runId: known };
     const id = randomUUID();
@@ -57,7 +63,7 @@ const rowsOf = async (workItemId: string) => (await h.admin.query(`SELECT id, co
 describe("build start and the public-change record (D#598 P1f-1)", () => {
   it("on a paired repo one row is written with the repo, the digest and branch fx/p-<id>, and a second approval does not add another", async () => {
     const t = await atSpecReady(true);
-    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { planeBase });
     expect(out).toMatchObject({ status: "started" });
     const rows = await rowsOf(t.workItemId);
     expect(rows).toHaveLength(1);
@@ -67,7 +73,7 @@ describe("build start and the public-change record (D#598 P1f-1)", () => {
     expect(branchNameOk(rows[0].branch)).toBe(true);
     // Build again after a failure: the same run key replay finds the row, a fresh approval re-stamps the same row.
     await h.admin.query("UPDATE work_items SET stage = 'needs_human' WHERE id = $1", [t.workItemId]);
-    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { planeBase });
     expect(await rowsOf(t.workItemId)).toHaveLength(1);
   });
 
@@ -81,9 +87,53 @@ describe("build start and the public-change record (D#598 P1f-1)", () => {
   it("a replay of the same step leaves a row a run already moved on exactly as it is", async () => {
     const t = await atSpecReady(true);
     const approval = randomUUID();
-    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world);
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { planeBase });
     await h.admin.query("UPDATE plane_pushes SET state = 'scanning' WHERE work_item_id = $1", [t.workItemId]);
-    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world);
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { planeBase });
     expect((await rowsOf(t.workItemId))[0]).toMatchObject({ state: "scanning" });
+  });
+});
+
+describe("a paired sandbox build records its base (D#598 P1f-5c)", () => {
+  it("passes the default branch's head as the run's head_sha and builds the paired prompt on exactly it", async () => {
+    const t = await atSpecReady(true);
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { planeBase });
+    expect(t.world.starts).toHaveLength(1);
+    expect(t.world.starts[0]).toMatchObject({ role: "executor", headSha: BASE });
+    expect(t.world.starts[0]!.prompt).toContain(`git fetch --depth 1 origin ${BASE}`);
+    expect(t.world.starts[0]!.prompt).not.toContain("/pulls");
+  });
+
+  it("an unpaired build sets no head_sha, reads no head, and keeps the pull request step", async () => {
+    const t = await atSpecReady(false);
+    let reads = 0;
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { planeBase: { defaultHead: async () => (reads++, BASE) } });
+    expect(reads).toBe(0);
+    expect(t.world.starts[0]!.headSha).toBeUndefined();
+    expect(t.world.starts[0]!.prompt).toContain("/pulls");
+  });
+
+  it.each([
+    ["no port at all", undefined],
+    ["a head that cannot be read", { defaultHead: async () => Promise.reject(new Error("github down")) }],
+    ["a repository with no head", { defaultHead: async () => null }],
+    ["an answer that is not a full sha", { defaultHead: async () => "main" }],
+  ])("%s refuses plane_base_unavailable: no run is started, no record is written, and the item stays at Spec ready", async (_label, port) => {
+    const t = await atSpecReady(true);
+    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, port ? { planeBase: port } : {});
+    expect(out).toEqual({ status: "refused", reason: "plane_base_unavailable" });
+    expect(t.world.starts).toEqual([]);
+    expect(await rowsOf(t.workItemId)).toHaveLength(0);
+    expect((await h.admin.query("SELECT stage FROM work_items WHERE id = $1", [t.workItemId])).rows[0].stage).toBe("spec_ready");
+  });
+
+  it("a replay of the step finds its run and reads no head again", async () => {
+    const t = await atSpecReady(true);
+    const approval = randomUUID();
+    await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { planeBase });
+    let reads = 0;
+    const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { planeBase: { defaultHead: async () => (reads++, BASE) } });
+    expect(out).toMatchObject({ status: "started" });
+    expect(reads).toBe(0);
   });
 });

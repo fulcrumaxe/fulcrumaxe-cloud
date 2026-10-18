@@ -282,6 +282,15 @@ describe("plane push token and report: claim -> token -> report [pg]", () => {
       expect(github.mints).toEqual([]);
     });
 
+    it("attempts are numbered per kind (0882): PR-open rows on the record do not use up the runner's push attempts", async () => {
+      const run = await ready();
+      const row = await planeRow();
+      for (const n of [1, 2, 3]) await admin.query(`INSERT INTO plane_push_attempts (account_id, plane_push_id, runtime, kind, attempt_no) VALUES ($1, $2, 'hosted', 'pr_open', $3)`, [A.accountId, row.id, n]);
+      const res = await askToken(run);
+      expect(res.status).toBe(200);
+      expect((await attempts()).filter((a) => a.kind === "push").map((a) => a.attempt_no)).toEqual([1]);
+    });
+
     it("a mint GitHub refuses spends the grant: 409 app_not_installed, the attempt records why and has no token, and a second request is already_issued", async () => {
       const run = await ready();
       github.mintError = Object.assign(new Error("x"), { code: "app_not_installed" });

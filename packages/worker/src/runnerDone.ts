@@ -44,6 +44,8 @@ export interface RunnerDoneVerdict {
   /** The run branch the verdict was judged on, recorded next to `prNumber` (C25 section 1.2): `fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise. Set exactly when `prNumber` is. */
   branch?: string;
   /** The HTTP status GitHub refused the pull request with (`pr_rejected`); a number only. */
+  /** D#598 P1f-5c: the run branch's head as the cloud read it from GitHub when it judged the run (never from the runner). Set with `prNumber`; the branch cleanup deletes the branch only while its head is still this commit. */
+  headOid?: string;
   prHttpStatus?: number;
   /** Why a `scope_unknown` ended the run, where that matters to the words shown: a renamed file, or a change type GitHub reported that the port does not know. */
   detail?: "renamed" | "unknown_change_type" | "no_file_list";
@@ -88,6 +90,7 @@ function requireVerdict(verdict: RunnerDoneVerdict): void {
   if (verdict.prNumber !== null && !(Number.isSafeInteger(verdict.prNumber) && verdict.prNumber >= 1)) throw new RunActionInputError();
   // A run branch, or (D#599 PL-2b) the item's pull request branch; the latter is checked against the run's bound event in `requireBoundBranch`, in the writing transaction.
   if (verdict.branch !== undefined && !(verdict.prNumber !== null && typeof verdict.branch === "string" && (RUNNER_RUN_BRANCH.test(verdict.branch) || ITEM_PR_BRANCH.test(verdict.branch)))) throw new RunActionInputError();
+  if (verdict.headOid !== undefined && !(verdict.prNumber !== null && typeof verdict.headOid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(verdict.headOid))) throw new RunActionInputError();
   if (verdict.prHttpStatus !== undefined && !(Number.isInteger(verdict.prHttpStatus) && verdict.prHttpStatus >= 100 && verdict.prHttpStatus <= 599)) throw new RunActionInputError();
   if (verdict.detail !== undefined && !((verdict.detail === "renamed" || verdict.detail === "unknown_change_type" || verdict.detail === "no_file_list") && verdict.failureReason === "scope_unknown")) throw new RunActionInputError();
 }
@@ -115,6 +118,7 @@ interface StoredRow {
   prNumber: number | null;
   branch: string | null;
   prHttpStatus: number | null;
+  headOid: string | null;
   detail: string | null;
 }
 
@@ -141,6 +145,7 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
     failureReason,
     prNumber,
     ...(prNumber !== null && typeof p.branch === "string" && (RUNNER_RUN_BRANCH.test(p.branch) || (ITEM_PR_BRANCH.test(p.branch) && bound?.branch === p.branch && bound.prNumber === prNumber)) ? { branch: p.branch } : {}),
+    ...(prNumber !== null && typeof p.headOid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(p.headOid) ? { headOid: p.headOid } : {}),
     ...(typeof p.prHttpStatus === "number" ? { prHttpStatus: p.prHttpStatus } : {}),
     ...(p.detail === "renamed" || p.detail === "unknown_change_type" || p.detail === "no_file_list" ? { detail: p.detail } : {}),
   };
@@ -215,7 +220,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
             from: "running",
             to: verdict.outcome,
             ...(verdict.failureReason === null ? {} : { failureReason: verdict.failureReason }),
-            runnerDone: { prNumber: verdict.prNumber, ...(verdict.branch === undefined ? {} : { branch: verdict.branch }), ...(verdict.prHttpStatus === undefined ? {} : { prHttpStatus: verdict.prHttpStatus }), ...(verdict.detail === undefined ? {} : { detail: verdict.detail }) },
+            runnerDone: { prNumber: verdict.prNumber, ...(verdict.branch === undefined ? {} : { branch: verdict.branch }), ...(verdict.headOid === undefined ? {} : { headOid: verdict.headOid }), ...(verdict.prHttpStatus === undefined ? {} : { prHttpStatus: verdict.prHttpStatus }), ...(verdict.detail === undefined ? {} : { detail: verdict.detail }) },
             result: { ...(envelope === undefined ? {} : { envelope }), ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }) },
           });
           // Held under the row lock, so this is a defence: the run was running a statement ago.

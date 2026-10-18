@@ -170,6 +170,9 @@ describe('plane_pushes and plane_push_attempts (migration 0831)', () => {
     await expect(insertAttempt(a, id, { runtime: 'sandbox', lease_generation: 1, attempt_no: 5, kind: 'pr_open' })).rejects.toMatchObject({ code: PG_ERROR.CHECK_VIOLATION });
     // A hosted PR-open retry is a different kind and is not held to the push cap.
     await insertAttempt(a, id, { runtime: 'hosted', kind: 'pr_open', attempt_no: 4 });
+    // Attempts are numbered per kind (0882): a pr_open row beside the three pushes can start from 1, and the same kind and number is still one row.
+    await insertAttempt(a, id, { runtime: 'hosted', kind: 'pr_open', attempt_no: 1 });
+    await expect(insertAttempt(a, id, { runtime: 'hosted', kind: 'pr_open', attempt_no: 1 })).rejects.toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
   });
 
   it('an attempt keeps its identity, sets its token time once, and records token_revoked only after a token was issued', async () => {

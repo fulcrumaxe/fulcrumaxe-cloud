@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,9 +168,10 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
     const importers: string[] = [];
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
-        // `_generated` holds build copies (the publish hook bundle, the workspace index): the guard reads the SOURCE the copy was made from.
-        if (name === "node_modules" || name === ".next" || name === ".git" || name === "_generated" || name.startsWith(".")) continue;
         const full = path.join(dir, name);
+        // Only apps/web's build copies are skipped (the publish hook bundle, the workspace index): the guard reads the SOURCE the copy was made from. The next test
+        // holds that nothing tracked sits under any `_generated` directory, so no other `_generated` can hide a caller.
+        if (name === "node_modules" || name === ".next" || name === ".git" || name.startsWith(".") || path.relative(root, full) === path.join("apps", "web", "app", "_generated")) continue;
         const stat = statSync(full);
         if (stat.isDirectory()) walk(full);
         else if (/\.(ts|tsx|mjs)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name) && /planePushText/.test(readFileSync(full, "utf8"))) importers.push(path.relative(root, full));
@@ -179,6 +181,14 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
     // packages/worker/src/planePublish.ts is the sandbox twin of the runner token route: it calls the builder with the item's stored title and the executor run's id,
     // both the platform's own rows, and nothing an agent wrote (the hook's output is parsed and verified separately and never reaches this call).
     expect(importers.sort()).toEqual(["packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts"]);
+  });
+});
+
+describe("the guard's one skipped directory", () => {
+  it("no file tracked in the repository sits under any `_generated` directory, so a caller can't hide there", () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    const tracked = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\0").filter((f) => f.split("/").includes("_generated"));
+    expect(tracked).toEqual([]);
   });
 });
 

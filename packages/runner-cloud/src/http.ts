@@ -250,6 +250,8 @@ export interface RunnerDoneStored {
   prNumber: number | null;
   /** The run branch the verdict was judged on (`fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise); set exactly when `prNumber` is (C25 section 1.2). */
   branch?: string;
+  /** D#598 P1f-5c: the run branch's head as the cloud read it from GitHub when it judged the run (never from the runner). Set with `prNumber`; the branch cleanup deletes the branch only while its head is still this commit. */
+  headOid?: string;
   prHttpStatus?: number;
   /** Why a `scope_unknown` ended the run, where that matters to the words shown: a renamed file, or a change type GitHub reported that the port does not know. */
   detail?: "renamed" | "unknown_change_type" | "no_file_list";

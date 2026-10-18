@@ -1,5 +1,5 @@
 import { resolveChecked } from "@fx/net-guard";
-import { AppCredentialsError, InstallationTokenCache, createHostedPlanePush, createPlanePushApi, loadAppCredentials } from "@fx/github";
+import { AppCredentialsError, InstallationTokenCache, createHostedPlanePush, createPlanePushApi, loadAppCredentials, type HostedPlanePush } from "@fx/github";
 import type { PlanePushHostedPort } from "@fx/runner-cloud";
 import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/api/gh-proxy/[...path]/handler";
 
@@ -9,7 +9,7 @@ import { buildAccessTokenRequester, nodeHttpsPinnedRequester } from "../../app/a
  * they return. It needs no setting of its own: the App credentials are the ones the other GitHub calls use, and a missing App answers the
  * routes' fixed `not_configured`/`public_unavailable`, never a stack.
  */
-export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort {
+export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): PlanePushHostedPort & Pick<HostedPlanePush, "openPullRequest"> {
   const api = createPlanePushApi({
     appCredentials: loadAppCredentials(env),
     requester: buildAccessTokenRequester({ resolveUpstream: (host, lookupFn) => resolveChecked(host, lookupFn), forwardPinned: nodeHttpsPinnedRequester }),
@@ -31,5 +31,6 @@ export function createLivePlanePushPort(env: NodeJS.ProcessEnv = process.env): P
     verifyPushed: (input) => guard(() => hosted.verifyPushed(input)),
     verifyPullRequest: (input) => guard(() => hosted.verifyPullRequest(input)),
     revokeToken: (token) => hosted.revokeToken(token),
+    openPullRequest: (input) => guard(() => hosted.openPullRequest(input)),
   };
 }

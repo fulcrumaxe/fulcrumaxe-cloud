@@ -177,7 +177,7 @@ describe("done route [pg]", () => {
       expect(s.repo.pulls[0]).toMatchObject({ draft: false, state: "open", head: s.branch, title: "Add the footer" });
       expect(s.repo.pulls[0]!.body).toContain(s.runId);
       // The branch the verdict was judged on is recorded next to the pull request number (C25 section 1.2).
-      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch });
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch, headOid: "b".repeat(40) });
     });
 
     it("the pull request body names the work item's issue (Closes #N) from our own row, so the webhook moves the item at once; an item with no issue gets today's body", async () => {
@@ -202,6 +202,8 @@ describe("done route [pg]", () => {
       const violation = await scene({ files: [file("outside/x.ts", "ADDED")] });
       await violation.call();
       expect(verdictOf()).toMatchObject({ failureReason: "scope_violation", prNumber: 1, branch: violation.branch });
+      // Only a run that succeeded has a head recorded: a refused run's branch is never cleaned up on the strength of one.
+      expect(verdictOf()).not.toHaveProperty("headOid");
       finished.length = 0;
       const none = await scene({ aheadBy: 0 });
       await none.call();
@@ -300,7 +302,7 @@ describe("done route [pg]", () => {
     it("done for a continuation records the continuation's own branch next to the pull request number, and a two-round chain keeps the first run's branch", async () => {
       const s = await scene({ continues: { branch: BRANCH }, dispatchBase: "c".repeat(40), branchOid: "d".repeat(40) });
       await s.call();
-      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: BRANCH });
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: BRANCH, headOid: "d".repeat(40) });
     });
 
     it("a branch that did not exist at dispatch (recorded null) passes once it exists and is ahead", async () => {
@@ -500,7 +502,7 @@ describe("done route [pg]", () => {
       expect(ready.repo.pulls[0]).toMatchObject({ draft: true, state: "open" });
       expect(labels(ready.fake)).not.toContain("A5");
       // The branch the run was judged on is still recorded with the pull request number.
-      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: ready.branch });
+      expect(verdictOf()).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: ready.branch, headOid: "b".repeat(40) });
       expect(lines.map((l) => JSON.parse(l))).toEqual([{ event: "runner.done.pr_failure", run_id: ready.runId, stage: "ready", op: "MarkReady", reason: "rejected", status: 200, graphql_types: ["FORBIDDEN"] }]);
     });
 
@@ -652,7 +654,7 @@ describe("done route [pg]", () => {
         const res = await s.call();
         expect(parsedDone(res), repoMode).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
         expect(s.fake.denied).toBe(0);
-        expect(finished.at(-1)!.verdict).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch });
+        expect(finished.at(-1)!.verdict).toEqual({ outcome: "succeeded", failureReason: null, prNumber: 1, branch: s.branch, headOid: "b".repeat(40) });
       }
     });
 

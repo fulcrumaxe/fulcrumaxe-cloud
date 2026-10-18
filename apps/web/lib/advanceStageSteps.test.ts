@@ -173,3 +173,39 @@ describe("D#7 DP4b-2: the decision step hands the workflow one fixed word", () =
     await expect(decisionBody({ advanceDecision: async () => { throw new Error("db down"); } }, WHO, "run-b")).rejects.toThrow("db down");
   });
 });
+
+describe("buildOutcomeBody: the platform settles a paired sandbox build (D#598 P1f-5c)", () => {
+  const done = (over: Record<string, unknown> = {}) => worker({ advanceRunOutcome: async () => ({ status: "succeeded", done: true, envelope: null, runtime: "production", tailRunId: "tail", ...over }) });
+  const settle = () => vi.fn(async () => ({ privatePullRequest: "opened" as const, publish: { kind: "skipped" as const, why: "not_paired" as const } }));
+
+  it("settles the finished sandbox executor run once, by its own id, and returns the outcome exactly as it was", async () => {
+    const settlePairedBuild = settle();
+    const out = await buildOutcomeBody({ ...done(), settlePairedBuild }, ACCOUNT, "r");
+    expect(settlePairedBuild.mock.calls).toEqual([[{ accountId: ACCOUNT, executorRunId: "tail" }]]);
+    expect(out).toEqual({ status: "succeeded", done: true, hasSummary: false, queuedOnRunner: false, tailRunId: "tail" });
+  });
+
+  it.each([
+    ["a run that is still going", { status: "running", done: false }],
+    ["a run that failed", { status: "failed", done: true }],
+    ["a runner run (the runner path opens its own pull request)", { runtime: "runner" }],
+  ])("%s settles nothing", async (_l, over) => {
+    const settlePairedBuild = settle();
+    await buildOutcomeBody({ ...done(over), settlePairedBuild }, ACCOUNT, "r");
+    expect(settlePairedBuild).not.toHaveBeenCalled();
+  });
+
+  it("a settle that throws never changes the outcome: the driver still gets the finished run, and the failure leaves one fixed log line", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const out = await buildOutcomeBody({ ...done(), settlePairedBuild: async () => Promise.reject(new Error("secret-detail")) }, ACCOUNT, "r");
+    expect(out).toMatchObject({ status: "succeeded", done: true });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("advance.paired_build_settle_failed");
+    expect(String(warn.mock.calls[0]![0])).not.toContain("secret-detail");
+    warn.mockRestore();
+  });
+
+  it("a worker without the settle (or a test double) behaves exactly as before", async () => {
+    expect(await buildOutcomeBody(done(), ACCOUNT, "r")).toMatchObject({ status: "succeeded", done: true });
+  });
+});

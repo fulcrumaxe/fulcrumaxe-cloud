@@ -36,6 +36,8 @@ interface World {
   pr?: unknown;
   /** Make the named read answer 500. */
   fail?: "ref" | "commit" | "compare" | "pulls";
+  /** How `POST /pulls` answers: created (the default), refused for good (422), or down (503). */
+  create?: "ok" | "refused" | "down";
 }
 
 async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) {
@@ -54,6 +56,11 @@ async function setup(world: World, expiresInMs = 3_600_000, now?: () => number) 
     }
     if (r.path === `/repos/acme/widgets/git/commits/${HEAD}`) return world.fail === "commit" ? ghError(500, "boom") : json(200, { sha: HEAD, parents: (world.parents ?? [TIP]).map((sha) => ({ sha })) });
     if (r.path === `/repos/acme/widgets/compare/main...${TIP}`) return world.fail === "compare" ? ghError(500, "boom") : json(200, { status: world.compare ?? "behind" });
+    if (r.method === "POST" && r.path === "/repos/acme/widgets/pulls") {
+      if (world.create === "refused") return ghError(422, "Validation Failed");
+      if (world.create === "down") return ghError(503, "unavailable");
+      return json(201, { number: 9, html_url: "https://github.com/acme/widgets/pull/9" });
+    }
     if (r.path === "/repos/acme/widgets/pulls/9") return world.fail === "pulls" ? ghError(500, "boom") : world.pr === undefined ? ghError(404, "Not Found") : json(200, world.pr);
     return undefined;
   };
@@ -228,5 +235,31 @@ describe("mintToken", () => {
     }) as typeof fetch;
     const api = createPlanePushApi({ appCredentials: () => ({ appId: "1", privateKeyPem, webhookSecret: "x" }), requester: async () => { throw new Error("unused"); }, cache: new InstallationTokenCache(), fetchImpl });
     await expect(createHostedPlanePush(api).mintToken("acme/widgets")).rejects.toMatchObject({ code: "app_not_installed" });
+  });
+});
+
+describe("openPullRequest (D#598 P1f-5c)", () => {
+  const open = (t: Awaited<ReturnType<typeof setup>>) => t.hosted.openPullRequest({ codeRepo: "acme/widgets", branch: BRANCH, title: "Add a thing", body: "Body text" });
+
+  it("opens the pull request on the pushed branch against main with one fresh token, then revokes it; nothing is pushed", async () => {
+    const t = await setup({});
+    await expect(open(t)).resolves.toEqual({ number: 9, url: "https://github.com/acme/widgets/pull/9" });
+    const posts = t.server.seen.filter((x) => x.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]!.body)).toMatchObject({ title: "Add a thing", head: BRANCH, base: "main", body: "Body text", maintainer_can_modify: false });
+    expect(t.mintedTokens).toEqual(["ghs_hosted1"]);
+    expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+    // No git smart-http request reached the server: the retry is an API call only.
+    expect(t.server.seen.some((x) => /git-(upload|receive)-pack/.test(x.path))).toBe(false);
+  });
+
+  it("a refusal is pr_failed and a GitHub that is down is public_unavailable; the token is revoked either way and still answers 401", async () => {
+    for (const [create, code] of [["refused", "pr_failed"], ["down", "public_unavailable"]] as const) {
+      const t = await setup({ create });
+      await expect(open(t)).rejects.toMatchObject({ code });
+      expect(t.trail().at(-1)).toBe("DELETE /installation/token ghs_hosted1");
+      expect(t.revoked.has("ghs_hosted1")).toBe(true);
+      await server?.close();
+    }
   });
 });

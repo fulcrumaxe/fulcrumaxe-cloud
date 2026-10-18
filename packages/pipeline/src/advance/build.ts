@@ -85,6 +85,13 @@ export interface ExecutorPromptInput {
   excludeLine?: boolean;
   /** D#598 P3b: the item builds on its stack parent's open pull request. The sandbox run starts from this branch at exactly this commit and opens its pull request against the branch. Absent: the default branch, as always. */
   stackBase?: { branch: string; sha: string };
+  /**
+   * D#598 P1f-5c: the item's repository is paired and the run is a sandbox run. The platform opens the pull request and publishes the public change,
+   * so the prompt has no pull request step and names only the private remote. `sha` is the commit the run builds on (also recorded on the run row):
+   * the run branches from exactly it, so the change the platform publishes holds this work and nothing the default branch gained since.
+   * Absent: the prompt is unchanged. With `stackBase` the branch the run builds on is already pinned, so only the pull request steps change.
+   */
+  planeBase?: { sha: string };
 }
 
 /**
@@ -103,8 +110,11 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
   const branch = branchFor(number);
   const repo = `${owner}/${name}`;
   const stack = input.stackBase;
+  const paired = input.planeBase;
   return assemblePrompt({
-    roleLine: `You are the executor. Implement GitHub issue #${number} of ${repo} exactly as the Spec below says, and open a pull request.`,
+    roleLine: paired
+      ? `You are the executor. Implement GitHub issue #${number} of ${repo} exactly as the Spec below says. The platform opens the pull request for you.`
+      : `You are the executor. Implement GitHub issue #${number} of ${repo} exactly as the Spec below says, and open a pull request.`,
     boundary: [
       "The repository is checked out in your working directory on its default branch.",
       "There is no GitHub Discussion for this work: where your role card says to read the Spec from a Discussion, the Spec below is the whole of it. Do not look for a Discussion.",
@@ -115,14 +125,26 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     ...(stack
       ? [
           `1. This work builds on a pull request that has not merged yet. Its branch is ${stack.branch} and its head must be ${stack.sha}. Fetch it and check, in one command: git fetch origin "+refs/heads/${stack.branch}:refs/remotes/origin/${stack.branch}" && test "$(git rev-parse origin/${stack.branch})" = "${stack.sha}"`,
-          "   If that command fails, do not change anything and do not open a pull request: finish with verdict fail and a summary that says the branch it builds on has moved.",
+          paired
+            ? "   If that command fails, do not change anything: finish with verdict fail and a summary that says the branch it builds on has moved."
+            : "   If that command fails, do not change anything and do not open a pull request: finish with verdict fail and a summary that says the branch it builds on has moved.",
           `   Then: BASE=${stack.branch}`,
         ]
-      : ["1. Note the default branch you are on: BASE=$(git rev-parse --abbrev-ref HEAD)"]),
+      : paired
+        ? [
+            `1. This work builds on the commit ${paired.sha}. Fetch it and check, in one command: git fetch --depth 1 origin ${paired.sha} && test "$(git rev-parse FETCH_HEAD)" = "${paired.sha}"`,
+            "   If that command fails, do not change anything: finish with verdict fail and a summary that says the commit it builds on could not be fetched.",
+            `   Then: BASE=${paired.sha}`,
+          ]
+        : ["1. Note the default branch you are on: BASE=$(git rev-parse --abbrev-ref HEAD)"]),
     stack
       ? input.rebuild === true
         ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the branch you build on, not from it: git checkout -B ${branch} "origin/$BASE"`
         : `2. Create the branch from it: git checkout -b ${branch} "origin/$BASE"`
+      : paired
+        ? input.rebuild === true
+          ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the commit above, not from it: git checkout -B ${branch} "$BASE"`
+          : `2. Create the branch from it: git checkout -b ${branch} "$BASE"`
       : input.rebuild === true
         ? `2. An earlier attempt at this issue may have left the branch ${branch}. Start from the default branch, not from it: git checkout -B ${branch} "$BASE"`
         : `2. Create the branch: git checkout -b ${branch}`,
@@ -132,10 +154,14 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     input.rebuild === true
       ? `6. Push, replacing the earlier attempt's branch (no pull request is open for it): git push --force origin ${branch}   (git authentication is handled for you; do not set or print any token)`
       : `6. Push: git push origin ${branch}   (git authentication is handled for you; do not set or print any token)`,
-    "7. Open the pull request with the GitHub REST API. There is no gh CLI in this image; requests to api.github.com are authenticated for you, so send no token:",
-    `   curl -s -X POST https://api.github.com/repos/${repo}/pulls -H "content-type: application/json" -d '{"title":"<title>","head":"${branch}","base":"'"$BASE"'","body":"Closes #${number}\\n\\n<what changed and how it was tested>"}'`,
-    `   The pull request body MUST start with the exact line \`Closes #${number}\`. Describe the change in your own words; do not paste the Spec or its text into the title, the body or any comment.`,
-    "8. Check that the response holds the pull request's number. If it does not, fix the request and send it again.",
+    ...(paired
+      ? ["7. Do not call the GitHub API and do not push anywhere but origin. When you finish, the platform takes your branch from there."]
+      : [
+          "7. Open the pull request with the GitHub REST API. There is no gh CLI in this image; requests to api.github.com are authenticated for you, so send no token:",
+          `   curl -s -X POST https://api.github.com/repos/${repo}/pulls -H "content-type: application/json" -d '{"title":"<title>","head":"${branch}","base":"'"$BASE"'","body":"Closes #${number}\\n\\n<what changed and how it was tested>"}'`,
+          `   The pull request body MUST start with the exact line \`Closes #${number}\`. Describe the change in your own words; do not paste the Spec or its text into the title, the body or any comment.`,
+          "8. Check that the response holds the pull request's number. If it does not, fix the request and send it again.",
+        ]),
     ].join("\n"),
     ...(input.excludeLine === true ? { contextRulesLine: EXCLUDE_PROMPT_LINE } : {}),
     spec: { version, body: input.spec },
@@ -147,7 +173,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
     notes: input.notes,
     output: [
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
-      ...agentOutputBlock(`{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
+      ...agentOutputBlock(paired ? `{"verdict":"done","branch":"${branch}","tests":"passed","summary":"<plain-text summary for the repository owner>"}` : `{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
     ].join("\n"),
   }, options);
 }
@@ -306,6 +332,21 @@ async function resolveStackBase(
 export type BuildStartResult ={ status: "started"; runId: string; branch: string } | { status: "refused"; reason: string };
 
 /**
+ * D#598 P1f-5c: the head of the repository's default branch, read from GitHub just before a paired sandbox build starts. A read that cannot be made throws.
+ * The run records it and branches from exactly it.
+ */
+export interface PlaneBasePort {
+  defaultHead(input: { repoId: string; owner: string; name: string }): Promise<string | null>;
+}
+
+const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** Whether the repository has a pairing row now (no row means off). The build step stamps the pairing right after, inside the start. */
+async function isPaired(pool: Pool, accountId: string, repoId: string): Promise<boolean> {
+  return withTenant(pool, accountId, async (client) => (await client.query("SELECT 1 FROM repo_pairing WHERE repo_id = $1 AND account_id = $2", [repoId, accountId])).rows.length > 0);
+}
+
+/**
  * `approvalId` names the approval (the run action) that asked for the build. It is part of the run's key, so a replay of
  * the same approval finds its run, while a fresh approval after a refused start asks again.
  */
@@ -316,7 +357,7 @@ export async function startBuildForItem(
   approvalId: string,
   ports: AdvanceRunPorts,
   /** The Spec version the person approved (read when the workflow started). A newer version appearing since refuses the build `spec_changed`: what is built is what was approved. */
-  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; pins?: PinContentPort; spendAttempt?: number; stackBase?: StackBasePort } = {},
+  options: { expectedVersion?: number; memory?: MemoryPort; repoMap?: RepoMapPort; pins?: PinContentPort; spendAttempt?: number; stackBase?: StackBasePort; planeBase?: PlaneBasePort } = {},
 ): Promise<BuildStartResult> {
   const facts = await readFacts(pool, accountId, workItemId);
   if (facts === null) return { status: "refused", reason: "not_found" };
@@ -366,6 +407,23 @@ export async function startBuildForItem(
   // CX-4b: a runner prompt spills too: the cut text rides in the signed job and the runner writes it under its own spill root (the memory travels in the job and is never cut).
   const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
   const budgetBytes = facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
+  // D#598 P1f-5c: a paired repository's sandbox build is published by the platform. The run starts from a recorded commit (its `head_sha`), and the prompt has no
+  // pull request step. A stacked item starts from its parent's verified head, which is that commit. A replay that finds its run reads nothing. Fails closed:
+  // without a head to record the publish step could not run, so the build does not start.
+  let planeBase: { sha: string } | undefined;
+  if (!prior && promptRuntimeOf(executionMode) === "sandbox" && facts.repo_id !== null && (await isPaired(pool, accountId, facts.repo_id))) {
+    let sha: string | null = stackBase?.sha ?? null;
+    if (sha === null) {
+      try {
+        sha = (await options.planeBase?.defaultHead({ repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name })) ?? null;
+      } catch {
+        // fx-swallow-ok: a read that cannot be made is a refusal with a fixed code, never a start with no recorded base
+        sha = null;
+      }
+    }
+    if (sha === null || !FULL_SHA.test(sha)) return { status: "refused", reason: "plane_base_unavailable" };
+    planeBase = { sha };
+  }
   // D#600 CX-5b: the item's rules as they stand now (its own over the repository's). The excludes only add a prompt line here (the settings that refuse the reads are written
   // at each launch, from the rules then); the pins are read on the cloud side at the run's start commit and go in full. A runner run gets neither from here (CX-5c).
   const rules = sandboxPrompt && !prior ? await withTenant(pool, accountId, (client) => readItemRules(client, accountId, workItemId)) : [];
@@ -374,12 +432,12 @@ export async function startBuildForItem(
   const allPins = rules.filter((r) => r.kind === "pin").map((r) => r.path);
   const pinPaths = allPins.filter((path) => !excludePatterns.some((pattern) => excludeCovers(pattern, path)));
   const excludedPins = allPins.length - pinPaths.length;
-  const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : {}) });
+  const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : planeBase ? { sha: planeBase.sha } : {}) });
   const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
   const assembled = assembleExecutorPrompt(
     {
       owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
-      ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}),
+      ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}), ...(planeBase ? { planeBase } : {}),
       ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),
       ...(pinRead && pinRead.items.length > 0 ? { pins: pinRead.items.map((p, i) => ({ label: `PINNED FILE ${i + 1} of ${pinRead.items.length}`, text: `path: ${p.path}\n${p.text}` })) } : {}),
     },
@@ -402,7 +460,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);
@@ -461,7 +519,7 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
  * HO-2b) are the two ways a move of a running run to the other side can end with nothing to continue: the item already had ten continuations,
  * or the new run could not start. In both the work is saved on the run's branch.
  */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed"] as const;
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };

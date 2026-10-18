@@ -1,4 +1,4 @@
-import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode } from "@fx/worker";
+import type { AdvanceFacade, AdvanceRunOutcome, AdvanceStepResult, DecisionStepCode, PlanePublish } from "@fx/worker";
 import { isQueuedOnRunner, type AdvanceWorker } from "./advanceSteps";
 
 /**
@@ -89,9 +89,23 @@ export interface BuildRunOutcome {
   failureReason?: string | null;
 }
 
-export async function buildOutcomeBody(worker: AdvanceWorker | null, accountId: string, runId: string): Promise<BuildRunOutcome> {
+/** D#598 P1f-5c: the worker's settle for a paired sandbox build. Optional, so a worker built without it (or a test double) leaves the outcome as it always was. */
+export type BuildSettler = Partial<Pick<PlanePublish, "settlePairedBuild">>;
+
+export async function buildOutcomeBody(worker: (AdvanceWorker & BuildSettler) | null, accountId: string, runId: string): Promise<BuildRunOutcome> {
   if (!worker) return { status: "missing", done: true, hasSummary: false, queuedOnRunner: false, tailRunId: runId };
   const out: AdvanceRunOutcome = await worker.advanceRunOutcome(accountId, runId);
+  // D#598 P1f-5c (Q1): the executor of a paired SANDBOX build has pushed its branch to the private repo and opened nothing. Once it has succeeded, the platform opens the private
+  // pull request and publishes the public change, before the driver looks for the pull request. The worker does nothing for any run it does not recognise, and a replay of this
+  // step is harmless (the pull request is reused, the attempt exists). Nothing here changes the outcome that is returned.
+  if (out.done && out.status === "succeeded" && out.runtime !== "runner" && worker.settlePairedBuild) {
+    try {
+      await worker.settlePairedBuild({ accountId, executorRunId: out.tailRunId ?? runId });
+    } catch (err) {
+      // fx-swallow-ok: the settle is best effort beside the driver; a failure leaves the existing "no pull request" outcome, and the log line is the trace
+      console.warn(JSON.stringify({ event: "advance.paired_build_settle_failed", run_id: out.tailRunId ?? runId, error: err instanceof Error ? err.name : "unknown" }));
+    }
+  }
   const summary = out.envelope?.summary;
   return { status: out.status, done: out.done, hasSummary: typeof summary === "string" && summary.trim().length > 0, queuedOnRunner: isQueuedOnRunner(out), tailRunId: out.tailRunId ?? runId, ...(out.failureReason ? { failureReason: out.failureReason } : {}) };
 }
