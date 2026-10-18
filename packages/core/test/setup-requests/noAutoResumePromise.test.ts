@@ -55,7 +55,7 @@ describe('no promise of an automatic resume where no check looks (C3)', () => {
     let promising = 0;
     for (const state of states) for (const checkKind of checkKinds) for (const checkReason of reasons) for (const resolution of resolutions) for (const checksAvailable of [false, true]) for (const repaused of [false, true]) {
       const line = statusSentence(
-        { state, checkKind, checkReason, resolution, resolvedAt: state === 'open' ? null : new Date(now - 1000), checkRanAt: null, repausedAt: repaused ? new Date(now) : null, target: 'cloud-staging', envName: 'STRIPE_KEY' },
+        { state, checkKind, checkReason, resolution, resolvedAt: state === 'open' ? null : new Date(now - 1000), checkRanAt: null, repausedAt: repaused ? new Date(now) : null, target: 'cloud-staging', envName: 'STRIPE_KEY', targetEnvironment: 'production' },
         { checksAvailable, now },
       );
       if (line !== null && PROMISE.test(line)) {

@@ -5,6 +5,7 @@ import {
   SETUP_REQUEST_CHECK_KINDS,
   SETUP_REQUEST_KINDS,
   SETUP_REQUEST_STATES,
+  TARGET_ENVIRONMENTS,
   setupRequestTitle,
 } from "@fx/core/src/setup-requests/kinds.js";
 import {
@@ -58,6 +59,8 @@ const requestSchema = z.object({
   target: z.string(),
   /** `env_var` only: the variable's name. */
   env_name: z.string().nullable(),
+  /** `env_var` only: the Vercel environment the variable must be set for (the check and its sentences use this one); null for every other kind. */
+  target_environment: z.enum(TARGET_ENVIRONMENTS).nullable(),
   /** The agent's reason, as sent. Plain text: show it as text only. */
   reason: z.string(),
   /** The one link a request may hold: a page on github.com or vercel.com. */
@@ -93,6 +96,8 @@ const createBodySchema = z
     work_item_id: UUID.nullish(),
     target: z.string().min(1).max(200),
     env_name: z.string().min(1).max(100).nullish(),
+    /** `env_var` only; production when omitted. */
+    target_environment: z.enum(TARGET_ENVIRONMENTS).nullish(),
     reason: z.string().min(1).max(1000),
     provider_url: z.string().min(1).max(500).nullish(),
     check: z.enum(SETUP_REQUEST_CHECK_KINDS).nullish(),
@@ -122,6 +127,7 @@ const baseDto = (r: SetupRequest): Omit<z.infer<typeof requestSchema>, "status_s
   title: setupRequestTitle(r.kind, r.target, r.envName),
   target: r.target,
   env_name: r.envName,
+  target_environment: r.kind === "env_var" ? r.targetEnvironment : null,
   reason: r.reason,
   provider_url: r.providerUrl,
   check: r.checkKind,
@@ -255,6 +261,7 @@ export const setupRequestRoutes: RouteEntry[] = [
               kind: body.kind,
               target: body.target,
               envName: body.env_name ?? null,
+              targetEnvironment: body.target_environment ?? null,
               reason: body.reason,
               providerUrl: body.provider_url ?? null,
               check: body.check ?? null,
