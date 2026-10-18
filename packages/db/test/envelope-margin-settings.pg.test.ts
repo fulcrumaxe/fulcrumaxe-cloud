@@ -176,7 +176,7 @@ describe('envelope margin settings and the weekly envelope index (0867)', () => 
       ).rejects.toMatchObject({ code: PG_ERROR.INSUFFICIENT_PRIVILEGE });
     });
 
-    it('privileges: replaced in place, so the owner is unchanged, EXECUTE is held by app_user alone, and the search path is pinned', async () => {
+    it('privileges: replaced in place, so the owner is unchanged, EXECUTE is held by app_user and the context rules definer only, and the search path is pinned', async () => {
       const { rows } = await admin.query<{ owner: string; proconfig: string[]; secdef: boolean; grantees: string[] }>(
         `SELECT pg_get_userbyid(p.proowner) AS owner, p.proconfig, p.prosecdef AS secdef,
                 coalesce((SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0), '{}') AS grantees
@@ -184,7 +184,8 @@ describe('envelope margin settings and the weekly envelope index (0867)', () => 
       );
       expect(rows[0]!.secdef).toBe(true);
       expect(rows[0]!.proconfig).toEqual(['search_path=pg_catalog, public, pg_temp']);
-      expect(rows[0]!.grantees).toEqual(['app_user']);
+      // 0876 (CX-5a2) adds context_rules_definer: its two functions write the rule's audit row inside their own transaction. Nobody else may be added.
+      expect(rows[0]!.grantees).toEqual(['app_user', 'context_rules_definer']);
       expect(rows[0]!.owner).toBe('platform_ops');
       expect((await admin.query(`SELECT has_function_privilege('public', 'audit_write(text, jsonb)', 'EXECUTE') AS ok`)).rows[0].ok).toBe(false);
     });

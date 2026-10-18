@@ -228,4 +228,52 @@ describe("saveContextRule [pg]", () => {
     expect(await listContextRules(h.pureAppUserPool, b.who, { repoId: a.repoId })).toEqual([]);
     expect(await listContextRules(h.pureAppUserPool, b.who, { workItemId: a.workItemId })).toEqual([]);
   });
+
+  describe("audit history (CX-5a2)", () => {
+    const auditRows = async (accountId: string) =>
+      (await h.admin.query("SELECT action, actor, payload FROM audit_log WHERE account_id = $1 AND action LIKE 'context_rule.%' ORDER BY created_at, id", [accountId])).rows;
+
+    it("a save, a pin-to-exclude replacement and a removal each write one row through the library calls; a pin refused for the budget writes none", async () => {
+      const w = await world({ budget: 5000 });
+      w.trees.tree_ = [{ path: "a.md", type: "blob", size: 3000 }, { path: "b.md", type: "blob", size: 3000 }];
+      const { id } = await saveContextRule(w.deps, w.who, w.repo, "pin", "a.md");
+      await expect(saveContextRule(w.deps, w.who, w.repo, "pin", "b.md")).rejects.toMatchObject({ code: "pins_exceed_budget" });
+      expect((await auditRows(w.accountId)).map((r) => r.action)).toEqual(["context_rule.saved"]);
+
+      await saveContextRule(w.deps, w.who, w.repo, "exclude", "a.md");
+      await removeContextRule(h.pureAppUserPool, w.who, id);
+      const rows = await auditRows(w.accountId);
+      expect(rows.map((r) => r.action)).toEqual(["context_rule.saved", "context_rule.replaced", "context_rule.removed"]);
+      expect(rows.every((r) => r.actor === w.owner)).toBe(true);
+      expect(rows.map((r) => [r.payload.old_kind, r.payload.new_kind])).toEqual([[null, "pin"], ["pin", "exclude"], ["exclude", null]]);
+      expect(await stored(w)).toEqual([]);
+    });
+
+    it("a refused pin leaves no audit row for the pin and no rule: no tree, truncated tree and a GitHub error", async () => {
+      const w = await world({ budget: 5000 });
+      w.trees.truncated = true;
+      await expect(saveContextRule(w.deps, w.who, w.repo, "pin", "a.md")).rejects.toMatchObject({ code: "tree_truncated" });
+      w.trees.truncated = false;
+      w.trees.fail = true;
+      await expect(saveContextRule(w.deps, w.who, w.repo, "pin", "a.md")).rejects.toMatchObject({ code: "tree_unavailable" });
+      expect(await auditRows(w.accountId)).toEqual([]);
+      expect(await stored(w)).toEqual([]);
+    });
+
+    it("another account reads none of this account's rule history", async () => {
+      const a = await world();
+      const b = await world();
+      await saveContextRule(a.deps, a.who, a.repo, "exclude", "x/**");
+      const seen = await h.pureAppUserPool.connect();
+      try {
+        await seen.query("BEGIN");
+        await seen.query("SELECT set_config('app.account_id', $1, true), set_config('app.user_id', $2, true)", [b.accountId, b.owner]);
+        expect((await seen.query("SELECT 1 FROM audit_log WHERE action LIKE 'context_rule.%'")).rows).toEqual([]);
+        await seen.query("ROLLBACK");
+      } finally {
+        seen.release();
+      }
+      expect((await auditRows(a.accountId)).length).toBe(1);
+    });
+  });
 });
