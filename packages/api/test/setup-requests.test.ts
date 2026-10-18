@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import type { VercelEnvSource } from '@fx/core/src/setup-requests/checks.js';
+import { setupRequestDeps } from '../src/routes/setupRequests.js';
 import type { Pool, PoolClient } from 'pg';
 import { createPool } from '@fx/db/src/pool.js';
 import { withTenant } from '@fx/db/src/withTenant.js';
@@ -33,6 +35,9 @@ interface Dto {
   resolution: string | null;
   resolved_by: string | null;
   resolved_at: string | null;
+  check_reason: string | null;
+  status_sentence: string | null;
+  check_interval_seconds: number | null;
 }
 interface ErrorBody {
   error: { code: string; message: string };
@@ -386,6 +391,10 @@ describe('D#598 P8a: setup requests', () => {
     expect(await hold()).toBe('setup_request_withdrawn');
     expect((await call(f.admin, 'POST', `/setup-requests/${b.id}/withdraw`)).status).toBe(200);
     expect(await code(await call(f.admin, 'POST', `/setup-requests/${b.id}/done`))).toBe('setup_request_closed');
+    // Mark done filed the item's one restart (P8b-2); it is performed (finished) before a person's next advance is recorded below.
+    const restarts = await admin.query(`SELECT state FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2`, [f.owner.accountId, f.itemId]);
+    expect(restarts.rows).toEqual([{ state: 'accepted' }]);
+    await admin.query(`UPDATE run_action_requests SET state = 'done', finished_at = now() WHERE account_id = $1 AND target_id = $2`, [f.owner.accountId, f.itemId]);
     // A person's next advance of the item after the withdrawal lifts the hold.
     await admin.query(
       `INSERT INTO run_action_requests (account_id, kind, target_id, requested_by, principal_kind, idempotency_key, request_hash)
@@ -498,5 +507,141 @@ describe('D#598 P8a: setup requests', () => {
     expect(sql.filter((q) => /\bDELETE\b[^;]*setup_requests|TRUNCATE[^;]*setup_requests/i.test(q))).toEqual([]);
     expect(sql.filter((q) => /INSERT\s+INTO\s+setup_requests/i.test(q))).toHaveLength(1);
     expect(sql.filter((q) => /\bUPDATE\s+setup_requests/i.test(q))).toHaveLength(1);
+  });
+
+  describe('D#598 P8b-2: the status API fields, Mark done with its check, and the unique-index race', () => {
+    const SECRET = 'sk_live_VALUE_THAT_MUST_NEVER_BE_KEPT';
+    /** A source that answers from a table the test edits; `available` is the switch the real binding flips when a credential exists. */
+    function source(available: boolean, vars: Array<{ name: string; targets: string[] }> = []): VercelEnvSource & { vars: typeof vars; asked: number } {
+      const s = {
+        available,
+        vars,
+        asked: 0,
+        async listEnvNames() {
+          s.asked += 1;
+          return { ok: true as const, entries: s.vars.map((v) => ({ name: v.name, targets: v.targets })) };
+        },
+      };
+      return s;
+    }
+    const previous = setupRequestDeps.getEnvSource;
+    const bind = (s: VercelEnvSource) => void (setupRequestDeps.getEnvSource = () => s);
+    afterEach(() => void (setupRequestDeps.getEnvSource = previous));
+    const get = async (who: Identity, id: string): Promise<Dto> => (await (await call(who, 'GET', `/setup-requests/${id}`)).json()) as Dto;
+    const restarts = async (f: { owner: Identity; itemId: string }) =>
+      (await admin.query(`SELECT state FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2`, [f.owner.accountId, f.itemId])).rows;
+
+    it('with no credential source (today) a request with a check says it cannot be checked and states no interval; a kind with no check says the same', async () => {
+      bind(source(false));
+      const f = await fixture();
+      const a = await created(f.admin, envBody(f));
+      const b = await created(f.admin, { kind: 'app_not_installed', repo_id: f.repoId, work_item_id: f.itemId, target: 'acme/web', reason: 'install it' });
+      const want = "We can't check this one for you. Press Mark done when it's finished.";
+      expect(a).toMatchObject({ status_sentence: want, check_interval_seconds: null });
+      expect(b).toMatchObject({ status_sentence: want, check_interval_seconds: null });
+      const list = (await (await call(f.member, 'GET', '/setup-requests')).json()) as { requests: Dto[] };
+      expect(list.requests.map((r) => [r.status_sentence, r.check_interval_seconds])).toEqual([[want, null], [want, null]]);
+    });
+
+    it('with a source bound, a request with a check states the interval and the resume sentence; a closed request has none', async () => {
+      bind(source(true));
+      const f = await fixture();
+      const a = await created(f.admin, envBody(f));
+      expect(a).toMatchObject({
+        status_sentence: "We check for this every 60 seconds. The item continues by itself once it's done, or press Mark done.",
+        check_interval_seconds: 60,
+      });
+      const w = await call(f.admin, 'POST', `/setup-requests/${a.id}/withdraw`);
+      expect(await w.json()).toMatchObject({ status_sentence: null, check_interval_seconds: null });
+    });
+
+    it('Mark done: the variable is there, so the item is restarted once, the answer is the closed request, and a second press files nothing and asks nothing', async () => {
+      const s = source(true, [{ name: 'STRIPE_WEBHOOK_SECRET', targets: ['production'] }]);
+      bind(s);
+      const f = await fixture();
+      const a = await created(f.admin, envBody(f));
+      const done = await call(f.admin, 'POST', `/setup-requests/${a.id}/done`);
+      expect(done.status).toBe(200);
+      expect(await done.json()).toMatchObject({ state: 'done', resolution: 'marked_done', status_sentence: null, check_interval_seconds: null });
+      expect(await restarts(f)).toEqual([{ state: 'accepted' }]);
+      expect(s.asked).toBe(1);
+      const again = await call(f.owner, 'POST', `/setup-requests/${a.id}/done`);
+      expect(again.status).toBe(200);
+      expect(await restarts(f)).toHaveLength(1);
+      expect(s.asked).toBe(1);
+    });
+
+    it('Mark done: the check says it is not done, so the answer is the request OPEN again with the check\'s reason; fixing it and pressing again resumes', async () => {
+      const s = source(true, []);
+      bind(s);
+      const f = await fixture();
+      const a = await created(f.admin, envBody(f));
+      const done = await call(f.admin, 'POST', `/setup-requests/${a.id}/done`);
+      expect(done.status).toBe(200);
+      expect(await done.json()).toMatchObject({
+        id: a.id,
+        state: 'open',
+        resolution: null,
+        resolved_by: null,
+        check_reason: 'env_var_missing',
+        status_sentence: "We checked and it isn't done yet: STRIPE_WEBHOOK_SECRET isn't set on cloud-staging yet. The item is paused again.",
+        check_interval_seconds: 60,
+      });
+      expect(await get(f.member, a.id)).toMatchObject({ state: 'open', status_sentence: expect.stringContaining('The item is paused again.') });
+      expect(await withTenant(appUserPool, f.owner.accountId, f.owner.userId, (c) => setupHoldFor(c, f.itemId))).toBe('setup_request_open');
+
+      s.vars.push({ name: 'STRIPE_WEBHOOK_SECRET', targets: ['preview'] });
+      const wrong = await (await call(f.admin, 'POST', `/setup-requests/${a.id}/done`)).json();
+      expect(wrong).toMatchObject({ state: 'open', check_reason: 'env_var_wrong_target', status_sentence: expect.stringContaining('but not for production') });
+
+      s.vars[0]!.targets = ['production'];
+      await admin.query(`UPDATE run_action_requests SET state = 'done', finished_at = now() WHERE account_id = $1 AND target_id = $2`, [f.owner.accountId, f.itemId]);
+      const ok = await (await call(f.admin, 'POST', `/setup-requests/${a.id}/done`)).json();
+      expect(ok).toMatchObject({ state: 'done', resolution: 'marked_done', status_sentence: null });
+      expect(await withTenant(appUserPool, f.owner.accountId, f.owner.userId, (c) => setupHoldFor(c, f.itemId))).toBeNull();
+      // Three presses are three generations. The second press found the first's restart still waiting (one live run per item, so it is the
+      // answer); the third, after the first was performed, filed its own.
+      expect(await restarts(f)).toEqual([{ state: 'done' }, { state: 'accepted' }]);
+      expect(JSON.stringify(await admin.query(`SELECT * FROM setup_requests WHERE account_id = $1`, [f.owner.accountId]))).not.toContain(SECRET);
+    });
+
+    it('C1: two creates of the same step at once, over HTTP, never answer 500: one 200, one 409 setup_request_exists, one open row', async () => {
+      for (let round = 0; round < 5; round += 1) {
+        const f = await fixture();
+        const answers = await Promise.all([create(f.admin, envBody(f)), create(f.owner, envBody(f))]);
+        expect(answers.map((r) => r.status).sort()).toEqual([200, 409]);
+        const lost = answers.find((r) => r.status === 409)!;
+        expect(await code(lost)).toBe('setup_request_exists');
+        expect((await rows(f.owner.accountId)).filter((r) => r.state === 'open')).toHaveLength(1);
+      }
+    });
+
+    it('C1: a request for the same item, kind and target while one is open is 409 (not a driver error), and for another target or item is fine', async () => {
+      const f = await fixture();
+      await created(f.admin, envBody(f));
+      const dup = await create(f.admin, envBody(f, { reason: 'a different reason is still the same step' }));
+      expect(dup.status).toBe(409);
+      expect(await code(dup)).toBe('setup_request_exists');
+      expect((await create(f.admin, envBody(f, { target: 'another-project' }))).status).toBe(200);
+      expect((await create(f.admin, envBody(f, { work_item_id: await seedItem(f.owner.accountId, f.repoId) }))).status).toBe(200);
+    });
+
+    it('a done request put back by its check does not collide with a newer open request: the answer is the older one done, the newer one carries the reason', async () => {
+      const s = source(true, []);
+      bind(s);
+      const f = await fixture();
+      const old = await created(f.admin, envBody(f));
+      // The provider is asked after the press has closed `old`; the same step is asked for again in that moment.
+      let twin: Dto | undefined;
+      s.listEnvNames = async () => {
+        s.asked += 1;
+        twin = await created(f.admin, envBody(f));
+        return { ok: true as const, entries: [] };
+      };
+      const answer = await (await call(f.admin, 'POST', `/setup-requests/${old.id}/done`)).json();
+      expect(answer).toMatchObject({ id: old.id, state: 'done' });
+      expect(await get(f.admin, twin!.id)).toMatchObject({ state: 'open', check_reason: 'env_var_missing', status_sentence: expect.stringContaining('The item is paused again.') });
+      expect((await rows(f.owner.accountId)).filter((r) => r.state === 'open')).toHaveLength(1);
+    });
   });
 });

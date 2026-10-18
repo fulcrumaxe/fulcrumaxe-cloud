@@ -202,6 +202,27 @@ withdraws and marks done a request, keeps the derived public/private drift reque
 (whether a request holds a work item: open holds it, withdrawn holds it until a person's next advance, done releases it). A request has
 no value field; text shaped like a credential is refused before the write.
 
+The same folder carries the check (D#598 P8b). What resumes an item, and when:
+
+- **A person's Mark done** (`markDone.ts`) closes the request and files one `advance_work_item` restart for its work item in the same
+  transaction; the run action does the restarting and refuses to start a second run. The restart's idempotency key is built from the
+  request id and the time that open generation was closed, so a second press, a retry or a restarted worker never starts a second run,
+  and a request that was put back and closed again files a new one. A request with an automatic check is then checked at once, while a
+  credential source is bound: if the check says "not yet" the request is open again (or folds into a newer open request for the same
+  step), the item is held again, and the request reads "We checked and it isn't done yet: ..." with the check's reason. A provider that
+  cannot be reached never puts a request back; the person's word stands.
+- **The check sweep** (`checkSweep.ts`, the once-a-minute cron behind the pending-work marker; the cross-account list is migration 0874's
+  `setup_request_list_due`) looks at open requests that name an automatic check and, when the check passes, closes the request as
+  `check_passed` and files the same restart. It lists open requests only, which is why Mark done runs its own check.
+- **No credential source is bound yet** (the customer's Vercel connection is a later row), so today nothing is checked and nothing
+  resumes by itself: a request says "We can't check this one for you" and a person's Mark done is the way on.
+- **The interval is a normal-case figure, not a guarantee.** The sweep runs only when the marker says there is work; if the marker is
+  lost, the worst case is the platform's standard backstop interval.
+
+`copy.ts` holds the sentences (one constant each, filled only from structured fields and a closed list of reason codes), and
+`statusSentence` derives the line a request shows from its row on every read; the API returns it as `status_sentence`, with
+`check_interval_seconds`. Migration 0877 adds the one stamp that sentence 4 needs (`repaused_at`).
+
 ## Security notes
 
 See [`../security.md`](../security.md) for the tenant-isolation model this

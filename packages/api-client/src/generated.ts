@@ -1453,6 +1453,8 @@ export interface Operations {
         resolved_at: string | null;
         check_reason: string | null;
         check_ran_at: string | null;
+        status_sentence: string | null;
+        check_interval_seconds: (number) | (null);
       }>;
       truncated: boolean;
     };
@@ -1490,6 +1492,8 @@ export interface Operations {
       resolved_at: string | null;
       check_reason: string | null;
       check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
     };
   };
   getSetupRequest: {
@@ -1518,6 +1522,8 @@ export interface Operations {
       resolved_at: string | null;
       check_reason: string | null;
       check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
     };
   };
   withdrawSetupRequest: {
@@ -1546,6 +1552,8 @@ export interface Operations {
       resolved_at: string | null;
       check_reason: string | null;
       check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
     };
   };
   markSetupRequestDone: {
@@ -1574,6 +1582,8 @@ export interface Operations {
       resolved_at: string | null;
       check_reason: string | null;
       check_ran_at: string | null;
+      status_sentence: string | null;
+      check_interval_seconds: (number) | (null);
     };
   };
   getActionAccountRules: {

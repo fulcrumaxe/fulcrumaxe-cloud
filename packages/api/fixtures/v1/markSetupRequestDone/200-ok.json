@@ -17,5 +17,7 @@
   "resolved_by": "b7e4a1c9-2d6f-4b3a-9c8e-5f4a3b2c1d77",
   "resolved_at": "2026-10-16T20:05:00.000Z",
   "check_reason": null,
-  "check_ran_at": null
+  "check_ran_at": "2026-10-16T20:05:01.000Z",
+  "status_sentence": null,
+  "check_interval_seconds": null
 }

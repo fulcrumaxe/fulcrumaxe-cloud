@@ -4,6 +4,8 @@ import { appUserPool, platformOpsPool } from "@fx/api/src/sse/pools.js";
 import { runActionDeps } from "@fx/api/src/routes/run-actions.js";
 import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
+import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
+import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { liveInstallationTokens } from "@fx/github";
 import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
@@ -40,6 +42,8 @@ export const maxDuration = 30;
 runActionDeps.getRunActionSignal = () => (workerConfigured() ? httpRunActionSignalFromEnv() : null);
 // D#31 AUTHOR-CHECK-WIRE: the retry author check, the same function the worker is handed (lib/worker.ts).
 runActionDeps.getAuthorCheck = getAuthorCheck;
+// D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
+setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();
 onboardingDeps.projectPreviewResult = parsePreviewResult;

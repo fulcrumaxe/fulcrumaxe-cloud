@@ -60,6 +60,8 @@ export interface SetupRequest {
   resolvedAt: Date | null;
   checkReason: string | null;
   checkRanAt: Date | null;
+  /** When the check after Mark done put the request back; null for one that never was. */
+  repausedAt: Date | null;
 }
 
 interface Row {
@@ -81,10 +83,11 @@ interface Row {
   resolved_at: Date | null;
   check_reason: string | null;
   check_ran_at: Date | null;
+  repaused_at: Date | null;
 }
 
 const COLUMNS = `id, repo_id, work_item_id, origin, kind, target, env_name, reason, provider_url, check_kind, state, created_by, created_at,
-  resolution, resolved_by, resolved_at, check_reason, check_ran_at`;
+  resolution, resolved_by, resolved_at, check_reason, check_ran_at, repaused_at`;
 
 const map = (r: Row): SetupRequest => ({
   id: r.id,
@@ -105,6 +108,7 @@ const map = (r: Row): SetupRequest => ({
   resolvedAt: r.resolved_at,
   checkReason: r.check_reason,
   checkRanAt: r.check_ran_at,
+  repausedAt: r.repaused_at,
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -218,14 +222,20 @@ export async function getSetupRequest(client: PoolClient, id: string): Promise<S
 }
 
 /**
- * A person's decision on an open request: `done` (resumes the item at once; a later failing check puts it back) or `withdrawn` (the item
- * stays paused). Repeating the decision already taken returns the request unchanged; the opposite decision on a closed request is `not_open`.
+ * A person's decision on an open request: `done` (releases the hold at once; {@link markSetupRequestDoneInTx} also files the item's restart,
+ * and a later failing check puts the request back) or `withdrawn` (the item stays paused). Repeating the decision already taken returns the
+ * request unchanged; the opposite decision on a closed request is `not_open`. Nothing here resumes a workflow by itself.
  * The person is the transaction's `app.user_id`, which the database requires to be an owner or admin of the account.
  */
 export async function resolveSetupRequest(client: PoolClient, input: { id: string; userId: string; to: 'done' | 'withdrawn' }): Promise<SetupRequest> {
+  return (await resolveSetupRequestChanged(client, input)).request;
+}
+
+/** {@link resolveSetupRequest}, saying whether THIS call made the transition (a repeat, or the loser of a race, did not). */
+async function resolveSetupRequestChanged(client: PoolClient, input: { id: string; userId: string; to: 'done' | 'withdrawn' }): Promise<{ request: SetupRequest; changed: boolean }> {
   if (!UUID_RE.test(input.userId)) throw new SetupRequestError('invalid_input', 'userId must be a user id', 'userId');
   const current = await getSetupRequest(client, input.id);
-  if (current.state === input.to) return current;
+  if (current.state === input.to) return { request: current, changed: false };
   if (current.state !== 'open') throw new SetupRequestError('not_open', `the request is already ${current.state}`);
   const { rows } = await client.query<Row>(
     `UPDATE setup_requests
@@ -234,11 +244,70 @@ export async function resolveSetupRequest(client: PoolClient, input: { id: strin
       RETURNING ${COLUMNS}`,
     [input.id, input.to, input.to === 'done' ? 'marked_done' : 'withdrawn', input.userId],
   );
-  if (rows.length > 0) return map(rows[0]!);
+  if (rows.length > 0) return { request: map(rows[0]!), changed: true };
   // Lost a race with another decision: report what it was.
   const after = await getSetupRequest(client, input.id);
-  if (after.state === input.to) return after;
+  if (after.state === input.to) return { request: after, changed: false };
   throw new SetupRequestError('not_open', `the request is already ${after.state}`);
+}
+
+export interface MarkedDone {
+  request: SetupRequest;
+  /** True only for the call that made the transition; a repeat, or the loser of a race, is false and files nothing. */
+  changed: boolean;
+  /** The `advance_work_item` request filed with the transition, or null (no change, or the request names no work item). */
+  restart: { actionId: string; replayed: boolean } | null;
+}
+
+/**
+ * Mark done, in one transaction: the request closes as `marked_done` and, when it names a work item, ONE `advance_work_item` run-action request
+ * is filed with it (the existing run action restarts the held workflow, or answers `already_running`; this file never resumes a workflow).
+ * Closing and filing commit together or not at all, so a request can never be done with its wake-up lost. A second press (or the loser of
+ * two at once) changes nothing and files nothing. The immediate check that follows is `markDone.ts`; if it says "not yet" the request is put
+ * back ({@link reopenSetupRequest}) and the restart, if it already started a workflow, is stopped by the hold at that workflow's next step.
+ * Run it on a tenant transaction whose session user is `input.userId`, an owner or admin of the account.
+ */
+export async function markSetupRequestDoneInTx(client: PoolClient, input: { id: string; userId: string }): Promise<MarkedDone> {
+  const { request, changed } = await resolveSetupRequestChanged(client, { ...input, to: 'done' });
+  if (!changed || request.workItemId === null) return { request, changed, restart: null };
+  return { request, changed, restart: await fileRestart(client, request.id, request.workItemId) };
+}
+
+/**
+ * Files the restart of a work item held by a request that just closed. The idempotency key is per (request id, generation of being open):
+ * a generation ends with one resolution, and the table stamps `resolved_at` on each, so the key carries it to the microsecond. The same
+ * generation (a retry, a second press, a restarted worker, the same pass applied twice) answers the first request; a request that was
+ * put back and closed again is a new generation and files a new restart. The caller must have closed the request in this transaction.
+ */
+async function fileRestart(client: PoolClient, requestId: string, workItemId: string): Promise<{ actionId: string; replayed: boolean }> {
+  const keyed = await client.query<{ key: string }>(
+    `SELECT 'setup_request_restart:' || id::text || ':' || (extract(epoch FROM resolved_at) * 1000000)::bigint::text AS key
+       FROM setup_requests WHERE id = $1::uuid AND state = 'done'`,
+    [requestId],
+  );
+  const key = keyed.rows[0]?.key;
+  if (key === undefined) throw new NotFoundError('setup request not found');
+  const filed = await client.query<{ action_id: string; replayed: boolean }>(
+    'SELECT action_id, replayed FROM run_action_request($1, $2::uuid, $3, $4)',
+    ['advance_work_item', workItemId, key, createHash('sha256').update(key).digest('hex')],
+  );
+  return { actionId: filed.rows[0]!.action_id, replayed: filed.rows[0]!.replayed };
+}
+
+/**
+ * Records that the check after Mark done ran and the person's word stands (it passed, or the provider could not be asked): the check's stamp
+ * moves past the closing, which ends "Checking now.". Nothing else changes. The stamp is at least a millisecond after the closing so the
+ * two compare unambiguously after the driver rounds them. Run on the same kind of transaction as {@link markSetupRequestDoneInTx}.
+ */
+export async function stampMarkDoneCheck(client: PoolClient, input: { id: string }): Promise<SetupRequest> {
+  if (!UUID_RE.test(input.id)) throw new NotFoundError('setup request not found');
+  const { rows } = await client.query<Row>(
+    `UPDATE setup_requests SET check_ran_at = GREATEST(now(), resolved_at + interval '1 millisecond')
+      WHERE id = $1::uuid AND state = 'done' AND resolution = 'marked_done' RETURNING ${COLUMNS}`,
+    [input.id],
+  );
+  if (rows.length > 0) return map(rows[0]!);
+  return getSetupRequest(client, input.id);
 }
 
 /**
@@ -338,14 +407,7 @@ export async function applyCheckOutcome(client: PoolClient, input: { id: string;
   );
   const request = map(rows[0]!);
   let advance: { actionId: string; replayed: boolean } | null = null;
-  if (request.workItemId !== null) {
-    const key = `setup_request_check_passed:${request.id}`;
-    const filed = await client.query<{ action_id: string; replayed: boolean }>(
-      'SELECT action_id, replayed FROM run_action_request($1, $2::uuid, $3, $4)',
-      ['advance_work_item', request.workItemId, key, createHash('sha256').update(key).digest('hex')],
-    );
-    advance = { actionId: filed.rows[0]!.action_id, replayed: filed.rows[0]!.replayed };
-  }
+  if (request.workItemId !== null) advance = await fileRestart(client, request.id, request.workItemId);
   return { result: 'resolved', request, advance };
 }
 
@@ -366,7 +428,7 @@ export async function reopenSetupRequest(client: PoolClient, input: { id: string
   if (old.state === 'withdrawn') throw new SetupRequestError('not_open', 'the request was withdrawn');
   if (old.check_kind === null) throw new SetupRequestError('invalid_input', 'only a request with an automatic check can be put back', 'check');
   const stamp = (id: string) =>
-    client.query<Row>(`UPDATE setup_requests SET check_reason = $2, check_ran_at = now() WHERE id = $1::uuid RETURNING ${COLUMNS}`, [id, input.reason]);
+    client.query<Row>(`UPDATE setup_requests SET check_reason = $2, check_ran_at = now(), repaused_at = now() WHERE id = $1::uuid RETURNING ${COLUMNS}`, [id, input.reason]);
   if (old.state === 'open') return { request: map((await stamp(old.id)).rows[0]!), folded: false };
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -386,7 +448,7 @@ export async function reopenSetupRequest(client: PoolClient, input: { id: string
     try {
       const { rows } = await client.query<Row>(
         `UPDATE setup_requests
-            SET state = 'open', resolution = NULL, resolved_by = NULL, resolved_at = NULL, check_reason = $2, check_ran_at = now()
+            SET state = 'open', resolution = NULL, resolved_by = NULL, resolved_at = NULL, check_reason = $2, check_ran_at = now(), repaused_at = now()
           WHERE id = $1::uuid AND state = 'done' RETURNING ${COLUMNS}`,
         [old.id, input.reason],
       );

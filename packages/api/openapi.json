@@ -12257,6 +12257,24 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "status_sentence": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "check_interval_seconds": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": -9007199254740991,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -12278,7 +12296,9 @@
                           "resolved_by",
                           "resolved_at",
                           "check_reason",
-                          "check_ran_at"
+                          "check_ran_at",
+                          "status_sentence",
+                          "check_interval_seconds"
                         ],
                         "additionalProperties": false
                       }
@@ -12580,6 +12600,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -12601,7 +12639,9 @@
                     "resolved_by",
                     "resolved_at",
                     "check_reason",
-                    "check_ran_at"
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds"
                   ],
                   "additionalProperties": false
                 }
@@ -12838,6 +12878,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -12859,7 +12917,9 @@
                     "resolved_by",
                     "resolved_at",
                     "check_reason",
-                    "check_ran_at"
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds"
                   ],
                   "additionalProperties": false
                 }
@@ -13068,6 +13128,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -13089,7 +13167,9 @@
                     "resolved_by",
                     "resolved_at",
                     "check_reason",
-                    "check_ran_at"
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds"
                   ],
                   "additionalProperties": false
                 }
@@ -13181,8 +13261,8 @@
     "/api/v1/setup-requests/{id}/done": {
       "post": {
         "operationId": "markSetupRequestDone",
-        "summary": "Mark an open setup request done; its work item can go on at once",
-        "description": "Owner or admin, session only. Repeating it answers 200 with the request unchanged; marking a withdrawn request done is 409. A check that later fails puts the request back.",
+        "summary": "Mark an open setup request done; its work item is restarted at once, and a request with an automatic check is checked at once",
+        "description": "Owner or admin, session only. The request closes and its work item is asked to continue once (a repeat files nothing). A request that names an automatic check is then checked right away, while a credential source is bound: if the check says it is not done, the request is open again and the item is paused again, and the answer's `status_sentence` gives the check's reason. Repeating it answers 200 with the request unchanged; marking a withdrawn request done is 409.",
         "security": [
           {
             "session": []
@@ -13200,7 +13280,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Mark an open setup request done; its work item can go on at once",
+            "description": "Mark an open setup request done; its work item is restarted at once, and a request with an automatic check is checked at once",
             "content": {
               "application/json": {
                 "schema": {
@@ -13327,6 +13407,24 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "status_sentence": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "check_interval_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -13348,7 +13446,9 @@
                     "resolved_by",
                     "resolved_at",
                     "check_reason",
-                    "check_ran_at"
+                    "check_ran_at",
+                    "status_sentence",
+                    "check_interval_seconds"
                   ],
                   "additionalProperties": false
                 }
