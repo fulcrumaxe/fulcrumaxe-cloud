@@ -362,7 +362,7 @@ export async function startFixBody(
   for (const f of failing.slice(0, 4)) {
     const o = await worker.advanceRunOutcome(who.accountId, f.runId);
     const v = readVerdict(o.status, o.envelope);
-    findings.push({ role: f.role, verdict: v.verdict, findings: v.findings, summary: v.summary });
+    findings.push({ role: f.role, verdict: v.verdict, findings: v.findings, fullFindings: v.fullFindings, summary: v.summary });
   }
   // D#599 PL-2b-2: the round is on the other side of the one that opened the pull request (the pull request lookup follows the newest executor run's side).
   const crossSide = roundIsCrossSide(ctx.prExecutionMode, ctx.executionMode);
@@ -372,15 +372,17 @@ export async function startFixBody(
   let heldSpec: { version: number; sha256: string } | null = null;
   try {
     const runtime = promptRuntimeOf(ctx.executionMode);
+    // D#600 CX-4a: a sandbox round can read /fx/context, so the findings its caps cut are spilled there and marked; a runner round has no spill (CX-4b).
+    const spillOptions = { spill: runtime === "sandbox" };
     const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.
     if (runtime === "sandbox" && spec.sha256 !== undefined) {
       heldSpec = { version: spec.version, sha256: spec.sha256 };
-      assembled = assembleFixPrompt({ ...base, heldSpec });
-      withBody = assembleFixPrompt(base);
+      assembled = assembleFixPrompt({ ...base, heldSpec }, spillOptions);
+      withBody = assembleFixPrompt(base, spillOptions);
     } else {
-      assembled = assembleFixPrompt(base);
+      assembled = assembleFixPrompt(base, spillOptions);
     }
   } catch (err) {
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
@@ -391,7 +393,8 @@ export async function startFixBody(
     headSha: pr.headSha,
     prompt: assembled.prompt,
     contextSections: assembled.sections,
-    ...(heldSpec && withBody ? { held: heldSpec, fallbackPrompt: withBody.prompt, fallbackContextSections: withBody.sections } : {}),
+    ...(assembled.spill ? { contextSpill: assembled.spill } : {}),
+    ...(heldSpec && withBody ? { held: heldSpec, fallbackPrompt: withBody.prompt, fallbackContextSections: withBody.sections, ...(withBody.spill ? { fallbackContextSpill: withBody.spill } : {}) } : {}),
     round,
     actionId,
     ...(retry > 0 ? { retry } : {}),

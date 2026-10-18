@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "@fulcrumaxe/runner-protocol";
 import { getRunContext } from "@fx/core/src/runs/contextPanel.js";
 import type { RouteEntry } from "../registry.js";
 
@@ -16,7 +16,7 @@ export const runContextResponseSchema = z.object({
   status: z.string(),
   recorded: z.boolean(),
   basis: z.enum(["measured", "partial"]).nullable(),
-  sections: z.array(z.object({ code: z.enum(CONTEXT_SECTION_CODES), bytes: count, trimmed_bytes: count })).max(64),
+  sections: z.array(z.object({ code: z.enum(CONTEXT_SECTION_CODES), bytes: count, trimmed_bytes: count, trimmed_reason: z.enum(CONTEXT_TRIMMED_REASONS).optional() })).max(64),
   first_turn_input_tokens: count.nullable(),
   peak_context_tokens: count.nullable(),
   cache_read_tokens: count.nullable(),

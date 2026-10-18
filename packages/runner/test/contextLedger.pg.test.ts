@@ -212,4 +212,42 @@ describe("run context ledger [pg] (D#600 CX-1a)", () => {
       expect((await rows(B.accountId, B.runId)).rows[0].sections).toEqual([section("spec", 5), mapSection(9)]);
     });
   });
+
+  // D#600 CX-4a (migration 0870): the `pinned` code and the `trimmed_reason` on a section, against the real definer. Acceptance 4.
+  describe("pinned and trimmed_reason (CX-4a)", () => {
+    const cut = (code: string, reason: unknown, trimmed = 40): Record<string, unknown> => ({ ...section(code, 100, trimmed), trimmed_reason: reason });
+
+    it("a pinned section is a known code and is stored", async () => {
+      const A = await seed();
+      await record(A.accountId, A.runId, [section("pinned", 300), section("spec", 200)]);
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toEqual([section("pinned", 300), section("spec", 200)]);
+    });
+
+    it.each(["findings_cap", "memory_slot", "over_budget"])("stores trimmed_reason %s with its section", async (reason) => {
+      const A = await seed();
+      await record(A.accountId, A.runId, [section("boundary", 10), cut("memory_item", reason), section("spec", 20)]);
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toEqual([section("boundary", 10), cut("memory_item", reason), section("spec", 20)]);
+    });
+
+    it.each([
+      ["an unknown reason", [cut("note", "too_big")]],
+      ["a reason that is not a string", [cut("note", 3)]],
+      ["a null reason", [cut("note", null)]],
+      ["an empty reason", [cut("note", "")]],
+      ["a reason in another case", [cut("note", "Over_Budget")]],
+      ["an unknown code beside a valid reason", [cut("note", "over_budget"), section("surprise")]],
+      ["a reason plus another unknown key", [{ ...cut("note", "over_budget"), path: "/etc/passwd" }]],
+      ["two unknown keys and no reason", [{ ...section("note"), a: 1, b: 2 }]],
+    ])("refuses %s with invalid_message and writes nothing", async (_name, sections) => {
+      const A = await seed();
+      await expect(record(A.accountId, A.runId, sections)).rejects.toBeInstanceOf(ContextLedgerInvalid);
+      expect((await rows(A.accountId, A.runId)).rows).toEqual([]);
+    });
+
+    it("a section without a reason is still valid, so a row recorded before 0870 reads the same", async () => {
+      const A = await seed();
+      await record(A.accountId, A.runId, [section("note", 10, 0)]);
+      expect(((await rows(A.accountId, A.runId)).rows[0].sections as Array<Record<string, unknown>>)[0]).not.toHaveProperty("trimmed_reason");
+    });
+  });
 });

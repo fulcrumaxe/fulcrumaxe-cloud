@@ -19,7 +19,7 @@ import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
-import type { ContextSection } from "@fx/runner";
+import { isContextSpill, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -340,6 +340,9 @@ export interface AdvanceFixRequest {
   held?: { version: number; sha256: string };
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
+  /** D#600 CX-4a: the files holding the findings text the prompt cut, and the uncut prompt a failed write falls back to; `fallbackContextSpill` is the same for `fallbackPrompt`. Sandbox side only. */
+  contextSpill?: ContextSpill;
+  fallbackContextSpill?: ContextSpill;
   /**
    * D#599 PL-2b-2: the pull request the round fixes, as the pipeline's own GitHub lookup just found it (number and head branch). Used only when the round's
    * side is not the side that opened the pull request: the round then works on that branch (a runner round as a continuation with no session, a sandbox
@@ -371,6 +374,8 @@ export interface AdvanceRunRequest {
   specVersionId?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-4a: see `AdvanceFixRequest.contextSpill`. */
+  contextSpill?: ContextSpill;
   /** D#601 MEM-3: the token estimate of the memory in the prompt, stored on the run's context ledger. Absent: not recorded. */
   memoryTokens?: number;
   /** D#7 DP11c: the run this one continues the work of (a resume's parked run). Linked on the new run's row; the parked run is not touched. The run must belong to this item. */
@@ -808,6 +813,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (req.expectedExecutionMode !== undefined && !MODE_RE.test(req.expectedExecutionMode)) return { ok: false, reason: "invalid_input" };
     if (req.specVersionId !== undefined && !UUID_RE.test(req.specVersionId)) return { ok: false, reason: "invalid_input" };
     if (req.parentRunId !== undefined && !UUID_RE.test(req.parentRunId)) return { ok: false, reason: "invalid_input" };
+    // A prompt that was cut needs its files: a spill that is not exactly the closed shape refuses the start rather than send a cut prompt with nothing to read.
+    if (req.contextSpill !== undefined && !isContextSpill(req.contextSpill)) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -867,6 +874,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
       ...(req.parentRunId !== undefined ? { parentRunId: req.parentRunId } : {}),
       ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
+      ...(req.contextSpill ? { contextSpill: req.contextSpill } : {}),
       ...(Number.isSafeInteger(req.memoryTokens) && req.memoryTokens! >= 0 ? { memoryTokens: req.memoryTokens } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
@@ -1319,6 +1327,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       (req.held === undefined || (typeof req.held.sha256 === "string" && /^[0-9a-f]{64}$/.test(req.held.sha256) && Number.isInteger(req.held.version) && req.held.version > 0 &&
         typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
       (req.fallbackPrompt === undefined || (typeof req.fallbackPrompt === "string" && req.fallbackPrompt !== "" && req.fallbackPrompt.length <= MAX_FIX_PROMPT_CHARS)) &&
+      (req.contextSpill === undefined || isContextSpill(req.contextSpill)) &&
+      (req.fallbackContextSpill === undefined || (req.fallbackPrompt !== undefined && isContextSpill(req.fallbackContextSpill))) &&
       (req.retry === undefined || (Number.isInteger(req.retry) && req.retry >= 1 && req.retry <= 3)) &&
       (req.spendAttempt === undefined || (Number.isSafeInteger(req.spendAttempt) && req.spendAttempt >= 0 && req.spendAttempt <= MAX_WAITING_ATTEMPT)) &&
       (req.reviewer === "code" || req.reviewer === "security" || req.reviewer === "acceptance") &&
@@ -1429,6 +1439,11 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
     const freshPrompt = req.fallbackPrompt === undefined ? prompt : withNotes(req.fallbackPrompt);
     const freshSections = req.fallbackPrompt === undefined ? sections : sectionsOf(req.fallbackContextSections);
+    // D#600 CX-4a: the files for the prompt that goes out, with the notes added to the uncut prompt as they are to the cut one.
+    const spillWithNotes = (s: ContextSpill | undefined): ContextSpill | undefined => (s === undefined ? undefined : { ...s, uncut: { ...s.uncut, prompt: withNotes(s.uncut.prompt) } });
+    const spill = spillWithNotes(useFallback ? req.fallbackContextSpill : req.contextSpill);
+    const fallbackSpill = fallbackPrompt === undefined ? undefined : spillWithNotes(req.fallbackContextSpill);
+    const freshSpill = req.fallbackPrompt === undefined ? spill : spillWithNotes(req.fallbackContextSpill);
     const crossSide = parentRun !== undefined && sideOfMode(parentRun.execution_mode) !== sideOfMode(effective);
 
     let out: { id: string; status: string };
@@ -1478,6 +1493,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
           ...(freshSections ? { contextSections: freshSections } : {}),
+          ...(freshSpill ? { contextSpill: freshSpill } : {}),
           ...(continues ? { continues, parentRunId: parent } : {}),
           ...(inCreateTransaction ? { inCreateTransaction } : {}),
           // A fresh session: the repository is cloned into the workdir, as for a build.
@@ -1508,7 +1524,8 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             prompt,
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
-            ...(fallbackPrompt !== undefined ? { fallbackPrompt, ...(fallbackSections ? { fallbackContextSections: fallbackSections } : {}) } : {}),
+            ...(spill ? { contextSpill: spill } : {}),
+            ...(fallbackPrompt !== undefined ? { fallbackPrompt, ...(fallbackSections ? { fallbackContextSections: fallbackSections } : {}), ...(fallbackSpill ? { fallbackContextSpill: fallbackSpill } : {}) } : {}),
             workdir: PREVIEW_WORKDIR,
             idempotency: { key, requestHash: createHash("sha256").update(`${key}:executor`).digest("hex") },
           }),

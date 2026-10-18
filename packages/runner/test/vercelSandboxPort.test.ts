@@ -78,6 +78,8 @@ function createSdkFake() {
     version: `${CLAUDE_CLI_VERSION} (Claude Code)`,
     /** What the fake's `stop` throws (default: nothing). */
     stopError: undefined as Error | undefined,
+    /** D#600 CX-4a: a write of any file whose path starts with this rejects. */
+    writeRefusedUnder: undefined as string | undefined,
     /** The clone command's exit code, and whether it never ends. */
     cloneExit: 0,
     hangClone: false,
@@ -131,6 +133,12 @@ function createSdkFake() {
         return command;
       },
       async writeFiles(files, opts) {
+        // D#600 CX-4a: the real service writes a path where the VM's user may, and a failed write rejects. This fake refuses any file under `writeRefusedUnder`,
+        // and any path outside what the port legitimately writes: /fx/context/<code>.md (a lowercase name, no `..`, no subdirectory), the agent files and the prompt file.
+        const legit = (p: string): boolean =>
+          /^\/fx\/context\/[a-z_]+\.md$/.test(p) || /^\/fx\/agent-config\/[A-Za-z0-9._-]+$/.test(p) || p === FX_RUN_LIMITS_PATH || /^\/tmp\/fx-prompt-[0-9a-f-]+$/.test(p);
+        for (const f of files) if (!legit(f.path)) throw new Error(`write refused: ${f.path} is outside the paths the port may write`);
+        if (knobs.writeRefusedUnder !== undefined && files.some((f) => f.path.startsWith(knobs.writeRefusedUnder!))) throw new Error("write refused");
         rec("writeFiles", { files, ...opts });
       },
       async updateNetworkPolicy(policy) {
@@ -1630,5 +1638,70 @@ describe("sandboxExists reports a doubt as a class", () => {
     });
     expect(await port.sandboxExists({ runId: "run-1", sandboxName: NAME })).toBe(false);
     expect(lines).toEqual([]);
+  });
+});
+
+describe("D#600 CX-4a: the spill files and the uncut fallback", () => {
+  const spill = {
+    files: [{ code: "note" as const, text: "THE FULL NOTE" }, { code: "map" as const, text: "THE FULL MAP" }],
+    uncut: { prompt: "UNCUT PROMPT WITH THE FULL NOTE", sections: [{ code: "note" as const, bytes: 3, sha256: "a".repeat(64), trimmed_bytes: 0 }] },
+  };
+  const promptFileBodies = (fake: ReturnType<typeof createSdkFake>): string[] =>
+    fake.calls.filter((c) => c.op === "writeFiles").flatMap((c) => c.params.files as Array<{ path: string; content: string }>).filter((f) => f.path.startsWith("/tmp/fx-prompt-")).map((f) => f.content);
+  const spillFiles = (fake: ReturnType<typeof createSdkFake>): Array<{ path: string; content: string; mode: number }> =>
+    fake.calls.filter((c) => c.op === "writeFiles").flatMap((c) => c.params.files as Array<{ path: string; content: string; mode: number }>).filter((f) => f.path.startsWith("/fx/context/"));
+
+  it("writes each file at /fx/context/<code>.md, read only, outside the workdir, before the prompt, and sends the cut prompt", async () => {
+    const fake = createSdkFake();
+    fake.knobs.stdout = [JSON.stringify(event(1, "result")) + "\n"];
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
+    const handle = await port.createSandbox(createOpts);
+    const written: boolean[] = [];
+    await port.startDetached(handle, startOpts({ prompt: "CUT PROMPT [trimmed: full text at /fx/context/note.md]", spill, onSpill: (w) => written.push(w), workdir: "/vercel/sandbox" })).hookFired;
+    // Written first, and again with the agent's other files (that second batch is the one repeated after an install).
+    const both = [
+      { path: "/fx/context/note.md", content: "THE FULL NOTE", mode: 0o444 },
+      { path: "/fx/context/map.md", content: "THE FULL MAP", mode: 0o444 },
+    ];
+    expect(spillFiles(fake)).toEqual([...both, ...both]);
+    expect(written).toEqual([true]);
+    expect(promptFileBodies(fake)[0]).toContain("CUT PROMPT [trimmed:");
+    expect(promptFileBodies(fake)[0]).not.toContain("UNCUT");
+    const ops = fake.calls.filter((c) => c.op === "writeFiles").map((c) => (c.params.files as Array<{ path: string }>)[0]!.path);
+    expect(ops.indexOf("/fx/context/note.md")).toBeLessThan(ops.findIndex((p) => p.startsWith("/tmp/fx-prompt-")));
+  });
+
+  it("if the files cannot be written the uncut prompt goes out, onSpill says false, and the run still starts: a cut never happens without a readable file", async () => {
+    const fake = createSdkFake();
+    fake.knobs.stdout = [JSON.stringify(event(1, "result")) + "\n"];
+    fake.knobs.writeRefusedUnder = "/fx/context/";
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
+    const handle = await port.createSandbox(createOpts);
+    const written: boolean[] = [];
+    await port.startDetached(handle, startOpts({ prompt: "CUT PROMPT", spill, onSpill: (w) => written.push(w) })).hookFired;
+    expect(written).toEqual([false]);
+    expect(spillFiles(fake)).toEqual([]);
+    expect(promptFileBodies(fake)[0]).toContain("UNCUT PROMPT WITH THE FULL NOTE");
+    expect(promptFileBodies(fake)[0]).not.toContain("CUT PROMPT\n");
+  });
+
+  it("the fake refuses a path outside /fx/context and the agent files, and a spill name that is not <code>.md", async () => {
+    const fake = createSdkFake();
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
+    await port.createSandbox(createOpts);
+    const sandbox = await fake.sdk.get({ teamId: "t", projectId: "p", token: "tok", name: NAME } as never);
+    for (const bad of ["/root/outside.md", "/vercel/sandbox/repo/x.md", "/fx/context/../x.md", "/fx/context/a/b.md", "/fx/context/Note.md", "fx/context/note.md"]) {
+      await expect(sandbox.writeFiles([{ path: bad, content: "x" }])).rejects.toThrow(/refused/);
+    }
+    await expect(sandbox.writeFiles([{ path: "/fx/context/note.md", content: "x" }])).resolves.toBeUndefined();
+  });
+
+  it("a run with no spill writes nothing under /fx/context", async () => {
+    const fake = createSdkFake();
+    fake.knobs.stdout = [JSON.stringify(event(1, "result")) + "\n"];
+    const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: fake.sdk });
+    const handle = await port.createSandbox(createOpts);
+    await port.startDetached(handle, startOpts()).hookFired;
+    expect(spillFiles(fake)).toEqual([]);
   });
 });

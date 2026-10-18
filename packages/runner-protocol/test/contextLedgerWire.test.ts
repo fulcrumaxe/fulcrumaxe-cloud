@@ -18,6 +18,11 @@ const ok = {
 };
 
 describe("ContextLedgerBody", () => {
+  it("D#600 CX-4a: a section may carry one trimmed_reason from the closed list and nothing else; pinned is a known code", () => {
+    for (const reason of ["findings_cap", "memory_slot", "over_budget"]) expect(ContextLedgerBody.safeParse({ ...ok, sections: [{ ...ok.sections[0], trimmed_reason: reason }, { ...ok.sections[0], code: "pinned" }] }).success, reason).toBe(true);
+    for (const bad of ["too_big", "", 3, null, "OVER_BUDGET"]) expect(ContextLedgerBody.safeParse({ ...ok, sections: [{ ...ok.sections[0], trimmed_reason: bad }] }).success, String(bad)).toBe(false);
+  });
+
   it("accepts a full ledger and a partial one with nothing measured", () => {
     expect(ContextLedgerBody.safeParse(ok).success).toBe(true);
     expect(ContextLedgerBody.safeParse({ basis: "partial", sections: [], tool_output_bytes: {}, compactions: 0 }).success).toBe(true);

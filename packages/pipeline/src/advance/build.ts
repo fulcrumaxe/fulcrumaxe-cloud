@@ -13,9 +13,10 @@ import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
-import { assemblePrompt, renderMemorySlot, type AssembledPrompt, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
+import { assemblePrompt, renderMemorySlot, MEMORY_MARKER_ROOM, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
+import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
 import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
@@ -90,7 +91,7 @@ export function buildExecutorPrompt(input: ExecutorPromptInput): string {
 }
 
 /** The executor's prompt and the section list the context ledger stores (D#600 CX-2). */
-export function assembleExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt {
+export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: AssembleOptions): AssembledPrompt {
   if (input.runtime === "runner") return buildRunnerExecutorPrompt(input);
   const { owner, name, number, version } = input;
   const branch = branchFor(number);
@@ -140,7 +141,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput): AssembledPro
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
       ...agentOutputBlock(`{"verdict":"done","branch":"${branch}","pr_number":0,"tests":"passed","summary":"<plain-text summary for the repository owner>"}`),
     ].join("\n"),
-  });
+  }, options);
 }
 
 /**
@@ -231,7 +232,8 @@ async function recallMemory(pool: Pool, accountId: string, repoId: string | null
   if (stable.length === 0 && item.length === 0) return undefined;
   const budget = await readMemorySlotBytes(pool, accountId, repoId);
   const first = renderMemorySlot(stable, budget);
-  const second = renderMemorySlot(item, budget - Buffer.byteLength(first.text, "utf8"));
+  // A cut stable part may gain a marker line (inside its own cap), so the item part leaves room for it: the two together stay within the slot.
+  const second = renderMemorySlot(item, budget - Buffer.byteLength(first.text, "utf8") - (first.trimmedBytes > 0 ? MEMORY_MARKER_ROOM : 0));
   return { ...(first.text ? { stable: first } : {}), ...(second.text ? { item: second } : {}) };
 }
 
@@ -322,7 +324,13 @@ export async function startBuildForItem(
     if (!stack.ok) return { status: "refused", reason: stack.reason };
     if (stack.base !== null) stackBase = stack.base;
   }
-  const { prompt, sections } = assembleExecutorPrompt({ owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}) });
+  // D#600 CX-4a: a sandbox prompt over its budget spills what it cuts to /fx/context. The budget is the repository's setting, else the role's default, derived now and never stored.
+  const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
+  const budgetBytes = sandboxPrompt && facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
+  const { prompt, sections, spill } = assembleExecutorPrompt(
+    { owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}) },
+    { spill: sandboxPrompt, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
+  );
 
   // D#483 S5-c1: an item moves into `in_progress` only by taking a build slot, under the account's advisory lock. The run starts INSIDE that lock, so
   // two starts at once cannot both pass a limit that has room for one, and a start that finds no slot has started nothing (no run, no spend). An item
@@ -335,7 +343,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);

@@ -109,7 +109,7 @@ describe("ContextLedgerCapture", () => {
   });
 
   it("the closed vocabularies are exactly the Spec's", () => {
-    expect([...CONTEXT_SECTION_CODES]).toEqual(["card", "boundary", "map", "memory_stable", "memory_item", "spec", "note", "corrections", "findings", "output", "repo_instructions"]);
+    expect([...CONTEXT_SECTION_CODES]).toEqual(["card", "boundary", "map", "memory_stable", "memory_item", "spec", "note", "corrections", "findings", "output", "repo_instructions", "pinned"]);
   });
 });
 

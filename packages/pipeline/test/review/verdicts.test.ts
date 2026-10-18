@@ -14,10 +14,10 @@ describe("normalizeVerdict: only the exact words", () => {
 
 describe("readVerdict", () => {
   it("reads the verdict, findings, summary and flag of a succeeded run", () => {
-    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], summary: "s", securityNeeded: true, environmentFailure: false });
+    expect(readVerdict("succeeded", { verdict: "needs-fix", findings: ["a", "b"], summary: "s", security_review_needed: true })).toEqual({ verdict: "needs-fix", findings: ["a", "b"], fullFindings: ["a", "b"], summary: "s", securityNeeded: true, environmentFailure: false });
   });
   it.each(["failed", "timed_out", "cancelled", "killed_spend", "refused_spend", "running", "pending", "missing", "weird"])("a run that is %s has no verdict: fail, and no flag", (status) => {
-    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], summary: "", securityNeeded: false, environmentFailure: false });
+    expect(readVerdict(status, { verdict: "pass", security_review_needed: true })).toEqual({ verdict: "fail", findings: [], fullFindings: [], summary: "", securityNeeded: false, environmentFailure: false });
   });
   it("a missing or non-object envelope is a fail", () => {
     for (const env of [null, [] as unknown as Record<string, unknown>, "pass" as unknown as Record<string, unknown>]) expect(readVerdict("succeeded", env).verdict).toBe("fail");

@@ -671,9 +671,10 @@ export interface Operations {
       recorded: boolean;
       basis: ("measured" | "partial") | (null);
       sections: Array<{
-        code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "output" | "repo_instructions";
+        code: "card" | "boundary" | "map" | "memory_stable" | "memory_item" | "spec" | "note" | "corrections" | "findings" | "output" | "repo_instructions" | "pinned";
         bytes: number;
         trimmed_bytes: number;
+        trimmed_reason?: "findings_cap" | "memory_slot" | "over_budget";
       }>;
       first_turn_input_tokens: (number) | (null);
       peak_context_tokens: (number) | (null);

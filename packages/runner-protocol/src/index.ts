@@ -17,3 +17,4 @@ export * from "./cliModels.js";
 export { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "./streamJson.js";
 export { normalizeRepoPath } from "./toolActivity.js";
 export * from "./contextLedger.js";
+export * from "./contextSpill.js";

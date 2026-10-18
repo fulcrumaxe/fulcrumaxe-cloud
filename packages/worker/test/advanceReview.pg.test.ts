@@ -537,6 +537,23 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
         expect(resume.inputs[0]!.fallbackContextSections).toHaveLength(1);
       });
 
+      it("D#600 CX-4a: a spill rides to the resume (with the notes added to its uncut prompt), the fallback has its own, and one outside the closed shape is refused", async () => {
+        const a = await seedAccount(admin, randomUUID());
+        const w = await item(a);
+        await buildRun(a, w);
+        const resume = realResume();
+        const sec = [{ code: "spec" as const, bytes: 5, sha256: "c".repeat(64), trimmed_bytes: 0 }];
+        const spill = (prompt: string) => ({ files: [{ code: "findings" as const, text: "FULL FINDINGS" }], uncut: { prompt, sections: sec } });
+        const t = build({}, review({ resume: resume.fn }));
+        const out = await t.module.advanceStartFix(who(a, w), fixRequest(a, { prompt: "Spec v1 unchanged", held: { version: 1, sha256: sha("spec") }, fallbackPrompt: "SPEC v1: spec", fallbackContextSections: sec, contextSpill: spill("UNCUT held"), fallbackContextSpill: spill("UNCUT body") }));
+        expect(out.ok).toBe(true);
+        expect(resume.inputs[0]!.contextSpill).toEqual(spill("UNCUT held"));
+        expect(resume.inputs[0]!.fallbackContextSpill).toEqual(spill("UNCUT body"));
+        const bad = { files: [{ code: "../etc", text: "x" }], uncut: { prompt: "p", sections: sec } };
+        expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { contextSpill: bad as never }))).toEqual({ ok: false, reason: "invalid_input" });
+        expect(await t.module.advanceStartFix(who(a, w), fixRequest(a, { fallbackContextSpill: spill("x") }))).toEqual({ ok: false, reason: "invalid_input" });
+      });
+
       it("a newer Spec than the one the parent run is pinned to: the caller's held line (the latest version) is not sent, the body is", async () => {
         const a = await seedAccount(admin, randomUUID());
         const w = await item(a);

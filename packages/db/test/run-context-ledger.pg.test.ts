@@ -4,6 +4,8 @@ import type { Pool, PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '../src/pool.js';
 import { DEFAULT_MIGRATIONS_DIR } from '../src/migrate.js';
+import { randomUUID } from 'node:crypto';
+import { seedAccount } from './helpers/seed.js';
 
 const MIGRATION = '0792_run_context_ledger.sql';
 const ROLE = 'run_context_ledger_definer';
@@ -88,5 +90,42 @@ describe(`migration 0792: ${ROLE}, run_context_ledger and its function (D#600 CX
   it('platform_ops holds no privilege on the table', async () => {
     const { rows } = await admin.query(`SELECT has_table_privilege('platform_ops', 'run_context_ledger', 'SELECT') AS s, has_table_privilege('platform_ops', 'run_context_ledger', 'INSERT') AS i`);
     expect(rows[0]).toEqual({ s: false, i: false });
+  });
+});
+
+/** [pg] D#600 CX-4a migration 0870: the definer itself refuses a `trimmed_reason` outside the closed list (the runner tests cover the wire; this is the database's own check). */
+describe('migration 0870: run_context_ledger_record refuses an unknown trimmed_reason', () => {
+  let adminPool: Pool;
+  let admin: PoolClient;
+  const sha = 'a'.repeat(64);
+
+  beforeAll(async () => {
+    adminPool = createPool(process.env.DATABASE_URL!);
+    admin = await adminPool.connect();
+  });
+  afterAll(async () => {
+    admin.release();
+    await adminPool.end();
+  });
+
+  const record = async (accountId: string, runId: string, reason: unknown) => {
+    await admin.query(`SELECT set_config('app.account_id', $1, false)`, [accountId]);
+    return admin.query(`SELECT run_context_ledger_record($1, $2, $3::jsonb, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, 0, 'partial')`, [
+      accountId,
+      runId,
+      JSON.stringify([{ code: 'note', bytes: 10, sha256: sha, trimmed_bytes: 5, trimmed_reason: reason }]),
+    ]);
+  };
+  const stored = async (accountId: string, runId: string) => (await admin.query('SELECT sections FROM run_context_ledger WHERE account_id = $1 AND run_id = $2', [accountId, runId])).rows;
+
+  it('stores each listed reason, and refuses an unknown, empty, wrong-case, non-string or null reason with nothing written', async () => {
+    const ok = await seedAccount(admin, randomUUID());
+    for (const reason of ['findings_cap', 'memory_slot', 'over_budget']) await record(ok.accountId, ok.runId, reason);
+    expect(await stored(ok.accountId, ok.runId)).toHaveLength(1);
+    for (const bad of ['surprise', '', 'Over_Budget', 7, null]) {
+      const t = await seedAccount(admin, randomUUID());
+      await expect(record(t.accountId, t.runId, bad), String(bad)).rejects.toThrow(/invalid_message/);
+      expect(await stored(t.accountId, t.runId), String(bad)).toEqual([]);
+    }
   });
 });

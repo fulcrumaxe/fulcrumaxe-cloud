@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import type { Product, Role } from "./types.js";
-import type { ContextSection } from "@fulcrumaxe/runner-protocol";
+import type { ContextSection, ContextSpill } from "@fulcrumaxe/runner-protocol";
 import type { DenyReason, ReserveParams } from "@fx/spend";
 import type { RunFunding } from "./funding.js";
 import type { ModelFailureCode } from "./modelFailure.js";
@@ -283,6 +283,13 @@ export interface ExecutionRun {
    */
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
+  /**
+   * D#600 CX-4a: the prompt was cut and its cut text is in these files, which a SANDBOX target writes to `/fx/context/<code>.md` before the agent starts.
+   * If a file cannot be written it sends `uncut.prompt` and records `uncut.sections` instead: a cut never happens without a readable file. A runner target
+   * ignores it (the prompt then holds no marker; the runner-side writer is CX-4b). `fallbackContextSpill` is the same for `fallbackPrompt`.
+   */
+  contextSpill?: ContextSpill;
+  fallbackContextSpill?: ContextSpill;
   /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
   cloneRepo?: { owner: string; name: string };
   capUsd: number;

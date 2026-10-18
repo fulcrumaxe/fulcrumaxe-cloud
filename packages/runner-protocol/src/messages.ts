@@ -4,7 +4,7 @@
  * change may add a field but never remove or rename one.
  */
 import { z } from "zod";
-import { CONTEXT_MAX_COUNT, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM } from "./contextLedger.js";
+import { CONTEXT_MAX_COUNT, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { SESSION_ID_PATTERN } from "./job.js";
 
@@ -421,7 +421,7 @@ export const ContextLedgerBody = z
   .object({
     basis: z.enum(["measured", "partial"]),
     sections: z
-      .array(z.object({ code: z.enum(CONTEXT_SECTION_CODES), bytes: ledgerCount, sha256: z.string().regex(/^[0-9a-f]{64}$/), trimmed_bytes: ledgerCount }).strict())
+      .array(z.object({ code: z.enum(CONTEXT_SECTION_CODES), bytes: ledgerCount, sha256: z.string().regex(/^[0-9a-f]{64}$/), trimmed_bytes: ledgerCount, trimmed_reason: z.enum(CONTEXT_TRIMMED_REASONS).optional() }).strict())
       .max(64),
     first_turn_input: ledgerCount.optional(),
     peak_context: ledgerCount.optional(),
