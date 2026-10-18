@@ -7,6 +7,7 @@ import { outsideMeterOn } from "@fx/spend";
 import { ENV_MANIFEST } from "../../../env-manifest";
 import { HUMAN_MERGE_ONLY_ENV, HUMAN_MERGE_ONLY_INVALID_CODE } from "@fx/db/src/humanMergeOnly";
 import { deployKindOf, evaluateEnv, type EnvLike, type EnvReport } from "../../../lib/env/check";
+import { productionVercelEnvSource, VERCEL_ENV_SOURCE_UNCONFIGURED } from "../../../lib/setupRequestEnvSource";
 
 /**
  * Liveness plus a check of the required settings (apps/web/env-manifest.ts).
@@ -51,7 +52,8 @@ function detail(report: EnvReport) {
     invalid_optional: report.invalidOptional,
     disabled: report.disabled,
     // D#483 S5-e1: a plan-data figure that is absent is named by a fixed code, never a value. Approval still works; the envelope pre-fill is the bare estimate.
-    unconfigured: envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : [],
+    // D#598 P8b: the setup-request env-var check has no credential source bound yet, so it answers "unavailable" and Mark done is the way on.
+    unconfigured: [...(envelopeDefaultMarginPct() === null ? ["envelope_margin_unconfigured"] : []), ...(productionVercelEnvSource.available ? [] : [VERCEL_ENV_SOURCE_UNCONFIGURED])],
   };
 }
 

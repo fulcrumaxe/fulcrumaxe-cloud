@@ -20,6 +20,7 @@
     { "method": "GET", "path": "/api/cron/reconcile", "expect": 401 },
     { "method": "GET", "path": "/api/cron/run-action-sweep", "expect": 401 },
     { "method": "GET", "path": "/api/cron/runner-sweeper", "expect": 401 },
+    { "method": "GET", "path": "/api/cron/setup-request-check", "expect": 401 },
     { "method": "GET", "path": "/api/cron/stage-resume-sweep", "expect": 401 },
     { "method": "POST", "path": "/api/internal/run-actions/kick", "expect": 401 },
     { "method": "POST", "path": "/.well-known/workflow/v1/flow", "expect": [400, 401, 403, 404, 405] },
