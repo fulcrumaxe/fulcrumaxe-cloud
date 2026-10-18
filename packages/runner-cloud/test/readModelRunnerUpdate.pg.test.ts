@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { waitText } from "@fulcrumaxe/runner-protocol";
+import { EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RUN_WAIT_REASONS, getRunWait, getRunWaitReason } from "../src/index.js";
@@ -56,9 +56,9 @@ describe("waiting_for_runner_update [pg]", () => {
 
   it("is a wait reason with a plain sentence that names the version when it is known", () => {
     expect(RUN_WAIT_REASONS).toContain("waiting_for_runner_update");
-    expect(waitText("waiting_for_runner_update", null)).toBe("Waiting for a runner update to continue this pull request");
-    expect(waitText("waiting_for_runner_update", null, 3)).toBe("Waiting for a runner update (version 3 or later) to continue this pull request");
-    for (const bad of [0, -1, 1.5, Number.NaN]) expect(waitText("waiting_for_runner_update", null, bad)).toBe("Waiting for a runner update to continue this pull request");
+    expect(waitText("waiting_for_runner_update", null)).toBe("Waiting for a runner update before this run can start");
+    expect(waitText("waiting_for_runner_update", null, 3)).toBe("Waiting for a runner update (version 3 or later) before this run can start");
+    for (const bad of [0, -1, 1.5, Number.NaN]) expect(waitText("waiting_for_runner_update", null, bad)).toBe("Waiting for a runner update before this run can start");
   });
 
   it("waits for an update while every live covering runner is below the job's minimum, and says which version", async () => {
@@ -110,5 +110,18 @@ describe("waiting_for_runner_update [pg]", () => {
     const w = await world();
     await runner(w, { protocol: null });
     expect(await reason(w, await run(w, 3))).toBe("waiting_for_runner_update");
+  });
+
+  it("D#600 CX-5c: a job with excludes (gated at the excludes floor) with only a memory-era runner shows the update-your-runner state, and the sentence names the version and the remedy", async () => {
+    const w = await world();
+    const memoryEra = await runner(w, { protocol: MEMORY_JOB_MIN_PROTOCOL });
+    const id = await run(w, EXCLUDES_JOB_MIN_PROTOCOL);
+    expect(await reason(w, id)).toBe("waiting_for_runner_update");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "waiting_for_runner_update", limited_by: null, min_protocol: EXCLUDES_JOB_MIN_PROTOCOL });
+    expect(waitText(wait.reason!, wait.limited_by, wait.min_protocol ?? null)).toBe(`Waiting for a runner update (version ${EXCLUDES_JOB_MIN_PROTOCOL} or later) before this run can start`);
+    // Updating the runner clears it.
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [memoryEra, EXCLUDES_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
   });
 });

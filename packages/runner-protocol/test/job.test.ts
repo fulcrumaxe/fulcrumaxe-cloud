@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
 import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
@@ -15,7 +16,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -320,5 +321,44 @@ describe("job.memory (D#601 MEM-3b)", () => {
   it("has a protocol floor that a current runner meets and that cuts no older runner off from hello", () => {
     expect(MEMORY_JOB_MIN_PROTOCOL).toBe(CONTINUES_CROSS_SIDE_MIN_PROTOCOL + 1);
     expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(MEMORY_JOB_MIN_PROTOCOL);
+  });
+});
+
+describe("excludes (D#600 CX-5c)", () => {
+  const ok = (excludes: unknown): boolean => JobSchema.safeParse(sampleJob({ excludes })).success;
+
+  it("accepts paths and globs (brackets, braces, parentheses and a leading bang are file-name or glob characters)", () => {
+    expect(ok(["secret/a.txt"])).toBe(true);
+    expect(ok(["keys", "src/**/[ab].ts", "app/[id]/page.tsx", "(group)/c.txt", "!odd", "#odd", "a{b,c}/d"])).toBe(true);
+  });
+
+  it("is omitted, never null and never empty, so a job without excludes keeps its canonical JSON", () => {
+    expect("excludes" in (JobSchema.parse(sampleJob()) as object)).toBe(false);
+    expect(ok(null)).toBe(false);
+    expect(ok([])).toBe(false);
+  });
+
+  it("refuses a path that cannot be a rule: empty, absolute, home, a dot segment, a control character, a backslash, over 512 characters", () => {
+    for (const bad of ["", "/abs/x", "~/x", "~", "../x", "a/../b", "a/./b", "a//b", "a\\b", "a\u0000b", "a\nb", "a".repeat(513)]) expect(ok([bad]), JSON.stringify(bad)).toBe(false);
+    expect(ok(["a".repeat(512)])).toBe(true);
+    for (const bad of [1, null, {}, ["x"]]) expect(ok([bad]), JSON.stringify(bad)).toBe(false);
+  });
+
+  it("holds at most 500 distinct paths and refuses a repeat", () => {
+    expect(MAX_EXCLUDE_RULES).toBe(500);
+    expect(ok(Array.from({ length: 500 }, (_, i) => `p/${i}`))).toBe(true);
+    expect(ok(Array.from({ length: 501 }, (_, i) => `p/${i}`))).toBe(false);
+    expect(ok(["a", "a"])).toBe(false);
+  });
+
+  it("has a protocol floor above the memory floor that the current version meets", () => {
+    expect(EXCLUDES_JOB_MIN_PROTOCOL).toBe(MEMORY_JOB_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(EXCLUDES_JOB_MIN_PROTOCOL);
+  });
+
+  it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
+    const before = JobSchema.omit({ excludes: true });
+    expect(before.safeParse(sampleJob({ excludes: ["secret/a.txt"] })).success).toBe(false);
+    expect(before.safeParse(sampleJob()).success).toBe(true);
   });
 });

@@ -8,7 +8,7 @@ import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
 
 /** The job fields `runJob` reads. The daemon passes a job it has already verified (signature, expiry, repo visibility). */
-export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & Partial<Pick<Job, "memory">> & { expires_at?: Job["expires_at"] };
+export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & Partial<Pick<Job, "memory" | "excludes">> & { expires_at?: Job["expires_at"] };
 
 /** Resume a session this machine still holds, in its workspace, or start fresh in a new workspace on `branch`. */
 export type SessionPlan = { kind: "resume"; sessionId: string; workspace: string } | { kind: "fresh"; branch: string | null };
@@ -117,6 +117,8 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     prompt: buildPrompt(job, deps.promptNotes?.() ?? [], deps.repoMap?.()),
     model: cliModel,
     workdir: workspace,
+    // D#600 CX-5c: the paths kept out of context. The engine writes them as deny entries before every agent command, so a resumed command has them too.
+    ...(job.excludes === undefined || job.excludes.length === 0 ? {} : { excludes: job.excludes }),
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
     env: cleanEnv(deps.credentials, deps.envOptions),

@@ -12,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { JobAllowancesSchema } from "./sandboxAllowances.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
@@ -139,6 +140,18 @@ export function sha256Text(text: string): string {
 export const JobMemorySchema = z.object({ person: memoryText, fenced: memoryText }).strict();
 export type JobMemory = z.infer<typeof JobMemorySchema>;
 
+/**
+ * D#600 CX-5c: the repository paths and globs kept out of the run's context. Only the paths and globs as the person saved them: never file text and never pin content.
+ * At least one (an empty list is omitted, not sent), at most `MAX_EXCLUDE_RULES`, each a path `isRuleablePath` accepts, none twice. The runner turns each into the
+ * same deny entries the cloud's sandbox writes (`excludeDenyRules`).
+ */
+export const JobExcludesSchema = z
+  .array(z.string().refine(isRuleablePath, { message: "an excluded path must be repository-relative and free of control characters, backslashes and . or .. segments" }))
+  .min(1)
+  .max(MAX_EXCLUDE_RULES)
+  .refine((paths) => new Set(paths).size === paths.length, { message: "an excluded path appears once" });
+export type JobExcludes = z.infer<typeof JobExcludesSchema>;
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -177,6 +190,10 @@ export const JobSchema = z
     // job that recalled something and omitted (never null) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it
     // only for a runner of `MEMORY_JOB_MIN_PROTOCOL` or later (an older runner's strict parse would refuse it). The runner writes none of it to disk.
     memory: JobMemorySchema.optional(),
+    // D#600 CX-5c: the paths and globs kept out of this run's context, read from the item's rules when the job is issued. Present only on a job that has excludes and omitted (never null,
+    // never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `EXCLUDES_JOB_MIN_PROTOCOL` or
+    // later: an older runner's strict parse would refuse the key, and a runner that started without the list would run the agent with nothing denied. Pin content is never here.
+    excludes: JobExcludesSchema.optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { ContextLedgerCapture, SESSION_ID_PATTERN, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { ContextLedgerCapture, SESSION_ID_PATTERN, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -67,10 +67,12 @@ export interface RunOutcome {
   engineVersion: string;
   sessionId?: string;
   agentOutput?: Record<string, unknown>;
+  /** D#600 CX-5c: how many Read, Grep, Glob or LS calls the job's permission rules refused; present only when at least one was. An integer, counted the way the cloud's sandbox counts it. Kept on this machine: no field of the runner's wire carries it. */
+  deniedToolCalls?: number;
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
-export type EngineStartOptions = StartOptions & { resumeSessionId?: string };
+export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[] };
 
 /** How a run ended: the promise every handle this engine returns carries. */
 export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
@@ -136,7 +138,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     if (!versionSupported(binary.version)) throw new EngineRefusal("claude_version_unsupported", `version ${binary.version} is older than ${MIN_CLAUDE_VERSION}; upgrade Claude Code`);
     if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn })).present) throw new EngineRefusal("auth_missing");
 
-    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths);
+    const excludes = (opts as EngineStartOptions).excludes;
+    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes);
     const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: confineFileTools(roleTools, path.resolve(workdir)), ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
@@ -163,7 +166,7 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
       let result: Record<string, unknown> | undefined;
       let sessionId: string | undefined;
       let agentOutput: Record<string, unknown> | undefined;
-      const ledger = new ContextLedgerCapture();
+      const ledger = new ContextLedgerCapture(disabledToolsFor(excludes));
       const engineVersion = binary.version;
       log.write("meta", JSON.stringify({ engine_version: engineVersion }));
       // The version goes out first, so a breaking release shows up across runs.
@@ -244,7 +247,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
               // fx-swallow-ok: a session that could not be indexed is only not resumable later; the outcome is unchanged
             }
           }
-          const base = { engineVersion, ...(sessionId === undefined ? {} : { sessionId }), ...(agentOutput === undefined ? {} : { agentOutput }) };
+          const denied = ledger.deniedToolCalls();
+          const base = { engineVersion, ...(denied > 0 ? { deniedToolCalls: denied } : {}), ...(sessionId === undefined ? {} : { sessionId }), ...(agentOutput === undefined ? {} : { agentOutput }) };
           if (limited) resolve({ status: "failed", failureReason: "resource_limit", ...base });
           else if (modeForced) resolve({ status: "failed", failureReason: "permission_mode_forced", engineVersion });
           else if (mismatch) resolve({ status: "failed", failureReason: "credential_mismatch", engineVersion });

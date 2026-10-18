@@ -64,6 +64,6 @@
   "wait": {
     "reason": "waiting_for_runner_update",
     "limited_by": null,
-    "text": "Waiting for a runner update (version 4 or later) to continue this pull request"
+    "text": "Waiting for a runner update (version 4 or later) before this run can start"
   }
 }

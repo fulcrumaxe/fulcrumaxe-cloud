@@ -55,6 +55,28 @@ describe("job signature over memory (D#601 MEM-3b)", () => {
   });
 });
 
+describe("job signature over excludes (D#600 CX-5c)", () => {
+  const withExcludes = { ...job, excludes: ["secret/a.txt", "keys"] } as Job;
+
+  it("signs the excludes: it verifies as signed, and an added, removed, changed or reordered path, or a stripped list, fails", () => {
+    const signed = signJob(withExcludes, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW })).toEqual(withExcludes);
+    const edit = (excludes: unknown) => ({ ...signed, job: { ...signed.job, excludes } });
+    for (const altered of [["secret/a.txt", "keys", "extra"], ["secret/a.txt"], ["secret/b.txt", "keys"], ["keys", "secret/a.txt"], ["secret/a.txt", "keys2"]]) {
+      expect(codeOf(() => verifyJob(edit(altered), keyring, { now: NOW })), JSON.stringify(altered)).toBe("bad_signature");
+    }
+    const { excludes: dropped, ...stripped } = signed.job as Job & { excludes?: string[] };
+    void dropped;
+    expect(codeOf(() => verifyJob({ ...signed, job: stripped }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("a job without excludes signs to the same bytes as before the field existed, and adding the field after signing fails", () => {
+    expect(canonicalJson(job)).not.toContain("excludes");
+    const signed = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...signed, job: { ...signed.job, excludes: ["secret/a.txt"] } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+});
+
 describe("job signature", () => {
   it("verifies a signed job and returns it", () => {
     expect(verifyJob(signJob(job, privateKey), keyring, { now: NOW })).toEqual(job);

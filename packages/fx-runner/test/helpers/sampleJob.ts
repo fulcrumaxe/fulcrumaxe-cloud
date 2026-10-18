@@ -5,7 +5,7 @@ import { roleToolsDigest } from "../../src/job/roleTools.js";
 export const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
 /** The fields of a job the checks read, with every digest matching its text. */
-export function sampleJob(over: { role?: string; prompt?: string; card?: string; memory?: Job["memory"] } = {}): Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256" | "memory"> {
+export function sampleJob(over: { role?: string; prompt?: string; card?: string; memory?: Job["memory"]; excludes?: Job["excludes"] } = {}): Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256" | "memory" | "excludes"> {
   const role = over.role ?? "executor";
   const prompt = over.prompt ?? "Implement the change.\n";
   const card = over.card ?? "You are the executor.\n";
@@ -15,5 +15,6 @@ export function sampleJob(over: { role?: string; prompt?: string; card?: string;
     role_card: { text: card, sha256: sha(card) },
     role_tools_sha256: roleToolsDigest(role),
     ...(over.memory === undefined ? {} : { memory: over.memory }),
-  } as Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256" | "memory">;
+    ...(over.excludes === undefined ? {} : { excludes: over.excludes }),
+  } as Pick<Job, "role" | "task" | "role_card" | "role_tools_sha256" | "memory" | "excludes">;
 }

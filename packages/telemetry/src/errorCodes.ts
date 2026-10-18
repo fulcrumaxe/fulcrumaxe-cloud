@@ -169,6 +169,8 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "spec_version_mismatch",
   // Runner sandbox allowances (D#6 R7a): the job issuer refused to sign a job whose approved allowance set no longer clears the floor.
   "sandbox_allowances_invalid",
+  // D#600 CX-5c: the job issuer could not read the item's excludes, so it signed no job (a job never goes out without the list it should carry).
+  "excludes_unreadable",
   // R4a-3b continuation pushes: a fix round's branch is gone (at prepare or before the push), or its push was rejected because the branch moved.
   "continuation_branch_missing",
   "push_rejected",

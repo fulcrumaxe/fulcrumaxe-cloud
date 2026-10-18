@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -94,6 +94,15 @@ describe("the claim's protocol gate [pg]", () => {
     const newer = await runnerAt(V + 4);
     const job = await pending(V);
     expect(await claim(newer)).toMatchObject({ kind: "claimed", runId: job });
+  });
+
+  it("D#600 CX-5c: a job gated at the excludes floor waits for a runner that applies excludes: a memory-era runner gets the idle answer, an updated one claims it", async () => {
+    const memoryEra = await runnerAt(MEMORY_JOB_MIN_PROTOCOL);
+    const job = await pending(EXCLUDES_JOB_MIN_PROTOCOL);
+    expect((await claim(memoryEra)).kind).toBe("idle");
+    expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
+    const updated = await runnerAt(EXCLUDES_JOB_MIN_PROTOCOL);
+    expect(await claim(updated)).toMatchObject({ kind: "claimed", runId: job });
   });
 
   it("a job with no gate is claimed by an old runner and by a current one", async () => {
