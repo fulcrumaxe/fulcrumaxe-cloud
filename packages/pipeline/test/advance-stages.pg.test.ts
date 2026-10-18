@@ -495,11 +495,16 @@ describe("the build", () => {
       expect(row).toHaveLength(1);
       expect(row[0]).toMatchObject({ commit_sha: SHA, map_version: "1" });
       expect(row[0]!.body).toContain("src/app.ts");
+      // D#600 CX-10a: the first build had to build the map (cold); the span is a whole number of milliseconds in the ledger's range.
+      expect(req.contextAssembly).toEqual({ ms: expect.any(Number), cold: true });
+      expect(Number.isInteger(req.contextAssembly!.ms) && req.contextAssembly!.ms >= 0 && req.contextAssembly!.ms <= 3_600_000).toBe(true);
 
       // A second build (Build again would be the same) at the same commit makes no trees call.
       await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [t.workItemId]);
       await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
       expect(src.trees).toBe(1);
+      // The cached map is warm.
+      expect(t.world.requests[1]!.contextAssembly).toEqual({ ms: expect.any(Number), cold: false });
     });
 
     it("a repository detached from its installation is served nothing from the cache, and its row goes with the repository when that is deleted", async () => {
@@ -533,13 +538,33 @@ describe("the build", () => {
       await connect(t.workItemId);
       await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = (SELECT repo_id FROM work_items WHERE id = $1)", [t.workItemId]);
       let calls = 0;
-      const repoMap = { forRun: async () => { calls += 1; return { version: "1", text: "commit: should-not-appear" }; } };
+      const repoMap = { forRun: async () => { calls += 1; return { version: "1", text: "commit: should-not-appear", cold: true }; } };
       expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap })).toMatchObject({ status: "started" });
       expect(calls).toBe(0);
       const req = t.world.requests[0]!;
       expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
       expect(req.prompt).not.toContain("REPOSITORY MAP");
       expect(req.prompt).not.toContain("should-not-appear");
+      // D#600 CX-10a: a runner build records the cloud's assembly time and leaves the cold flag unset (no map was looked up).
+      expect(req.contextAssembly).toEqual({ ms: expect.any(Number) });
+    });
+
+    it("D#600 CX-10a: the span covers the map lookup: a lookup that takes 60 ms shows in the recorded time, and the port's cold answer is passed on", async () => {
+      const t = await atSpecReady();
+      await connect(t.workItemId);
+      const repoMap = { forRun: async () => { await new Promise((r) => setTimeout(r, 60)); return { version: "1", text: "commit: eeeeeeeeeeee", cold: false }; } };
+      await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      const a = t.world.requests[0]!.contextAssembly!;
+      expect(a.cold).toBe(false);
+      expect(a.ms).toBeGreaterThanOrEqual(55);
+      expect(a.ms).toBeLessThan(5_000);
+    });
+
+    it("D#600 CX-10a: a build with no map port records the time alone, cold unset (never a guess)", async () => {
+      const t = await atSpecReady();
+      await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world);
+      const a = t.world.requests[0]!.contextAssembly!;
+      expect(Object.keys(a)).toEqual(["ms"]);
     });
   });
 
@@ -585,6 +610,16 @@ describe("the build", () => {
     }
     const LINE = "kept out of your context";
     const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+    it("D#600 CX-10a: the recorded assembly time leaves out the pin fetch (a 300 ms fetch does not show in it)", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("docs/guide.md", "# Guide\n");
+      await w.rule("repo", "pin", "docs/guide.md");
+      const slow: PinContentPort = { forRun: async (req) => { await new Promise((r) => setTimeout(r, 300)); return port(gh).forRun(req); } };
+      expect(await w.build(slow)).toMatchObject({ status: "started" });
+      expect(w.t.world.requests[0]!.contextAssembly!.ms).toBeLessThan(250);
+    });
 
     it("acceptance 3: a pin for a path that exists at the start commit is in the pinned section in full; a pin for a missing path is skipped, the run starts, and the ledger carries pin_missing", async () => {
       const w = await world();
@@ -932,7 +967,7 @@ describe("the build", () => {
       const { t, repoMap } = await seeded();
       t.world.script = () => ({ status: "running" });
       const approval = randomUUID();
-      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd" }) };
+      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd", cold: true }) };
       await expect(startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, approval, t.world, { repoMap: badMap })).rejects.toThrow();
       const cancelledRun = t.world.cancelled[0]!;
       expect((await t.world.outcome(cancelledRun)).status).toBe("cancelled");
@@ -951,7 +986,7 @@ describe("the build", () => {
     it("FAILS CLOSED (D#601 C2): when the record cannot be written the start rolls back, the item stays at spec_ready and the new run is cancelled", async () => {
       const { t } = await seeded();
       // A map whose version breaks the table's check makes the insert fail.
-      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd" }) };
+      const badMap = { forRun: async () => ({ version: "not-a-number", text: "commit: dddddddddddd", cold: true }) };
       await expect(startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap: badMap })).rejects.toThrow();
       expect(await stageOf(t.workItemId)).toBe("spec_ready");
       expect(t.world.cancelled).toHaveLength(1);

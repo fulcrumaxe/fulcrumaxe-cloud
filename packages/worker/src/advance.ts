@@ -19,7 +19,7 @@ import type { RaiseEnvelopeAsk } from "./envelopeAsk.js";
 import { ingestRunMemoryProposals } from "./memoryIntake.js";
 import { isItemWaitingOnAnswer } from "@fx/db/src/decisionAsks.js";
 import type { DecisionIntake, DecisionStepCode } from "./decisionIntake.js";
-import { isContextSpill, type ContextSection, type ContextSpill } from "@fx/runner";
+import { isContextSpill, type ContextAssembly, type ContextSection, type ContextSpill } from "@fx/runner";
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
@@ -331,6 +331,8 @@ export interface AdvanceFixRequest {
   expectedExecutionMode?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-10a: the cloud's assembly time for this prompt (and whether it built the repo map), stored on the run's context ledger. Absent: not recorded. */
+  contextAssembly?: ContextAssembly;
   /**
    * D#600 CX-2: set when `prompt` says the Spec is unchanged instead of carrying it. It names the Spec version and hash the caller believes the executor's session holds.
    * The worker checks that against the Spec version pinned on the run whose session this round continues (never against the latest Spec) and sends `fallbackPrompt`
@@ -374,6 +376,8 @@ export interface AdvanceRunRequest {
   specVersionId?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-10a: the cloud's assembly time for this prompt (and whether it built the repo map), stored on the run's context ledger. Absent: not recorded. */
+  contextAssembly?: ContextAssembly;
   /** D#600 CX-4a: see `AdvanceFixRequest.contextSpill`. */
   contextSpill?: ContextSpill;
   /** D#601 MEM-3: the token estimate of the memory in the prompt, stored on the run's context ledger. Absent: not recorded. */
@@ -382,6 +386,14 @@ export interface AdvanceRunRequest {
   jobMemory?: JobMemory;
   /** D#7 DP11c: the run this one continues the work of (a resume's parked run). Linked on the new run's row; the parked run is not touched. The run must belong to this item. */
   parentRunId?: string;
+}
+
+/** The assembly time when it is a whole number of milliseconds in the ledger's range (and `cold` a boolean); anything else is dropped. */
+function assemblyOf(value: unknown): ContextAssembly | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { ms, cold } = value as { ms?: unknown; cold?: unknown };
+  if (typeof ms !== "number" || !Number.isInteger(ms) || ms < 0 || ms > 3_600_000) return undefined;
+  return typeof cold === "boolean" ? { ms, cold } : { ms };
 }
 
 /** The assembler's section list when it is an array the ledger can hold (at most 64 entries); anything else is dropped, and the run is simply not given sections. The definer checks every entry. */
@@ -877,6 +889,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       ...(req.specVersionId !== undefined ? { specVersionId: req.specVersionId } : {}),
       ...(req.parentRunId !== undefined ? { parentRunId: req.parentRunId } : {}),
       ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
+      ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
       ...(req.contextSpill ? { contextSpill: req.contextSpill } : {}),
       ...(Number.isSafeInteger(req.memoryTokens) && req.memoryTokens! >= 0 ? { memoryTokens: req.memoryTokens } : {}),
       ...(req.jobMemory ? { jobMemory: req.jobMemory } : {}),
@@ -1497,6 +1510,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
           ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
           ...(parentRun.spec_version_id === null ? {} : { specVersionId: parentRun.spec_version_id }),
           ...(freshSections ? { contextSections: freshSections } : {}),
+          ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
           ...(freshSpill ? { contextSpill: freshSpill } : {}),
           ...(continues ? { continues, parentRunId: parent } : {}),
           ...(inCreateTransaction ? { inCreateTransaction } : {}),
@@ -1528,6 +1542,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
             prompt,
             ...(req.expectedExecutionMode !== undefined ? { expectedExecutionMode: req.expectedExecutionMode } : {}),
             ...(sections ? { contextSections: sections } : {}),
+            ...(assemblyOf(req.contextAssembly) ? { contextAssembly: assemblyOf(req.contextAssembly) } : {}),
             ...(spill ? { contextSpill: spill } : {}),
             ...(fallbackPrompt !== undefined ? { fallbackPrompt, ...(fallbackSections ? { fallbackContextSections: fallbackSections } : {}), ...(fallbackSpill ? { fallbackContextSpill: fallbackSpill } : {}) } : {}),
             workdir: PREVIEW_WORKDIR,

@@ -25,6 +25,7 @@ import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./run
 import type { RunStatus } from "./statusTransitions.js";
 import type { Product, Role } from "./types.js";
 import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
+import type { ContextAssembly } from "./contextLedgerWriter.js";
 
 /**
  * D#2 H09b, correction C10: `startAgentRun` owns "resolving the run;
@@ -80,6 +81,8 @@ export interface StartAgentRunInput {
   specVersionId?: string | null;
   /** D#600 CX-2: see `ExecutionRun.contextSections`. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-10a: see `ExecutionRun.contextAssembly`. */
+  contextAssembly?: ContextAssembly;
   /** D#601 MEM-3: see `ExecutionRun.memoryTokens`. */
   memoryTokens?: number;
   /** D#601 MEM-3b: see `ExecutionRun.jobMemory`. */
@@ -195,6 +198,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     workdir: input.workdir,
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,
+    contextAssembly: input.contextAssembly,
     memoryTokens: input.memoryTokens,
     jobMemory: input.jobMemory,
     fallbackPrompt: input.fallbackPrompt,

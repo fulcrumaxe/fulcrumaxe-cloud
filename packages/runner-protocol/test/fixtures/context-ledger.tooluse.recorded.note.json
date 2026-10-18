@@ -1,0 +1,7 @@
+{
+  "fixture": "context-ledger.tooluse.recorded.jsonl",
+  "cli": "claude 2.1.302",
+  "made": "The real CLI run headless with --output-format stream-json against a scripted loopback API (a dummy API key, no network), permissionMode dontAsk, with path excludes and Grep/Glob turned off, so the stream holds permitted, refused and no-such-tool results.",
+  "tool_use_blocks": { "Read": 8, "Grep": 1, "Glob": 1 },
+  "sanitised": "The temporary working directory, the config directory and the socket path were rewritten to /work, /config and /tmp/cc-socks/0.sock, and the sentinel search string to SENTINEL. Nothing else was changed: line order, keys, ids and usage are as recorded."
+}

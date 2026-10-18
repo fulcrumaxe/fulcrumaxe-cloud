@@ -17,6 +17,12 @@ const recorded = readFileSync(path.join(here, "fixtures/context-ledger.recorded.
   .filter((l) => l !== "")
   .map((l) => JSON.parse(l) as unknown);
 
+/** D#600 CX-10a: a stream recorded from the real CLI (2.1.302) with 8 Read, 1 Grep and 1 Glob tool_use blocks; how it was made is in the .note.json beside it. */
+const toolUseRecorded = readFileSync(path.join(here, "fixtures/context-ledger.tooluse.recorded.jsonl"), "utf8")
+  .split("\n")
+  .filter((l) => l !== "")
+  .map((l) => JSON.parse(l) as unknown);
+
 const usage = (input: number, write: number, read: number, output = 5) => ({ input_tokens: input, cache_creation_input_tokens: write, cache_read_input_tokens: read, output_tokens: output });
 const assistant = (id: string, u: ReturnType<typeof usage>, ...blocks: unknown[]) => ({ type: "assistant", message: { id, role: "assistant", content: blocks, usage: u } });
 const toolUse = (id: string, name: string) => ({ type: "tool_use", id, name, input: { file_path: "/work/SECRET-PATH.txt" } });
@@ -38,6 +44,7 @@ describe("ContextLedgerCapture", () => {
       cache_write_tokens: 4875,
       tool_output_bytes: {},
       compactions: 0,
+      tool_call_counts: {},
     });
   });
 
@@ -74,7 +81,7 @@ describe("ContextLedgerCapture", () => {
 
   it("a stream with no usage is partial with null figures, never zeros", () => {
     const m = measure([{ type: "system", subtype: "init" }, assistant("m", undefined as never, { type: "text", text: "x" }), { type: "result", subtype: "success" }]);
-    expect(m).toEqual({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, tool_output_bytes: {}, compactions: 0 });
+    expect(m).toEqual({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, tool_output_bytes: {}, compactions: 0, tool_call_counts: {} });
   });
 
   it("hostile lines are ignored: wrong types, negative, fractional or out-of-range numbers, missing or oversize ids, huge arrays", () => {
@@ -106,6 +113,26 @@ describe("ContextLedgerCapture", () => {
     const json = JSON.stringify(m);
     for (const needle of ["SECRET", "PLANTED", "/work", "sk-ant"]) expect(json).not.toContain(needle);
     expect(Object.keys(m.tool_output_bytes).every((k) => (CONTEXT_TOOL_ENUM as readonly string[]).includes(k))).toBe(true);
+  });
+
+  it("D#600 CX-10a: counts tool_use blocks by tool, each call once, from a real CLI 2.1.302 stream (Read 8, Grep 1, Glob 1)", () => {
+    const m = measure(toolUseRecorded);
+    expect(m.tool_call_counts).toEqual({ Read: 8, Grep: 1, Glob: 1 });
+    // The fixture's own tool_use blocks, counted by name outside the capture, agree.
+    const byName: Record<string, number> = {};
+    for (const line of toolUseRecorded) {
+      const content = (line as { message?: { content?: Array<{ type?: string; name?: string }> } }).message?.content;
+      for (const block of Array.isArray(content) ? content : []) if (block.type === "tool_use" && block.name) byName[block.name] = (byName[block.name] ?? 0) + 1;
+    }
+    expect(m.tool_call_counts).toEqual(byName);
+    // Integers only: the recorded paths and sentinel never reach the measure.
+    for (const needle of ["/work", "SENTINEL", "toolu_"]) expect(JSON.stringify(m)).not.toContain(needle);
+  });
+
+  it("D#600 CX-10a: a call id repeated in a later line counts once; an unknown tool counts under other; a stream with no call has an empty object", () => {
+    const repeated = [assistant("m1", usage(1, 0, 0), toolUse("t1", "Read")), assistant("m1", usage(1, 0, 0), toolUse("t1", "Read")), assistant("m2", usage(1, 0, 0), toolUse("t2", "mcp__x__y"), toolUse("t3", "Bash"))];
+    expect(measure(repeated).tool_call_counts).toEqual({ Read: 1, Bash: 1, other: 1 });
+    expect(measure([assistant("m", usage(1, 0, 0), { type: "text", text: "hi" })]).tool_call_counts).toEqual({});
   });
 
   it("the closed vocabularies are exactly the Spec's", () => {
@@ -214,7 +241,16 @@ describe("mergeContextLedgerMeasures", () => {
       cache_write_tokens: 30,
       tool_output_bytes: { Read: 6 },
       compactions: 1,
+      tool_call_counts: { Read: 2 },
     });
+  });
+
+  it("D#600 CX-10a: tool call counts add per tool across commands; one that carries none leaves the other's; two that carry none stay without", () => {
+    const withBash = measure([assistant("m3", usage(1, 0, 0), toolUse("u", "Bash"), toolUse("v", "Read"))]);
+    expect(mergeContextLedgerMeasures(a, withBash).tool_call_counts).toEqual({ Read: 2, Bash: 1 });
+    const { tool_call_counts: _drop, ...bare } = b;
+    expect(mergeContextLedgerMeasures(a, bare).tool_call_counts).toEqual({ Read: 1 });
+    expect(Object.keys(mergeContextLedgerMeasures({ ...a, tool_call_counts: undefined }, bare))).not.toContain("tool_call_counts");
   });
 
   it("refused calls add across commands; a measure that carries none leaves the other's figure, and two that carry none stay without one", () => {

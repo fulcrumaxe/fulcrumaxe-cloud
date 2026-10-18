@@ -74,6 +74,20 @@ describe("the wire mapping", () => {
     expect(contextLedgerFromWire(none).measure).toEqual(NOT_RECORDED_MEASURE);
   });
 
+  it("D#600 CX-10a: tool call counts ride the wire as integers over the closed tool list, round-trip, and are absent when the measure has none", () => {
+    const withCounts = { ...NOT_RECORDED_MEASURE, tool_call_counts: { Read: 3, Grep: 1 } };
+    const wire = contextLedgerToWire(withCounts);
+    expect(wire.tool_call_counts).toEqual({ Read: 3, Grep: 1 });
+    expect(ContextLedgerBody.safeParse(wire).success).toBe(true);
+    expect(contextLedgerFromWire(wire).measure.tool_call_counts).toEqual({ Read: 3, Grep: 1 });
+    expect(Object.keys(contextLedgerToWire(NOT_RECORDED_MEASURE))).not.toContain("tool_call_counts");
+    expect(ContextLedgerBody.safeParse(ok).success).toBe(true);
+    for (const bad of [{ "/etc/passwd": 1 }, { Read: -1 }, { Read: 1.5 }, { Read: 1_000_001 }, { Read: "3" }, { Read: null }]) expect(ContextLedgerBody.safeParse({ ...ok, tool_call_counts: bad }).success, JSON.stringify(bad)).toBe(false);
+    expect(ContextLedgerBody.safeParse({ ...ok, tool_call_counts: { Read: 1_000_000 } }).success).toBe(true);
+    // Assembly time is the cloud's own figure: a runner cannot send it.
+    expect(ContextLedgerBody.safeParse({ ...ok, assembly_ms: 5 }).success).toBe(false);
+  });
+
   it("D#600 CX-5b: the count of refused calls is a sandbox figure. It is not on the wire (no wire change), and a body that sends one is refused", () => {
     const wire = contextLedgerToWire({ ...NOT_RECORDED_MEASURE, denied_tool_calls: 3 });
     expect(Object.keys(wire)).not.toContain("denied_tool_calls");

@@ -79,6 +79,17 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
     expect(await recorded(undefined)).toBeNull();
   });
 
+  it("D#600 CX-10a: finalize stores the stream's tool call counts and the cloud's assembly time and cold flag; a run that carries no assembly leaves them null", async () => {
+    const c = new ContextLedgerCapture();
+    c.observe({ type: "assistant", message: { id: "m1", content: [{ type: "tool_use", id: "a", name: "Read", input: {} }, { type: "tool_use", id: "b", name: "Read", input: {} }, { type: "tool_use", id: "c", name: "Grep", input: {} }], usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
+    const s = await started(c.snapshot());
+    await s.target.finalize({ ...s.run, contextSections: [section("card")], contextAssembly: { ms: 120, cold: false } }, { status: "succeeded", usd: 0.1 });
+    expect((await rowsOf(s.accountId, s.id)).rows[0]).toMatchObject({ tool_call_counts: { Read: 2, Grep: 1 }, assembly_ms: 120, assembly_cold: false });
+    const bare = await started(c.snapshot());
+    await bare.target.finalize({ ...bare.run, contextSections: [section("card")] }, { status: "succeeded", usd: 0.1 });
+    expect((await rowsOf(bare.accountId, bare.id)).rows[0]).toMatchObject({ tool_call_counts: { Read: 2, Grep: 1 }, assembly_ms: null, assembly_cold: null });
+  });
+
   it("a run whose stream gave no measure has no row (the screen says Not recorded), and the run still finalizes", async () => {
     const s = await started(undefined);
     await s.target.finalize(s.run, { status: "succeeded", usd: 0.1 });

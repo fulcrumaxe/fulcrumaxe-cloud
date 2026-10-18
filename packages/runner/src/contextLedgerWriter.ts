@@ -19,6 +19,16 @@ export class ContextLedgerInvalid extends Error {
   }
 }
 
+/**
+ * D#600 CX-10a: how long the cloud took to assemble a run's prompt, and whether that had to build the repository map. `ms` is a whole number of milliseconds from a
+ * monotonic clock; `cold` is true when the map was built (a cache miss), false when the cached map was used, and absent when no map was looked up (a review or fix
+ * prompt, a runner build): the row then keeps NULL ("Not recorded"), never a guess.
+ */
+export interface ContextAssembly {
+  ms: number;
+  cold?: boolean;
+}
+
 export interface ContextLedgerInput {
   accountId: string;
   runId: string;
@@ -27,12 +37,16 @@ export interface ContextLedgerInput {
   measure: ContextLedgerMeasure;
   /** Tokens the memory slot held (D#601 via CX-2); absent = not recorded. */
   memoryTokens?: number;
+  /** The cloud's assembly time for the run's prompt (CX-10a). Absent: not recorded. */
+  assembly?: ContextAssembly;
 }
 
 export async function recordContextLedger(client: PoolClient, input: ContextLedgerInput): Promise<void> {
   const m = input.measure;
+  // A figure that is not a whole number cannot be sent as the integer parameter (the cast would fail with another error); it is the same refusal as the database's.
+  if (input.assembly !== undefined && !Number.isInteger(input.assembly.ms)) throw new ContextLedgerInvalid();
   try {
-    await client.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, $3::jsonb, $4::bigint, $5::bigint, $6::bigint, $7::bigint, $8::bigint, $9::jsonb, $10::integer, $11::text, $12::integer)", [
+    await client.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, $3::jsonb, $4::bigint, $5::bigint, $6::bigint, $7::bigint, $8::bigint, $9::jsonb, $10::integer, $11::text, $12::integer, $13::jsonb, $14::integer, $15::boolean)", [
       input.accountId,
       input.runId,
       JSON.stringify(input.sections),
@@ -46,6 +60,10 @@ export async function recordContextLedger(client: PoolClient, input: ContextLedg
       m.basis,
       // D#600 CX-5b: a sandbox command's count of refused tool calls; a measure that carries none (a runner's) leaves the row's null.
       m.denied_tool_calls ?? null,
+      // D#600 CX-10a: tool calls by tool (a measure that carries none leaves the row's null), and the cloud's assembly time and whether it built the map.
+      m.tool_call_counts === undefined ? null : JSON.stringify(m.tool_call_counts),
+      input.assembly?.ms ?? null,
+      input.assembly?.cold ?? null,
     ]);
   } catch (err) {
     if ((err as { code?: unknown }).code === "22023" && (err as { message?: unknown }).message === "invalid_message") throw new ContextLedgerInvalid();

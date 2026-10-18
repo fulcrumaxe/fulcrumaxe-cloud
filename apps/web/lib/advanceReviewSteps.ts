@@ -7,6 +7,7 @@ import {
   assembleReviewPrompt,
   compareHeads,
   findPullRequestForItem,
+  assemblyMsSince,
   findRecordedPullRequest,
   isLocalGitHubHttp,
   listChangedFiles,
@@ -225,6 +226,8 @@ export async function startReviewerBody(
     }
   }
   let assembled: AssembledPrompt;
+  // D#600 CX-10a: a review prompt has no map, so the span is the assembler call alone and `cold` stays unset.
+  const assemblyStarted = performance.now();
   try {
     assembled = assembleReviewPrompt({
       role: role as ReviewPromptRole,
@@ -245,6 +248,7 @@ export async function startReviewerBody(
     if (err instanceof ReviewPromptInputError) return { role, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
   }
+  const assemblyMs = assemblyMsSince(assemblyStarted);
   const started: AdvanceRunStart = pauseOnDenial(await worker.advanceStartRun({
     accountId: who.accountId,
     workItemId: who.workItemId,
@@ -253,6 +257,7 @@ export async function startReviewerBody(
     role,
     prompt: assembled.prompt,
     contextSections: assembled.sections,
+    contextAssembly: { ms: assemblyMs },
     clone: true,
     headSha: pr.headSha,
     expectedExecutionMode: ctx.executionMode,
@@ -370,6 +375,8 @@ export async function startFixBody(
   // The same round with the Spec body: what a fresh session needs (a lost snapshot starts one), and what the worker sends instead when the session's pinned Spec is not the one held.
   let withBody: AssembledPrompt | null = null;
   let heldSpec: { version: number; sha256: string } | null = null;
+  // D#600 CX-10a: a fix prompt has no map: the span is the assembler calls alone and `cold` stays unset.
+  const assemblyStarted = performance.now();
   try {
     const runtime = promptRuntimeOf(ctx.executionMode);
     // D#600 CX-4a: the findings the caps cut are spilled and marked: a sandbox round reads /fx/context, a runner round the files its runner writes (CX-4b, from the signed job).
@@ -388,11 +395,13 @@ export async function startFixBody(
     if (err instanceof ReviewPromptInputError) return { ok: false, runId: null, reason: `bad_${err.field.toLowerCase()}` };
     throw err;
   }
+  const assemblyMs = assemblyMsSince(assemblyStarted);
   const started = await worker.advanceStartFix(who, {
     issue: ctx.issue,
     headSha: pr.headSha,
     prompt: assembled.prompt,
     contextSections: assembled.sections,
+    contextAssembly: { ms: assemblyMs },
     ...(assembled.spill ? { contextSpill: assembled.spill } : {}),
     ...(heldSpec && withBody ? { held: heldSpec, fallbackPrompt: withBody.prompt, fallbackContextSections: withBody.sections, ...(withBody.spill ? { fallbackContextSpill: withBody.spill } : {}) } : {}),
     round,

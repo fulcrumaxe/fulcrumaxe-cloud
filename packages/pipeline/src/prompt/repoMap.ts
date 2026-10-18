@@ -161,7 +161,8 @@ export interface RepoMapRequest {
 
 /** What the build step asks for. Absent answer: the run starts without a map (a map is never a reason to refuse or delay a run). */
 export interface RepoMapPort {
-  forRun(request: RepoMapRequest): Promise<{ version: string; text: string } | undefined>;
+  /** `cold` (D#600 CX-10a): true when the map had to be built (a cache miss), false when the cached one was used. */
+  forRun(request: RepoMapRequest): Promise<{ version: string; text: string; cold: boolean } | undefined>;
 }
 
 export function createRepoMapPort(deps: { open: (request: RepoMapRequest) => Promise<RepoMapSource>; cache: RepoMapCache; log?: (reason: string) => void }): RepoMapPort {
@@ -177,7 +178,7 @@ export function createRepoMapPort(deps: { open: (request: RepoMapRequest) => Pro
         if (sha === null) return skip("no_head");
         const key = { accountId: request.accountId, repoId: request.repoId, commitSha: sha, version: REPO_MAP_VERSION };
         const cached = await deps.cache.get(key);
-        if (cached !== null) return { version: REPO_MAP_VERSION, text: cached };
+        if (cached !== null) return { version: REPO_MAP_VERSION, text: cached, cold: false };
         const tree = await source.tree(sha);
         if (tree === null) return skip("no_tree");
         // Package manifests near the root, shallowest first, a bounded number: each is one more GitHub call.
@@ -193,7 +194,7 @@ export function createRepoMapPort(deps: { open: (request: RepoMapRequest) => Pro
         }
         const text = buildRepoMap({ sha, paths: tree.entries, truncated: tree.truncated, manifests });
         await deps.cache.put(key, text).catch(() => skip("cache_write_failed"));
-        return { version: REPO_MAP_VERSION, text };
+        return { version: REPO_MAP_VERSION, text, cold: true };
       } catch {
         // fx-swallow-ok: a map that cannot be built is left out of the prompt; the run starts without it and the reason is logged as a fixed word
         return skip("unavailable");
