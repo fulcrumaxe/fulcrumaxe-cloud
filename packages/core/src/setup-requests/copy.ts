@@ -47,20 +47,60 @@ export function repausedSentence(code: CheckReasonCode, fields: { name: string; 
   return fill(COPY_REPAUSED, { reason: checkReasonSentence(code, fields).replace(/\.$/, '') });
 }
 
+/** How long "Checking now." is believed after Mark done: a check that has not answered by then is not still running (its caller died). */
+export const CHECKING_NOW_WINDOW_MS = 120_000;
+
 export interface StatusSentenceInput {
   state: SetupRequestState;
   checkKind: SetupRequestCheckKind | null;
   /** The code the last check left on an open request, if any. */
   checkReason: string | null;
+  resolution?: 'marked_done' | 'check_passed' | 'condition_cleared' | 'withdrawn' | null;
+  resolvedAt?: Date | null;
+  checkRanAt?: Date | null;
+  /** Set when the check after Mark done put the request back (or folded into the newer open request for the same step). */
+  repausedAt?: Date | null;
+  /** The project's name and the variable's name: the fields sentence 4 is filled from. */
+  target?: string;
+  envName?: string | null;
+}
+
+export interface StatusSentenceOptions {
+  /** False while no credential source is bound to the provider. */
+  checksAvailable: boolean;
+  intervalSeconds?: number;
+  /** Epoch ms; default now. Only sentence 3 reads the clock. */
+  now?: number;
 }
 
 /**
- * The line shown under an OPEN request while it waits (sentences 1 and 2); null for a request that is not waiting. A request with a check
- * gets sentence 1 only while checks can really run: `checksAvailable` is false while no credential source is bound to the provider, and a
- * request whose last check could not reach the provider reads as unchecked, so the page never promises a check that is not happening.
+ * The line a request shows, derived from its row on every read (nothing is stamped for it):
+ *  - open and never put back: sentence 1 (a check runs) or 2 (it cannot be checked). A request with a check gets sentence 1 only while checks
+ *    can really run: `checksAvailable` is false while no credential source is bound to the provider, and a request whose last check could not
+ *    reach the provider reads as unchecked, so the page never promises a check that is not happening.
+ *  - open and put back by the check after Mark done: sentence 4, with the check's reason.
+ *  - marked done with its check not yet answered: sentence 3, for {@link CHECKING_NOW_WINDOW_MS} at most.
+ *  - anything else (done and answered, withdrawn): null.
  */
-export function statusSentence(request: StatusSentenceInput, opts: { checksAvailable: boolean; intervalSeconds?: number }): string | null {
+export function statusSentence(request: StatusSentenceInput, opts: StatusSentenceOptions): string | null {
+  if (request.state === 'done') {
+    const resolvedAt = request.resolvedAt ?? null;
+    const ranAt = request.checkRanAt ?? null;
+    const pending =
+      request.resolution === 'marked_done' && request.checkKind !== null && opts.checksAvailable && resolvedAt !== null &&
+      (ranAt === null || ranAt.getTime() <= resolvedAt.getTime()) &&
+      (opts.now ?? Date.now()) - resolvedAt.getTime() <= CHECKING_NOW_WINDOW_MS;
+    return pending ? COPY_CHECKING_NOW : null;
+  }
   if (request.state !== 'open') return null;
   if (request.checkKind === null || !opts.checksAvailable || request.checkReason === 'check_unavailable') return COPY_WAITING_UNCHECKED;
+  if ((request.repausedAt ?? null) !== null && isCheckReasonCode(request.checkReason) && request.target !== undefined) {
+    return repausedSentence(request.checkReason, { name: request.envName ?? request.target, project: request.target });
+  }
   return fill(COPY_WAITING_CHECKED, { interval: secondsText(opts.intervalSeconds ?? CHECK_INTERVAL_SECONDS) });
+}
+
+/** The interval the API states for a request: the constant while it waits on an automatic check that can run, else null. */
+export function checkIntervalFor(request: Pick<StatusSentenceInput, 'state' | 'checkKind'>, opts: { checksAvailable: boolean }): number | null {
+  return request.state === 'open' && request.checkKind !== null && opts.checksAvailable ? CHECK_INTERVAL_SECONDS : null;
 }

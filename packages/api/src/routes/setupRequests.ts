@@ -16,9 +16,19 @@ import {
   resolveSetupRequest,
   type SetupRequest,
 } from "@fx/core/src/setup-requests/store.js";
+import { markSetupRequestDone } from "@fx/core/src/setup-requests/markDone.js";
+import { unavailableVercelEnvSource, type VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
+import { checkIntervalFor, statusSentence } from "@fx/core/src/setup-requests/copy.js";
 import { ForbiddenError } from "@fx/core/src/tenancy/errors.js";
 import { ApiError } from "../errors.js";
 import type { RouteEntry } from "../registry.js";
+import { runActionDeps } from "./run-actions.js";
+
+/**
+ * The seam apps/web's catch-all installs, like `runActionDeps`: where the env-var check gets a project's variable names. Until a credential
+ * source is bound (D#598 P8d) it is "unavailable": a request is told the platform cannot check it, and Mark done resumes it with no check.
+ */
+export const setupRequestDeps: { getEnvSource: () => VercelEnvSource } = { getEnvSource: () => unavailableVercelEnvSource };
 
 /**
  * D#598 P8a: the HTTP face of `setup_requests`. A request asks a person for one step the platform cannot do (an environment variable, a
@@ -30,7 +40,8 @@ import type { RouteEntry } from "../registry.js";
  *    request can hold is `provider_url`, on github.com or vercel.com. `title` is built here from a fixed template, never from the reason.
  *  - The account and the person come from the session. Nothing in a body can name either. Every route is session-only: a token can neither read nor write.
  *  - Reading is any member. Proposing, marking done and withdrawing are owner or admin, because each one decides whether an item can go on.
- *  - Undo: a person can withdraw an open request (the item stays paused until someone advances it) or mark it done (resumes at once). Repeating
+ *  - Undo: a person can withdraw an open request (the item stays paused until someone advances it) or mark it done (the item is restarted
+ *    at once, and a request with an automatic check is checked at once and put back if it is not done). Repeating
  *    the decision already taken answers 200 with the request unchanged; the opposite decision on a closed request is 409.
  */
 
@@ -62,6 +73,14 @@ const requestSchema = z.object({
   /** After "mark done", why the check put the request back (plain text), else null. */
   check_reason: z.string().nullable(),
   check_ran_at: z.string().nullable(),
+  /**
+   * The line to show for the request, derived from the row on every read (plain text; screens render it as text): while it waits, whether we check
+   * for it or cannot; after Mark done, "Checking now." and, if the check says it is not done, why the item is paused again. Null when there is nothing
+   * to say (done and answered, withdrawn).
+   */
+  status_sentence: z.string().nullable(),
+  /** How often an automatic check runs while the request waits (seconds), or null when none runs (no check, or no credential source is bound). */
+  check_interval_seconds: z.number().int().nullable(),
 });
 
 const listResponseSchema = z.object({ requests: z.array(requestSchema), truncated: z.boolean() });
@@ -86,7 +105,16 @@ const listQuerySchema = z.object({
   repo_id: UUID.optional(),
 });
 
-const toDto = (r: SetupRequest): z.infer<typeof requestSchema> => ({
+const toDto = (r: SetupRequest): z.infer<typeof requestSchema> => {
+  const checksAvailable = setupRequestDeps.getEnvSource().available;
+  return {
+    ...baseDto(r),
+    status_sentence: statusSentence(r, { checksAvailable }),
+    check_interval_seconds: checkIntervalFor(r, { checksAvailable }),
+  };
+};
+
+const baseDto = (r: SetupRequest): Omit<z.infer<typeof requestSchema>, "status_sentence" | "check_interval_seconds"> => ({
   id: r.id,
   repo_id: r.repoId,
   work_item_id: r.workItemId,
@@ -136,8 +164,17 @@ const resolveRoute = (verb: "withdraw" | "done", operationId: string, summary: s
   async handler(ctx, input) {
     const { accountId, userId } = ctx.principal;
     try {
+      if (verb === "done") {
+        // Closes the request, restarts its item once, and runs the request's own check at once (core markDone.ts). A failed check answers 200 with
+        // the request OPEN again and `status_sentence` saying why; the answer is always the request as it reads after the check.
+        const result = await markSetupRequestDone(
+          { pool: ctx.pool, envSource: setupRequestDeps.getEnvSource(), signal: runActionDeps.getRunActionSignal() },
+          { accountId, userId, id: input.params.id! },
+        );
+        return toDto(result.request);
+      }
       return await withTenant(ctx.pool, accountId, userId, async (client) =>
-        toDto(await resolveSetupRequest(client, { id: input.params.id!, userId, to: verb === "done" ? "done" : "withdrawn" })),
+        toDto(await resolveSetupRequest(client, { id: input.params.id!, userId, to: "withdrawn" })),
       );
     } catch (error) {
       throw mapError(error);
@@ -238,7 +275,9 @@ export const setupRequestRoutes: RouteEntry[] = [
   resolveRoute(
     "done",
     "markSetupRequestDone",
-    "Mark an open setup request done; its work item can go on at once",
-    "Owner or admin, session only. Repeating it answers 200 with the request unchanged; marking a withdrawn request done is 409. A check that later fails puts the request back.",
+    "Mark an open setup request done; its work item is restarted at once, and a request with an automatic check is checked at once",
+    "Owner or admin, session only. The request closes and its work item is asked to continue once (a repeat files nothing). A request that names an automatic check is " +
+      "then checked right away, while a credential source is bound: if the check says it is not done, the request is open again and the item is paused again, and the answer's " +
+      "`status_sentence` gives the check's reason. Repeating it answers 200 with the request unchanged; marking a withdrawn request done is 409.",
   ),
 ];

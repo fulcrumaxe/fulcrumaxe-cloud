@@ -6,6 +6,8 @@ import { startBuildForItem } from "@fx/pipeline";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
+import { markSetupRequestDone } from "@fx/core/src/setup-requests/markDone.js";
+import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { createAdvanceModule, type AdvanceModuleDeps, type AdvanceStartArgs } from "../src/advance.js";
 import type { RunStarter } from "../src/preview.js";
 import type { SeatResult } from "../src/seat.js";
@@ -140,5 +142,59 @@ describe("setup request hold [pg]", { timeout: 60_000 }, () => {
     expect(after).not.toBe(before);
     await claim(after);
     expect(await t.module.performAdvanceWorkItem(after)).toEqual({ result: "done", outcome: { work_item_id: wi, advance: "started" } });
+  });
+
+  describe("D#598 P8b-2: Mark done files the restart, and the check after it decides whether the item runs", () => {
+    const withCheck = async (a: SeedRefs, workItemId: string): Promise<string> =>
+      (
+        await admin.query<{ id: string }>(
+          `INSERT INTO setup_requests (account_id, repo_id, work_item_id, origin, kind, target, env_name, reason, check_kind, created_by)
+           VALUES ($1, $2, $3, 'agent', 'env_var', 'cloud-staging', 'SOME_NAME', 'needed', 'env_var_present', $4) RETURNING id`,
+          [a.accountId, a.repoId, workItemId, a.userId],
+        )
+      ).rows[0]!.id;
+    const source = (set: boolean): VercelEnvSource => ({
+      available: true,
+      listEnvNames: async () => ({ ok: true, entries: set ? [{ name: "SOME_NAME", targets: ["production"] }] : [] }),
+    });
+    const filed = async (a: SeedRefs, wi: string) =>
+      (await admin.query<{ id: string }>("SELECT id FROM run_action_requests WHERE account_id = $1 AND kind = 'advance_work_item' AND target_id = $2 AND state = 'accepted'", [a.accountId, wi])).rows.map((r) => r.id);
+
+    it("the variable is there: the one restart Mark done filed starts the item, and nothing else does", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const wi = await item(a);
+      const id = await withCheck(a, wi);
+      const out = await markSetupRequestDone({ pool: appPool, envSource: source(true), signal: null, log: () => undefined }, { accountId: a.accountId, userId: a.userId, id });
+      expect(out).toMatchObject({ changed: true, check: "passed" });
+      const [restart, ...rest] = await filed(a, wi);
+      expect(rest).toEqual([]);
+      await claim(restart!);
+      const t = advance();
+      expect(await t.module.performAdvanceWorkItem(restart!)).toEqual({ result: "done", outcome: { work_item_id: wi, advance: "started" } });
+      expect(t.args).toHaveLength(1);
+    });
+
+    it("the variable is missing: the restart that was filed is refused by the hold (sentence 4's pause is real), and no workflow step runs", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const wi = await item(a);
+      const id = await withCheck(a, wi);
+      const out = await markSetupRequestDone({ pool: appPool, envSource: source(false), signal: null, log: () => undefined }, { accountId: a.accountId, userId: a.userId, id });
+      expect(out).toMatchObject({ changed: true, check: "not_yet", request: { state: "open", checkReason: "env_var_missing" } });
+      const [restart] = await filed(a, wi);
+      await claim(restart!);
+      const t = advance();
+      expect(await t.module.performAdvanceWorkItem(restart!)).toEqual({ result: "refused", errorCode: "setup_request_open" });
+      expect(await t.module.advanceBuild(whoOf(a, wi), restart!, 1)).toEqual({ status: "refused", reason: "setup_request_open" });
+      expect(t.args).toEqual([]);
+      // The performer settles it; the variable is set; the person presses again: a new generation, a new restart, and it starts.
+      await admin.query("UPDATE run_action_requests SET state = 'refused', claimed_until = NULL, error_code = 'setup_request_open', finished_at = now() WHERE id = $1", [restart]);
+      const again = await markSetupRequestDone({ pool: appPool, envSource: source(true), signal: null, log: () => undefined }, { accountId: a.accountId, userId: a.userId, id });
+      expect(again).toMatchObject({ changed: true, check: "passed", request: { state: "done" } });
+      const [second, ...others] = await filed(a, wi);
+      expect(others).toEqual([]);
+      expect(second).not.toBe(restart);
+      await claim(second!);
+      expect(await t.module.performAdvanceWorkItem(second!)).toEqual({ result: "done", outcome: { work_item_id: wi, advance: "started" } });
+    });
   });
 });
