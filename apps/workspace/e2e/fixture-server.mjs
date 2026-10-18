@@ -303,6 +303,15 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#598 P8c: opening the Needs you app lists the open setup requests (GET only, the contract fixture; needs-you.spec.ts mocks the actions and the errors).
+    if (urlPath === "/api/v1/setup-requests" && req.method === "GET") {
+      readFile(join(V1_FIXTURES_DIR, "listSetupRequests", "200-ok.json")).then(
+        (body) => res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(body),
+        () => res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }))
+      );
+      return;
+    }
+
     // D#37 WS-F9a: opening the Onboarding app reads the setup progress (GET only; onboarding.spec.ts mocks the rest).
     if (urlPath === "/api/v1/onboarding" && req.method === "GET") {
       readFile(join(V1_FIXTURES_DIR, "getOnboarding", "200-new.json")).then(

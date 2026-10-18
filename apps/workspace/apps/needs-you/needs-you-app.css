@@ -1,0 +1,49 @@
+/* D#598 P8c: Needs you app. Theme variables come from the shell; the fallbacks only matter if a theme leaves one out. */
+.ny-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.ny-title { margin: 0 0 8px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.ny-muted { margin: 6px 0; font-size: 0.8rem; } /* quieter by size, not by a faded colour: a faded colour fails contrast on some themes */
+.ny-error { margin: 6px 0; padding-left: 8px; border-left: 3px solid var(--accent, #1aff80); font-weight: 600; } /* a theme token, never a fixed colour: the bar and the weight carry it, the text keeps the theme's own contrast */
+.ny-error:empty { display: none; }
+.ny-live { margin: 0; min-height: 0; }
+.ny-live:empty { display: none; }
+.ny-rows { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.ny-row { padding: 10px; border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); background: var(--bg-surface, #0a0a0a); }
+.ny-row[data-state="done"], .ny-row[data-state="withdrawn"] { border-style: dashed; }
+.ny-row[aria-busy="true"] { opacity: 0.85; }
+.ny-row-title { margin: 0 0 4px; font-size: 0.95rem; overflow-wrap: anywhere; }
+.ny-row p { margin: 4px 0; }
+.ny-state { font-weight: 600; }
+/* Agent text: plain text, line breaks kept, long words and addresses wrap instead of widening the page. */
+.ny-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ny-sentence { overflow-wrap: anywhere; font-weight: 600; }
+.ny-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.ny-btn {
+  min-height: 44px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ny-btn:hover:not([aria-disabled="true"]) { border-color: var(--accent, #1aff80); }
+.ny-btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; border-style: dashed; }
+.ny-btn:focus-visible, .ny-link:focus-visible, .ny-row-title:focus-visible, .ny-title:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.ny-link { color: inherit; text-decoration: underline; }
+
+/* Phones and narrow windows: the buttons are full-width. */
+@container (max-width: 520px) {
+  .ny-btn { flex: 1 1 100%; }
+}

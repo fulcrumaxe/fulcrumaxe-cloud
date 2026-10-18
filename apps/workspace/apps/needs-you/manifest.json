@@ -1,0 +1,5 @@
+{
+  "id": "needs-you",
+  "entry": "needs-you-app.js",
+  "styles": ["needs-you-app.css"]
+}

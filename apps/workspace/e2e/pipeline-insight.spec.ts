@@ -700,18 +700,12 @@ test.describe("D#7 DP8-f1: halted and waiting for an answer (mocked API)", () =>
     expect(errors).toEqual([]);
   });
 
-  test("the waiting flag has no Needs you link while that app is not installed, and opens it once it is", async ({ page }) => {
+  // The Needs you app (D#598 P8c) ships in the cloud build, so the link is drawn at once and opens the real window. That the link is left out while the
+  // app is not registered is pinned in test/pipeline-insight.test.mjs.
+  test("the waiting flag links to the Needs you app, and the link opens it", async ({ page }) => {
     const { errors } = await setup(page, { status: 200, json: { ...OK, halted: false, waiting_on_answer: true } });
     await openDetail(page);
     await expect(tid(page, "pl-flag-waiting_on_answer")).toBeVisible();
-    await expect(tid(page, "pl-flag-needs-you")).toHaveCount(0);
-    // Installed after the card drew: the next change of the record redraws with the link.
-    await page.evaluate(() => {
-      const w = window as unknown as { FULCApps: { register: (id: string, app: object) => void } };
-      w.FULCApps.register("needs-you", { title: "Needs you", icon: "", defaultSize: { width: 400, height: 300 }, onOpen: (el: HTMLElement) => { el.textContent = "Needs you opened"; } });
-    });
-    await page.route((u) => u.pathname.endsWith("/activity"), (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...OK, halted: true, waiting_on_answer: true }) }));
-    await page.clock.runFor(10_000);
     const link = tid(page, "pl-flag-needs-you");
     await expect(link).toHaveText("Needs you");
     await press(page, link);
