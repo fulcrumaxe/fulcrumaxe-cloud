@@ -77,6 +77,10 @@ describe("D#2 H09b2, correction C21: PR #85 follow-ups [pg]", () => {
       async readCounters() {
         return undefined;
       },
+      async writeFiles() {},
+      async runCommand() {
+        throw new Error("not used");
+      },
       async sandboxExists() {
         return true;
       },

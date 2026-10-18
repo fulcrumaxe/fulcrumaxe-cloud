@@ -22,9 +22,18 @@ export function isPersistentRole(role: Role): boolean {
   return role === EXECUTOR_ROLE;
 }
 
+/**
+ * D#598 P1f-5a: the role of the one-shot publish sandbox, and its name prefix. A publish sandbox is named `pp-<attempt row id>`: unique, never
+ * an `ex-` or `rn-` name, and nothing reads its text (the run row records it). It has no model connection and runs no agent.
+ */
+export const PLANE_PUBLISH_ROLE = "plane_publish";
+const PUBLISH_SANDBOX_PREFIX = "pp-";
+
 export interface SandboxNamingParams {
   role: Role;
   runId: string;
+  /** Required, and only meaningful, for the `plane_publish` role: the `plane_push_attempts.id` UUID. */
+  attemptId?: string;
   /** Required, and only meaningful, for the executor role. PR #85 fix
    * round 3, must-fix 2 (CWE-639/706/200): the name-uniqueness input,
    * not just a display field -- see the header comment on
@@ -61,7 +70,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const EXECUTOR_SANDBOX_PREFIX = "ex-";
 const NON_EXECUTOR_SANDBOX_PREFIX = "rn-";
 
-function assertValidUuidField(value: string, field: "accountId" | "repoId"): void {
+function assertValidUuidField(value: string, field: "accountId" | "repoId" | "attemptId"): void {
   if (!UUID_RE.test(value)) {
     throw new Error(`sandboxNameFor: ${field} must be a UUID, got ${JSON.stringify(value)}`);
   }
@@ -130,6 +139,11 @@ function assertValidPr(pr: number): void {
  * of what characters either field contains.
  */
 export function sandboxNameFor(params: SandboxNamingParams): string {
+  if (params.role === PLANE_PUBLISH_ROLE) {
+    if (params.attemptId === undefined) throw new Error("sandboxNameFor: the plane_publish role requires attemptId");
+    assertValidUuidField(params.attemptId, "attemptId");
+    return `${PUBLISH_SANDBOX_PREFIX}${params.attemptId}`;
+  }
   if (isPersistentRole(params.role)) {
     if (!params.accountId || !params.repoId || params.pr === undefined) {
       throw new Error(

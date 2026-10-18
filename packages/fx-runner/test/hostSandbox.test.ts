@@ -146,6 +146,17 @@ describe("hostSandbox: the sandbox block comes from the one builder, for this jo
   });
 });
 
+describe("hostSandbox: no publish sandbox on this machine (D#598 P1f-5a)", () => {
+  it("writeFiles and runCommand each refuse fail-closed with a typed error, and start nothing", async () => {
+    const t = setup();
+    const handle = await t.create("pp-11111111-2222-4333-8444-555555555555");
+    await expect(t.host.writeFiles(handle, [{ path: "/fx/plane-publish/fx-plane-publish.mjs", content: "x", mode: 0o555 }])).rejects.toMatchObject({ name: "HostSandboxRefused", code: "no_publish_sandbox" });
+    await expect(t.host.runCommand(handle, { role: "plane_publish", cmd: "node", args: ["/fx/plane-publish/fx-plane-publish.mjs"], env: {}, networkPolicy: [], timeoutMs: 60_000 })).rejects.toMatchObject({ name: "HostSandboxRefused", code: "no_publish_sandbox" });
+    expect(t.starts).toEqual([]);
+    expect(t.blocks).toEqual([]);
+  });
+});
+
 describe("hostSandbox: lifecycle", () => {
   it("delete removes the per-job temp directory and the sandbox; state follows", async () => {
     const t = setup();

@@ -190,6 +190,10 @@ function fakeSandboxPort(): SandboxPort {
     async readCounters() {
       return undefined;
     },
+    async writeFiles() {},
+    async runCommand() {
+      throw new Error("not used");
+    },
     async sandboxExists() {
       return true;
     },

@@ -106,6 +106,8 @@ describe("startAgentRun", () => {
       deleteSandbox: async () => {},
       measure: async () => [],
       readCounters: async () => undefined,
+      writeFiles: async () => undefined,
+      runCommand: async () => { throw new Error("not used"); },
       sandboxExists: async () => true,
     };
 

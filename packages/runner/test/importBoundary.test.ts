@@ -63,6 +63,10 @@ const FORBIDDEN_MODULE_FILES = new Set([
   // D#483 S5-p: the sandbox's run-time arithmetic and compute price (the pinned vCPUs, the timeout margin, @fx/spend's rates). It is the one
   // price source for the seat's reservation and the pipeline estimate; no restricted file (the run starter, the runner target) imports it.
   "runTime.ts",
+  // D#598 P1f-5a: the publish sandbox's argument checks and its create-to-delete runner. Both sit on the port, the env and the policy type, and
+  // only the worker's publish step (P1f-5b) will call them; no restricted file imports them.
+  "runCommand.ts",
+  path.join("planePublish", "run.ts"),
 ]);
 
 function listWorkflowFiles(): string[] {

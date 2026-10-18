@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
 import type { AgentRuntime, NormalizedEvent, Role } from "./types.js";
 import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv } from "./sandboxEnv.js";
+import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
+import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import {
   LISTABLE_PREFIXES,
   SandboxNotFoundError,
   type CreateSandboxOptions,
   type DeleteSandboxOptions,
+  type RunCommandOptions,
+  type SandboxFile,
+  type RunCommandResult,
   type ListSandboxesOptions,
   type ListedSandbox,
   type SandboxComputeState,
@@ -28,7 +34,8 @@ import {
  */
 export function assertSandboxEnvMatchesRole(role: Role, env: Record<string, string>): void {
   // Either of the two envs `buildSandboxEnv` can build; the operator one holds only the fixed placeholder.
-  const expected = Object.hasOwn(env, OPERATOR_OAUTH_ENV_NAME) ? buildSandboxEnv(role, "operator_subscription") : buildSandboxEnv(role);
+  // The publish role has one env only: a smuggled operator variable then fails the comparison as an extra key.
+  const expected = role !== PLANE_PUBLISH_ROLE && Object.hasOwn(env, OPERATOR_OAUTH_ENV_NAME) ? buildSandboxEnv(role, "operator_subscription") : buildSandboxEnv(role);
   const expectedKeys = Object.keys(expected).sort();
   const actualKeys = Object.keys(env).sort();
   const matches =
@@ -78,7 +85,24 @@ export interface FakeSandboxState {
   readonly calls: readonly string[];
   /** Names whose snapshot the provider still holds. A delete without `deleteSnapshots` leaves it, one with it removes it. */
   readonly snapshots: readonly string[];
+  /** D#598 P1f-5a: every `runCommand`, as the provider would have seen it. */
+  readonly commands: readonly RecordedCommand[];
+  /** Every `writeFiles`, with the SHA-256 of each file's bytes in the sandbox. */
+  readonly writtenFiles: readonly { sandboxName: string; path: string; mode: number | undefined; sha256: string; content: string }[];
 }
+
+export interface RecordedCommand {
+  sandboxName: string;
+  cmd: string;
+  args: readonly string[];
+  env: Record<string, string>;
+  /** The purposes of the rules applied, in order (never a host value that carries a credential). */
+  policyPurposes: readonly string[];
+  timeoutMs: number;
+}
+
+/** What a scripted `runCommand` does: ends with this exit code and output, never ends (killed at its limit), or fails at the provider with this status. */
+export type ScriptedCommand = { exitCode: number; stdout?: string; stderr?: string } | { hang: true } | { failStatus: number };
 
 export interface FakeSandboxController {
   readonly state: FakeSandboxState;
@@ -114,6 +138,8 @@ export interface FakeSandboxController {
   failList(status: number): void;
   /** What `sandboxExists` does for this sandbox: answers `false` (a 404), or "unknown" (it THROWS, as a port that could not answer would). Unscripted: it exists. */
   scriptExists(sandboxName: string, answer: false | "unknown"): void;
+  /** What `runCommand` does on this sandbox. Unscripted: exit 0 with no output. */
+  scriptCommand(sandboxName: string, script: ScriptedCommand): void;
 }
 
 /** What the fake reports for a session nobody scripted: every figure present, so a run prices as 'measured'. */
@@ -142,6 +168,9 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   let listFailStatus: number | undefined;
   let clockMs = 1_700_000_000_000;
   const existence = new Map<string, false | "unknown">();
+  const commands: RecordedCommand[] = [];
+  const writtenFiles: { sandboxName: string; path: string; mode: number | undefined; sha256: string; content: string }[] = [];
+  const commandScripts = new Map<string, ScriptedCommand>();
   /** The session each sandbox is in; a created or resumed sandbox gets a new one. */
   const sessionOf = new Map<string, string>();
   let sessionSeq = 0;
@@ -156,7 +185,11 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
       ? Promise.resolve(opts.onSession(sessionOf.get(handle.sandboxName) ?? newSession(handle.sandboxName))).then(start)
       : start();
 
+  /** The publish role has no model connection: no agent is ever launched for it, whatever env is offered. */
+  const refusePublishAgent = (handle: SandboxHandle, role: Role): void => assertNoAgentInPublishSandbox(handle.sandboxName, role);
+
   function runStart(handle: SandboxHandle, opts: StartDetachedOptions): StartDetachedResult {
+    refusePublishAgent(handle, opts.role);
     assertSandboxEnvMatchesRole(opts.role, opts.env);
     if (hungLaunchNames.has(handle.sandboxName)) {
       return { handle, hookFired: new Promise<NormalizedEvent | undefined>(() => {}), launched: new Promise<void>(() => {}) };
@@ -188,6 +221,9 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
 
   const port: SandboxPort = {
     async createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle> {
+      vcpusForCreate(opts);
+      // A live sandbox of this name makes a second create fail, as the provider does for a name that is not persistent. For a publish sandbox only.
+      if (opts.sandboxName.startsWith("pp-") && provider.has(opts.sandboxName)) throw Object.assign(new Error("fakeSandbox: the sandbox name is taken"), { status: 400, json: { error: { code: "bad_request" } } });
       created.push(opts);
       provider.set(opts.sandboxName, { name: opts.sandboxName, persistent: opts.retention.persistent, status: "running", createdAt: ++clockMs, updatedAt: clockMs });
       if (opts.retention.persistent) snapshots.add(opts.sandboxName);
@@ -200,6 +236,35 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
 
     startDetached(handle, opts) {
       return runStart(handle, opts);
+    },
+
+    async runCommand(handle, opts: RunCommandOptions): Promise<RunCommandResult> {
+      assertRunCommandOptions(opts);
+      assertSandboxEnvMatchesRole(opts.role, opts.env);
+      if (!handle.sandboxName.startsWith("pp-")) throw new Error("fakeSandbox: runCommand runs only in a pp- sandbox");
+      calls.push(`runCommand:${handle.sandboxName}`);
+      // The provider answers 404 for a missing sandbox, and the real port never wakes a stopped one.
+      const listed = provider.get(handle.sandboxName);
+      if (!listed) throw Object.assign(new Error("fakeSandbox: runCommand: no such sandbox"), { status: 404 });
+      if (listed.status !== "running") throw Object.assign(new Error("fakeSandbox: runCommand: the sandbox is not running"), { status: 409 });
+      const script = commandScripts.get(handle.sandboxName) ?? { exitCode: 0 };
+      if ("failStatus" in script) throw Object.assign(new Error("fakeSandbox: runCommand failed"), { status: script.failStatus });
+      const sessionId = sessionOf.get(handle.sandboxName);
+      if (sessionId !== undefined) await opts.onSession?.(sessionId);
+      commands.push({ sandboxName: handle.sandboxName, cmd: opts.cmd, args: [...opts.args], env: { ...opts.env }, policyPurposes: opts.networkPolicy.map((r) => r.purpose), timeoutMs: opts.timeoutMs });
+      if ("hang" in script) return { exitCode: null, timedOut: true, stdout: "", stderr: "", truncated: false, ...(sessionId !== undefined && { sessionId }) };
+      const [stdout, stderr] = [script.stdout ?? "", script.stderr ?? ""];
+      const truncated = stdout.length > RUN_COMMAND_MAX_OUTPUT_CHARS || stderr.length > RUN_COMMAND_MAX_OUTPUT_CHARS;
+      return { exitCode: script.exitCode, timedOut: false, stdout: stdout.slice(0, RUN_COMMAND_MAX_OUTPUT_CHARS), stderr: stderr.slice(0, RUN_COMMAND_MAX_OUTPUT_CHARS), truncated, ...(sessionId !== undefined && { sessionId }) };
+    },
+
+    async writeFiles(handle, files: readonly SandboxFile[]) {
+      assertWriteFiles(handle.sandboxName, files);
+      calls.push(`writeFiles:${handle.sandboxName}`);
+      const listed = provider.get(handle.sandboxName);
+      if (!listed) throw Object.assign(new Error("fakeSandbox: writeFiles: no such sandbox"), { status: 404 });
+      if (listed.status !== "running") throw Object.assign(new Error("fakeSandbox: writeFiles: the sandbox is not running"), { status: 409 });
+      for (const f of files) writtenFiles.push({ sandboxName: handle.sandboxName, path: f.path, mode: f.mode, sha256: createHash("sha256").update(f.content).digest("hex"), content: f.content });
     },
 
     async extendTimeout(handle, additionalMs) {
@@ -218,6 +283,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     },
 
     resume(handle, sessionId, prompt, opts) {
+      refusePublishAgent(handle, opts.role);
       assertSandboxEnvMatchesRole(opts.role, opts.env);
       if (notFoundOnResume.has(handle.sandboxName)) {
         throw new SandboxNotFoundError(handle.sandboxName);
@@ -296,7 +362,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
 
   return {
     port,
-    state: { created, extended, stopped, deleted, calls, get snapshots() { return [...snapshots]; } },
+    state: { created, extended, stopped, deleted, calls, commands, writtenFiles, get snapshots() { return [...snapshots]; } },
     hang(sandboxName) {
       hungSandboxNames.add(sandboxName);
     },
@@ -337,6 +403,9 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     },
     scriptExists(sandboxName, answer) {
       existence.set(sandboxName, answer);
+    },
+    scriptCommand(sandboxName, script) {
+      commandScripts.set(sandboxName, script);
     },
   };
 }

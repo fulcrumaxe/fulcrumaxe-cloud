@@ -1122,6 +1122,9 @@ importers:
       '@fx/discussions':
         specifier: workspace:*
         version: link:../discussions
+      '@fx/gh-policy':
+        specifier: workspace:*
+        version: link:../gh-policy
       '@fx/model-connection':
         specifier: workspace:*
         version: link:../model-connection
@@ -1131,6 +1134,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

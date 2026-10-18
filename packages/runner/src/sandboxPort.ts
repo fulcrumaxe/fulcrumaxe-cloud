@@ -42,6 +42,8 @@ export interface SandboxSessionUsage {
 
 /** The vCPUs every sandbox is created with (pinned, not an SDK default). */
 export const SANDBOX_VCPUS = SANDBOX_PINNED_VCPUS;
+/** D#598 P1f-5a: a `pp-` publish sandbox is created with exactly this many vCPUs (C4 acceptance 26); no other sandbox may ask for it. */
+export const PLANE_PUBLISH_VCPUS = 1;
 
 /**
  * D#2 H14c-3-2d-2 (R-MAX): the longest sandbox Vercel allows on the plan this deployment runs
@@ -74,6 +76,8 @@ export interface CreateSandboxOptions {
   /** D#2 H14c-3-2d-2 (R-CT): the limits of the run this sandbox is for. The port refuses a sandbox
    * whose `timeoutMs` is not at least this run's `maxRunMs` plus `SANDBOX_TIMEOUT_MARGIN_MS`; absent, the port's defaults are checked. */
   limits?: Partial<RunLimits>;
+  /** D#598 P1f-5a: set (to `PLANE_PUBLISH_VCPUS`) for a `pp-` sandbox and nowhere else; absent = `SANDBOX_VCPUS`. */
+  vcpus?: number;
 }
 
 export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sandboxSpec"> {
@@ -181,7 +185,53 @@ export class SandboxBusyError extends Error {
   }
 }
 
+/**
+ * D#598 P1f-5a: one command in a sandbox, run to its end, with no agent launch. The argument shapes are checked by `assertRunCommandOptions`
+ * (`runCommand.ts`) in every implementation: the `plane_publish` role only, a program from a short list run directly (never through a shell),
+ * the one env that role has (no model variable) and a network policy of the GitHub proxy rule alone. Arguments are a list: each element reaches
+ * the program as one literal string, whatever characters it holds.
+ */
+export interface RunCommandOptions {
+  role: Role;
+  /** A program name from `RUN_COMMAND_PROGRAMS`, executed directly with `args` as its argv. */
+  cmd: string;
+  args: readonly string[];
+  env: Record<string, string>;
+  /** Applied before the command starts. */
+  networkPolicy: NetworkPolicyRule[];
+  /** The command is killed at this limit. */
+  timeoutMs: number;
+  /** Awaited with the session the command runs in, before it starts (compute settle). */
+  onSession?: (sessionId: string) => void | Promise<void>;
+}
+
+export interface RunCommandResult {
+  /** `null` when the command was killed at `timeoutMs` (`timedOut`) or its output could not be read to the end. */
+  exitCode: number | null;
+  timedOut: boolean;
+  /** The first `RUN_COMMAND_MAX_OUTPUT_CHARS` characters of each stream. */
+  stdout: string;
+  stderr: string;
+  /** True when either stream was cut. A caller reads a truncated result as a crash, never as success. */
+  truncated: boolean;
+  sessionId?: string;
+}
+
+/** A file for `SandboxPort.writeFiles`. */
+export interface SandboxFile {
+  path: string;
+  content: string;
+  mode?: number;
+}
+
 export interface SandboxPort {
+  /**
+   * D#598 P1f-5a: writes files into a `pp-` publish sandbox through the provider's file API (no shell). Paths must be directly under
+   * `/fx/plane-publish/`; an agent sandbox (`ex-`, `rn-`) is refused, so the publish hook can never land in a sandbox that runs a model.
+   */
+  writeFiles(handle: SandboxHandle, files: readonly SandboxFile[]): Promise<void>;
+  /** D#598 P1f-5a: see `RunCommandOptions`. Throws `SandboxPortError` on a provider failure; a command that fails is a result, not a throw. */
+  runCommand(handle: SandboxHandle, opts: RunCommandOptions): Promise<RunCommandResult>;
   createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle>;
   /** Fire-and-forget: starts the agent detached inside an already-created
    * sandbox and returns immediately. See `StartDetachedResult.hookFired`. */

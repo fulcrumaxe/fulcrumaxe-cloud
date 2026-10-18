@@ -91,6 +91,10 @@ describe("agentRunWorkflow (D#2 H09b2-wf, H09.7 watchdog) [pg]", () => {
       async readCounters() {
         return undefined;
       },
+      async writeFiles() {},
+      async runCommand() {
+        throw new Error("not used");
+      },
       async sandboxExists() {
         return true;
       },

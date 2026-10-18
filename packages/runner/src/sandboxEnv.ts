@@ -1,5 +1,6 @@
 import { OPERATOR_OAUTH_PLACEHOLDER } from "@fx/runtime/src/operatorSubscription.js";
 import type { Role } from "./types.js";
+import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
 
 /**
  * D#2 H09 pass/fail 4: "The sandbox env for every role contains no value
@@ -92,7 +93,12 @@ export const SANDBOX_CA_ENV: Readonly<Record<string, string>> = Object.freeze({
  * never reach for `process.env`.
  */
 export function buildSandboxEnv(role: Role, mode: SandboxEnvMode = "tenant_key"): Record<string, string> {
-  void role; // No H09 pass/fail item varies the sandbox env by role today.
+  // D#598 P1f-5a: the publish sandbox has no model connection, so it carries no model variable at all (not even the placeholders) and no
+  // operator mode. It holds only the CA paths; the proxy adds every GitHub credential outside the VM.
+  if (role === PLANE_PUBLISH_ROLE) {
+    if (mode !== "tenant_key") throw new Error("buildSandboxEnv: the plane_publish role has no model connection");
+    return { ...SANDBOX_CA_ENV };
+  }
   if (mode === "operator_subscription") {
     // Operator mode: the CLI believes it holds an OAuth token (so it sends the OAuth headers
     // itself) and the firewall swaps the Authorization header for ours. ANTHROPIC_AUTH_TOKEN is

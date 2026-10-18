@@ -44,6 +44,10 @@ function recordingPort(end: () => Promise<NormalizedEvent | undefined> = async (
     async readCounters() {
       return undefined;
     },
+    async writeFiles() {},
+    async runCommand(): Promise<never> {
+      throw new Error("not used");
+    },
     async sandboxExists() {
       return true;
     },

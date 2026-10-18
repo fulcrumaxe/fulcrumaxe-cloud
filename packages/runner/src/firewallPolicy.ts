@@ -186,6 +186,14 @@ export async function buildOperatorFirewallPolicy(
   return rulesCarryingKey(operatorToken, "operator_subscription", host, input);
 }
 
+/**
+ * D#598 P1f-5a: the publish sandbox's whole egress policy: GitHub's two hosts forwarded to our proxy, and nothing else. There is no model rule,
+ * no registry and no key, so nothing here can carry a credential. The same forward-host checks as the agent policies apply (config, then DNS).
+ */
+export async function buildPublishFirewallPolicy(deps: FirewallPolicyDeps): Promise<NetworkPolicyRule[]> {
+  return [{ host: await checkedForwardHost(deps), purpose: "github_proxy" }];
+}
+
 /** The shared front half: the forward config re-validated and its host resolved, before any key is touched. */
 async function checkedForwardHost(deps: FirewallPolicyDeps): Promise<string> {
   // D#66 security review round 2, must-fix 1 (CWE-367 -> CWE-918): read
