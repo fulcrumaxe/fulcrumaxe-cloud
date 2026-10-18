@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import type { Product, Role } from "./types.js";
 import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
+import type { ContextAssembly } from "./contextLedgerWriter.js";
 import type { DenyReason, ReserveParams } from "@fx/spend";
 import type { RunFunding } from "./funding.js";
 import type { ModelFailureCode } from "./modelFailure.js";
@@ -274,6 +275,8 @@ export interface ExecutionRun {
   workdir?: string;
   /** D#600 CX-1a: the assembled prompt's sections (code, bytes, hash, trimmed bytes), stored on the run's context ledger. The prompt assembler (CX-2) supplies them; absent = none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-10a: how long the cloud took to assemble this prompt (and whether it built the repo map), stored on the run's context ledger. Absent: not recorded. */
+  contextAssembly?: ContextAssembly;
   /** D#601 MEM-3: the token estimate of the memory the prompt carries, recorded on the run's context ledger. Absent: not recorded (a run that did not recall, such as a fix round). */
   memoryTokens?: number;
   /**

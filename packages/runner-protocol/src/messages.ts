@@ -4,7 +4,7 @@
  * change may add a field but never remove or rename one.
  */
 import { z } from "zod";
-import { CONTEXT_MAX_COUNT, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
+import { CONTEXT_MAX_COUNT, CONTEXT_MAX_TOOL_CALLS, CONTEXT_SECTION_CODES, CONTEXT_TOOL_ENUM, CONTEXT_TRIMMED_REASONS } from "./contextLedger.js";
 import { MAX_ENVELOPE_INPUT_BYTES } from "./envelope.js";
 import { SESSION_ID_PATTERN } from "./job.js";
 
@@ -450,6 +450,8 @@ export const ContextLedgerBody = z
     cache_write: ledgerCount.optional(),
     memory: ledgerCount.optional(),
     tool_output_bytes: z.object(Object.fromEntries(CONTEXT_TOOL_ENUM.map((tool) => [tool, ledgerCount.optional()])) as Record<(typeof CONTEXT_TOOL_ENUM)[number], z.ZodOptional<typeof ledgerCount>>).strict(),
+    // D#600 CX-10a (additive): tool calls by tool, over the same closed list; a runner that does not send it leaves the row's null ("Not recorded").
+    tool_call_counts: z.object(Object.fromEntries(CONTEXT_TOOL_ENUM.map((tool) => [tool, safeInt.min(0).max(CONTEXT_MAX_TOOL_CALLS).optional()])) as Record<(typeof CONTEXT_TOOL_ENUM)[number], z.ZodOptional<z.ZodNumber>>).strict().optional(),
     compactions: safeInt.min(0).max(1_000_000),
   })
   .strict()

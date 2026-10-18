@@ -250,4 +250,87 @@ describe("run context ledger [pg] (D#600 CX-1a)", () => {
       expect(((await rows(A.accountId, A.runId)).rows[0].sections as Array<Record<string, unknown>>)[0]).not.toHaveProperty("trimmed_reason");
     });
   });
+
+  // D#600 CX-10a (migration 0883): tool call counts and the cloud's assembly time, through the real definer and the real run-writer login.
+  describe("tool call counts and assembly time (CX-10a)", () => {
+    const base = () => measureOf(usage("m1", 10, 20, 30));
+    const withCounts = (tool_call_counts: Record<string, number>) => ({ ...base(), tool_call_counts: tool_call_counts as never });
+    const recordWith = (accountId: string, runId: string, measure: ReturnType<typeof base>, assembly?: { ms: number; cold?: boolean }) =>
+      withTenant(db.runWriterPool, accountId, (client) => recordContextLedger(client, { accountId, runId, sections: [], measure, ...(assembly ? { assembly } : {}) }));
+    const cx = async (accountId: string, runId: string) => (await rows(accountId, runId)).rows.map((r) => [r.tool_call_counts, r.assembly_ms, r.assembly_cold]);
+
+    it("records {Read:3,Grep:1}, assembly 120 ms and a warm map, and reads them back for the same account only", async () => {
+      const A = await seed();
+      const B = await seed();
+      await recordWith(A.accountId, A.runId, withCounts({ Read: 3, Grep: 1 }), { ms: 120, cold: false });
+      expect(await cx(A.accountId, A.runId)).toEqual([[{ Read: 3, Grep: 1 }, 120, false]]);
+      const read = (tenant: string) => withTenant(db.pureAppUserPool, tenant, (c) => c.query("SELECT tool_call_counts, assembly_ms, assembly_cold FROM run_context_ledger WHERE run_id = $1", [A.runId]));
+      expect((await read(A.accountId)).rows).toEqual([{ tool_call_counts: { Read: 3, Grep: 1 }, assembly_ms: 120, assembly_cold: false }]);
+      expect((await read(B.accountId)).rows).toEqual([]);
+    });
+
+    it.each([
+      ["a tool outside the closed list", withCounts({ Evil: 1 })],
+      ["a negative count", withCounts({ Read: -1 })],
+      ["a fractional count", withCounts({ Read: 1.5 })],
+      ["a count over 1,000,000", withCounts({ Read: 1_000_001 })],
+    ])("refuses %s with invalid_message and writes nothing", async (_name, measure) => {
+      const A = await seed();
+      await expect(recordWith(A.accountId, A.runId, measure as never)).rejects.toBeInstanceOf(ContextLedgerInvalid);
+      expect((await rows(A.accountId, A.runId)).rows).toEqual([]);
+    });
+
+    it("refuses an assembly time out of range (negative, over 3,600,000, fractional) and accepts both ends", async () => {
+      const A = await seed();
+      for (const ms of [-1, 3_600_001, 1.5]) await expect(recordWith(A.accountId, A.runId, base(), { ms }), String(ms)).rejects.toBeInstanceOf(ContextLedgerInvalid);
+      expect((await rows(A.accountId, A.runId)).rows).toEqual([]);
+      const lo = await seed();
+      await recordWith(lo.accountId, lo.runId, base(), { ms: 0 });
+      const hi = await seed();
+      await recordWith(hi.accountId, hi.runId, base(), { ms: 3_600_000, cold: true });
+      expect(await cx(lo.accountId, lo.runId)).toEqual([[{}, 0, null]]);
+      expect(await cx(hi.accountId, hi.runId)).toEqual([[{}, 3_600_000, true]]);
+    });
+
+    it("a second call adds the counts per tool and keeps the first assembly values, even when the second carries others", async () => {
+      const A = await seed();
+      await recordWith(A.accountId, A.runId, withCounts({ Read: 3, Grep: 1 }), { ms: 120, cold: false });
+      await recordWith(A.accountId, A.runId, withCounts({ Read: 2, Bash: 4 }), { ms: 900, cold: true });
+      expect(await cx(A.accountId, A.runId)).toEqual([[{ Read: 5, Grep: 1, Bash: 4 }, 120, false]]);
+    });
+
+    it("a later call fills a value the first left null, and a call that carries none leaves the row's", async () => {
+      const A = await seed();
+      await recordWith(A.accountId, A.runId, base(), { ms: 40 });
+      await recordWith(A.accountId, A.runId, withCounts({ Glob: 2 }), { ms: 99, cold: true });
+      await recordWith(A.accountId, A.runId, base());
+      expect(await cx(A.accountId, A.runId)).toEqual([[{ Glob: 2 }, 40, true]]);
+    });
+
+    it("a caller that omits the new fields stores NULL, not 0, and the row still satisfies the basis check (the dispatch write and an older runner)", async () => {
+      const A = await seed();
+      await recordWith(A.accountId, A.runId, NOT_RECORDED_MEASURE as never);
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0]).toMatchObject({ basis: "partial", tool_call_counts: null, assembly_ms: null, assembly_cold: null });
+      // The eleven- and twelve-argument calls still resolve to the one function.
+      const B = await seed();
+      await withTenant(db.runWriterPool, B.accountId, async (c) => {
+        await c.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, '[]'::jsonb, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, 0, 'partial')", [B.accountId, B.runId]);
+        await c.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, '[]'::jsonb, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, 0, 'partial', 1)", [B.accountId, B.runId]);
+      });
+      expect(await cx(B.accountId, B.runId)).toEqual([[null, null, null]]);
+    });
+
+    it("a platform_ops login cannot call the function", async () => {
+      const A = await seed();
+      await db.admin.query("SET SESSION AUTHORIZATION platform_ops");
+      try {
+        await db.admin.query("SELECT set_config('app.account_id', $1, false)", [A.accountId]);
+        await expect(db.admin.query("SELECT run_context_ledger_record($1::uuid, $2::uuid, '[]'::jsonb, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, 0, 'partial', NULL, '{\"Read\":1}'::jsonb, 5, true)", [A.accountId, A.runId])).rejects.toMatchObject({ code: "42501" });
+      } finally {
+        await db.admin.query("RESET SESSION AUTHORIZATION");
+      }
+      expect((await rows(A.accountId, A.runId)).rows).toEqual([]);
+    });
+  });
 });

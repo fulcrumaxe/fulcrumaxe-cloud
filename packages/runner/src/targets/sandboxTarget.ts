@@ -988,7 +988,7 @@ export class SandboxTarget implements ExecutionTarget {
     bk.contextLedger = undefined;
     const sections: readonly ContextSection[] = bk.uncutSections ?? run.contextSections ?? [];
     try {
-      await this.withAccount(run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure, ...(run.memoryTokens === undefined ? {} : { memoryTokens: run.memoryTokens }) }));
+      await this.withAccount(run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure, ...(run.memoryTokens === undefined ? {} : { memoryTokens: run.memoryTokens }), ...(run.contextAssembly ? { assembly: run.contextAssembly } : {}) }));
     } catch (err) {
       reportError(err, { stage: "run.context_ledger" });
     }

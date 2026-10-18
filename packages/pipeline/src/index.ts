@@ -14,6 +14,7 @@ export * from "./advance/buildSlots.js";
 export * from "./advance/reservationPauses.js";
 export * from "./advance/waitingStages.js";
 export * from "./advance/attemptKeys.js";
+export * from "./advance/assemblyClock.js";
 export * from "./advance/stageRegistry.js";
 export * from "./advance/stageWords.js";
 export * from "./advance/stageStarts.js";

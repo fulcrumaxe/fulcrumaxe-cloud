@@ -409,6 +409,25 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       expect(t.inputs[1]).not.toHaveProperty("contextSections");
     });
 
+    it("D#600 CX-10a: the cloud's assembly time reaches the run's input when it is whole milliseconds in range (cold only when a boolean), and is dropped otherwise", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const t = build();
+      const start = (step: string, contextAssembly: unknown) => t.module.advanceStartRun({ accountId: a.accountId, workItemId: w, haltEpoch: 0, step: `review:${HEAD}:${step}`, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD, contextAssembly } as never);
+      await start("code-reviewer", { ms: 120, cold: false });
+      expect(t.inputs[0]).toMatchObject({ contextAssembly: { ms: 120, cold: false } });
+      await start("acceptance-tester", { ms: 0 });
+      expect(t.inputs[1]!.contextAssembly).toEqual({ ms: 0 });
+      let n = 2;
+      for (const bad of [{ ms: -1 }, { ms: 3_600_001 }, { ms: 1.5 }, { ms: "5" }, { cold: true }, "x", null]) {
+        await start(`security-reviewer-${n}`, bad);
+        expect(t.inputs[n]).not.toHaveProperty("contextAssembly");
+        n += 1;
+      }
+      await start("debater", { ms: 5, cold: "yes", extra: "SECRET" });
+      expect(t.inputs[n]!.contextAssembly).toEqual({ ms: 5 });
+    });
+
     it("D#601 MEM-3: the memory token figure reaches the run's input when it is a whole number of zero or more (0 included), and is dropped otherwise", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a);

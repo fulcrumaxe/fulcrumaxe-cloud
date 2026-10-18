@@ -263,6 +263,14 @@ describe("RunnerTarget [pg]", () => {
         expect(total).toBeLessThanOrEqual(Buffer.byteLength(prompt, "utf8"));
       });
 
+      it("D#600 CX-10a: dispatch also records the cloud's assembly time; a runner build has no map lookup, so the cold flag stays null", async () => {
+        const w = await world();
+        const { prompt, sections } = assembled();
+        const run = { ...(await insertRun(w, { role: "executor" })), prompt, contextSections: sections, contextAssembly: { ms: 87 } };
+        await target(db.runWriterPool).target.dispatch(run);
+        expect((await ledger(w.accountId, run.id)).rows[0]).toMatchObject({ assembly_ms: 87, assembly_cold: null, tool_call_counts: null });
+      });
+
       it("resume writes the same row for the new run", async () => {
         const w = await world();
         const { prompt, sections } = assembled();

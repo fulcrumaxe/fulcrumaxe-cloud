@@ -146,7 +146,10 @@ describe("createRepoMapPort", () => {
     const { port, cache } = portFor(source);
     const first = await port.forRun(REQ);
     const second = await port.forRun(REQ);
-    expect(second).toEqual(first);
+    // D#600 CX-10a: the first run built the map (cold), the second read it back (warm); the text is the same.
+    expect(first!.cold).toBe(true);
+    expect(second!.cold).toBe(false);
+    expect({ ...second, cold: true }).toEqual(first);
     expect(source.calls.tree).toBe(1);
     expect(cache.writes).toBe(1);
     source.head = SHA_B;

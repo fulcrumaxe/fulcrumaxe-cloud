@@ -91,7 +91,15 @@ export interface ContextLedgerMeasure {
    * runner daemon's measure and the runner wire never carry it, so a runner row stays null ("Not recorded").
    */
   denied_tool_calls?: number;
+  /**
+   * D#600 CX-10a: tool calls the run made, by tool (a count of the stream's `tool_use` blocks, each call once), over the same closed list as `tool_output_bytes`.
+   * A measure from a capture always has it ({} when the run called nothing); absent on a measure that did not come from a stream ("Not recorded").
+   */
+  tool_call_counts?: Partial<Record<ContextTool, number>>;
 }
+
+/** Calls counted per tool: the store refuses a figure above this. */
+export const CONTEXT_MAX_TOOL_CALLS = 1_000_000;
 
 /** A count above this is not a real one (a run does not reach a thousandth of it); the field is ignored. */
 export const CONTEXT_MAX_COUNT = 1_000_000_000_000;
@@ -168,6 +176,7 @@ export class ContextLedgerCapture {
   private overflow = false;
   private readonly toolById = new Map<string, ContextTool>();
   private readonly toolBytes = new Map<ContextTool, number>();
+  private readonly toolCalls = new Map<ContextTool, number>();
   private compactions = 0;
   /** Tool call ids the CLI refused for a permission rule: from a refused `tool_result` and from the final `result`'s `permission_denials`; one id counts once. */
   private readonly denied = new Set<string>();
@@ -200,7 +209,11 @@ export class ContextLedgerCapture {
     for (const block of content) {
       if (!isRecord(block) || block.type !== "tool_use" || typeof block.id !== "string" || block.id === "" || block.id.length > MAX_ID_CHARS) continue;
       if (this.toolById.size >= MAX_TRACKED_TOOL_CALLS) break;
-      this.toolById.set(block.id, toolOf(block.name));
+      // A call id seen again (the same block repeated in a later line) is one call.
+      if (this.toolById.has(block.id)) continue;
+      const tool = toolOf(block.name);
+      this.toolById.set(block.id, tool);
+      this.toolCalls.set(tool, Math.min((this.toolCalls.get(tool) ?? 0) + 1, CONTEXT_MAX_TOOL_CALLS));
     }
     const usage = message.usage;
     const id = message.id;
@@ -255,6 +268,11 @@ export class ContextLedgerCapture {
       const bytes = this.toolBytes.get(tool);
       if (bytes !== undefined) tool_output_bytes[tool] = bytes;
     }
+    const tool_call_counts: Partial<Record<ContextTool, number>> = {};
+    for (const tool of CONTEXT_TOOL_ENUM) {
+      const calls = this.toolCalls.get(tool);
+      if (calls !== undefined) tool_call_counts[tool] = calls;
+    }
     return {
       basis: measured ? "measured" : "partial",
       first_turn_input_tokens: measured ? this.firstContext : null,
@@ -263,8 +281,19 @@ export class ContextLedgerCapture {
       cache_write_tokens: measured ? Math.min(this.cacheWrite, CONTEXT_MAX_COUNT) : null,
       tool_output_bytes,
       compactions: this.compactions,
+      tool_call_counts,
     };
   }
+}
+
+function addToolCalls(a: Partial<Record<ContextTool, number>> | undefined, b: Partial<Record<ContextTool, number>> | undefined): Partial<Record<ContextTool, number>> {
+  const out: Partial<Record<ContextTool, number>> = {};
+  for (const tool of CONTEXT_TOOL_ENUM) {
+    const x = a?.[tool];
+    const y = b?.[tool];
+    if (x !== undefined || y !== undefined) out[tool] = Math.min((x ?? 0) + (y ?? 0), CONTEXT_MAX_TOOL_CALLS);
+  }
+  return out;
 }
 
 /**
@@ -288,6 +317,7 @@ export function mergeContextLedgerMeasures(a: ContextLedgerMeasure | undefined, 
     cache_write_tokens: add(a.cache_write_tokens, b.cache_write_tokens),
     tool_output_bytes,
     compactions: Math.min(a.compactions + b.compactions, CONTEXT_MAX_COUNT),
+    ...(a.tool_call_counts === undefined && b.tool_call_counts === undefined ? {} : { tool_call_counts: addToolCalls(a.tool_call_counts, b.tool_call_counts) }),
     ...(a.denied_tool_calls === undefined && b.denied_tool_calls === undefined ? {} : { denied_tool_calls: Math.min((a.denied_tool_calls ?? 0) + (b.denied_tool_calls ?? 0), 1_000_000) }),
   };
 }
@@ -302,6 +332,8 @@ export interface ContextLedgerWire {
   cache_write?: number;
   memory?: number;
   tool_output_bytes: Partial<Record<ContextTool, number>>;
+  /** D#600 CX-10a: tool calls by tool; absent when the measure carries none. */
+  tool_call_counts?: Partial<Record<ContextTool, number>>;
   compactions: number;
 }
 
@@ -316,6 +348,7 @@ export function contextLedgerToWire(measure: ContextLedgerMeasure, sections: rea
     ...keep("cache_write", measure.cache_write_tokens),
     ...keep("memory", memoryTokens),
     tool_output_bytes: { ...measure.tool_output_bytes },
+    ...(measure.tool_call_counts === undefined ? {} : { tool_call_counts: { ...measure.tool_call_counts } }),
     compactions: measure.compactions,
   };
 }
@@ -341,6 +374,7 @@ export function contextLedgerFromWire(wire: ContextLedgerWire): { measure: Conte
       cache_write_tokens: wire.cache_write ?? null,
       tool_output_bytes: { ...wire.tool_output_bytes },
       compactions: wire.compactions,
+      ...(wire.tool_call_counts === undefined ? {} : { tool_call_counts: { ...wire.tool_call_counts } }),
     },
     sections: wire.sections,
     ...(wire.memory === undefined ? {} : { memoryTokens: wire.memory }),

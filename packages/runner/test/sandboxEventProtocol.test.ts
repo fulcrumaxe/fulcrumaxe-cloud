@@ -990,6 +990,7 @@ describe("D#600 CX-1a: the context measure of the command's own stream", () => {
         compactions: 1,
         // D#600 CX-5b: a sandbox command always reports its count of refused tool calls (here none).
         denied_tool_calls: 0,
+        tool_call_counts: { Bash: 1 },
       },
     ]);
   });

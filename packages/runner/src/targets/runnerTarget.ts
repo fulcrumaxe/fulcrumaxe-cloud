@@ -252,7 +252,7 @@ export class RunnerTarget implements ExecutionTarget {
     const sections = run.contextSections;
     if (sections === undefined || sections.length === 0) return;
     try {
-      await withTenant(this.deps.pool, run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure: NOT_RECORDED_MEASURE }));
+      await withTenant(this.deps.pool, run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure: NOT_RECORDED_MEASURE, ...(run.contextAssembly ? { assembly: run.contextAssembly } : {}) }));
     } catch (err) {
       reportError(err, { stage: "run.context_ledger" });
     }

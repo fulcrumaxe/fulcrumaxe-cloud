@@ -14,6 +14,7 @@ import { agentOutputBlock } from "../plan/envelope.js";
 import { takeBuildSlot } from "./buildSlots.js";
 import { pauseForDenial } from "./reservationPauses.js";
 import { attemptKey } from "./attemptKeys.js";
+import { clampAssemblyMs } from "./assemblyClock.js";
 import { assemblePrompt, renderMemorySlot, sha256Of, MEMORY_MARKER_ROOM, type PinnedItem, type AssembledPrompt, type AssembleOptions, type MemoryPort, type NoteItem, type RenderedMemory } from "../prompt/assemblePrompt.js";
 import { createMemoryPort, memoryTokensOf } from "../prompt/memoryRecall.js";
 import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
@@ -394,7 +395,12 @@ export async function startBuildForItem(
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
   // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
   // A runner run gets its map from the daemon's own mirror (CX-3b), so the cloud builds none for it.
-  const map = prior || !options.repoMap || facts.repo_id === null || promptRuntimeOf(executionMode) !== "sandbox" ? undefined : await options.repoMap.forRun({ accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name });
+  // D#600 CX-10a: the assembly time is the map lookup plus the assembler call (a monotonic clock), and nothing between them (stack base, budget and rule reads,
+  // pin fetches are not assembly). `cold` is the map port's answer: true when the map had to be built; a run with no map lookup (a runner run) records the time alone and leaves it null.
+  const mapStarted = performance.now();
+  const mapAnswer = prior || !options.repoMap || facts.repo_id === null || promptRuntimeOf(executionMode) !== "sandbox" ? undefined : await options.repoMap.forRun({ accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name });
+  const mapMs = performance.now() - mapStarted;
+  const map = mapAnswer ? { version: mapAnswer.version, text: mapAnswer.text } : undefined;
   // D#598 P3b: an item with a stack parent starts from the parent's open pull request head, or is refused with a reason. A replay of a step that already
   // started its run reads nothing (the run exists and its prompt is not used again). Same rules for every repository: no pairing, plan or account test here.
   let stackBase: { branch: string; sha: string } | undefined;
@@ -434,6 +440,7 @@ export async function startBuildForItem(
   const excludedPins = allPins.length - pinPaths.length;
   const fetched = pinPaths.length === 0 || facts.repo_id === null ? undefined : await readPins(options.pins, { accountId, repoId: facts.repo_id, owner: facts.gh_owner, name: facts.gh_name, paths: pinPaths, ...(stackBase ? { sha: stackBase.sha } : planeBase ? { sha: planeBase.sha } : {}) });
   const pinRead = allPins.length === 0 || facts.repo_id === null ? undefined : { ...(fetched ?? { items: [], missing: 0, tooLarge: 0 }), excluded: excludedPins };
+  const assembleStarted = performance.now();
   const assembled = assembleExecutorPrompt(
     {
       owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes),
@@ -443,6 +450,7 @@ export async function startBuildForItem(
     },
     { spill: true, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
   );
+  const contextAssembly = { ms: clampAssemblyMs(mapMs + (performance.now() - assembleStarted)), ...(mapAnswer && typeof mapAnswer.cold === "boolean" ? { cold: mapAnswer.cold } : {}) };
   const { prompt, spill: assembledSpill, memoryAside } = assembled;
   const notesOfPins = pinRead ? pinLedgerNotes(pinRead, budgetBytes) : [];
   const sections = [...assembled.sections, ...notesOfPins];
@@ -460,7 +468,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, contextAssembly, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, ...(planeBase ? { headSha: planeBase.sha } : {}), expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);

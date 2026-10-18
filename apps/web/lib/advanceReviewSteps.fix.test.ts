@@ -43,6 +43,14 @@ describe("startFixBody: the Spec in a fix round", () => {
     expect(req.fallbackContextSections.map((s) => s.code)).toEqual(["boundary", "spec", "findings", "output"]);
   });
 
+  it("D#600 CX-10a: a fix prompt records its assembly time alone (whole milliseconds), with no cold flag", async () => {
+    const f = fixture("sandbox");
+    await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }]);
+    const req = f.started.mock.calls[0]!.at(-1) as { contextAssembly: Record<string, unknown> };
+    expect(Object.keys(req.contextAssembly)).toEqual(["ms"]);
+    expect(Number.isInteger(req.contextAssembly.ms)).toBe(true);
+  });
+
   it("a runner round may be a follow-up in a fresh session, so it keeps the Spec body", async () => {
     const f = fixture("runner_local");
     await startFixBody(f.worker, WHO, f.ctx, PR, "act", 1, [{ role: "code-reviewer", runId: "x" }]);
@@ -68,6 +76,15 @@ describe("startReviewerBody", () => {
     const req = f.started.mock.calls[0]!.at(-1) as { contextSections: Array<{ code: string; bytes: number }> };
     expect(req.contextSections.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
     expect(req.contextSections.every((s) => s.bytes > 0)).toBe(true);
+  });
+
+  it("D#600 CX-10a: a review prompt records its assembly time alone (whole milliseconds), with no cold flag", async () => {
+    const f = fixture("sandbox");
+    await startReviewerBody(f.worker, WHO, f.ctx, PR, "code-reviewer", [], 0);
+    const req = f.started.mock.calls[0]!.at(-1) as { contextAssembly: Record<string, unknown> };
+    expect(Object.keys(req.contextAssembly)).toEqual(["ms"]);
+    expect(Number.isInteger(req.contextAssembly.ms)).toBe(true);
+    expect(req.contextAssembly.ms as number).toBeGreaterThanOrEqual(0);
   });
 
   it("D#598 P7a: the security reviewer's prompt gets the step-back once two fix rounds have started, for any repository", async () => {

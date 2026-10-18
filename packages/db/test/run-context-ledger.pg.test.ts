@@ -9,7 +9,7 @@ import { seedAccount } from './helpers/seed.js';
 
 const MIGRATION = '0792_run_context_ledger.sql';
 const ROLE = 'run_context_ledger_definer';
-const FN = 'run_context_ledger_record(uuid,uuid,jsonb,bigint,bigint,bigint,bigint,bigint,jsonb,integer,text,integer)';
+const FN = 'run_context_ledger_record(uuid,uuid,jsonb,bigint,bigint,bigint,bigint,bigint,jsonb,integer,text,integer,jsonb,integer,boolean)';
 
 /** Everything the role holds, exactly. */
 const EXPECTED_PRIVILEGES = [
@@ -77,7 +77,7 @@ describe(`migration 0792: ${ROLE}, run_context_ledger and its function (D#600 CX
     expect(fk.rows).toEqual([{ confdeltype: 'c' }]);
   });
 
-  it.each([MIGRATION, '0869_run_context_ledger_merge_sections.sql', '0875_run_context_ledger_denied_calls.sql'])('%s never grants platform_ops a privilege, revokes one from it or makes it an owner', (file) => {
+  it.each([MIGRATION, '0869_run_context_ledger_merge_sections.sql', '0875_run_context_ledger_denied_calls.sql', '0883_run_context_ledger_tool_calls_assembly.sql'])('%s never grants platform_ops a privilege, revokes one from it or makes it an owner', (file) => {
     const sql = readFileSync(path.join(DEFAULT_MIGRATIONS_DIR, file), 'utf8')
       .split('\n')
       .map((line) => line.replace(/--.*$/, ''))
@@ -202,7 +202,7 @@ describe('migration 0875: run_context_ledger_record stores denied_tool_calls and
     await expect(record(u.accountId, u.runId, 0, [note('pin_gone')])).rejects.toThrow(/invalid_message/);
   });
 
-  it('the old eleven-argument function is gone: one function, one owner, one ACL (the exact signature the shape check pins)', async () => {
+  it('the older functions are gone: one function, one owner, one ACL (the exact signature the shape check pins)', async () => {
     const { rows } = await admin.query(`SELECT p.oid::regprocedure::text AS fn FROM pg_proc p WHERE p.proname = 'run_context_ledger_record'`);
     expect(rows.map((r) => r.fn)).toEqual([FN]);
   });
