@@ -124,7 +124,7 @@ test.describe("D#483 S3-L2b: Inbox rows and filters", () => {
     await expect(rows(page).filter({ hasText: "A planned task" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Task D#2 · H14a");
     await expect(rows(page).filter({ hasText: "A planned task" }).locator('[data-testid="pl-inbox-details"]')).toHaveCount(0);
     await expect(rows(page).filter({ hasText: "A Discussion" }).locator('[data-testid="pl-inbox-badges"]')).toHaveText("Discussion #483");
-    expect(m.requests).toContain(`GET /api/v1/proposals?repo_id=${REPO}&state=new&owner=product`);
+    expect(m.requests).toContain(`GET /api/v1/proposals?repo_id=${REPO}&state=new&owner=product&section=new`);
     await axeClean(page);
 
     await press(page, filter(page, "approved"));
@@ -142,12 +142,12 @@ test.describe("D#483 S3-L2b: Inbox rows and filters", () => {
 
     await press(page, filter(page, "withdrawn"));
     await expect(rows(page)).toHaveCount(1);
-    await expect(rows(page).locator("button")).toHaveCount(0);
+    await expect(rows(page).locator("button:not([data-testid='pl-inbox-toggle'])")).toHaveCount(0);
     await expect(tid(page, "pl-inbox-gone")).toContainText("Closed or finished at its source");
 
     await press(page, filter(page, "own_loop"));
     await expect(rows(page)).toHaveCount(1);
-    await expect(rows(page).locator("button")).toHaveCount(0);
+    await expect(rows(page).locator("button:not([data-testid='pl-inbox-toggle'])")).toHaveCount(0);
     await expect(tid(page, "pl-inbox-loop")).toHaveText("Your own development loop handles this. fulcrumaxe only shows it.");
     expect(m.requests).toContain(`GET /api/v1/proposals?repo_id=${REPO}&owner=internal_loop`);
     await axeClean(page);

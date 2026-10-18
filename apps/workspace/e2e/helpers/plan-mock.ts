@@ -28,8 +28,9 @@ export const REPOS = {
 
 export type Proposal = Record<string, unknown> & { id: string; state: string; owner_process: string; repo_id: string };
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const SECTION_OF: Record<string, string> = { verified: "new", partly_verified: "new", pending: "being_checked", refuted: "couldnt_confirm", check_failed: "couldnt_confirm", not_checked: "not_checked" };
 export function proposal(n: number, over: Record<string, unknown> = {}): Proposal {
-  return {
+  const row = {
     id: uuid(n),
     repo_id: REPO,
     dedupe_key: `gh:issue:${n}`,
@@ -53,8 +54,19 @@ export function proposal(n: number, over: Record<string, unknown> = {}): Proposa
     work_item_stage: null,
     created_at: `2026-10-16T06:${String(60 - n).padStart(2, "0")}:00.000Z`,
     updated_at: "2026-10-16T06:00:00.000Z",
+    // D#483 S4-h: what the verifier saw. The section is what the server derives (S4-i): only a new, product-owned proposal has one.
+    verification: "verified",
+    verified_at: "2026-10-16T06:30:00.000Z",
+    verified_sha: "0123456789abcdef0123456789abcdef01234567",
+    verify_attempts: 0,
+    verify_attempts_max: 3,
+    verify_retry: false,
+    claim_counts: { supported: 0, refuted: 0, unverifiable: 0, pending: 0 },
+    evidence_count: 0,
     ...over,
-  } as Proposal;
+  } as Record<string, unknown>;
+  if (!("inbox_section" in over)) row.inbox_section = row.state === "new" && row.owner_process === "product" ? SECTION_OF[row.verification as string] : null;
+  return row as Proposal;
 }
 
 export interface Reply { status: number; json?: unknown; headers?: Record<string, string>; abort?: boolean }
@@ -85,6 +97,8 @@ export interface PlanMock {
   onImport: (() => void) | null;
   /** Answers to GET /repos: when true the list fails with a 500. */
   reposFail: boolean;
+  /** D#483 S4-h: what the detail route answers for a proposal id: its claims and evidence, or a Reply for a refusal. An id not here answers 404. */
+  details: Record<string, { claims: unknown[]; evidence: unknown[] } | Reply>;
   /**
    * D#483 S5-e1: what the estimate route answers, by proposal id; null (the default) leaves the route unanswered (404), as before it existed.
    * `meta` is the set-level figures. An id missing from `estimates` is answered 404 like an unknown proposal.
@@ -129,6 +143,7 @@ export function newMock(): PlanMock {
     removeReply: [],
     onImport: null,
     reposFail: false,
+    details: {},
     estimates: null,
     estimateMeta: { margin_pct: 20, remaining_budget_usd: 437, first_run_usd: 10 },
     holds: [],
@@ -168,11 +183,20 @@ export async function installMock(page: Page, m: PlanMock) {
         let rows = m.proposals.filter((x) => x.repo_id === q.get("repo_id"));
         if (q.get("state")) rows = rows.filter((x) => x.state === q.get("state"));
         if (q.get("owner")) rows = rows.filter((x) => x.owner_process === q.get("owner"));
+        if (q.get("section")) rows = rows.filter((x) => x.inbox_section === q.get("section"));
         rows = [...rows].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
         const from = q.get("cursor") ? Number(q.get("cursor")) : 0;
         const page_ = rows.slice(from, from + m.pageSize);
         const next = from + m.pageSize < rows.length ? String(from + m.pageSize) : null;
         return send(route, { status: 200, json: { proposals: page_, next_cursor: next } });
+      }
+      const one = /^\/api\/v1\/proposals\/([^/]+)$/.exec(p);
+      if (one) {
+        const row = m.proposals.find((x) => x.id === one[1]);
+        const d = m.details[one[1]!];
+        if (!row || !d) return send(route, refusal(404, "not_found"));
+        if ("status" in d) return send(route, d);
+        return send(route, { status: 200, json: { proposal: { ...row, claims: d.claims, evidence: d.evidence } } });
       }
       const plan = /^\/api\/v1\/repos\/([^/]+)\/plan$/.exec(p);
       if (plan) {
