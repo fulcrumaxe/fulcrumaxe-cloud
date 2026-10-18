@@ -4,7 +4,7 @@ import type { SandboxRetentionPolicy } from "./sandboxNaming.js";
 import type { ExtensionPolicy } from "./runLimitDecision.js";
 import type { RunLimits } from "./meteringGuard.js";
 import { SANDBOX_PINNED_VCPUS } from "@fx/spend";
-import type { ContextLedgerMeasure } from "@fulcrumaxe/runner-protocol";
+import type { ContextLedgerMeasure, ContextSpill } from "@fulcrumaxe/runner-protocol";
 
 /**
  * H09a's sandbox lifecycle port. H04 (`@fx/runtime`) owns starting an
@@ -114,6 +114,13 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   /** D#600 CX-1a: called once when this command's stream ends, with what the stream said about the run's context (turn sizes,
    * cache tokens, tool output bytes, compactions). Integers only; the caller merges the measures of a run's commands. Best effort. */
   onContextLedger?: (measure: ContextLedgerMeasure) => void;
+  /**
+   * D#600 CX-4a: files holding text the prompt cut, written to `/fx/context/<code>.md` (outside the checkout) before the agent starts, with the uncut prompt
+   * the port sends instead if a file cannot be written. `onSpill` is called once with whether they were written, so the caller records the sections of the
+   * prompt that went out.
+   */
+  spill?: ContextSpill;
+  onSpill?: (written: boolean) => void;
   /** D#2 H14c-3-2d-1 (C56 s1): this run's limits. Fields left out take the port's
    * own defaults, so nothing one run sets reaches another. The port refuses a launch
    * whose `maxRunMs` is not below its sandbox's `timeoutMs` (MP-CLOCK). */

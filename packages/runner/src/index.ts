@@ -41,4 +41,5 @@ export * from "./lostRunSweep.js";
 export * from "@fx/runtime/src/operatorSubscription.js";
 export * from "./repoClone.js";
 export * from "./sandboxReap.js";
-export type { ContextSection, ContextSectionCode } from "@fulcrumaxe/runner-protocol";
+export type { ContextSection, ContextSectionCode, ContextSpill, ContextSpillCode, ContextTrimmedReason } from "@fulcrumaxe/runner-protocol";
+export { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_PROMPT_CHARS, CONTEXT_SPILL_MAX_TOTAL_BYTES, contextSpillPath, contextSpillWrites, isContextSpill, isContextSpillCode, trimmedMarker } from "@fulcrumaxe/runner-protocol";

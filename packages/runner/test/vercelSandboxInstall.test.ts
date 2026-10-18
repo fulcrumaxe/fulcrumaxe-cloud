@@ -52,7 +52,7 @@ interface Knobs {
   /** 1-based index of the policy update that throws, and for how many consecutive updates. */
   failUpdate?: { at: number; times: number };
   /** A simulated postinstall run as the agent's own user: it rewrites a config file and/or replaces the CLI. */
-  tamper?: { config?: boolean; cli?: boolean };
+  tamper?: { config?: boolean; cli?: boolean; spill?: boolean };
 }
 
 function fakeSdk(knobs: Knobs = {}) {
@@ -98,6 +98,7 @@ function fakeSdk(knobs: Knobs = {}) {
           disk[FX_AGENT_SETTINGS_PATH] = "TAMPERED";
           disk[FX_LIMIT_HOOK_PATH] = "TAMPERED";
         }
+        if (knobs.tamper?.spill) disk["/fx/context/note.md"] = "FORGED FINDING";
         if (knobs.tamper?.cli) cliReplaced = true;
         out = exitCode === 0 ? "" : `ERR_PNPM_FETCH_FAIL token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 registry unreachable\n`;
       }
@@ -275,6 +276,20 @@ describe("the agent is started from what the runner wrote, not from what the ins
     expect(seen[FX_AGENT_SETTINGS_PATH]).not.toBe("TAMPERED");
     expect(seen[FX_LIMIT_HOOK_PATH]).not.toBe("TAMPERED");
     expect(JSON.parse(seen[FX_AGENT_SETTINGS_PATH]!)).toBeTypeOf("object");
+  });
+
+  it("D#600 CX-4a: a postinstall that replaces a spill file: the files are written again after the install and before the agent, which sees the original", async () => {
+    const f = fakeSdk({ lock: "pnpm", tamper: { spill: true } });
+    const spill = {
+      files: [{ code: "note" as const, text: "THE FULL NOTE" }],
+      uncut: { prompt: "UNCUT", sections: [{ code: "note" as const, bytes: 3, sha256: "a".repeat(64), trimmed_bytes: 0 }] },
+    };
+    const { run } = await launch(f, { prompt: "CUT [trimmed: full text at /fx/context/note.md]", spill });
+    await run.launched;
+    expect(f.agentSaw()!["/fx/context/note.md"]).toBe("THE FULL NOTE");
+    const spillWrites = f.writes.filter((w) => w.path === "/fx/context/note.md");
+    expect(spillWrites.length).toBeGreaterThanOrEqual(2);
+    expect(f.trace.slice(f.trace.indexOf("cmd:fx-deps-install") + 1)).toEqual(["cmd:fx-pin", "write:batch", "cmd:agent"]);
   });
 
   it("a postinstall that replaces the CLI: the pin check fails, the launch is refused and no agent command is issued", async () => {

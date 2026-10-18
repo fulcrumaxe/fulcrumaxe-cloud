@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ContextLedgerCapture, type ContextLedgerMeasure, type ContextSection } from "@fulcrumaxe/runner-protocol";
+import { ContextLedgerCapture, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
 import { buildExecutionRun, startAgentRun, type StartAgentRunInput } from "../src/startAgentRun.js";
 import { SandboxTarget } from "../src/targets/sandboxTarget.js";
 import type { SandboxPort } from "../src/sandboxPort.js";
@@ -23,7 +23,7 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
   }
 
   /** A started run whose fake port reports `measure` (when given) from its command stream, as the real port does at stream end. */
-  async function started(measure: ContextLedgerMeasure | undefined) {
+  async function started(measure: ContextLedgerMeasure | undefined, spill?: { written: boolean; value: ContextSpill }) {
     const accountId = randomUUID();
     const userId = randomUUID();
     const repoId = randomUUID();
@@ -33,7 +33,7 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
     await seedRepo(db.admin, accountId, repoId);
     await seedWorkItem(db.admin, accountId, workItemId, repoId, { ghNumber: 5 });
     const input: StartAgentRunInput = {
-      accountId, repoId, workItemId, role: "code-reviewer", product: "team", roleCard: "rc", prompt: "p", model: "haiku-4.5", capUsd: 5,
+      accountId, repoId, workItemId, role: "code-reviewer", product: "team", roleCard: "rc", prompt: "p", model: "haiku-4.5", capUsd: 5, ...(spill ? { contextSpill: spill.value } : {}),
       spend: { plan: "starter", estimateComputeUsd: 1, trigger: "foreground" },
     };
     const h = createSandboxTargetHarness(db.runWriterPool);
@@ -42,6 +42,7 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
       startDetached(handle, opts) {
         const out = h.deps.sandboxPort.startDetached(handle, opts);
         if (measure !== undefined) opts.onContextLedger?.(measure);
+        if (spill !== undefined && opts.spill === spill.value) opts.onSpill?.(spill.written);
         return out;
       },
     };
@@ -88,5 +89,26 @@ describe("sandbox target records the context ledger [pg] (D#600 CX-1a)", () => {
     const s = await started(measureOf());
     await expect(s.target.finalize({ ...s.run, contextSections: [section("not_a_section")] }, { status: "succeeded", usd: 0.1 })).resolves.toBeDefined();
     expect((await rowsOf(s.accountId, s.id)).rows).toEqual([]);
+  });
+
+  // D#600 CX-4a: the spill reaches the port, and the ledger records the sections of the prompt that went out.
+  describe("the spill and the sections of the prompt that went out (CX-4a)", () => {
+    const cutSections: ContextSection[] = [{ ...section("note"), bytes: 40, trimmed_bytes: 3000, trimmed_reason: "over_budget" }, section("spec")];
+    const uncutSections: ContextSection[] = [{ ...section("note"), bytes: 3040 }, section("spec")];
+    const spillValue: ContextSpill = { files: [{ code: "note", text: "N".repeat(3000) }], uncut: { prompt: "uncut", sections: uncutSections } };
+
+    it("a written spill records the cut sections with their trimmed_reason", async () => {
+      const s = await started(measureOf(), { written: true, value: spillValue });
+      await s.target.finalize({ ...s.run, contextSections: cutSections, contextSpill: spillValue }, { status: "succeeded", usd: 0.1 });
+      expect((await rowsOf(s.accountId, s.id)).rows[0].sections).toEqual(cutSections);
+    });
+
+    it("a spill that could not be written records the uncut sections: trimmed_bytes 0 and no reason", async () => {
+      const s = await started(measureOf(), { written: false, value: spillValue });
+      await s.target.finalize({ ...s.run, contextSections: cutSections, contextSpill: spillValue }, { status: "succeeded", usd: 0.1 });
+      const sections = (await rowsOf(s.accountId, s.id)).rows[0].sections as ContextSection[];
+      expect(sections).toEqual(uncutSections);
+      expect(sections.every((x) => x.trimmed_bytes === 0 && !("trimmed_reason" in x))).toBe(true);
+    });
   });
 });

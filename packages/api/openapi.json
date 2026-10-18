@@ -5412,7 +5412,8 @@
                               "corrections",
                               "findings",
                               "output",
-                              "repo_instructions"
+                              "repo_instructions",
+                              "pinned"
                             ]
                           },
                           "bytes": {
@@ -5424,6 +5425,14 @@
                             "type": "integer",
                             "minimum": 0,
                             "maximum": 9007199254740991
+                          },
+                          "trimmed_reason": {
+                            "type": "string",
+                            "enum": [
+                              "findings_cap",
+                              "memory_slot",
+                              "over_budget"
+                            ]
                           }
                         },
                         "required": [

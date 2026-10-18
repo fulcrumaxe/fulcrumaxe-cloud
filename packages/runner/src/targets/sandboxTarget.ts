@@ -60,7 +60,7 @@ import {
   type StartDetachedResult,
 } from "../sandboxPort.js";
 import { reportError } from "@fx/telemetry";
-import { mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection } from "@fulcrumaxe/runner-protocol";
+import { mergeContextLedgerMeasures, type ContextLedgerMeasure, type ContextSection, type ContextSpill } from "@fulcrumaxe/runner-protocol";
 import { recordContextLedger } from "../contextLedgerWriter.js";
 import { modelIdForCliName } from "../vercelSandboxPort.js";
 import type { BrokenConnectionCode, ConnectionStatusPort } from "../connectionStatusPort.js";
@@ -237,6 +237,8 @@ interface RunBookkeeping {
   meteredModelCalls: number;
   /** D#600 CX-1a: what this run's streams said about its context, merged over its commands; recorded once at finalize. */
   contextLedger?: ContextLedgerMeasure;
+  /** D#600 CX-4a: set when the spill files could not be written and the uncut prompt went out: the sections of THAT prompt are what the ledger records. */
+  uncutSections?: readonly ContextSection[];
   /** The metered token total (W3) and the plausibility flags (MP-PLAUS), both for the terminal report. */
   meteredTokens: TokenTotals;
   /** The same tokens by the model each message was priced at (W2). */
@@ -476,6 +478,7 @@ export class SandboxTarget implements ExecutionTarget {
       ...this.extensionOf(run, bk),
       onModelCalls: (n) => (bk.meteredModelCalls += n),
       onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
+      ...this.spillOf(run, bk),
       ...(run.limits && { limits: run.limits }),
       onEvent,
       onStage,
@@ -685,6 +688,7 @@ export class SandboxTarget implements ExecutionTarget {
         ...this.extensionOf(run, bk),
         onModelCalls: (n) => (bk.meteredModelCalls += n),
         onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
+        ...this.spillOf(run, bk),
         ...(run.limits && { limits: run.limits }),
         onEvent,
         onStage,
@@ -698,7 +702,7 @@ export class SandboxTarget implements ExecutionTarget {
         return this.dispatch(
           run.fallbackPrompt === undefined
             ? run
-            : { ...run, prompt: run.fallbackPrompt, contextSections: run.fallbackContextSections },
+            : { ...run, prompt: run.fallbackPrompt, contextSections: run.fallbackContextSections, contextSpill: run.fallbackContextSpill },
         );
       }
       throw err;
@@ -951,12 +955,19 @@ export class SandboxTarget implements ExecutionTarget {
    * D#600 CX-1a: writes the context ledger row from what this instance's streams measured. Once per run (the measure is taken off the
    * bookkeeping), and never fatal: a ledger is information, so a failure is reported and the run still ends as it would have.
    */
+  /** D#600 CX-4a: the files the prompt's cut text lives in, for the port to write. A file that could not be written means the uncut prompt went out, so its sections are recorded. */
+  private spillOf(run: ExecutionRun, bk: RunBookkeeping): { spill?: ContextSpill; onSpill?: (written: boolean) => void } {
+    const spill = run.contextSpill;
+    if (spill === undefined) return {};
+    return { spill, onSpill: (written) => { bk.uncutSections = written ? undefined : spill.uncut.sections; } };
+  }
+
   private async recordContext(run: ExecutionRun): Promise<void> {
     const bk = this.runs.get(run.id);
     const measure = bk?.contextLedger;
     if (bk === undefined || measure === undefined) return;
     bk.contextLedger = undefined;
-    const sections: readonly ContextSection[] = run.contextSections ?? [];
+    const sections: readonly ContextSection[] = bk.uncutSections ?? run.contextSections ?? [];
     try {
       await this.withAccount(run.accountId, (client) => recordContextLedger(client, { accountId: run.accountId, runId: run.id, sections, measure, ...(run.memoryTokens === undefined ? {} : { memoryTokens: run.memoryTokens }) }));
     } catch (err) {

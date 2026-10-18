@@ -76,6 +76,25 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     expect(ROUTES).toContain(route);
   });
 
+  it('D#600 CX-4a: the reader returns trimmed_reason from the stored section, drops one outside the closed list, and leaves a section that was not cut without the key', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const id = await seedRun(accountId);
+    await seedLedger(accountId, id, {
+      sections: [
+        { code: 'map', bytes: 40, sha256: SHA, trimmed_bytes: 900, trimmed_reason: 'over_budget' },
+        { code: 'findings', bytes: 40, sha256: SHA, trimmed_bytes: 5, trimmed_reason: 'hand_edited' },
+        { code: 'spec', bytes: 12000, sha256: SHA, trimmed_bytes: 0 },
+      ],
+    });
+    const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+    expect(runContextResponseSchema.parse(body)).toEqual(body);
+    expect(body.sections).toEqual([
+      { code: 'map', bytes: 40, trimmed_bytes: 900, trimmed_reason: 'over_budget' },
+      { code: 'findings', bytes: 40, trimmed_bytes: 5 },
+      { code: 'spec', bytes: 12000, trimmed_bytes: 0 },
+    ]);
+  });
+
   it('reads a measured ledger: sections in stored order with trimmed bytes, tokens, cache, tools largest first and compactions; no hash', async () => {
     const { accountId, userId } = await seedAccountWithMember(admin);
     const id = await seedRun(accountId);

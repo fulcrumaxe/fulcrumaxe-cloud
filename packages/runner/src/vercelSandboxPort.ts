@@ -4,7 +4,7 @@ import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
 import type { ModelId } from "@fx/spend";
-import { CLI_MODEL_NAMES, ContextLedgerCapture, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import { CLI_MODEL_NAMES, ContextLedgerCapture, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import {
   DETECT_NONE,
   DETECT_NPM,
@@ -954,7 +954,27 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       };
       // The prompt and the agent's config, as one batch. Written here, and written again after the dependency install (D#6 C44-6b):
       // the install runs the repo's lifecycle scripts as the same uid, so it is an "earlier command" in the sense below.
-      let promptBody = `${opts.roleCard}\n\n${prompt}`;
+      // D#600 CX-4a: the text the prompt cut goes to /fx/context/<code>.md first (fixed names, one writeFiles call, outside the checkout). If it cannot be
+      // written, the prompt that goes out is the uncut one: a cut never happens without a readable file.
+      let promptText = prompt;
+      // The spill files, once the first write succeeded: they are rewritten with the agent's other files after the install (CWE-345), because the
+      // prompt sends the agent to them and a repo's lifecycle script could replace them.
+      let spillRewrite: Array<{ path: string; content: string; mode: number }> = [];
+      if (opts.spill !== undefined) {
+        let written = false;
+        try {
+          const spillWrites = contextSpillWrites(opts.spill);
+          await guarded("writeFiles", () => sandbox.writeFiles(spillWrites, { signal: signal() }));
+          written = true;
+          spillRewrite = spillWrites;
+        } catch {
+          // fx-swallow-ok: a spill that cannot be written is the uncut prompt, below; it never fails the launch
+        }
+        if (run.stopped) return undefined;
+        if (!written) promptText = opts.spill.uncut.prompt;
+        opts.onSpill?.(written);
+      }
+      let promptBody = `${opts.roleCard}\n\n${promptText}`;
       const writeAgentFiles = (): Promise<void> =>
         guarded("writeFiles", () =>
           sandbox.writeFiles(
@@ -967,6 +987,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
               // C66: the runner's one hook, and the deadline it warns from (W-1).
               { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
               { path: FX_RUN_LIMITS_PATH, content: limitsFile(), mode: 0o444 },
+              // D#600 CX-4a: the text the prompt cut, from the runner's own copy, never trusted from before the install.
+              ...spillRewrite,
             ],
             { signal: signal() },
           ),

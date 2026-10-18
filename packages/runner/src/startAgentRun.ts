@@ -24,7 +24,7 @@ import { defaultResolvePayer, type RunFunding } from "./funding.js";
 import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./runStatusWriter.js";
 import type { RunStatus } from "./statusTransitions.js";
 import type { Product, Role } from "./types.js";
-import type { ContextSection } from "@fulcrumaxe/runner-protocol";
+import type { ContextSection, ContextSpill } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#2 H09b, correction C10: `startAgentRun` owns "resolving the run;
@@ -85,6 +85,9 @@ export interface StartAgentRunInput {
   /** D#600 CX-2: see `ExecutionRun.fallbackPrompt`. */
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
+  /** D#600 CX-4a: see `ExecutionRun.contextSpill`. */
+  contextSpill?: ContextSpill;
+  fallbackContextSpill?: ContextSpill;
   /** D#6 R3a: the member who started the run, written to `agent_runs.initiated_by` at insert and never changed. The
    * definer refuses a user who is not a member of `accountId`. Absent for a run no member started. */
   initiatedBy?: string | null;
@@ -193,6 +196,8 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     memoryTokens: input.memoryTokens,
     fallbackPrompt: input.fallbackPrompt,
     fallbackContextSections: input.fallbackContextSections,
+    contextSpill: input.contextSpill,
+    fallbackContextSpill: input.fallbackContextSpill,
     capUsd: input.capUsd,
     timeoutMs: input.timeoutMs,
     limits: input.limits,

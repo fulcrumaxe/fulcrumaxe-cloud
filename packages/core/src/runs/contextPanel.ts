@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
+import { CONTEXT_TRIMMED_REASONS, type ContextTrimmedReason } from '@fulcrumaxe/runner-protocol';
 import type { RunsReadCtx } from './read.js';
 
 /**
@@ -20,6 +21,8 @@ export interface RunContextSection {
   code: string;
   bytes: number;
   trimmed_bytes: number;
+  /** Why the section was cut (D#600 CX-4a); absent on a section that was not. The panel shows words, never null. */
+  trimmed_reason?: ContextTrimmedReason;
 }
 
 export interface RunContextPanel {
@@ -141,7 +144,12 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       .filter(isRecord)
       .filter((s) => typeof s.code === 'string')
       .slice(0, 64)
-      .map((s) => ({ code: s.code as string, bytes: count(s.bytes), trimmed_bytes: count(s.trimmed_bytes) }));
+      .map((s): RunContextSection => ({
+        code: s.code as string,
+        bytes: count(s.bytes),
+        trimmed_bytes: count(s.trimmed_bytes),
+        ...(CONTEXT_TRIMMED_REASONS.includes(s.trimmed_reason as ContextTrimmedReason) ? { trimmed_reason: s.trimmed_reason as ContextTrimmedReason } : {}),
+      }));
     const tool_output = Object.entries(isRecord(r.tool_output_bytes) ? r.tool_output_bytes : {})
       .map(([tool, bytes]) => ({ tool, bytes: count(bytes) }))
       .sort((a, b) => b.bytes - a.bytes || a.tool.localeCompare(b.tool))

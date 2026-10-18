@@ -36,7 +36,13 @@ describe("D#598 P3b: no repo, pairing, plan or account gate on the stacked paths
     // `resolveStackBase` reads the repository's coordinates only to pass them to the reader; it tests none of them against a name.
     const fn = between(build, "async function resolveStackBase(", "export type BuildStartResult");
     expect(fn.replace(/facts\.gh_owner|facts\.gh_name/g, "")).not.toMatch(FORBIDDEN);
-    expect(between(build, "if (facts.stack_parent_id !== null && !prior) {", "const { prompt, sections }")).not.toMatch(FORBIDDEN);
+    // The region ends where the CX-4a budget code begins (it used to end at the prompt assembly, which that code now precedes); the budget code is not scanned.
+    const start = between(build, "if (facts.stack_parent_id !== null && !prior) {", "// D#600 CX-4a: a sandbox prompt over its budget");
+    // The scan must still cover the stacked start itself: the call, its refusal and the base it sets.
+    expect(start).toContain("resolveStackBase(");
+    expect(start).toContain("stackBase = stack.base");
+    expect(start.length).toBeGreaterThan(150);
+    expect(start).not.toMatch(FORBIDDEN);
   });
 
   it("mergeGate.ts: the stacked stop", () => {

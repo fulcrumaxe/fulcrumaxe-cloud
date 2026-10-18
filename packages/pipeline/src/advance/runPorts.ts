@@ -1,4 +1,4 @@
-import type { ContextSection } from "@fx/runner";
+import type { ContextSection, ContextSpill } from "@fx/runner";
 
 /**
  * D#483 P2: what the stage driver's pipeline steps may do with agent runs. The worker (which owns the runner pool and
@@ -33,6 +33,8 @@ export interface AdvanceRunRequest {
   specVersionId?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
+  /** D#600 CX-4a: the files holding text the prompt cut (written to `/fx/context/<code>.md` before the agent starts) and the uncut prompt to use if one cannot be written. Sandbox runs only. */
+  contextSpill?: ContextSpill;
   /** D#601 MEM-3: the token estimate of the memory in the prompt (0 when none was recalled), stored on the run's context ledger. Absent: not recorded. */
   memoryTokens?: number;
 }

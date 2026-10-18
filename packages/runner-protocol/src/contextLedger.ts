@@ -29,8 +29,14 @@ export const CONTEXT_SECTION_CODES = [
   "findings",
   "output",
   "repo_instructions",
+  // D#600 CX-4a: files a person pinned (CX-5 supplies them). Never cut.
+  "pinned",
 ] as const;
 export type ContextSectionCode = (typeof CONTEXT_SECTION_CODES)[number];
+
+/** Why a section was cut (D#600 CX-4a), a closed enum the definer checks: the findings caps, the memory slot's size, or the run's context budget. */
+export const CONTEXT_TRIMMED_REASONS = ["findings_cap", "memory_slot", "over_budget"] as const;
+export type ContextTrimmedReason = (typeof CONTEXT_TRIMMED_REASONS)[number];
 
 /** The tools a tool result is attributed to; anything else is `other`. */
 export const CONTEXT_TOOL_ENUM = [
@@ -59,6 +65,8 @@ export interface ContextSection {
   sha256: string;
   /** Bytes cut from the section (CX-4); 0 when nothing was. */
   trimmed_bytes: number;
+  /** Why it was cut. Absent on a section that was not cut. */
+  trimmed_reason?: ContextTrimmedReason;
 }
 
 export type ContextLedgerBasis = "measured" | "partial";

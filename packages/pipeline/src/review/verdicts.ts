@@ -4,6 +4,7 @@ import { recordDriverEvent, toCode } from "@fx/core/src/work-items/driverEvents.
 import type { ExecutionTargetRegistry } from "@fx/runner";
 import { recordReviewVerdict } from "../build/fixLoop.js";
 import type { ReviewVerdict, ReviewerAgentRole } from "../build/types.js";
+import { MAX_FINDINGS, MAX_FINDING_CHARS } from "./findingCaps.js";
 
 /**
  * D#483 P3: what the reviewers said, read and recorded.
@@ -21,13 +22,14 @@ import type { ReviewVerdict, ReviewerAgentRole } from "../build/types.js";
 
 export type VerdictRole = ReviewerAgentRole | "debater";
 
-export const MAX_FINDINGS = 20;
-export const MAX_FINDING_CHARS = 600;
+export { MAX_FINDINGS, MAX_FINDING_CHARS };
 export const MAX_SUMMARY_CHARS = 4000;
 
 export interface ReadVerdict {
   verdict: ReviewVerdict;
   findings: string[];
+  /** D#600 CX-4a: the same findings before the 600-character cut (at most MAX_FINDINGS). A fix prompt spills them and marks the cut. */
+  fullFindings: string[];
   summary: string;
   /** The code reviewer asked for a security review. Only the JSON boolean `true` counts. */
   securityNeeded: boolean;
@@ -51,9 +53,11 @@ export function readVerdict(status: string, envelope: Record<string, unknown> | 
   const summaryRaw = env && Object.hasOwn(env, "summary") ? env.summary : undefined;
   const flag = env && Object.hasOwn(env, "security_review_needed") ? env.security_review_needed : undefined;
   const envFlag = env && Object.hasOwn(env, "environment_failure") ? env.environment_failure : undefined;
+  const fullFindings = Array.isArray(findingsRaw) ? findingsRaw.filter((f): f is string => typeof f === "string").slice(0, MAX_FINDINGS) : [];
   return {
     verdict: normalizeVerdict(raw),
-    findings: Array.isArray(findingsRaw) ? findingsRaw.filter((f): f is string => typeof f === "string").slice(0, MAX_FINDINGS).map((f) => f.slice(0, MAX_FINDING_CHARS)) : [],
+    findings: fullFindings.map((f) => f.slice(0, MAX_FINDING_CHARS)),
+    fullFindings,
     summary: typeof summaryRaw === "string" ? summaryRaw.slice(0, MAX_SUMMARY_CHARS) : "",
     securityNeeded: flag === true,
     environmentFailure: envFlag === true,
