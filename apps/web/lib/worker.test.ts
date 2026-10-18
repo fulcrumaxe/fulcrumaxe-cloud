@@ -58,7 +58,7 @@ describe("both ids present", () => {
     // Only the hooks, author-check, follower, (D#6 R3b) repository-visibility and continuation-base ports are supplied; every other port is the production body.
     // The author check is the SAME function the /api/v1 route registers (D#31 AUTHOR-CHECK-WIRE).
     expect(options.ports.authorCheck).toBe(runActionDeps.getAuthorCheck);
-    expect(Object.keys(options.ports)).toEqual(["hooks", "authorCheck", "follow", "repoVisibility", "continuationBase", "continuationBinding"]);
+    expect(Object.keys(options.ports)).toEqual(["hooks", "authorCheck", "follow", "repoVisibility", "continuationBase", "continuationBinding", "planePublish"]);
     expect(typeof options.ports.repoVisibility?.visibility).toBe("function");
     expect(Object.keys(options.ports.hooks)).toEqual(["resume"]);
     expect(typeof options.ports.follow).toBe("function");

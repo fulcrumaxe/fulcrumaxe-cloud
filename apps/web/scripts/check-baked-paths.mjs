@@ -111,6 +111,18 @@ export function findBaked(serverDirectory, roots) {
   return [...bad];
 }
 
+/**
+ * D#598 P1f-5b: the publish hook (fx-plane-publish.mjs) is compiled into the server build as text, never read from a path at run time. This
+ * fails when the build's generated hook module is missing or its sha256 is nowhere in the server output (the worker's ports are not wired to it,
+ * or the bundler dropped it). Its text holding the build machine's path is caught by the scan above, since the text is part of the output.
+ */
+export function findMissingHook(serverDirectory, generatedFile) {
+  if (!fs.existsSync(generatedFile)) return [`the generated hook module ${path.basename(generatedFile)} is missing; run \`pnpm --filter web build:prepare\``];
+  const sha = /PLANE_PUBLISH_HOOK_SHA256: string = "([0-9a-f]{64})"/.exec(fs.readFileSync(generatedFile, "utf8"))?.[1];
+  if (!sha) return ["the generated hook module has no sha256"];
+  return walk(serverDirectory).some((f) => fs.readFileSync(f, "utf8").includes(sha)) ? [] : ["the publish hook is not compiled into .next/server (its sha256 appears nowhere)"];
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (!fs.existsSync(serverDir)) {
     console.error(`check-baked-paths: no build output at ${serverDir}; run \`next build\` first`);
@@ -118,7 +130,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const repoRoot = path.resolve(webDir, "../..");
   const roots = [...new Set([repoRoot, fs.realpathSync(repoRoot)])];
-  const bad = findBaked(serverDir, roots);
+  const bad = [...findBaked(serverDir, roots), ...findMissingHook(serverDir, path.join(webDir, "app", "_generated", "plane-publish-hook.ts"))];
   if (bad.length > 0) {
     console.error("check-baked-paths: FAIL -- the build output contains the build machine's path:");
     for (const b of bad) console.error(`  - ${b}`);

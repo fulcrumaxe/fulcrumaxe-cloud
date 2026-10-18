@@ -267,6 +267,12 @@ describe("parseSandboxName (D#2 SANDBOX-REAPER): reads back exactly what sandbox
     }
   });
 
+  it("reads a publish name back by shape: pp- plus a lower-case uuid, nothing else", () => {
+    expect(parseSandboxName(`pp-${RUN_ID}`)).toEqual({ kind: "publish", attemptId: RUN_ID });
+    expect(parseSandboxName(sandboxNameFor({ role: "plane_publish", runId: RUN_ID, attemptId: RUN_ID }))).toEqual({ kind: "publish", attemptId: RUN_ID });
+    for (const name of ["pp-", "pp-1", "pp-ABCDEFAB-1111-4111-8111-111111111111", `pp-${RUN_ID} `, `xpp-${RUN_ID}`, `pp-${RUN_ID}-x`]) expect(parseSandboxName(name), name).toBeNull();
+  });
+
   it("returns null for a foreign name, a near miss or a hostile one", () => {
     for (const name of [
       "", "rlr0-spike-1", "fx-sandbox-1", "ex-", "ex-1-2-3", `ex-${ACCOUNT_ID_A}-${REPO_ID_A}`, `ex-${ACCOUNT_ID_A}-${REPO_ID_A}-0`, `ex-${ACCOUNT_ID_A}-${REPO_ID_A}-007`,

@@ -19,8 +19,11 @@
 // check-globalsetup-env.sh) forbids in a globalSetup file: it writes
 // no environment variable, and it picks no random port. Root cause for
 // both rules is documented in that script's own header.
+import { buildPlanePublish } from "../scripts/build-plane-publish.mjs";
 import { copyWorkspace } from "../scripts/copy-workspace.mjs";
 
 export default async function globalSetup(): Promise<void> {
   await copyWorkspace();
+  // D#598 P1f-5b: the built publish hook the worker ports import (app/_generated/plane-publish-hook.ts).
+  buildPlanePublish();
 }

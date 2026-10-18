@@ -136,3 +136,20 @@ describe('sandboxRunCost tiers', () => {
     expect(r).toEqual({ usd: 0.2, basis: 'fallback' });
   });
 });
+
+describe("priced from the sandbox's real vCPU count (D#598 P1f-5b item 30)", () => {
+  const wall = [{ ownDurationMs: 600_000 }];
+  it('a 1-vCPU fallback costs half of the pinned 2 (CPU and memory both follow the vCPUs); absent vcpus is the pinned figure', () => {
+    const pinned = sandboxRunCost(wall).usd;
+    const one = sandboxRunCost(wall, { vcpus: 1 }).usd;
+    expect(one * 2).toBeCloseTo(pinned, 3);
+    expect(sandboxRunCost(wall, { vcpus: 2 }).usd).toBe(pinned);
+    expect(one).toBeGreaterThan(0);
+  });
+  it('a session figure carries its own vcpus for the self-measured bound', () => {
+    const base = { region: 'iad1', durationMs: 600_000, selfMeasured: { cpuMs: 700_000, txBytes: 0 } };
+    // 700 s of CPU in 600 s is possible on 2 vCPUs, impossible on 1: the counter is refused and the fallback prices instead.
+    expect(sandboxRunCost([{ ...base, vcpus: 2 }]).basis).toBe('self_measured');
+    expect(sandboxRunCost([{ ...base, vcpus: 1 }]).basis).toBe('fallback');
+  });
+});

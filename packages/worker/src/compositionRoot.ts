@@ -23,6 +23,8 @@ import {
   type SandboxInventoryResult,
   type LostSweepResult,
   type AuthorCheckProvider,
+  buildPublishFirewallPolicy,
+  PLANE_PUBLISH_ROLE,
   configureAgentRunWiring,
   createVercelSandboxPort,
   defaultResolvePayer,
@@ -57,6 +59,7 @@ import { loadJobSigner } from "./jobSigner.js";
 import { loadGitTicketSigner } from "./gitTicketSigner.js";
 import { createRunnerGitTicketFacade, type RunnerGitTicketFacade } from "./runnerGitTicket.js";
 import { createRunnerPlanePushFacade, type RunnerPlanePushFacade } from "./runnerPlanePush.js";
+import { createPlanePublish, createPublishSettler, type PlanePublish, type PlanePublishDeps } from "./planePublish.js";
 import { createRunActionFacade, type RunActionFacade } from "./runActions.js";
 import { createRunnerLeaseFacade, type RunnerLeaseFacade } from "./runnerLeases.js";
 import { sweepInvariants, type InvariantSweeper } from "./invariantSweep.js";
@@ -123,6 +126,8 @@ export interface WorkerPorts {
   continuationBinding?: ContinuationBindingPort;
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
   runnerLimits?: RunnerLimitsPort;
+  /** D#598 P1f-5b: what the paired-publish step needs from outside the worker (the built hook, the commit identity, the GitHub reads). Absent, the step answers `not_configured` and starts nothing. */
+  planePublish?: Pick<PlanePublishDeps, "hook" | "identity" | "privateHead" | "hosted">;
 }
 
 export interface CreateWorkerOptions {
@@ -159,7 +164,7 @@ export interface CreateWorkerOptions {
  * worker's own sweep/kick only, never directly callable from a user request.
  * H14c-3b's CARRY-28 enforces caller authorisation.
  */
-export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade {
+export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade, RunnerClaimFacade, RunnerDoneFacade, RunnerGitTicketFacade, RunnerPlanePushFacade, RunnerQueueSweeper, RunnerLeaseSweeper, Pick<RunHandoffs, "sweepRunHandoffs" | "completeRunHandoff" | "completeHandoffOnDone">, RunnerNoticeSweeper, InvariantSweeper, Pick<StageResume, "sweepParkedStages">, PreviewFacade, RetryFacade, AdvanceFacade, ResumeFacade {
   registry: ExecutionTargetRegistry;
   /** D#2 H14c-3-2d-2: resolves one run's card, model, limits, sandbox timeout and spend facts, or refuses with a fixed reason. Starts nothing. */
   resolveRunSeat(request: SeatRequest): Promise<SeatResult>;
@@ -339,13 +344,17 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     const runnerGitTickets = createRunnerGitTicketFacade(pools.runnerPool, { signer: loadGitTicketSigner(env), audience: githubProxyForwardUrl(githubForward) });
     // D#598 P1f-2: the public-push token and report routes' database half. Needs no setting of its own.
     const runnerPlanePush = createRunnerPlanePushFacade(pools.runnerPool);
+    // D#598 P1f-5b: the sandbox publish step and "Try the push again". The pool, the port and the proxy-only policy are the worker's own.
+    const planePublish = createPlanePublish(options.ports.planePublish ? { ...options.ports.planePublish, pool: pools.runnerPool, port: sandboxPort, networkPolicy: () => buildPublishFirewallPolicy({ githubForward, lookup: options.lookup }) } : null);
     const runnerLeaseSweep = createRunnerLeaseSweeper(pools.runnerPool, { followUp, onError: (runId) => console.warn(JSON.stringify({ event: "runner.lease_sweep_failed", run_id: runId })) });
+    // A publish run is settled by its recorded pp- name and attempt, never by a name derived from the role.
+    const publishSettler = createPublishSettler({ pool: pools.runnerPool, port: sandboxPort });
     const runSweepComputeSettle = async (): Promise<ComputeSettleSweepResult & { lost: LostSweepResult; outside: OutsideMeterResult }> => {
       // The lost-run check goes first and spends part of the tick's time; the settle gets what is left of its budget.
       const began = performance.now();
       let lost: LostSweepResult = { listed: 0, young: 0, stale: 0, settled: 0, alive: 0, unknown: 0, failed: 0, skipped: 0 };
       try {
-        lost = await sweepLostRuns({ pool: pools.runnerPool, target: sandboxTarget, onError: (runId) => console.warn(JSON.stringify({ event: "run.lost_sweep_failed", run_id: runId })) });
+        lost = await sweepLostRuns({ pool: pools.runnerPool, target: { settleIfLost: (run) => (run.role === PLANE_PUBLISH_ROLE ? publishSettler.settleIfLost(run) : sandboxTarget.settleIfLost(run)) }, onError: (runId) => console.warn(JSON.stringify({ event: "run.lost_sweep_failed", run_id: runId })) });
       } catch {
         // fx-swallow-ok: the list itself failed (a fixed-code line is logged); the compute settle below must still run this tick
         console.warn(JSON.stringify({ event: "run.lost_sweep_list_failed" }));
@@ -376,7 +385,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -396,7 +405,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -423,6 +432,8 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         planePushPairing,
         planePushSettleGrant,
         planePushReportContext,
+        publishPairedChange,
+        retryPublish,
         planePushRecordReport,
         sweepRunnerLeases,
         sweepRunHandoffs,

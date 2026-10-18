@@ -178,7 +178,8 @@ export function retentionPolicyFor(role: Role): SandboxRetentionPolicy {
  */
 export type ParsedSandboxName =
   | { kind: "executor"; accountId: string; repoId: string; pr: number }
-  | { kind: "ephemeral"; role: string; runId: string };
+  | { kind: "ephemeral"; role: string; runId: string }
+  | { kind: "publish"; attemptId: string };
 
 export function parseSandboxName(name: string): ParsedSandboxName | null {
   const executor = /^ex-([0-9a-f-]{36})-([0-9a-f-]{36})-([1-9][0-9]{0,15})$/.exec(name);
@@ -186,6 +187,8 @@ export function parseSandboxName(name: string): ParsedSandboxName | null {
     const [accountId, repoId, pr] = [executor[1]!, executor[2]!, executor[3]!];
     return UUID_RE.test(accountId) && UUID_RE.test(repoId) ? { kind: "executor", accountId, repoId, pr: Number(pr) } : null;
   }
+  const publish = /^pp-([0-9a-f-]{36})$/.exec(name);
+  if (publish) return UUID_RE.test(publish[1]!) ? { kind: "publish", attemptId: publish[1]! } : null;
   const ephemeral = /^rn-([0-9]{1,3})-(.+)-([0-9a-f-]{36})$/.exec(name);
   if (ephemeral) {
     const [length, role, runId] = [ephemeral[1]!, ephemeral[2]!, ephemeral[3]!];

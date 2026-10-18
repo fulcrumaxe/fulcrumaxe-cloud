@@ -5,12 +5,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "generate": "node scripts/copy-workspace.mjs",
-    "dev": "node scripts/copy-workspace.mjs && next dev",
-    "build:prepare": "node scripts/copy-workspace.mjs && node --experimental-strip-types scripts/check-env-manifest.mjs && node --experimental-strip-types scripts/migrate-on-build.mjs",
+    "generate": "node scripts/copy-workspace.mjs && node scripts/build-plane-publish.mjs",
+    "dev": "node scripts/copy-workspace.mjs && node scripts/build-plane-publish.mjs && next dev",
+    "build:prepare": "node scripts/copy-workspace.mjs && node scripts/build-plane-publish.mjs && node --experimental-strip-types scripts/check-env-manifest.mjs && node --experimental-strip-types scripts/migrate-on-build.mjs",
     "build": "pnpm run build:prepare && next build",
     "start": "next start",
-    "typecheck": "node scripts/copy-workspace.mjs && tsc --noEmit"
+    "typecheck": "node scripts/copy-workspace.mjs && node scripts/build-plane-publish.mjs && tsc --noEmit"
   },
   "dependencies": {
     "@fulcrumaxe/runner-protocol": "workspace:*",
@@ -46,6 +46,7 @@
     "@types/pg": "^8.11.10",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
+    "esbuild": "0.28.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

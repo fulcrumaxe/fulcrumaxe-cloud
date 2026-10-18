@@ -25,6 +25,8 @@ export interface SandboxSessionFigures {
   selfMeasured?: SandboxSelfMeasured;
   /** The runner's own start-to-stop wall time (used only when the provider reports no duration). */
   ownDurationMs?: number;
+  /** The vCPUs this sandbox was created with; absent = `SANDBOX_PINNED_VCPUS`. A 1-vCPU publish sandbox sets it so it is not priced as a 2-vCPU one. */
+  vcpus?: number;
 }
 
 /** What the runner read inside the VM just before stopping it. */
@@ -86,9 +88,12 @@ export interface SandboxRunCostOptions {
   reservedUsd?: number;
   /** Wall time from the sandbox request to now; the fallback's CPU bound uses it when given. */
   runWallMs?: number;
+  /** The vCPUs the run's sandbox has (memory follows, 2048 MB each); absent = `SANDBOX_PINNED_VCPUS`. */
+  vcpus?: number;
 }
 
-export const PINNED_MEMORY_MB = SANDBOX_PINNED_VCPUS * 2048;
+const MEMORY_MB_PER_VCPU = 2048;
+export const PINNED_MEMORY_MB = SANDBOX_PINNED_VCPUS * MEMORY_MB_PER_VCPU;
 
 /**
  * Tier 2: the provider's figures, with ONLY the missing CPU / egress filled from the in-VM counters.
@@ -106,6 +111,7 @@ function selfMeasuredUsd(sessions: readonly SandboxSessionFigures[]): number | u
     if (s.region === undefined || !PRICED_REGIONS.has(s.region)) return undefined;
     const wallMs = s.durationMs ?? s.ownDurationMs;
     if (!isFigure(wallMs)) return undefined;
+    const vcpus = s.vcpus ?? SANDBOX_PINNED_VCPUS;
     // A counter from a VM that restarted mid-session undercounts: refuse it.
     const own = s.selfMeasured;
     const ownOk =
@@ -113,13 +119,13 @@ function selfMeasuredUsd(sessions: readonly SandboxSessionFigures[]): number | u
       isFigure(own.cpuMs) &&
       isFigure(own.txBytes) &&
       // Above the physical bound the counters are forged or broken: reject (fall to the fallback), never clamp.
-      own.cpuMs <= wallMs * SANDBOX_PINNED_VCPUS * SELF_MEASURED_CPU_TOLERANCE &&
+      own.cpuMs <= wallMs * vcpus * SELF_MEASURED_CPU_TOLERANCE &&
       own.txBytes <= (wallMs / 1000) * MAX_EGRESS_BYTES_PER_SECOND &&
       (own.uptimeMs === undefined || (isFigure(own.uptimeMs) && own.uptimeMs >= wallMs - Math.max(SELF_MEASURED_RESET_MIN_SLACK_MS, SELF_MEASURED_RESET_SLACK_FRACTION * wallMs)));
     const cpuMs = isFigure(s.activeCpuMs) ? s.activeCpuMs : ownOk ? own.cpuMs : undefined;
     const txBytes = isFigure(s.egressBytes) ? s.egressBytes : ownOk ? own.txBytes : undefined;
     if (cpuMs === undefined || txBytes === undefined) return undefined;
-    total += cpuTerm(cpuMs) + memoryTerm(isFigure(s.memoryMb) ? s.memoryMb : PINNED_MEMORY_MB, wallMs) + egressTerm(txBytes);
+    total += cpuTerm(cpuMs) + memoryTerm(isFigure(s.memoryMb) ? s.memoryMb : vcpus * MEMORY_MB_PER_VCPU, wallMs) + egressTerm(txBytes);
   }
   return round4(total);
 }
@@ -128,16 +134,17 @@ function selfMeasuredUsd(sessions: readonly SandboxSessionFigures[]): number | u
  * It has NO egress term (egress is unknown here), so a genuine tier-2 reading with real egress may exceed it;
  * the floor at the reservation usually covers the gap. */
 function fallbackUsd(sessions: readonly SandboxSessionFigures[], opts: SandboxRunCostOptions): number {
+  const vcpus = opts.vcpus ?? SANDBOX_PINNED_VCPUS;
   let sessionWallMs = 0;
   let memory = 0;
   for (const s of sessions) {
     const wallMs = s.durationMs ?? s.ownDurationMs;
     if (!isFigure(wallMs)) continue;
     sessionWallMs += wallMs;
-    memory += memoryTerm(isFigure(s.memoryMb) ? s.memoryMb : PINNED_MEMORY_MB, wallMs);
+    memory += memoryTerm(isFigure(s.memoryMb) ? s.memoryMb : (s.vcpus ?? vcpus) * MEMORY_MB_PER_VCPU, wallMs);
   }
   const cpuWallMs = isFigure(opts.runWallMs) ? opts.runWallMs : sessionWallMs;
-  return Math.max(round4(SANDBOX_PINNED_VCPUS * cpuTerm(cpuWallMs) + memory), opts.reservedUsd ?? 0);
+  return Math.max(round4(vcpus * cpuTerm(cpuWallMs) + memory), opts.reservedUsd ?? 0);
 }
 
 /**
