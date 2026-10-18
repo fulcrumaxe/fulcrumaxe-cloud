@@ -97,6 +97,8 @@ describe("R7b: the per-job environment", () => {
       pnpm_config_verify_store_integrity: "true",
       BASH_DEFAULT_TIMEOUT_MS: "900000",
       BASH_MAX_TIMEOUT_MS: "900000",
+      BASH_MAX_OUTPUT_LENGTH: "30000",
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "85",
     });
     expect(jobEnvFor({ tempDir: "/t/rn-1", commandTimeoutS: 1800 })).not.toHaveProperty("pnpm_config_store_dir");
     // keyed by the repo's id, like the mirrors: a name with ".." is valid, and a recreated repo (new id) never inherits the old store

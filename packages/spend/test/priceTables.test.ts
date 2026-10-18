@@ -1,5 +1,6 @@
+import { loadPlanData, resetPlanDataCache } from '@fx/plan-data';
 import { describe, expect, it } from 'vitest';
-import { claudePricing, computeModelUsd, computeUsd, type ModelRate } from '../src/pricing.js';
+import { claudePricing, computeModelUsd, computeUsd, contextWindowTokensFor, type ModelRate } from '../src/pricing.js';
 import {
   computeBackendModelUsd,
   isPriced,
@@ -96,5 +97,39 @@ describe('computeBackendModelUsd', () => {
   it('throws on an unpriced pair rather than returning 0', () => {
     expect(() => computeBackendModelUsd('opencode', 'x', { inputTokens: 1, outputTokens: 1 })).toThrow(/unpriced/);
     expect(() => computeBackendModelUsd('codex', 'opus-5', { inputTokens: 1, outputTokens: 1 })).toThrow(/unpriced/);
+  });
+});
+
+describe('contextWindowTokensFor (D#600 CX-6a)', () => {
+  it('is the table entry: 200,000 for haiku-4.5, sonnet-5 and opus-5', () => {
+    for (const id of ['haiku-4.5', 'sonnet-5', 'opus-5'] as const) {
+      expect(claudePricing()[id].contextWindowTokens).toBe(200_000);
+      expect(contextWindowTokensFor(id)).toBe(200_000);
+    }
+  });
+
+  it('an entry with no figure (data that predates the field) has no window: undefined, never a default', () => {
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      const without = JSON.parse(JSON.stringify(loadPlanData())) as { pricing: { claude: Record<string, { contextWindowTokens?: unknown }> } };
+      delete without.pricing.claude['sonnet-5']!.contextWindowTokens;
+      process.env.FX_PLAN_DATA = JSON.stringify(without);
+      resetPlanDataCache();
+      expect(contextWindowTokensFor('sonnet-5')).toBeUndefined();
+      expect(contextWindowTokensFor('opus-5')).toBe(200_000);
+      // a larger window is a one-line data change: the figure is read, not assumed
+      without.pricing.claude['opus-5']!.contextWindowTokens = 1_000_000;
+      process.env.FX_PLAN_DATA = JSON.stringify(without);
+      resetPlanDataCache();
+      expect(contextWindowTokensFor('opus-5')).toBe(1_000_000);
+    } finally {
+      if (saved === undefined) delete process.env.FX_PLAN_DATA;
+      else process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
+  });
+
+  it('a model with no entry, or an inherited key, has no window and does not throw', () => {
+    for (const k of ['gpt-5.3-codex', 'constructor', '__proto__', '']) expect(contextWindowTokensFor(k)).toBeUndefined();
   });
 });

@@ -5,6 +5,7 @@
  * greps the source for that). Each allowed name is looked up by name, so a variable that is not on the list cannot
  * reach the agent, however it got into the host's environment.
  */
+import { CONTEXT_LEVER_ENV } from "@fulcrumaxe/runner-protocol";
 import { NIX_ENV_NAMES, nixEnvValue } from "./nixShellEnv.js";
 
 /** Host variables copied through when they are set. `HOME` is how the agent's binary finds the user's own login. */
@@ -29,8 +30,10 @@ export const SUBSCRIPTION_TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN";
  *    bubblewrap can create namespaces but the nested view fails (D#6 R7e). It is set here, so a host value cannot clear it.
  *  - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` removes the API key, auth token and OAuth token from the environment of every
  *    tool subprocess, so a shell command the agent runs does not inherit the credential the CLI itself needs.
+ *  - `BASH_MAX_OUTPUT_LENGTH` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (D#600 CX-6a): the context levers, the same constants the cloud's sandbox sets
+ *    (`CONTEXT_LEVER_ENV` in the runner protocol). They are also job variable names, and `cleanEnv` sets them again after a job's own values.
  */
-export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1" });
+export const FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1", ...CONTEXT_LEVER_ENV });
 
 /**
  * How the run authenticates. Subscription mode has no field for an API key, so none can be passed. API-key mode takes
@@ -56,7 +59,7 @@ export interface CleanEnvOptions {
 }
 
 /** The only names a job's own environment may set. A repo's Nix dev shell (D#6 R7c) adds only the names in `NIX_ENV_NAMES`, each value checked again. */
-export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["TMPDIR", "CLAUDE_ENV_FILE", "XDG_CACHE_HOME", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"]);
+export const JOB_ENV_NAMES: readonly string[] = Object.freeze(["TMPDIR", "CLAUDE_ENV_FILE", "XDG_CACHE_HOME", "pnpm_config_store_dir", "pnpm_config_verify_store_integrity", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "BASH_MAX_OUTPUT_LENGTH", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]);
 
 /** True for a PATH entry that is an absolute directory with no NUL byte. */
 function isAbsoluteEntry(entry: string): boolean {
@@ -106,6 +109,8 @@ export function cleanEnv(credentials: CredentialMode, options: CleanEnvOptions =
       env[name] = value;
     }
   }
+  // D#600 CX-6a: the two context levers are constants on every run, with or without allowances, and a job's own value cannot change them.
+  Object.assign(env, CONTEXT_LEVER_ENV);
   if (credentials.mode === "subscription") {
     const token = process.env[SUBSCRIPTION_TOKEN_VAR];
     if (typeof token === "string" && token !== "") env[SUBSCRIPTION_TOKEN_VAR] = token;

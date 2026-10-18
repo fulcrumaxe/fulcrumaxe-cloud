@@ -1,3 +1,4 @@
+import { CONTEXT_LEVER_ENV } from "@fulcrumaxe/runner-protocol";
 import { OPERATOR_OAUTH_PLACEHOLDER } from "@fx/runtime/src/operatorSubscription.js";
 import type { Role } from "./types.js";
 import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
@@ -85,6 +86,9 @@ export const SANDBOX_CA_ENV: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
+ * D#600 CX-6a: every agent role also gets the two context levers (`CONTEXT_LEVER_ENV`: the longest Bash answer the model sees, the compaction point) as fixed
+ * constants, never from a setting. The publish role has no model, so it gets neither.
+ *
  * Builds the env map for one role's sandbox. Deliberately takes NO
  * "ambient" input (no `process.env`, no connection/credential object) --
  * only `role`, which today doesn't even vary the output (every role gets
@@ -105,12 +109,14 @@ export function buildSandboxEnv(role: Role, mode: SandboxEnvMode = "tenant_key")
     // left out: it outranks the OAuth slot in the CLI's credential order and would bypass it.
     return {
       ...SANDBOX_CA_ENV,
+      ...CONTEXT_LEVER_ENV,
       [ANTHROPIC_API_KEY_EXEMPT_NAME]: "",
       [OPERATOR_OAUTH_ENV_NAME]: OPERATOR_OAUTH_PLACEHOLDER,
     };
   }
   return {
     ...SANDBOX_CA_ENV,
+    ...CONTEXT_LEVER_ENV,
     [ANTHROPIC_API_KEY_EXEMPT_NAME]: "",
     [ANTHROPIC_AUTH_TOKEN_EXEMPT_NAME]: ANTHROPIC_AUTH_TOKEN_PLACEHOLDER,
   };

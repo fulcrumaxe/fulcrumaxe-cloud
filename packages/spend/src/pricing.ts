@@ -18,6 +18,19 @@ export interface ModelRate {
   reasoningUsdPerMTok?: number;
   /** True only for a pair that was derived rather than posted directly. */
   cacheRatesProvisional?: boolean;
+  /** The model's context window in tokens (D#600 CX-6a). Absent in data that predates it: read it through `contextWindowTokensFor`. */
+  contextWindowTokens?: number;
+}
+
+/**
+ * The context window of a price-table model id, in tokens, or `undefined` when the model has no entry or its entry carries no (valid) figure. There is no
+ * default: with no figure the caller says nothing about the window rather than guess. It reads the plan data, so it throws what `loadPlanData` throws when
+ * the data is missing or invalid; a caller that only drives an advisory warning catches that. Own-property lookup, so 'constructor' is not a model.
+ */
+export function contextWindowTokensFor(model: string): number | undefined {
+  const table: Readonly<Record<string, ModelRate>> = loadPlanData().pricing.claude;
+  const w = Object.hasOwn(table, model) ? table[model]?.contextWindowTokens : undefined;
+  return typeof w === 'number' && Number.isSafeInteger(w) && w > 0 ? w : undefined;
 }
 
 /** The claude-code price table, straight from the plan data (the same object each call). */

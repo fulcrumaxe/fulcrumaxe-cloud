@@ -9,7 +9,7 @@
  */
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
-import { allowanceFloorViolation, parseAllowanceSet, type AllowanceEntry, type AllowanceRefusal } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_LEVER_ENV, allowanceFloorViolation, parseAllowanceSet, type AllowanceEntry, type AllowanceRefusal } from "@fulcrumaxe/runner-protocol";
 
 /** The allowances of one job as the port carries them: the signed entries, the timeout, and the plain word that names the repo's package store. */
 export interface JobAllowanceGrant {
@@ -150,5 +150,7 @@ export function jobEnvFor(input: { tempDir: string; store?: string; commandTimeo
     ...(input.store === undefined ? {} : { pnpm_config_store_dir: input.store, pnpm_config_verify_store_integrity: "true" }),
     BASH_DEFAULT_TIMEOUT_MS: ms,
     BASH_MAX_TIMEOUT_MS: ms,
+    // D#600 CX-6a: fixed constants (the longest Bash answer the model sees, the compaction point); `cleanEnv` sets them on every run.
+    ...CONTEXT_LEVER_ENV,
   };
 }

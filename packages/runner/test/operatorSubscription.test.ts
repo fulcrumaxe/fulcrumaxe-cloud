@@ -97,7 +97,7 @@ describe("buildSandboxEnv: operator mode holds a placeholder and never a credent
     expect(env.ANTHROPIC_API_KEY).toBe("");
     // ANTHROPIC_AUTH_TOKEN outranks the OAuth slot in the CLI's credential order: it must not be set.
     expect(Object.hasOwn(env, "ANTHROPIC_AUTH_TOKEN")).toBe(false);
-    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]);
+    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "BASH_MAX_OUTPUT_LENGTH", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_OAUTH_TOKEN", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]); // D#600 CX-6a: plus the two context levers
   });
 
   it("matches no credential shape in any value", () => {

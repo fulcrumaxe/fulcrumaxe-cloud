@@ -3,8 +3,8 @@ import { Sandbox } from "@vercel/sandbox";
 import { reportError } from "@fx/telemetry";
 import type { NetworkPolicy, NetworkPolicyRule as SdkNetworkPolicyRule } from "@vercel/sandbox";
 import { GITHUB_FORWARDED_HOSTS, githubForwardUrlForHost, type NetworkPolicyRule } from "./networkPolicy.js";
-import type { ModelId } from "@fx/spend";
-import { CLI_MODEL_NAMES, ContextLedgerCapture, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
+import { contextWindowTokensFor, type ModelId } from "@fx/spend";
+import { CLI_MODEL_NAMES, CONTEXT_WARN_PCT, ContextLedgerCapture, contextPct, contextSpillWrites, modelIdForCliName } from "@fulcrumaxe/runner-protocol";
 import {
   DETECT_NONE,
   DETECT_NPM,
@@ -883,6 +883,13 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     }
     const cliModel = Object.hasOwn(CLI_MODEL_NAMES, opts.model) ? CLI_MODEL_NAMES[opts.model as ModelId] : undefined;
     if (cliModel === undefined) throw new Error("createVercelSandboxPort: model has no CLI model name");
+    // D#600 CX-6a: the model's window, for the context warning. A model with no figure (or a price table that cannot be read) has no window, and the run gets no context_pct.
+    let windowTokens: number | undefined;
+    try {
+      windowTokens = contextWindowTokensFor(opts.model);
+    } catch {
+      // fx-swallow-ok: the window drives an advisory warning only; with no window there is no warning
+    }
     const resuming = sessionId !== undefined;
     if (!Number.isFinite(opts.capUsd) || opts.capUsd <= 0) throw new Error("createVercelSandboxPort: capUsd must be a positive number");
     // The in-VM belt (C46 F5/MP-TURNS): the runner's own limits are what hold.
@@ -943,11 +950,13 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       // What the warnings say, computed by the runner (the hook has no clock).
       let timeWarningMinutes: number | undefined;
       let modelCallsRemaining: number | undefined;
+      // CX-6a: the whole percent of the window the latest turn fills, set only from CONTEXT_WARN_PCT up (it falls back to undefined after a compaction).
+      let contextPctNow: number | undefined;
       // X-4: the limits in force; an extension raises them (`applied`).
       let inForceLimits: RunLimits = limits;
       const inForce = (): RunLimits => inForceLimits;
       const limitsFile = (): string =>
-        runLimitsFileContent({ startedMs, deadlineMs: startedMs + inForce().maxRunMs, maxModelCalls: inForce().maxModelCalls, timeWarningMinutes, modelCallsRemaining });
+        runLimitsFileContent({ startedMs, deadlineMs: startedMs + inForce().maxRunMs, maxModelCalls: inForce().maxModelCalls, timeWarningMinutes, modelCallsRemaining, contextPct: contextPctNow });
       // Mid-run rewrites are best effort and serialized, so an older body never lands after a newer one.
       let rewriting: Promise<unknown> = Promise.resolve();
       const rewriteLimits = (): void => {
@@ -1164,6 +1173,15 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         }
         await opts.onEvent(event);
         guard.observe(event);
+        // CX-6a: after a main-thread turn, say how full the window is. The file is rewritten only when the figure crosses in, changes or drops out.
+        if (parsed.type === "assistant") {
+          const pct = windowTokens === undefined ? undefined : contextPct(ledger.lastContextTokens(), windowTokens);
+          const next = pct !== undefined && pct >= CONTEXT_WARN_PCT ? pct : undefined;
+          if (next !== contextPctNow) {
+            contextPctNow = next;
+            rewriteLimits();
+          }
+        }
         // W-2: once, at 80% of the call limit, tell the agent how many remain.
         // Advisory and best effort: the runner's own count is what enforces.
         if (!callsWarned && guard.modelCalls() >= WARN_FRACTION * inForce().maxModelCalls) {

@@ -18,3 +18,4 @@ export { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from ".
 export { normalizeRepoPath } from "./toolActivity.js";
 export * from "./contextLedger.js";
 export * from "./contextSpill.js";
+export * from "./contextLevers.js";
