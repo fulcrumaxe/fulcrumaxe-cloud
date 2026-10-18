@@ -51,6 +51,7 @@ Every `CREATE TABLE` in `packages/db/migrations/*.sql` at HEAD, one row each (49
 | `decision_receipts` | `0400_decisions.sql` | tenant | yes |
 | `decision_ask_settings` | `0812_decision_ask_settings.sql` | tenant | yes |
 | `action_rules` | `0847_action_rules.sql` | tenant (append-only; `app_user` SELECT and INSERT, owner or admin to insert) | yes |
+| `context_rules` | `0871_context_rules.sql` | tenant (`app_user` SELECT only; written by `context_rule_save` and `context_rule_remove`: owner or admin for repo scope, any member for item scope) | yes |
 | `ask_routes` | `0836_ask_routes.sql` | tenant | yes |
 | `discovery_settings` | `0849_discovery_settings.sql` | tenant | yes |
 | `setup_requests` | `0856_setup_requests.sql` | tenant (`app_user` SELECT, INSERT and a column-limited UPDATE; owner or admin to propose or decide; no DELETE) | yes |

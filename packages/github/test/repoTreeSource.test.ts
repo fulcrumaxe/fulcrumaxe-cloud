@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { InstallationTokenCache, type AccessTokenRequester } from "../src/installationToken.js";
 import { createInstallationHttp } from "../src/installationHttp.js";
 import { BLOB_MAX_BYTES, createRepoTreeSource } from "../src/repoTreeSource.js";
+import type { PinTreeSource } from "@fx/pipeline";
 import { ghError, FETCH_DEFAULT_USER_AGENT, type GhReply, type GhRequest } from "./helpers/strictGithub.js";
 import { startStrictGithubServer, type LocalTlsServer } from "./helpers/localTlsServer.js";
 
@@ -91,7 +92,7 @@ describe("createRepoTreeSource over real TLS", () => {
     const { source, srv, minted } = await setup(repoRoutes());
     expect(await source.headSha()).toBe(COMMIT);
     const tree = await source.tree(COMMIT);
-    expect(tree).toEqual({ truncated: false, entries: [{ path: "src", type: "tree", sha: "3".repeat(40) }, { path: "src/a.ts", type: "blob", sha: BLOB }] });
+    expect(tree).toEqual({ truncated: false, entries: [{ path: "src", type: "tree", sha: "3".repeat(40) }, { path: "src/a.ts", type: "blob", sha: BLOB, size: 5 }] });
     expect(await source.blob(BLOB)).toBe("hello");
     expect(minted).toHaveLength(1);
     expect(minted[0]).toMatchObject({ repositories: ["widgets"], permissions: { metadata: "read", contents: "read" } });
@@ -115,6 +116,25 @@ describe("createRepoTreeSource over real TLS", () => {
     const tree = await source.tree(COMMIT);
     expect(tree!.truncated).toBe(true);
     expect(tree!.entries).toHaveLength(50);
+  });
+
+  it("keeps a blob's size only when GitHub sent a whole number of bytes (D#600 CX-5a)", async () => {
+    const tree = [
+      { path: "ok", type: "blob", sha: BLOB, size: 0 },
+      { path: "neg", type: "blob", sha: BLOB, size: -1 },
+      { path: "frac", type: "blob", sha: BLOB, size: 1.5 },
+      { path: "str", type: "blob", sha: BLOB, size: "9" },
+      { path: "dir", type: "tree", sha: BLOB, size: 7 },
+    ];
+    const { source } = await setup(repoRoutes({ [`/repos/acme/widgets/git/trees/${COMMIT}`]: ok({ sha: COMMIT, truncated: false, tree }) }));
+    const asPins: PinTreeSource = source; // the pins budget check (@fx/pipeline) takes this source as it is
+    expect((await asPins.tree(COMMIT))!.entries).toEqual([
+      { path: "ok", type: "blob", sha: BLOB, size: 0 },
+      { path: "neg", type: "blob", sha: BLOB },
+      { path: "frac", type: "blob", sha: BLOB },
+      { path: "str", type: "blob", sha: BLOB },
+      { path: "dir", type: "tree", sha: BLOB },
+    ]);
   });
 
   it("answers null for an empty repository, a missing tree and a wrong-shaped reply; throws a fixed message (no token, no body) on a server error", async () => {
