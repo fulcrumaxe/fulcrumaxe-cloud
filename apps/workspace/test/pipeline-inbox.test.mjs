@@ -6,20 +6,64 @@
 // survives an unknown outcome only.
 import { describe, expect, it } from "vitest";
 import { ApiFailure } from "../apps/_lib/api.js";
-import { AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
+import { approveBlock, checkSentences, claimVerdict, evidenceLabel, AMOUNT_LABEL, AMOUNT_SENTENCE, LOW_BUDGET_SENTENCE, checkAmount, prefillAmount, DETACHED_SENTENCE, INBOX_DONE as DONE, FILTERS, NOT_STARTED, REFUSALS, INBOX_SENDING as SENDING, approvedSentence, badgesFor, detailsFor, outcomeUnknown, refusalSentence, stageWords, validProposal } from "../apps/pipeline/pipeline-actions.js";
 
 const BAD = /\b(null|undefined|NaN|\[object)/;
 const base = { id: "p1", title: "Add dark mode", state: "new", sources: ["github_issue"], gh_number: 12, discussion_number: null, task_key: null, category_hint: null, estimate_usd: null, milestone_key: null, milestone_title: null };
 
 describe("filters", () => {
-  it("are the five of the Spec, in order, each with an empty-state sentence", () => {
-    expect(FILTERS.map((f) => f.label)).toEqual(["New", "Approved", "Rejected", "Closed at source", "Your own loop"]);
+  it("are the four sections, then the decided ones, in order, each with an empty-state sentence", () => {
+    expect(FILTERS.map((f) => f.label)).toEqual(["New", "Being checked", "Couldn't confirm", "Not checked", "Approved", "Rejected", "Closed at source", "Your own loop"]);
     for (const f of FILTERS) {
       expect(f.empty.length).toBeGreaterThan(10);
       expect(f.empty).not.toMatch(BAD);
     }
-    expect(FILTERS.find((f) => f.key === "new").query).toBe("state=new&owner=product");
+    expect(FILTERS.find((f) => f.key === "new").query).toBe("state=new&owner=product&section=new");
+    expect(FILTERS.find((f) => f.key === "couldnt_confirm").query).toBe("state=new&owner=product&section=couldnt_confirm");
     expect(FILTERS.find((f) => f.key === "own_loop").query).toBe("owner=internal_loop");
+  });
+});
+
+describe("S4-h: the check on a proposal", () => {
+  it("names the claim verdicts and the three refute reasons in the approved words", () => {
+    expect(claimVerdict({ verdict: "supported" })).toBe("Confirmed in the repository.");
+    expect(claimVerdict({ verdict: "unverifiable" })).toBe("Couldn't be checked against the repository.");
+    expect(claimVerdict({ verdict: "pending" })).toBe("Not checked yet.");
+    expect(claimVerdict({ verdict: "refuted", refute_code: "cite_not_found" })).toBe("Not confirmed: the file or lines it points to aren't in the repository at this commit.");
+    expect(claimVerdict({ verdict: "refuted", refute_code: "cite_mismatch" })).toBe("Not confirmed: the lines it points to don't say this.");
+    expect(claimVerdict({ verdict: "refuted", refute_code: "contradicted" })).toBe("Not confirmed: the repository says otherwise.");
+    expect(claimVerdict({ verdict: "refuted", refute_code: null })).toBe("");
+    expect(claimVerdict({ verdict: "odd" })).toBe("");
+  });
+  it("labels the six kinds of evidence", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(evidenceLabel({ kind: "file_lines", ref: "src/a.ts:3-7", commit_sha: sha })).toEqual({ label: "src/a.ts, lines 3 to 7", commit: "at commit 0123456" });
+    expect(evidenceLabel({ kind: "file_lines", ref: "src/a.ts:3", commit_sha: sha })).toEqual({ label: "src/a.ts, line 3", commit: "at commit 0123456" });
+    expect(evidenceLabel({ kind: "file_lines", ref: "src/a.ts:3-7", commit_sha: null })).toEqual({ label: "src/a.ts, lines 3 to 7", commit: "" });
+    expect(evidenceLabel({ kind: "issue", ref: "#12" })).toEqual({ label: "Issue #12", commit: "" });
+    expect(evidenceLabel({ kind: "discussion", ref: "#483" })).toEqual({ label: "Discussion #483", commit: "" });
+    expect(evidenceLabel({ kind: "doc_passage", ref: "docs/a.md:4-9", commit_sha: sha })).toEqual({ label: "From docs/a.md, lines 4 to 9", commit: "" });
+    expect(evidenceLabel({ kind: "interview_answer", ref: "goals" })).toEqual({ label: "From your interview answers", commit: "" });
+    expect(evidenceLabel({ kind: "preview", ref: "#5" })).toEqual({ label: "Found in the preview", commit: "" });
+  });
+  it("shows a ref that does not parse as the text it is, never as a hole", () => {
+    expect(evidenceLabel({ kind: "file_lines", ref: "no lines here" }).label).toBe("no lines here");
+    expect(evidenceLabel({ kind: "issue", ref: "twelve" }).label).toBe("twelve");
+    expect(evidenceLabel({ kind: "issue" }).label).toBe("");
+  });
+  it("checkSentences speaks from the row's own fields only", () => {
+    expect(checkSentences({ provenance: "internal", verification: "verified" })).toEqual([]);
+    expect(checkSentences({ provenance: "external", verification: "verified" })).toEqual(["From someone without write access. Read it before approving."]);
+    expect(checkSentences({ verification: "partly_verified" })).toEqual(["Part of this was confirmed. Read the parts that weren't before you approve it."]);
+    expect(checkSentences({ verification: "check_failed", verify_retry: true, verify_attempts_max: 3 })).toEqual(["The check didn't finish. We'll try again at the next check."]);
+    expect(checkSentences({ verification: "check_failed", verify_retry: false, verify_attempts_max: 3 })).toEqual(["The check didn't finish after 3 tries, so this proposal stays unconfirmed."]);
+    expect(checkSentences({ verification: "check_failed", verify_retry: false })).toEqual([]);
+    expect(checkSentences({ verification: "refuted" })).toEqual([]);
+  });
+  it("approveBlock names why Approve is off in Being checked and Not checked only", () => {
+    expect(approveBlock({ inbox_section: "being_checked" })).toBe("You can approve this once it's been checked.");
+    expect(approveBlock({ inbox_section: "not_checked" })).toBe("Not checked yet: add a model key or connect a runner");
+    for (const s of ["new", "couldnt_confirm", null, undefined]) expect(approveBlock({ inbox_section: s })).toBe("");
   });
 });
 

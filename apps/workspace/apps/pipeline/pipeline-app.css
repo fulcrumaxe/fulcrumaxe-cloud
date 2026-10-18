@@ -215,6 +215,15 @@
 .pl-plan-task-title { display: block; }
 .pl-plan-task-meta { display: block; }
 .pl-plan-evidence ul { margin: 4px 0 10px; padding-left: 1.2em; overflow-wrap: anywhere; }
+/* D#483 S4-h: the title that opens a proposal's claims and evidence. Text wraps; nothing may widen the row on a phone. */
+.pl-inbox-open { box-sizing: border-box; min-height: 44px; max-width: 100%; padding: 4px 0; background: none; border: 0; color: inherit; font: inherit; font-weight: 600; text-align: left; text-decoration: underline; cursor: pointer; overflow-wrap: anywhere; }
+.pl-inbox-open:focus-visible, .pl-inbox-detail a:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.pl-inbox-detail { margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--accent, #1aff80); min-width: 0; }
+.pl-claims, .pl-evidence { list-style: none; margin: 4px 0 10px; padding: 0; }
+.pl-claim, .pl-evi { margin: 6px 0; }
+.pl-claim-text, .pl-claim-verdict { display: block; }
+.pl-evi-excerpt { margin: 2px 0 0; }
+.pl-inbox-detail a { color: var(--accent, #1aff80); }
 @media (max-width: 520px) {
   .pl-tabs { padding-left: 6px; padding-right: 6px; }
   .pl-inbox, .pl-plan { padding-left: 8px; padding-right: 8px; }

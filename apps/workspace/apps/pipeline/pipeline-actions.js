@@ -648,14 +648,82 @@ export function approvalParts(run, approvals) {
 //  - No text node is ever "null" or "undefined": every value goes through str() or a presence check before it is drawn.
 //  - Text only, built with h().
 
-/** The five filters. "Your own loop" shows loop-owned proposals of every state; the others show product-owned ones only. */
+/**
+ * The filters (D#483 S4-h): the four sections of new proposals, then the decided ones. A section is asked of the server by `section`
+ * (it implies product-owned and state=new); the Inbox never works out a section itself. "Your own loop" shows loop-owned proposals of every state.
+ */
 export const FILTERS = [
-  { key: "new", label: "New", query: "state=new&owner=product", empty: "Nothing is waiting for a decision. Proposals appear here after you import the repository's plan on the Plan tab." },
+  { key: "new", label: "New", query: "state=new&owner=product&section=new", empty: "Nothing is waiting for a decision. New proposals appear here once they've been checked." },
+  { key: "being_checked", label: "Being checked", query: "state=new&owner=product&section=being_checked", intro: "We're checking these against your repository. They move to New when the check is done.", empty: "Nothing is being checked right now." },
+  { key: "couldnt_confirm", label: "Couldn't confirm", query: "state=new&owner=product&section=couldnt_confirm", intro: "We couldn't confirm these against your repository. Read what didn't match before you approve one.", empty: "Nothing here. Every proposal we checked was confirmed." },
+  { key: "not_checked", label: "Not checked", query: "state=new&owner=product&section=not_checked", empty: "Every proposal has been checked or is being checked." },
   { key: "approved", label: "Approved", query: "state=approved", empty: "Nothing has been approved yet." },
   { key: "rejected", label: "Rejected", query: "state=rejected", empty: "Nothing has been rejected." },
   { key: "withdrawn", label: "Closed at source", query: "state=withdrawn", empty: "Nothing has been closed or finished at its source since the last import." },
   { key: "own_loop", label: "Your own loop", query: "owner=internal_loop", empty: "None of this repository's items belong to your own development loop." },
 ];
+
+// D#483 S4-h: what a person reads about a proposal's check. Fixed, owner-approved text; the number in the spent-tries line comes from the row's own cap.
+export const EXTERNAL_SENTENCE = "From someone without write access. Read it before approving.";
+export const PARTLY_SENTENCE = "Part of this was confirmed. Read the parts that weren't before you approve it.";
+export const NOT_CHECKED_SENTENCE = "Not checked yet: add a model key or connect a runner";
+export const BEING_CHECKED_SENTENCE = "You can approve this once it's been checked.";
+export const RETRY_SENTENCE = "The check didn't finish. We'll try again at the next check.";
+export const NO_EVIDENCE_SENTENCE = "No evidence was found for this proposal.";
+export const NO_CLAIMS_SENTENCE = "There was nothing to check in this proposal.";
+export const CLAIM_VERDICTS = {
+  supported: "Confirmed in the repository.",
+  unverifiable: "Couldn't be checked against the repository.",
+  pending: "Not checked yet.",
+};
+export const REFUTE_REASONS = {
+  cite_not_found: "Not confirmed: the file or lines it points to aren't in the repository at this commit.",
+  cite_mismatch: "Not confirmed: the lines it points to don't say this.",
+  contradicted: "Not confirmed: the repository says otherwise.",
+};
+
+/** The line for a check that gave up; null when the row has no cap to name. */
+export const spentSentence = (max) => (typeof max === "number" && Number.isFinite(max) ? "The check didn't finish after " + max + " tries, so this proposal stays unconfirmed." : null);
+
+/** The sentence beside a claim: its verdict, and for a refusal its reason. "" for a verdict this build does not know. */
+export function claimVerdict(c) {
+  if (c.verdict === "refuted") return typeof c.refute_code === "string" && has(REFUTE_REASONS, c.refute_code) ? REFUTE_REASONS[c.refute_code] : "";
+  return typeof c.verdict === "string" && has(CLAIM_VERDICTS, c.verdict) ? CLAIM_VERDICTS[c.verdict] : "";
+}
+
+/**
+ * The words naming one piece of evidence, from its kind and `ref` (grammar: `<path>:<a>-<b>`, `<path>:<n>`, `#<n>`). A ref that does not parse
+ * is shown as stored, as text. `commit` ("at commit ...") is kept apart so it can follow the link.
+ */
+export function evidenceLabel(e) {
+  const ref = typeof e.ref === "string" ? e.ref : "";
+  if (e.kind === "interview_answer") return { label: "From your interview answers", commit: "" };
+  if (e.kind === "preview") return { label: "Found in the preview", commit: "" };
+  if (e.kind === "issue" || e.kind === "discussion") {
+    const n = /^#([1-9][0-9]*)$/.exec(ref);
+    return { label: n ? (e.kind === "issue" ? "Issue #" : "Discussion #") + n[1] : ref, commit: "" };
+  }
+  const m = /^(.+):([1-9][0-9]*)(?:-([1-9][0-9]*))?$/.exec(ref);
+  if (!m || (e.kind !== "file_lines" && e.kind !== "doc_passage")) return { label: ref, commit: "" };
+  const where = m[3] && m[3] !== m[2] ? "lines " + m[2] + " to " + m[3] : "line " + m[2];
+  const sha = typeof e.commit_sha === "string" && /^[0-9a-f]{7,}$/.test(e.commit_sha) ? e.commit_sha.slice(0, 7) : "";
+  return e.kind === "doc_passage" ? { label: "From " + m[1] + ", " + where, commit: "" } : { label: m[1] + ", " + where, commit: sha ? "at commit " + sha : "" };
+}
+
+/** The sentences under a new proposal about where it came from and how its check went, from its own fields. */
+export function checkSentences(p) {
+  const out = [];
+  if (p.provenance === "external") out.push(EXTERNAL_SENTENCE);
+  if (p.verification === "partly_verified") out.push(PARTLY_SENTENCE);
+  if (p.verification === "check_failed") {
+    const s = p.verify_retry === true ? RETRY_SENTENCE : spentSentence(p.verify_attempts_max);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+/** The sentence that explains a disabled Approve, from the section the server put the proposal in. "" when Approve is open. */
+export const approveBlock = (p) => (p.inbox_section === "being_checked" ? BEING_CHECKED_SENTENCE : p.inbox_section === "not_checked" ? NOT_CHECKED_SENTENCE : "");
 
 /** Shown instead of "Enter a higher one" when the remaining monthly budget is below the first run's cost. Fixed text. */
 export const LOW_BUDGET_SENTENCE = "Your remaining budget this month is lower than the cost of the first run. Raise the monthly budget to approve this.";
@@ -832,6 +900,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
   const keys = new Map(); // proposal id -> the Idempotency-Key of an approve whose outcome is unknown
   const amounts = new Map(); // proposal id -> the limit being typed (a string)
   const estimates = new Map(); // proposal id -> { basis, remaining, ... } from the estimate route; absent when it could not be read
+  const opened = new Set(); // proposal ids whose evidence and claims are showing
+  const detailsById = new Map(); // proposal id -> { status: loading | ready | error, claims, evidence, stamp }; read once per opening, never by the list
   const sending = new Set();
   let ac = null;
   let seq = 0;
@@ -880,6 +950,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       keys.clear();
       amounts.clear();
       estimates.clear();
+      opened.clear();
+      detailsById.clear();
     }
     if (!keepNotes) note = "";
     ac = new AbortController();
@@ -897,7 +969,53 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
       status = "error";
     }
     paint();
-    if (status === "ready") void loadEstimates(repo, mine);
+    if (status === "ready") {
+      void loadEstimates(repo, mine);
+      // An opened proposal whose check changed since its detail was read is read again; one that left the list is closed.
+      for (const id of [...opened]) {
+        const p = rows.find((r) => r.id === id);
+        if (!p) {
+          opened.delete(id);
+          detailsById.delete(id);
+        } else if (!detailsById.has(id) || (detailsById.get(id).status === "ready" && detailsById.get(id).stamp !== stampOf(p))) void fetchDetail(p);
+      }
+    }
+  }
+
+  const stampOf = (p) => str(p.verified_at) + "|" + str(p.verification);
+
+  /** The claims and evidence of one proposal: the detail route, once per opening. A bad row in the answer is left out, not drawn with holes. */
+  async function fetchDetail(p) {
+    const stamp = stampOf(p);
+    detailsById.set(p.id, { status: "loading", claims: [], evidence: [], stamp });
+    paint();
+    try {
+      const res = await call("GET", "/api/v1/proposals/" + encodeURIComponent(p.id));
+      if (destroyed || !opened.has(p.id)) return;
+      const got = res && res.proposal && typeof res.proposal === "object" ? res.proposal : null;
+      if (!got || !Array.isArray(got.claims) || !Array.isArray(got.evidence)) throw new Error("shape");
+      detailsById.set(p.id, {
+        status: "ready",
+        claims: got.claims.filter((c) => c && typeof c.id === "string" && typeof c.text === "string"),
+        evidence: got.evidence.filter((e) => e && typeof e.id === "string" && typeof e.kind === "string"),
+        stamp,
+      });
+    } catch {
+      if (destroyed || !opened.has(p.id)) return;
+      detailsById.set(p.id, { status: "error", claims: [], evidence: [], stamp });
+    }
+    paint();
+  }
+
+  function toggle(p) {
+    if (opened.has(p.id)) {
+      opened.delete(p.id);
+      detailsById.delete(p.id);
+      paint();
+    } else {
+      opened.add(p.id);
+      void fetchDetail(p);
+    }
   }
 
   /** The estimate of every new, product-owned row not yet read, in sets of 50 (the route's limit). A failure leaves the field blank and optional. */
@@ -1018,9 +1136,10 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
 
   function button(label, p, path, extra) {
     const repo = getRepo();
-    const blocked = sending.has(p.id) || limited > 0 || (path === "approve" && !!repo && !repo.connected);
+    const unchecked = path === "approve" && approveBlock(p) !== "";
+    const blocked = sending.has(p.id) || limited > 0 || unchecked || (path === "approve" && !!repo && !repo.connected);
     // aria-disabled, not disabled: a disabled button drops keyboard focus while the request is out. Clicks are ignored instead.
-    const describe = path === "approve" || path === "reject" ? { "aria-describedby": "pl-inbox-title-" + p.id } : {};
+    const describe = path === "approve" || path === "reject" ? { "aria-describedby": "pl-inbox-title-" + p.id + (unchecked ? " pl-inbox-why-" + p.id : "") } : {};
     return h("button", { type: "button", class: "pl-btn", "data-testid": "pl-inbox-" + path, "data-focus": p.id + ":" + path, "aria-disabled": blocked ? "true" : "false", ...describe, onClick: () => !blocked && act(p, path), ...extra }, label);
   }
 
@@ -1063,6 +1182,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         est && est.basis === "none" ? h("p", { class: "pl-inbox-line", id: aid + "-line", "data-testid": "pl-inbox-amount-line" }, AMOUNT_SENTENCE) : null,
         h("label", { class: "pl-inbox-amountlabel", for: aid }, AMOUNT_LABEL, amountInput),
         button("Approve", p, "approve"),
+        approveBlock(p) ? h("p", { class: "pl-inbox-line", id: "pl-inbox-why-" + p.id, "data-testid": "pl-inbox-approve-why" }, approveBlock(p)) : null,
         repo && !repo.connected ? h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-detached" }, DETACHED_SENTENCE) : null,
         h("label", { class: "pl-inbox-notelabel", for: id }, h("span", { class: "pl-sr" }, "Reason for rejecting " + p.title + " (optional)"), input),
         button("Reject", p, "reject"),
@@ -1094,15 +1214,49 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     return out;
   }
 
+  /** The claims (each with its verdict in words) and the evidence of an opened proposal. Text only: an excerpt or a claim is never read as markup. */
+  function detailEl(p) {
+    const d = detailsById.get(p.id);
+    const id = "pl-inbox-detail-" + p.id;
+    const wrap = (...kids) => h("div", { class: "pl-inbox-detail", id, "data-testid": "pl-inbox-detail" }, ...kids);
+    if (!d || d.status === "loading") return wrap(h("p", { class: "pl-inbox-line", role: "status", "data-testid": "pl-inbox-detail-loading" }, "Loading…"));
+    if (d.status === "error")
+      return wrap(h("p", { role: "alert", "data-testid": "pl-inbox-detail-error" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": p.id + ":retry", onClick: () => void fetchDetail(p) }, "Try again"));
+    const claims = d.claims.length
+      ? h("ul", { class: "pl-claims", "data-testid": "pl-claims" }, d.claims.map((c) => h("li", { class: "pl-claim", "data-testid": "pl-claim", "data-verdict": str(c.verdict) }, h("span", { class: "pl-claim-text" }, c.text), claimVerdict(c) ? h("span", { class: "pl-claim-verdict", "data-testid": "pl-claim-verdict" }, claimVerdict(c)) : null)))
+      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-claims" }, NO_CLAIMS_SENTENCE);
+    const evidence = d.evidence.length
+      ? h("ul", { class: "pl-evidence", "data-testid": "pl-evidence" }, d.evidence.map((e) => {
+          const w = evidenceLabel(e);
+          // The link is the server's own (built from the repository and the commit); anything but a GitHub https address is shown as plain text.
+          const link = typeof e.url === "string" && e.url.startsWith("https://github.com/");
+          return h("li", { class: "pl-evi", "data-testid": "pl-evi", "data-kind": e.kind },
+            link ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-evi-link" }, w.label) : h("span", { "data-testid": "pl-evi-label" }, w.label),
+            w.commit ? [" ", h("span", { "data-testid": "pl-evi-commit" }, w.commit)] : null,
+            str(e.excerpt) ? h("p", { class: "pl-ins-text pl-evi-excerpt", "data-testid": "pl-evi-excerpt" }, e.excerpt) : null);
+        }))
+      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-evidence" }, NO_EVIDENCE_SENTENCE);
+    return wrap(claims, evidence);
+  }
+
   function rowEl(p) {
     const details = detailsFor(p);
     const badges = badgesFor(p);
+    const open = opened.has(p.id);
+    const checks = p.owner_process === "internal_loop" ? [] : checkSentences(p).filter((s) => p.state === "new" || s === EXTERNAL_SENTENCE);
     return h(
       "li",
       { class: "pl-inbox-row", "data-testid": "pl-inbox-row", "data-id": p.id, "data-state": p.state },
-      h("h3", { class: "pl-inbox-title", id: "pl-inbox-title-" + p.id }, p.title),
+      h(
+        "h3",
+        { class: "pl-inbox-title", id: "pl-inbox-title-" + p.id },
+        // The title opens the evidence and claims, so the control needs no wording of its own.
+        h("button", { type: "button", class: "pl-inbox-open", "aria-expanded": String(open), "aria-controls": open ? "pl-inbox-detail-" + p.id : null, "data-focus": p.id + ":toggle", "data-testid": "pl-inbox-toggle", onClick: () => toggle(p) }, p.title)
+      ),
       badges.length ? h("p", { class: "pl-inbox-badges", "data-testid": "pl-inbox-badges" }, badges.join(" · ")) : null,
       details.length ? h("p", { class: "pl-inbox-details", "data-testid": "pl-inbox-details" }, details.join(" · ")) : null,
+      checks.map((s) => h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-check" }, s)),
+      open ? detailEl(p) : null,
       stamps(p),
       h("div", { class: "pl-inbox-actions" }, actions(p)),
       rowNote.has(p.id) ? h("p", { class: "pl-inbox-sentence", "data-testid": "pl-inbox-sentence" }, rowNote.get(p.id) === RATE ? "You're changing things too fast. " + retryWords(limited) : rowNote.get(p.id)) : null
@@ -1115,10 +1269,13 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     if (status === "error")
       return h("div", { "data-testid": "pl-inbox-error" }, h("p", { role: "alert" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": "retry", onClick: () => load() }, "Try again"));
     if (status === "loading" && rows.length === 0) return h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-loading" }, "Loading proposals…");
-    if (rows.length === 0) return h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-empty" }, FILTERS.find((f) => f.key === filter).empty);
+    const intro = FILTERS.find((f) => f.key === filter).intro;
+    const introEl = intro ? h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-intro" }, intro) : null;
+    if (rows.length === 0) return h("div", {}, introEl, h("p", { class: "pl-inbox-line", "data-testid": "pl-inbox-empty" }, FILTERS.find((f) => f.key === filter).empty));
     return h(
       "div",
       {},
+      introEl,
       h("ul", { class: "pl-inbox-list", "aria-label": FILTERS.find((f) => f.key === filter).label }, rows.map(rowEl)),
       cursor
         ? h(
@@ -1166,7 +1323,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
         let target = null;
         for (const id of before.slice(before.indexOf(focusRow) + 1)) {
           const row = present.get(id);
-          target = row ? row.querySelector("button[data-focus]") : null;
+          target = row ? row.querySelector(".pl-inbox-actions button[data-focus]") || row.querySelector("button[data-focus]") : null;
           if (target) break;
         }
         if (!target) target = view.querySelector("#pl-inbox-h");
@@ -1178,6 +1335,8 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
   function select(key) {
     if (key === filter) return;
     filter = key;
+    opened.clear();
+    detailsById.clear();
     rows = [];
     cursor = null;
     note = "";
