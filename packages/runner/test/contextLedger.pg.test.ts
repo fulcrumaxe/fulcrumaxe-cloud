@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
 import { seedAccount as seedTenant } from "@fx/db/test/helpers/seed.js";
-import { ContextLedgerCapture, type ContextSection } from "@fulcrumaxe/runner-protocol";
+import { ContextLedgerCapture, NOT_RECORDED_MEASURE, type ContextSection } from "@fulcrumaxe/runner-protocol";
 import { ContextLedgerInvalid, recordContextLedger } from "../src/contextLedgerWriter.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
@@ -127,5 +127,89 @@ describe("run context ledger [pg] (D#600 CX-1a)", () => {
     await record(A.accountId, A.runId, []);
     await db.admin.query("DELETE FROM agent_runs WHERE id = $1", [A.runId]);
     expect((await rows(A.accountId, A.runId)).rows).toEqual([]);
+  });
+
+  // D#600 CX-2b (migration 0869): the dispatch writes the cloud's sections with nothing measured; the runner's `done` adds to that row.
+  describe("the cloud's sections first, the runner's measure after (CX-2b)", () => {
+    const sha2 = "b".repeat(64);
+    const mapSection = (bytes: number): ContextSection => ({ code: "map", bytes, sha256: sha2, trimmed_bytes: 0 });
+    const dispatchWrite = (A: { accountId: string; runId: string }, sections: ContextSection[]) =>
+      withTenant(db.runWriterPool, A.accountId, (client) => recordContextLedger(client, { accountId: A.accountId, runId: A.runId, sections, measure: NOT_RECORDED_MEASURE }));
+
+    it("the dispatch write is a partial row of the sections with every figure null, never 0", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200), section("output", 30)]);
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r).toHaveLength(1);
+      expect(r[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null, memory_tokens: null, compactions: 0, tool_output_bytes: {} });
+      expect(r[0].sections).toEqual([section("boundary", 40), section("spec", 200), section("output", 30)]);
+    });
+
+    it("the runner's done then makes the row measured and its map entry joins the cloud's sections; every other cloud entry stays", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200), section("output", 30)]);
+      await record(A.accountId, A.runId, [mapSection(900)], measureOf(usage("r1", 12_000, 600, 19)));
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0]).toMatchObject({ basis: "measured", first_turn_input_tokens: "12619", peak_context_tokens: "12619" });
+      expect(r[0].sections).toEqual([section("boundary", 40), section("spec", 200), section("output", 30), mapSection(900)]);
+    });
+
+    it("a map entry from the runner replaces the cloud's map in place, so there is one map entry", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), { ...mapSection(100), sha256: sha }, section("spec", 200)]);
+      await record(A.accountId, A.runId, [mapSection(900)], measureOf(usage("r1", 10, 0, 0)));
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0].sections).toEqual([section("boundary", 40), mapSection(900), section("spec", 200)]);
+    });
+
+    it("the runner cannot change the cloud's figures for any other code, and cannot add one", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);
+      await record(A.accountId, A.runId, [section("spec", 999_999), section("findings", 5), section("note", 6)], measureOf(usage("r1", 10, 0, 0)));
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0].sections).toEqual([section("boundary", 40), section("spec", 200)]);
+    });
+
+    it("a runner that sends no ledger leaves the cloud's sections, partial, with nothing measured", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);
+      await record(A.accountId, A.runId, [], NOT_RECORDED_MEASURE);
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: null, peak_context_tokens: null, compactions: 0 });
+      expect(r[0].sections).toEqual([section("boundary", 40), section("spec", 200)]);
+    });
+
+    it("the same dispatch recorded twice changes nothing", async () => {
+      const A = await seed();
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);
+      await dispatchWrite(A, [section("boundary", 40), section("spec", 200)]);
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toEqual([section("boundary", 40), section("spec", 200)]);
+    });
+
+    it("several sections of one code are kept as sent (a note per note, the boundary around the card)", async () => {
+      const A = await seed();
+      const sent = [section("boundary", 10), section("card", 20), section("boundary", 5), section("note", 7), { ...section("note", 8), sha256: sha2 }];
+      await dispatchWrite(A, sent);
+      expect((await rows(A.accountId, A.runId)).rows[0].sections).toEqual(sent);
+    });
+
+    it("a row that already measured something stays partial when a later command measured nothing (the old rule)", async () => {
+      const A = await seed();
+      await record(A.accountId, A.runId, [], measureOf(usage("a", 1, 1, 8)));
+      await record(A.accountId, A.runId, [], measureOf({ type: "system", subtype: "init" }));
+      expect((await rows(A.accountId, A.runId)).rows[0]).toMatchObject({ basis: "partial", first_turn_input_tokens: "10" });
+    });
+
+    it("a map entry on a row that has sections but no map is appended; the row never exceeds 64 entries", async () => {
+      const A = await seed();
+      await dispatchWrite(A, Array.from({ length: 64 }, (_, i) => ({ ...section("note", i + 1) })));
+      await record(A.accountId, A.runId, [mapSection(9)], measureOf(usage("a", 1, 1, 8)));
+      const { rows: r } = await rows(A.accountId, A.runId);
+      expect(r[0].sections).toHaveLength(64);
+      const B = await seed();
+      await dispatchWrite(B, [section("spec", 5)]);
+      await record(B.accountId, B.runId, [mapSection(9)], measureOf(usage("a", 1, 1, 8)));
+      expect((await rows(B.accountId, B.runId)).rows[0].sections).toEqual([section("spec", 5), mapSection(9)]);
+    });
   });
 });

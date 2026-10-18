@@ -170,6 +170,57 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     expect(strings.sort()).toEqual([id, 'map', 'measured', 'Read', 'runner', 'succeeded'].sort());
   });
 
+  // D#600 CX-2b: the two writes of a runner run, through the real definer (the dispatch with the cloud's sections, then the runner's done), read back by the route.
+  describe('D#600 CX-2b: a runner run lists the cloud\'s assembled sections and the daemon\'s map entry', () => {
+    const sec = (code: string, bytes: number, sha = 'a') => ({ code, bytes, sha256: sha.repeat(64), trimmed_bytes: 0 });
+    const record = async (accountId: string, runId: string, sections: unknown[], p: { first: number | null; peak: number | null; basis: 'measured' | 'partial' }): Promise<void> => {
+      await admin.query(`SELECT set_config('app.account_id', $1, false)`, [accountId]);
+      try {
+        await admin.query('SELECT run_context_ledger_record($1::uuid, $2::uuid, $3::jsonb, $4::bigint, $5::bigint, NULL, NULL, NULL, $6::jsonb, 0, $7::text)', [accountId, runId, JSON.stringify(sections), p.first, p.peak, '{}', p.basis]);
+      } finally {
+        await admin.query(`SELECT set_config('app.account_id', '', false)`);
+      }
+    };
+    const cloud = [sec('boundary', 50), sec('card', 150), sec('spec', 400), sec('output', 40)];
+    const prompt = ['b'.repeat(50), 'c'.repeat(150), 's'.repeat(400), 'o'.repeat(40)].join('\n\n');
+    const panel = async (id: string, identity: { userId: string; accountId: string }) => (await (await get(id, identity)).json()) as RunContextPanel;
+
+    it('lists every assembled section with its bytes (not []), the daemon\'s map entry, and the first turn beside them without a contradiction (the 10-17 staging shape)', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId, { runtime: 'runner', status: 'running' });
+      await record(accountId, id, cloud, { first: null, peak: null, basis: 'partial' });
+      // Before the runner is done: the cloud's sections, nothing measured (null, never 0).
+      const early = await panel(id, { accountId, userId });
+      expect(early).toMatchObject({ recorded: true, basis: 'partial', first_turn_input_tokens: null, peak_context_tokens: null });
+      expect(early.sections.map((s) => s.code)).toEqual(['boundary', 'card', 'spec', 'output']);
+      await record(accountId, id, [sec('map', 700, 'e')], { first: 12_619, peak: 12_619, basis: 'measured' });
+      const done = await panel(id, { accountId, userId });
+      expect(done).toMatchObject({ recorded: true, basis: 'measured', first_turn_input_tokens: 12_619 });
+      expect(done.sections).toEqual([
+        { code: 'boundary', bytes: 50, trimmed_bytes: 0 },
+        { code: 'card', bytes: 150, trimmed_bytes: 0 },
+        { code: 'spec', bytes: 400, trimmed_bytes: 0 },
+        { code: 'output', bytes: 40, trimmed_bytes: 0 },
+        { code: 'map', bytes: 700, trimmed_bytes: 0 },
+      ]);
+      // The cloud's sections (the runner's map is read on the machine, so it is not part of the dispatched prompt) fit the dispatched prompt,
+      // and the first turn (the CLI's own system prompt and tools included) is larger than the prompt's bytes.
+      const cloudBytes = done.sections.filter((s) => s.code !== 'map').reduce((n, s) => n + s.bytes, 0);
+      expect(cloudBytes).toBeLessThanOrEqual(Buffer.byteLength(prompt, 'utf8'));
+      expect(done.first_turn_input_tokens!).toBeGreaterThan(cloudBytes / 4);
+    });
+
+    it('a runner that sends no ledger still shows the cloud\'s sections; the token figures stay null', async () => {
+      const { accountId, userId } = await seedAccountWithMember(admin);
+      const id = await seedRun(accountId, { runtime: 'runner' });
+      await record(accountId, id, cloud, { first: null, peak: null, basis: 'partial' });
+      await record(accountId, id, [], { first: null, peak: null, basis: 'partial' });
+      const out = await panel(id, { accountId, userId });
+      expect(out).toMatchObject({ basis: 'partial', first_turn_input_tokens: null, peak_context_tokens: null, cache_read_tokens: null, cache_write_tokens: null });
+      expect(out.sections.map((s) => s.bytes)).toEqual([50, 150, 400, 40]);
+    });
+  });
+
   describe('D#600 CX-8b: recalled memory and the map version from the run\'s recorded inputs', () => {
     const MAP_HASH = 'c'.repeat(64);
     async function entry(accountId: string, body: string, status = 'approved', version = 1): Promise<string> {
