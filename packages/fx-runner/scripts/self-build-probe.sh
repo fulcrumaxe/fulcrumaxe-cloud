@@ -15,10 +15,13 @@ FLOOR=(.ssh .aws .config/gh .kube .docker .gnupg .netrc .npmrc .claude .claude.j
 FILES=(.netrc .npmrc .claude.json)
 SYSTEM_DIR="${FX_PROBE_SYSTEM_DIR:-/etc}"
 NIX_SOCKET=/nix/var/nix/daemon-socket/socket
-SENTINEL='postgres: fx-probe-sentinel'
 
 is_file_entry() { local e; for e in "${FILES[@]}"; do [ "$e" = "$1" ] && return 0; done; return 1; }
 state_dir() { printf '%s' "${FX_PROBE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fx-probe}"; }
+# The decoy's name carries this run's state directory (letters and digits only, so it is safe in a pgrep pattern) and is followed by a space in the process table, where the
+# next argument starts. Probes with different state directories, such as parallel test runs by one user, name different decoys and never end
+# each other's. It is read when needed: --state may set the directory after the script starts.
+sentinel_name() { local s; s="$(state_dir)"; printf 'postgres: fx-decoy-%s' "${s//[^A-Za-z0-9]/_}"; }
 rand_hex() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 
 CHECKS=()
@@ -101,7 +104,8 @@ proc_cmdline() { tr '\0' ' ' 2> /dev/null < "$1/cmdline"; }
 # kill_decoys: ends the decoy process. pkill goes first, then a scan of /proc, so cleanup never depends on pgrep or pkill seeing this user's
 # processes (a unit with ProtectProc=invisible hides them from both; our own /proc/PID/cmdline may still be readable).
 kill_decoys() {
-  pkill -u "$(id -u)" -f "$SENTINEL" 2> /dev/null || true
+  local name; name="$(sentinel_name) "
+  pkill -u "$(id -u)" -f "$name" 2> /dev/null || true
   local d pid cmd
   for d in /proc/[0-9]*; do
     pid="${d#/proc/}"
@@ -109,7 +113,7 @@ kill_decoys() {
     proc_is_ours "$d" || continue
     [ -r "$d/cmdline" ] || continue
     cmd="$(proc_cmdline "$d")" || continue
-    case "$cmd" in "$SENTINEL"*) kill -KILL "$pid" 2> /dev/null || true ;; esac
+    case "$cmd" in "$name"*) kill -KILL "$pid" 2> /dev/null || true ;; esac
   done
 }
 
@@ -257,7 +261,7 @@ check_nix() {
 # A decoy named like the processes item 8 looks for. If the sandbox does not end the job's process tree, it is still there for `verify`.
 start_sentinel() {
   # Not `sleep`: on some systems it is a multi-call binary that reads its applet from argv[0].
-  ( exec -a "$SENTINEL" bash -c 'while :; do sleep 30; done' ) > /dev/null 2>&1 &
+  ( exec -a "$(sentinel_name)" bash -c 'while :; do sleep 30; done' ) > /dev/null 2>&1 &
   disown 2> /dev/null || true
 }
 
@@ -267,7 +271,7 @@ run() {
   start_sentinel
   sleep 1
   # Without this the "gone" answer of `verify` could only mean the decoy never started.
-  if pgrep -f "$SENTINEL" > /dev/null 2>&1; then add sentinel_started 8 started pass started; else add sentinel_started 8 started inconclusive not_visible; fi
+  if pgrep -f "$(sentinel_name) " > /dev/null 2>&1; then add sentinel_started 8 started pass started; else add sentinel_started 8 started inconclusive not_visible; fi
   check_reads
   check_writes
   if [ "$egress" = 1 ]; then check_egress; fi
@@ -304,7 +308,7 @@ verify() {
     add "not_covered_$(slug "$(basename "$path")")" 4 covered inconclusive existing_file_empty
   done < "$state/manifest"
   # Item 8: nothing the job started is left.
-  if pgrep -u "$(id -u)" -f "$SENTINEL" > /dev/null 2>&1; then add leftover_sentinel 8 gone fail sentinel_alive; else add leftover_sentinel 8 gone pass sentinel_gone; fi
+  if pgrep -u "$(id -u)" -f "$(sentinel_name) " > /dev/null 2>&1; then add leftover_sentinel 8 gone fail sentinel_alive; else add leftover_sentinel 8 gone pass sentinel_gone; fi
   n=0
   for pid in $(pgrep -u "$(id -u)" -f 'postgres|chrom' 2> /dev/null); do
     grep -qx "$pid" "$state/baseline.pids" 2> /dev/null || n=$((n + 1))

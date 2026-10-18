@@ -282,6 +282,34 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     expect([live.status, live.stdout, live.stderr]).toEqual([0, "a b ", ""]);
   });
 
+  it("two probes running at once keep separate decoys: one unplanting does not end the other's", () => {
+    const a = rig();
+    const b = rig();
+    expect(a.sh(["plant"]).code).toBe(0);
+    expect(b.sh(["plant"]).code).toBe(0);
+    const runA = a.sh(["run", "--no-egress", "--no-nix"]);
+    const runB = b.sh(["run", "--no-egress", "--no-nix"]);
+    const visible = processesVisible();
+    // Each decoy is there for its own verify, whichever started last.
+    const logA = path.join(a.home, "run.log");
+    writeFileSync(logA, runA.stdout);
+    writeFileSync(path.join(b.home, "run.log"), runB.stdout);
+    if (visible) {
+      expect(result(a.sh(["verify", logA]).stdout, "leftover_sentinel")).toBe("fail");
+      expect(result(b.sh(["verify", path.join(b.home, "run.log")]).stdout, "leftover_sentinel")).toBe("fail");
+    }
+    expect(b.sh(["unplant"]).code).toBe(0);
+    spawnSync("sleep", ["0.5"]);
+    // B's unplant ended B's decoy only.
+    if (visible) {
+      expect(result(a.sh(["verify", logA]).stdout, "leftover_sentinel")).toBe("fail");
+      expect(existsSync(path.join(b.home, "state"))).toBe(false);
+    }
+    expect(a.sh(["unplant"]).code).toBe(0);
+    spawnSync("sleep", ["0.5"]);
+    expect(a.sh(["verify"]).code).toBe(2); // state gone
+  });
+
   it("unplant still ends the decoy and removes everything when pgrep and pkill see no process (ProtectProc=invisible)", () => {
     const { home, sh } = rig();
     const before = readdirSync(home).sort();
@@ -290,7 +318,7 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     const env = { ...envFor(home), PATH: bin };
     expect(sh(["plant"]).code).toBe(0);
     // The decoy, named exactly as the probe names it.
-    const decoy = spawn("bash", ["-c", "exec -a 'postgres: fx-probe-sentinel' bash -c 'while :; do sleep 30; done'"], { stdio: "ignore", detached: true, env: { PATH: process.env.PATH } });
+    const decoy = spawn("bash", ["-c", `exec -a 'postgres: fx-decoy-${path.join(home, "state").replace(/[^A-Za-z0-9]/g, "_")}' bash -c 'while :; do sleep 30; done'`], { stdio: "ignore", detached: true, env: { PATH: process.env.PATH } });
     try {
       spawnSync("sleep", ["0.5"]);
       expect(spawnSync("bash", [SCRIPT, "run", "--no-egress", "--no-nix"], { env, cwd: home, encoding: "utf8", timeout: 60_000 }).stdout).toContain('"sentinel_started","item":8,"expect":"started","result":"inconclusive"');
