@@ -104,6 +104,10 @@ function recordingPort(over: { hold?: boolean; end?: (runId: string) => Normaliz
     async readCounters() {
       return undefined;
     },
+    async writeFiles() {},
+    async runCommand(): Promise<never> {
+      throw new Error("not used");
+    },
     async sandboxExists() {
       return true;
     },

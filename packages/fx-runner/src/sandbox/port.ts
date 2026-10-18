@@ -17,6 +17,7 @@ export interface CreateSandboxOptions {
   retention: { persistent: boolean; keepLastSnapshots?: number };
   timeoutMs: number;
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
+  vcpus?: number;
 }
 
 /** One allowed network host. A rule that carries a header to inject is never valid on this machine. */
@@ -76,7 +77,35 @@ export class SandboxNotFoundError extends Error {
   }
 }
 
+/** The cloud publish-sandbox calls (D#598 P1f-5a). The local engine has no publish sandbox: both refuse (`HostSandboxRefused`, `no_publish_sandbox`). */
+export interface SandboxFile {
+  path: string;
+  content: string;
+  mode?: number;
+}
+
+export interface RunCommandOptions {
+  role: string;
+  cmd: string;
+  args: readonly string[];
+  env: Record<string, string>;
+  networkPolicy: NetworkRule[];
+  timeoutMs: number;
+  onSession?: (sessionId: string) => void | Promise<void>;
+}
+
+export interface RunCommandResult {
+  exitCode: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  sessionId?: string;
+}
+
 export interface SandboxPort {
+  writeFiles(handle: SandboxHandle, files: readonly SandboxFile[]): Promise<void>;
+  runCommand(handle: SandboxHandle, opts: RunCommandOptions): Promise<RunCommandResult>;
   createSandbox(opts: CreateSandboxOptions): Promise<SandboxHandle>;
   startDetached(handle: SandboxHandle, opts: StartDetachedOptions): StartDetachedResult;
   extendTimeout(handle: SandboxHandle, additionalMs: number): Promise<void>;

@@ -59,7 +59,7 @@ export interface HostSandboxConfig {
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
 export class HostSandboxRefused extends Error {
-  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe", detail?: string) {
+  constructor(readonly code: "network_rule_forbidden" | "env_not_clean" | "bad_workdir" | "sandbox_busy" | "sandbox_timeout" | "bad_sandbox_name" | "sandbox_exists" | "sandbox_allowance_forbidden" | "job_env_unsafe" | "no_publish_sandbox", detail?: string) {
     super(detail === undefined ? code : `${code}: ${detail}`);
     this.name = "HostSandboxRefused";
   }
@@ -330,6 +330,13 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
         // The job's write directories go with it, whether the job ended well or not (this runs in the job runner's finally).
         releaseScratch(entry.scratch);
       }
+    },
+    // The publish sandbox is the cloud one; this machine never has one, so both calls refuse before anything is touched.
+    async writeFiles() {
+      throw new HostSandboxRefused("no_publish_sandbox");
+    },
+    async runCommand() {
+      throw new HostSandboxRefused("no_publish_sandbox");
     },
     async measure() {
       return [];

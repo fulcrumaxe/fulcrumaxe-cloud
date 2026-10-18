@@ -124,10 +124,12 @@ const HARDENING = [
 ];
 const NO_PROMPT = { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false", GIT_CONFIG_NOSYSTEM: "1" } as const;
 
-export function createGitTransport(opts: { origin?: string } = {}): PublicGitTransport {
+export function createGitTransport(opts: { origin?: string; caInfo?: string } = {}): PublicGitTransport {
   const origin = checkOrigin(opts.origin ?? "https://github.com");
+  // A caller that runs where git's compiled-in CA path is not certain (a sandbox image) names the bundle; the daemon on a customer machine leaves it out.
+  if (opts.caInfo !== undefined && !/^\/[A-Za-z0-9._/-]{1,200}$/.test(opts.caInfo)) throw new Error("transport caInfo must be an absolute path");
   // Only the origin's own scheme is allowed, so a production transport can never speak plain http.
-  const hardening = [...HARDENING, "-c", `protocol.${new URL(origin).protocol === "https:" ? "https" : "http"}.allow=always`];
+  const hardening = [...HARDENING, "-c", `protocol.${new URL(origin).protocol === "https:" ? "https" : "http"}.allow=always`, ...(opts.caInfo === undefined ? [] : ["-c", `http.sslCAInfo=${opts.caInfo}`])];
   const urlOf = (codeRepo: string): string => {
     if (!CODE_REPO.test(codeRepo)) throw new Error("the paired repo must be owner/name");
     return `${origin}/${codeRepo}.git`;

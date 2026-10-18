@@ -56,7 +56,7 @@ function rig(lockfile: ((workspace: string) => void) | undefined, kept?: string,
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
       return { handle, hookFired: Promise.resolve(event) };
     },
-    async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async sandboxExists() { return true; },
+    async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (kept === undefined ? { kind: "fresh", branch: null } : { kind: "resume", sessionId: "s1", workspace: kept }), defaultModel: "sonnet" };
   const git = fakeGitPath({ resume: async () => ({ base: "c".repeat(40) }), prepare: async (_job, _claimed, workspace) => { lockfile?.(workspace); return { base: "c".repeat(40) }; } });

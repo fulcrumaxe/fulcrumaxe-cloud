@@ -23,6 +23,7 @@ import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, Clon
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { NormalizedEvent } from "./types.js";
 import { assertSandboxEnvMatchesRole } from "./fakeSandbox.js";
+import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import { RunLimitError, WARN_FRACTION, createRunGuard, resolveRunLimits, type RunLimits } from "./meteringGuard.js";
 import type { RunLimit } from "./executionTarget.js";
 import { tryExtend } from "./runLimitDecision.js";
@@ -55,7 +56,6 @@ import {
   type SandboxProviderStatus,
   SANDBOX_MAX_TIMEOUT_MS,
   SANDBOX_TIMEOUT_MARGIN_MS,
-  SANDBOX_VCPUS,
   type SandboxHandle,
   type SandboxPort,
   type SandboxSessionUsage,
@@ -425,7 +425,7 @@ export function sdkNetworkPolicy(rules: readonly NetworkPolicyRule[]): NetworkPo
   return { allow };
 }
 
-const SANDBOX_NAME_RE = /^(ex|rn)-[A-Za-z0-9._-]{1,200}$/;
+const SANDBOX_NAME_RE = /^(ex|rn|pp)-[A-Za-z0-9._-]{1,200}$/;
 
 function statusOf(err: unknown): number | undefined {
   const status = (err as { response?: { status?: unknown } } | null)?.response?.status;
@@ -863,6 +863,8 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
     assertName(handle.sandboxName);
     // D#221 R1a: a backend that is not registered (with the hostile-config contract) is not selectable; nothing starts.
     const backend = backends.select(opts.backend);
+    // D#598 P1f-5a: no agent is ever launched in a publish sandbox (any role), and the publish role has no model connection (any sandbox).
+    assertNoAgentInPublishSandbox(handle.sandboxName, opts.role);
     assertSandboxEnvMatchesRole(opts.role, opts.env);
     // This run's limits: the port's defaults under whatever the run carries. Invalid values throw here, before anything starts.
     // A run that carries limits (they come from a tenant's settings) is held to the platform bounds as well.
@@ -1374,13 +1376,14 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
       if (opts.limits === undefined ? runLimits.maxRunMs >= opts.timeoutMs : runLimits.maxRunMs + SANDBOX_TIMEOUT_MARGIN_MS > opts.timeoutMs) {
         throw new Error("createVercelSandboxPort: maxRunMs must be less than the sandbox timeoutMs");
       }
+      const vcpus = vcpusForCreate(opts);
       const creds = await credentials();
       const params: SdkCreateParams = {
         name: opts.sandboxName,
         image: sandboxImage,
         timeout: opts.timeoutMs,
         persistent: opts.retention.persistent,
-        resources: { vcpus: SANDBOX_VCPUS },
+        resources: { vcpus },
         tags: { "fx-sandbox": opts.sandboxName },
         signal: signal(),
         ...creds,
@@ -1414,6 +1417,53 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
 
     startDetached(handle, opts) {
       return launch(handle, opts, opts.prompt, undefined);
+    },
+
+    /**
+     * D#598 P1f-5a: one command to its end, no agent: the network policy (the GitHub proxy rule alone), then the program run directly with
+     * its argv (no shell). A stopped sandbox is never woken. Each output stream is held to a cap and the command is killed at `timeoutMs`;
+     * a failing command is a result (its exit code), a provider failure throws.
+     */
+    async runCommand(handle, opts) {
+      assertRunCommandOptions(opts);
+      assertSandboxEnvMatchesRole(opts.role, opts.env);
+      if (!handle.sandboxName.startsWith("pp-")) throw new Error("createVercelSandboxPort: runCommand runs only in a pp- sandbox");
+      const sandbox = await open(handle, "runCommand", false);
+      if (sandbox.status !== "running") throw new SandboxPortError("runCommand");
+      const sessionId = sandbox.currentSession().sessionId;
+      if (typeof sessionId !== "string" || sessionId === "") throw new SandboxPortError("runCommand");
+      await opts.onSession?.(sessionId);
+      await guarded("updateNetworkPolicy", () => sandbox.updateNetworkPolicy(sdkNetworkPolicy(opts.networkPolicy), { signal: signal() }));
+      const command = await guarded("runCommand", () => sandbox.runCommand({ cmd: opts.cmd, args: [...opts.args], env: opts.env, detached: true, signal: signal() }));
+      const held = { stdout: "", stderr: "" };
+      let truncated = false;
+      let timedOut = false;
+      const exit = await bounded(
+        "runCommand",
+        (async () => {
+          for await (const entry of command.logs()) {
+            if ((entry.stream !== "stdout" && entry.stream !== "stderr") || typeof entry.data !== "string") continue;
+            const room = Math.max(RUN_COMMAND_MAX_OUTPUT_CHARS - held[entry.stream].length, 0);
+            if (entry.data.length > room) truncated = true;
+            held[entry.stream] += entry.data.slice(0, room);
+          }
+          return command.wait();
+        })(),
+        opts.timeoutMs,
+      ).catch(async (err: unknown) => {
+        timedOut = err instanceof SandboxPortError && err.status === undefined;
+        await killQuietly(handle.sandboxName, command, sessionId);
+        return undefined;
+      });
+      return { exitCode: exit?.exitCode ?? null, timedOut, stdout: held.stdout, stderr: held.stderr, truncated, sessionId };
+    },
+
+    async writeFiles(handle, files) {
+      assertWriteFiles(handle.sandboxName, files);
+      const sandbox = await open(handle, "writeFiles", false);
+      if (sandbox.status !== "running") throw new SandboxPortError("writeFiles");
+      const list = files.map(({ path, content, mode }) => ({ path, content, ...(mode !== undefined && { mode }) }));
+      await guarded("writeFiles", () => sandbox.writeFiles(list, { signal: signal() }));
     },
 
     async extendTimeout(handle, additionalMs) {

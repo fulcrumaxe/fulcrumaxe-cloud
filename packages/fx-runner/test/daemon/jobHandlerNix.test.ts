@@ -84,7 +84,7 @@ function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; deta
       return { handle, hookFired: Promise.resolve(event) };
     },
     resume: () => { throw new Error("not used"); },
-    async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async sandboxExists() { return true; },
+    async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
   const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
   const git = fakeGitPath({ prepare: async () => ({ base: BASE }) });

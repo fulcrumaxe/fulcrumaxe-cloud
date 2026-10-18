@@ -30,9 +30,11 @@
   "devDependencies": {
     "@fx/db": "workspace:*",
     "@fx/discussions": "workspace:*",
+    "@fx/gh-policy": "workspace:*",
     "@fx/model-connection": "workspace:*",
     "@types/node": "^24.19.0",
     "@types/pg": "^8.11.10",
+    "esbuild": "0.28.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

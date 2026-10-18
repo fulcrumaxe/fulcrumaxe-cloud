@@ -491,13 +491,14 @@ describe("MP-SRC: usage and completion come only from the agent command's stdout
       const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       expect(code).not.toMatch(/readFile|downloadFile|readFileToBuffer/);
     }
-    // Exactly five command sites exist: the version check, (preview runs only) the repository
+    // Exactly six command sites exist: the version check, (preview runs only) the repository
     // clone, whose output is drained and never read, (D#6 C44-6b) the fixed detect and install scripts, whose
     // output is held as a capped redacted tail for the operator only (one shared site), the agent, and (COMPUTE-SETTLE CS-1b) the
     // constant read-only counters read before a stop, whose output fills in COST figures only and is
-    // never a usage or completion source.
+    // never a usage or completion source, and (D#598 P1f-5a) the publish sandbox's one command, whose phase lines the worker reads
+    // and whose agent-free sandbox has no usage or completion at all.
     const port = readFileSync(path.join(here, "..", "src", "vercelSandboxPort.ts"), "utf8");
-    expect(port.match(/\.runCommand\(/g)).toHaveLength(5);
+    expect(port.match(/\.runCommand\(/g)).toHaveLength(6);
   });
 });
 
