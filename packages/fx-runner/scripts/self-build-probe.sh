@@ -93,6 +93,11 @@ plant() {
 # proc_is_ours DIR: true only for a process directory owned by this user (the effective uid), so a run as root never kills another user's process.
 proc_is_ours() { [ -O "$1" ]; }
 
+# proc_cmdline DIR: the command line of a process directory, NULs as spaces. The 2> /dev/null comes BEFORE the < redirect on purpose: bash reports a
+# failed open of the < file on whatever stderr is at that moment, so a process that exits between the readable test and this read would
+# otherwise print "No such file or directory" on the real stderr (a noisy unplant on a busy host). It fails quietly instead.
+proc_cmdline() { tr '\0' ' ' 2> /dev/null < "$1/cmdline"; }
+
 # kill_decoys: ends the decoy process. pkill goes first, then a scan of /proc, so cleanup never depends on pgrep or pkill seeing this user's
 # processes (a unit with ProtectProc=invisible hides them from both; our own /proc/PID/cmdline may still be readable).
 kill_decoys() {
@@ -103,7 +108,7 @@ kill_decoys() {
     [ "$pid" != "$$" ] || continue
     proc_is_ours "$d" || continue
     [ -r "$d/cmdline" ] || continue
-    cmd="$(tr '\0' ' ' < "$d/cmdline" 2> /dev/null)" || continue
+    cmd="$(proc_cmdline "$d")" || continue
     case "$cmd" in "$SENTINEL"*) kill -KILL "$pid" 2> /dev/null || true ;; esac
   done
 }

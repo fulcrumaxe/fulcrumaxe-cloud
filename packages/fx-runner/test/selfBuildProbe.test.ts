@@ -266,6 +266,22 @@ describe("the probe, with no sandbox, on a throwaway home", () => {
     expect(scan.indexOf('proc_is_ours "$d" || continue')).toBeLessThan(scan.indexOf("kill -KILL"));
   });
 
+  it("reading the command line of a process that has just exited is silent, so unplant's stderr stays empty on a busy host", () => {
+    const source = readFileSync(SCRIPT, "utf8");
+    const fn = /^proc_cmdline\(\) \{.*\}$/m.exec(source)?.[0];
+    expect(fn).toBeDefined();
+    // A directory with no cmdline is what a process that exited between the readable test and the read looks like.
+    const gone = spawnSync("bash", ["-c", `${fn}\nproc_cmdline "$1"`, "bash", path.join(tmpdir(), "fx-probe-no-such-process")], { encoding: "utf8" });
+    expect([gone.status !== 0, gone.stderr]).toEqual([true, ""]);
+    // The decoy scan goes through it, so the race cannot reach stderr.
+    expect(/^kill_decoys\(\) \{[\s\S]*?^\}/m.exec(source)?.[0]).toContain('cmd="$(proc_cmdline "$d")"');
+    // One that is there still reads, NULs turned into spaces.
+    const { home } = rig();
+    writeFileSync(path.join(home, "cmdline"), "a\0b\0");
+    const live = spawnSync("bash", ["-c", `${fn}\nproc_cmdline "$1"`, "bash", home], { encoding: "utf8" });
+    expect([live.status, live.stdout, live.stderr]).toEqual([0, "a b ", ""]);
+  });
+
   it("unplant still ends the decoy and removes everything when pgrep and pkill see no process (ProtectProc=invisible)", () => {
     const { home, sh } = rig();
     const before = readdirSync(home).sort();
