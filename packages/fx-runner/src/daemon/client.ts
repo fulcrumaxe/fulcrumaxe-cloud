@@ -5,7 +5,8 @@
  */
 import {
   ClaimMessage, ClaimRateLimitedReply, HelloMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
-  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply, type ClaimCapacity, type ContextLedgerWire, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
+  GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
+  PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -41,6 +42,26 @@ export type DoneResult =
 /** A git ticket for a cloud-verified run (D#6 R5a-3): the compact JWS, when it expires, and the proxy origin it is good for (checked against the build's pin by the caller). */
 export type GitTicketResult = { kind: "ticket"; ticket: string; expiresAt: string; proxyOrigin: string } | { kind: "stop"; reason: StopReason } | CallError;
 
+/** D#598 P1f-3: the repository's pairing as the cloud has it now (a read, no side effect). `not_paired` is the answer for a run that has no public repository. */
+export type PlanePushPairingResult =
+  | { kind: "pairing"; pairing: PlanePushPairingReply }
+  | { kind: "not_paired" }
+  | { kind: "pairing_changed" }
+  | { kind: "stop"; reason: StopReason }
+  | CallError;
+/** D#598 P1f-3: the one restricted token, the pull request text and the commit identity. `refused` carries the closed code the cloud answered with. */
+export type PlanePushTokenResult =
+  | { kind: "token"; reply: PlanePushTokenReply }
+  | { kind: "not_paired" }
+  | { kind: "refused"; code: string }
+  | { kind: "stop"; reason: StopReason }
+  | CallError;
+/** D#598 P1f-3: a report is a hint; `recorded` is all the reply says. */
+export type PlanePushReportResult = { kind: "recorded" } | { kind: "not_paired" } | { kind: "stop"; reason: StopReason } | CallError;
+
+/** The closed codes a token request can be refused with; any other 4xx or 5xx word is a plain `CallError`. */
+const TOKEN_REFUSALS: ReadonlySet<string> = new Set(["pairing_changed", "already_issued", "attempts_exhausted", "app_not_installed", "token_scope_mismatch", "public_unavailable", "not_configured"]);
+
 export interface DoneInput {
   runId: string;
   leaseGeneration: number;
@@ -62,6 +83,10 @@ export interface RunnerClient {
   events(runId: string, leaseGeneration: number, events: readonly LocalOnlyEvent[]): Promise<EventsResult>;
   done(input: DoneInput): Promise<DoneResult>;
   gitTicket(runId: string, leaseGeneration: number): Promise<GitTicketResult>;
+  /** D#598 P1f-3. The run-end hook of an executor run on a repository paired with a public repository. */
+  planePushPairing(runId: string, leaseGeneration: number): Promise<PlanePushPairingResult>;
+  planePushToken(runId: string, leaseGeneration: number): Promise<PlanePushTokenResult>;
+  planePushReport(message: PlanePushReportMessage): Promise<PlanePushReportResult>;
 }
 
 export interface RunnerClientConfig {
@@ -138,6 +163,51 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
       if (reply?.status === 409) {
         const parsed = StopReply.safeParse(reply.body);
         return parsed.success ? { kind: "stop", reason: parsed.data.reason } : fail(reply, "invalid_reply");
+      }
+      return fail(reply);
+    },
+
+    async planePushPairing(runId, leaseGeneration) {
+      const reply = await send(PLANE_PUSH_PAIRING_PATH, PlanePushPairingMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
+      if (reply?.status === 200) {
+        // The reply schema recomputes the digest from the other fields: a pairing that disagrees with its own digest is an invalid reply.
+        const parsed = PlanePushPairingReply.safeParse(reply.body);
+        return parsed.success ? { kind: "pairing", pairing: parsed.data } : fail(reply, "invalid_reply");
+      }
+      if (reply?.status === 403 && errorCodeOf(reply.body) === "not_paired") return { kind: "not_paired" };
+      if (reply?.status === 409) {
+        const stop = StopReply.safeParse(reply.body);
+        if (stop.success) return { kind: "stop", reason: stop.data.reason };
+        if (errorCodeOf(reply.body) === "pairing_changed") return { kind: "pairing_changed" };
+      }
+      return fail(reply);
+    },
+
+    async planePushToken(runId, leaseGeneration) {
+      const reply = await send(PLANE_PUSH_TOKEN_PATH, PlanePushTokenMessage.parse({ run_id: runId, lease_generation: leaseGeneration }));
+      if (reply?.status === 200) {
+        const parsed = PlanePushTokenReply.safeParse(reply.body);
+        return parsed.success ? { kind: "token", reply: parsed.data } : fail(reply, "invalid_reply");
+      }
+      if (reply?.status === 403 && errorCodeOf(reply.body) === "not_paired") return { kind: "not_paired" };
+      if (reply?.status === 409) {
+        const stop = StopReply.safeParse(reply.body);
+        if (stop.success) return { kind: "stop", reason: stop.data.reason };
+      }
+      const code = reply === undefined ? undefined : errorCodeOf(reply.body);
+      if (reply !== undefined && [409, 502, 503].includes(reply.status) && code !== undefined && TOKEN_REFUSALS.has(code)) return { kind: "refused", code };
+      return fail(reply);
+    },
+
+    async planePushReport(message) {
+      const parsed = PlanePushReportMessage.safeParse(message);
+      if (!parsed.success) return fail(undefined, "invalid_message");
+      const reply = await send(PLANE_PUSH_REPORT_PATH, parsed.data);
+      if (reply?.status === 200) return PlanePushReportReply.safeParse(reply.body).success ? { kind: "recorded" } : fail(reply, "invalid_reply");
+      if (reply?.status === 403 && errorCodeOf(reply.body) === "not_paired") return { kind: "not_paired" };
+      if (reply?.status === 409) {
+        const stop = StopReply.safeParse(reply.body);
+        if (stop.success) return { kind: "stop", reason: stop.data.reason };
       }
       return fail(reply);
     },

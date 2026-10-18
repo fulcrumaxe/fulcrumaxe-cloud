@@ -39,6 +39,11 @@ export interface GitPath {
   /** The paths the job's sandbox may read besides its workspace: exactly the repo mirror's `objects` directory, which the workspace borrows from. */
   readGrants(job: GitJob): string[];
   /**
+   * D#598 P1f-3: the directory of the repo's bare mirror, where a finished run's objects are after `publish`. The run-end hook for a repository paired with a
+   * public repository reads them from here by local path; nothing is written to it. Optional: a path without a mirror gives none, and the hook is not entered.
+   */
+  mirrorDir?(job: GitJob): string;
+  /**
    * D#6 R7c: what the repo's Nix dev shell may be built from at `sha`. A commit in the history of the mirror's default branch (the mirror's HEAD
    * follows it) is used as it is. Any other commit is replaced by its merge-base with that HEAD (`fromDefault`); with no merge-base the answer is `not_default_branch`. Optional: a path without a mirror gives none.
    */
@@ -88,6 +93,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
       return mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
     },
     readGrants: (job) => [mirrors.objects(job.repo)],
+    mirrorDir: (job) => mirrors.dir(job.repo),
     repoMap: (job, sha) => readRepoMap({ listing: listingGit, small: git, listingCap: deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP }, mirrors.dir(job.repo), sha),
     async nixSource(job, sha) {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return { kind: "not_default_branch" };

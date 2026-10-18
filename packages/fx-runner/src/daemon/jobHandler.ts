@@ -33,6 +33,8 @@ import type { WorkspaceStore } from "../job/workspace.js";
 import type { Claimed, RunnerClient } from "./client.js";
 import { GitPathError } from "./git.js";
 import type { GitPath } from "./gitPath.js";
+import type { PlaneBaseLedger, PlanePushOutcome, PlanePushRunEnd } from "./planePush.js";
+import type { Published } from "./push.js";
 import { startLease, type Clock, type Lease, type LeaseEnd, type EventRelay } from "./lease.js";
 import { endOfFailure, endOfRefusal, RUN_ENDED_RETRY_MS, RUN_ENDED_TRIES, runEndedEvent, sendRunEndedAlone, SHUTDOWN_REPORT_MS, type RunEnd } from "./runEnded.js";
 import { verifyJob, type JobRefusal } from "./verifyJob.js";
@@ -71,6 +73,12 @@ export interface JobHandlerDeps {
   ledger: JobLedger;
   /** Git path B: the mirror, the workspace and the push. */
   git: GitPath;
+  /**
+   * D#598 P1f-3: the run-end hook for a repository paired with a public repository. `baseLedger` takes the commit a fresh executor run starts from before the agent
+   * starts (this handler writes it, from the path's own answer, never from the checkout); `run` is called once, after the run's private branch was pushed and
+   * before `done`. Absent: no executor run enters a hook, as before. A run on a repository that is not paired is told so by the cloud and goes on unchanged.
+   */
+  planePush?: { baseLedger: PlaneBaseLedger; run: (input: PlanePushRunEnd) => Promise<PlanePushOutcome> };
   /** Git path A (cloud-verified, D#6 R5a-3). Absent when this build pins no GitHub relay for the cloud: a `verified` job then ends `git_proxy_unpinned`. */
   gitA?: GitPath;
   events: EventRelay;
@@ -174,6 +182,9 @@ const UNPINNED_PATH: GitPath = {
 
 /** The relay's 409 or 401: the cloud has ended or fenced the run, so nothing is reported (as for any stop reply). */
 const isGitStop = (code: string): boolean => code === "git_stopped" || code === "git_revoked";
+
+/** The runs that enter the public-push hook: a fresh executor run. A fix round updates a branch that already exists (a later change), and no other role pushes. */
+const enters = (job: Job): boolean => job.role === "executor" && job.continues === null && (job.review ?? null) === null;
 
 export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Promise<JobResult> {
   const run = deps.runJobFn ?? runJob;
@@ -369,6 +380,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
             // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
             mark("workspace_ready");
             started.base = (await git.prepare(job, claimed, workspace)).base;
+            // The start commit is recorded here, in the daemon's own memory, before the agent can run: the run-end hook reads this and never the checkout.
+            if (deps.planePush !== undefined && enters(job)) deps.planePush.baseLedger.record(claimed.runId, started.base);
             mark("cloned");
             await prepareMap(job, git, started.base, repoMapHeld);
             // D#6 R7c: the repo's Nix dev shell, only for a job with signed, approved allowances. A skip or a failure leaves the job without one.
@@ -424,9 +437,10 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         if (end !== null) await reportEnd(lease, end);
         return { status: "failed", reason: result.reason };
       }
+      let published: Published = { pushed: false };
       try {
         if (started.base === undefined) throw new GitPathError("push_failed");
-        await git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
+        published = await git.publish(job, claimed, result.workspace, started.base, () => lease.ended() !== undefined);
       } catch (error) {
         if (!(error instanceof GitPathError)) throw error;
         await lease.flush();
@@ -435,6 +449,16 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         if (isGitStop(error.code)) return { status: "stopped", reason: "lease_lost" };
         await reportEnd(lease, endOfFailure(error.code, error.sizeMb)!);
         return { status: "failed", reason: error.code };
+      }
+      // The run-end hook for a paired repository (D#598 P1f-3). Its calls need the live lease, so it runs before `done`. It never fails the run: an
+      // unexpected error is the closed outcome `failed`, and a cloud that ended the run ends this one too.
+      const mirrorDir = deps.planePush !== undefined && enters(job) ? git.mirrorDir?.(job) : undefined;
+      // A run the cloud has already ended, or a daemon that is shutting down, asks for nothing: the hook's first call would be a token request.
+      if (deps.planePush !== undefined && mirrorDir !== undefined && lease.ended() === undefined && !stopRun.aborted) {
+        const outcome = await deps.planePush
+          .run({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, repo: { owner: job.repo.owner, name: job.repo.name }, mirrorDir, privateHead: published.pushed ? published.sha : undefined, signal: stopRun })
+          .catch((): PlanePushOutcome => ({ kind: "failed" }));
+        if (outcome.kind === "stopped") return { status: "stopped", reason: outcome.reason };
       }
       await lease.flush();
       // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
@@ -446,6 +470,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     } finally {
       ran.abort();
       detach();
+      deps.planePush?.baseLedger.forget(claimed.runId);
       await lease.close({ abandon: abandonSend });
       await watched?.finish();
     }

@@ -94,6 +94,25 @@ describe("the public-push routes never run git or a process (import graph)", () 
     expect(offenders).toEqual([]);
   });
 
+  // A relative import from a runner-cloud file OUTSIDE the route closure (a sibling module reaching across packages by path) is not followed by the closure
+  // walk above, so the banned names and a `planePush/` path are looked for in every runner-cloud source file.
+  const PLANE_PUSH_PATH = /planePush\//;
+
+  it("no runner-cloud source file names a banned module or a planePush/ path, whether or not the routes reach it", () => {
+    const files = allCloudSource();
+    expect(files.length).toBeGreaterThan(10);
+    const offenders = files.filter((f) => BANNED.test(readFileSync(f, "utf8")) || PLANE_PUSH_PATH.test(readFileSync(f, "utf8"))).map((f) => path.relative(repoRoot, f));
+    expect(offenders).toEqual([]);
+  });
+
+  it("control: the banned names and the planePush/ path fire on a cross-package relative import, and not on the sibling route module's own name", () => {
+    const rel = (spec: string): string => ["import", "{ x }", "from", JSON.stringify(spec)].join(" ") + ";";
+    expect(PLANE_PUSH_PATH.test(rel("../../runner-protocol/src/planePush/index.js"))).toBe(true);
+    expect(BANNED.test(rel("../../runner-protocol/src/planePush/planePushRoute.js"))).toBe(true);
+    expect(PLANE_PUSH_PATH.test(rel("./planePush.js"))).toBe(false);
+    expect(BANNED.test(rel("./planePush.js"))).toBe(false);
+  });
+
   it("control: the protocol-import check fires on the root, the subpath, a re-export and a dynamic import, and not on an ordinary protocol import", () => {
     const from = (names: string, spec: string): string => ["import", names, "from", JSON.stringify(spec)].join(" ") + ";";
     const root = ["@fulcrumaxe", "runner-protocol"].join("/");
