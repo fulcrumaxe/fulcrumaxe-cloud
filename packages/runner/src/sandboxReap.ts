@@ -137,7 +137,55 @@ export async function sweepSandboxReap(deps: SandboxReapDeps, input: SweepSandbo
 
   // What is left of the budget counts orphans (read only). A pass that used it all counts none.
   await countOrphans(deps, input.pass === "ephemeral" ? "rn-" : "ex-", result, alert, left);
+  if (input.pass === "ephemeral") await reapPublishOrphans(deps, input, result, alert, left);
   return result;
+}
+
+/** A listed publish sandbox that is this young is never an orphan: the same grace sandbox_reap_publish_status gives an attempt with no run yet. */
+export const PUBLISH_ORPHAN_GRACE_MS = 60 * 60_000;
+const NIL_ACCOUNT = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Publish sandboxes ("pp-<attempt id>") that no attempt row and no run row mention have no account, so no sandbox_reaps row can hold
+ * them. The provider's list is their only source: each listed name is asked of `sandbox_reap_publish_status` (a name any account owns
+ * answers `live`, `terminal` or `refused`, never `orphan`), counted, and deleted when it is older than the grace by the provider's own
+ * created time. In dry_run nothing is deleted. Each delete is logged with the name only.
+ */
+async function reapPublishOrphans(deps: SandboxReapDeps, input: SweepSandboxReapInput, result: SweepSandboxReapResult, alert: (code: string) => void, left: () => number): Promise<void> {
+  if (!deps.port.listSandboxes) return;
+  const log = deps.log ?? ((line: string) => console.log(line));
+  let cursor: string | undefined;
+  for (let page = 0; page < ORPHAN_SCAN_MAX_PAGES && left() >= 1; page++) {
+    let listed;
+    try {
+      listed = await deps.port.listSandboxes({ prefix: "pp-", ...(cursor !== undefined && { cursor }) });
+    } catch {
+      // fx-swallow-ok: the scan is best effort; a failed list changes no decision and the next pass scans again
+      result.callsUsed++;
+      return;
+    }
+    result.callsUsed++;
+    for (const s of listed.sandboxes) {
+      if (!/^pp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s.name)) continue;
+      const status = (await deps.pool.query<{ v: string }>("SELECT sandbox_reap_publish_status($1, $2) AS v", [NIL_ACCOUNT, s.name])).rows[0]?.v;
+      if (status !== "orphan") continue;
+      result.orphans++;
+      alert("sandbox_orphan_found");
+      if (input.mode !== "on" || !Number.isFinite(s.createdAt) || input.now - s.createdAt <= PUBLISH_ORPHAN_GRACE_MS || left() < 1) continue;
+      result.callsUsed++;
+      try {
+        await deps.port.deleteSandbox({ runId: "publish-orphan", sandboxName: s.name }, { deleteSnapshots: true });
+      } catch (err) {
+        // fx-swallow-ok: a gone sandbox (404/410) is done; any other failure leaves it for the next pass
+        const status2 = (err as { status?: unknown } | null)?.status;
+        if (status2 !== 404 && status2 !== 410) continue;
+      }
+      result.deleted++;
+      log(JSON.stringify({ event: "sandbox_reap.publish_orphan_deleted", name: s.name }));
+    }
+    if (listed.next === null) break;
+    cursor = listed.next;
+  }
 }
 
 /** Handles one candidate; false when the budget cannot cover its next step (the candidate stays for the next pass). */
@@ -149,18 +197,29 @@ async function reapOne(deps: SandboxReapDeps, input: SweepSandboxReapInput, row:
   };
   const run = await readRun(deps.pool, row.account_id, row.run_id);
   // Tenant binding: the recorded name must be exactly what this run row derives, and the row must be the candidate's own.
-  if (run === null || run.id !== row.run_id || run.accountId !== row.account_id || run.sandboxName !== row.sandbox_name || nameOf(run) !== row.sandbox_name) {
+  // A publish sandbox ("pp-<attempt id>") is named by its attempt row, not by anything on the run row, so `nameOf` cannot derive it:
+  // its name is checked against the attempt instead (below).
+  const publish = row.sandbox_name.startsWith("pp-");
+  if (run === null || run.id !== row.run_id || run.accountId !== row.account_id || run.sandboxName !== row.sandbox_name || (!publish && nameOf(run) !== row.sandbox_name)) {
     if (run !== null) {
       alert("sandbox_name_mismatch");
       (deps.log ?? console.log)(JSON.stringify({ event: "sandbox_reap.name_mismatch", account_id: row.account_id, run_id: row.run_id }));
     }
     return skip();
   }
+  if (publish) {
+    // Only an attempt that has ended (or has no row at all) frees its sandbox; a live attempt, another account's, or any doubt leaves it alone.
+    const status = (await sql("SELECT sandbox_reap_publish_status($1, $2) AS v", row.account_id, row.sandbox_name)).rows[0]?.v;
+    if (status !== "terminal" && status !== "orphan") return skip();
+  }
   const handle: SandboxHandle = { runId: run.id, sandboxName: row.sandbox_name };
   const state = deps.port.sandboxState ? await deps.port.sandboxState(handle) : "unknown";
   result.callsUsed++;
   if (state === "unknown") return skip();
   if (state === "running") {
+    // A publish sandbox is stopped by its recorded name or not at all: `stopStray` derives an "rn-" name from the run's role, which is not
+    // this sandbox. Left running, it is looked at again on the next pass.
+    if (publish) return skip();
     // Ended, yet the provider shows it running: stop it (the target's ownership test applies), delete it on a later pass.
     if (run.endedAt === null || input.now - run.endedAt.getTime() < STRAY_RUNNING_GRACE_MS) return skip();
     if (left() < CALLS_STOP) return false;
@@ -233,7 +292,7 @@ function validate(input: SweepSandboxReapInput): void {
     !["terminal", "ephemeral", "idle"].includes(input.pass) ? "pass must be terminal, ephemeral or idle"
     : !["dry_run", "on"].includes(input.mode) ? "mode must be dry_run or on"
     : !Number.isFinite(input.now) ? "now must be a number"
-    : input.cursor !== null && !(typeof input.cursor === "string" && (input.pass === "ephemeral" ? /^rn-[A-Za-z0-9._-]{1,200}$/ : /^ex-[A-Za-z0-9._-]{1,200}$/).test(input.cursor)) ? "cursor must be null or a sandbox name of the pass's own kind"
+    : input.cursor !== null && !(typeof input.cursor === "string" && (input.pass === "ephemeral" ? /^(rn|pp)-[A-Za-z0-9._-]{1,200}$/ : /^ex-[A-Za-z0-9._-]{1,200}$/).test(input.cursor)) ? "cursor must be null or a sandbox name of the pass's own kind"
     : !Number.isSafeInteger(input.maxCalls) || input.maxCalls < 0 || input.maxCalls > 10_000 ? "maxCalls must be an integer from 0 to 10000"
     : !Number.isFinite(input.timeBudgetMs) || input.timeBudgetMs <= 0 ? "timeBudgetMs must be positive"
     : undefined;
