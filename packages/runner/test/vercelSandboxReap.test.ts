@@ -28,13 +28,13 @@ async function listAll(port: SandboxPort, prefix: "ex-" | "rn-"): Promise<Listed
 }
 
 describe("criterion 1: listSandboxes", () => {
-  it("accepts only the ex- and rn- prefixes: anything else rejects before a request is made", async () => {
+  it("accepts only the ex-, rn- and pp- prefixes: anything else rejects before a request is made", async () => {
     const fake = createReaperSdkFake();
     fake.seed("rlr0-spike-1");
     fake.seed(EX(1));
     const port = portOver(fake);
     for (const prefix of ["", "e", "ex", "EX-", "rlr0-", "rn", "ex-1", " ex-"]) {
-      await expect(port.listSandboxes!({ prefix: prefix as "ex-" }), JSON.stringify(prefix)).rejects.toThrow(/only "ex-" and "rn-"/);
+      await expect(port.listSandboxes!({ prefix: prefix as "ex-" }), JSON.stringify(prefix)).rejects.toThrow(/only "ex-" and "rn-" and "pp-"/);
     }
     await expect(port.listSandboxes!(undefined as never)).rejects.toThrow();
     expect(fake.calls).toEqual([]);

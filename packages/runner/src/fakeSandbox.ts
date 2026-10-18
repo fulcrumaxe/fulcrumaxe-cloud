@@ -107,7 +107,7 @@ export interface FakeSandboxController {
   /** Undoes `failDelete` for this sandbox. */
   healDelete(sandboxName: string): void;
   /** Puts a sandbox in the provider's project without going through the port (another tool's, a spike script's): it is listed and has a state. */
-  seedProviderSandbox(sandboxName: string, init?: { status?: SandboxProviderStatus; persistent?: boolean; snapshot?: boolean }): void;
+  seedProviderSandbox(sandboxName: string, init?: { status?: SandboxProviderStatus; persistent?: boolean; snapshot?: boolean; createdAt?: number }): void;
   /** How many sandboxes one `listSandboxes` page holds (default 100). */
   setListPageSize(size: number): void;
   /** After this call, `listSandboxes` throws a provider error with this status (429, 500, ...). */
@@ -253,7 +253,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
 
     async listSandboxes(opts: ListSandboxesOptions): Promise<SandboxListPage> {
       calls.push(`list:${opts.prefix}`);
-      if (!LISTABLE_PREFIXES.includes(opts.prefix)) throw new Error("fakeSandbox: listSandboxes accepts only the ex- and rn- prefixes");
+      if (!LISTABLE_PREFIXES.includes(opts.prefix)) throw new Error("fakeSandbox: listSandboxes accepts only the ex-, rn- and pp- prefixes");
       if (listFailStatus !== undefined) throw Object.assign(new Error("fakeSandbox: listSandboxes failed"), { status: listFailStatus });
       const all = [...provider.values()].filter((s) => s.name.startsWith(opts.prefix));
       const from = opts.cursor === undefined ? 0 : Number(opts.cursor);
@@ -325,7 +325,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
       deleteFails.delete(sandboxName);
     },
     seedProviderSandbox(sandboxName, init = {}) {
-      provider.set(sandboxName, { name: sandboxName, persistent: init.persistent ?? false, status: init.status ?? "stopped", createdAt: ++clockMs, updatedAt: clockMs });
+      provider.set(sandboxName, { name: sandboxName, persistent: init.persistent ?? false, status: init.status ?? "stopped", createdAt: init.createdAt ?? ++clockMs, updatedAt: clockMs });
       if (init.snapshot) snapshots.add(sandboxName);
       existence.delete(sandboxName);
     },

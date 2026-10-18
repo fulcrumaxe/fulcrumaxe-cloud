@@ -245,9 +245,9 @@ export interface DeleteSandboxOptions {
   deleteSnapshots?: boolean;
 }
 
-/** The only name prefixes a list may ask for: executor sandboxes and every other role's. */
-export type ListablePrefix = "ex-" | "rn-";
-export const LISTABLE_PREFIXES: readonly ListablePrefix[] = Object.freeze(["ex-", "rn-"] as const);
+/** The only name prefixes a list may ask for: executor sandboxes, every other role's, and publish sandboxes ("pp-<attempt id>"). */
+export type ListablePrefix = "ex-" | "rn-" | "pp-";
+export const LISTABLE_PREFIXES: readonly ListablePrefix[] = Object.freeze(["ex-", "rn-", "pp-"] as const);
 
 export interface ListSandboxesOptions {
   prefix: ListablePrefix;

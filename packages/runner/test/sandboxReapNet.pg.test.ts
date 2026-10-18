@@ -187,7 +187,7 @@ describe("D#2 SANDBOX-REAPER-1b: the safety net and the inventory [pg]", () => {
   });
 
   describe("what is not ours, and the tenant binding", () => {
-    it("an rn- sandbox with no run row, an rlr0- one, an ex- one and a foreign name all survive a pass; the orphan count is 1 and only rn- is listed", async () => {
+    it("an rn- sandbox with no run row, an rlr0- one, an ex- one and a foreign name all survive a pass; the orphan count is 1 and only rn- and pp- are listed", async () => {
       const w = await world();
       const stranger = `rn-15-project-manager-${randomUUID()}`;
       h.fakeSandbox.seedProviderSandbox(stranger, { snapshot: true });
@@ -201,7 +201,7 @@ describe("D#2 SANDBOX-REAPER-1b: the safety net and the inventory [pg]", () => {
         expect(result.alerts, mode).toContain("sandbox_orphan_found");
       }
       expect(deletedNames()).toEqual([ours.name]);
-      expect(h.fakeSandbox.state.calls.filter((c) => c.startsWith("list:")).every((c) => c === "list:rn-")).toBe(true);
+      expect(h.fakeSandbox.state.calls.filter((c) => c.startsWith("list:")).every((c) => c === "list:rn-" || c === "list:pp-")).toBe(true);
       expect(h.fakeSandbox.state.calls.filter((c) => c.includes("rlr0") || c.includes("foreign") || c.includes(stranger))).toEqual([]);
       expect(await reapRow(stranger)).toBeUndefined();
     });
