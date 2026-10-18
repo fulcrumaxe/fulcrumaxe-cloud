@@ -3,6 +3,7 @@ import type { KeyObject } from "node:crypto";
 import type { Pool } from "pg";
 import {
   CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
+  MEMORY_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -400,6 +401,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         continues,
         ...(review ? { review } : {}),
         ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
+        // D#601 MEM-3b: the memory the pipeline recalled, as it split it. Omitted when the run has none (never null, never an empty pair), so such a job's signed bytes are unchanged.
+        ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),
@@ -426,7 +429,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        minProtocolVersion: crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

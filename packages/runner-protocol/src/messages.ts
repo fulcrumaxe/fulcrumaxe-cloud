@@ -207,9 +207,10 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
 /**
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
- * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
+ * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 3;
+export const CURRENT_PROTOCOL_VERSION = 4;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -227,6 +228,12 @@ export const HANDOFF_MIN_PROTOCOL_VERSION = 2;
  * (PL-2b-3) raises `CURRENT_PROTOCOL_VERSION` to this value, so until then the gated job simply waits for an updated runner.
  */
 export const CONTINUES_CROSS_SIDE_MIN_PROTOCOL = 3;
+/**
+ * D#601 MEM-3b: the first version whose runner can read a job that has a `memory` object. The runner's job parse is strict, so the cloud never offers such a job to
+ * a runner whose stored version is lower (the same claim gate as above, `agent_runs.min_protocol_version`). The cloud deploys first: it understands version 4 before any
+ * runner declares it, and until a runner is updated a run that carries memory waits for one (the run page says so).
+ */
+export const MEMORY_JOB_MIN_PROTOCOL = 4;
 
 /** The largest value of a Postgres `integer` column. `runners.protocol_version` is one, so the schema refuses anything above it (D#6 R2b). */
 export const INT4_MAX = 2_147_483_647;

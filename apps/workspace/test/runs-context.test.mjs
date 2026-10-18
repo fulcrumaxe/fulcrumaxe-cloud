@@ -157,15 +157,15 @@ describe("the model, per state", () => {
     expect(contextModel(readContext(NONE)).text).toMatch(/^Not recorded/);
   });
 
-  it("a runner run is labelled and shows sizes and counts only: no memory names and no map version, even if the body held them", () => {
-    const hostile = { ...RUNNER, recalled_memory: [{ id: "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33", name: "/home/someone/secret.txt", version: 2 }], repo_map_version: "v9" };
-    const m = contextModel(readContext(hostile));
+  it("a runner run is labelled and shows sizes and counts, plus the memory its job carried; never a map version, even if the body held one (D#601 MEM-3b)", () => {
+    const body = { ...RUNNER, memory_tokens: 40, recalled_memory: [{ id: "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33", name: "run pnpm test", version: 2 }], repo_map_version: "v9" };
+    const m = contextModel(readContext(body));
     expect(m.runner.title).toBe("Contents stayed on your machine");
-    expect(m.memory).toBeNull();
+    expect(m.memory.items).toEqual([{ name: "run pnpm test", ref: "0d2a41c7@2", title: "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33@2" }]);
     expect(m.mapVersion).toBeNull();
-    const text = panelText(drawn(hostile));
+    const text = panelText(drawn(body));
     expect(text).toContain("Contents stayed on your machine");
-    expect(text).not.toContain("secret.txt");
+    expect(text).toContain("run pnpm test");
     expect(text).not.toContain("v9");
   });
 });

@@ -286,16 +286,15 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
       expect(((await (await get(bare, { accountId, userId })).json()) as RunContextPanel).recalled_memory).toEqual([]);
     });
 
-    it('a runner run returns no memory name and no map even when a record exists', async () => {
+    it('a runner run lists the memory its job carried (the cloud\'s own rows, D#601 MEM-3b) and no map even when a record exists', async () => {
       const { accountId, userId } = await seedAccountWithMember(admin);
       const id = await seedRun(accountId, { runtime: 'runner' });
       await seedLedger(accountId, id, { basis: 'measured', first: 1, peak: 2 });
       const e = await entry(accountId, 'private name');
       await inputs(accountId, id, [e], [1]);
       const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
-      expect(body.recalled_memory).toEqual([]);
+      expect(body.recalled_memory).toEqual([{ id: e, name: 'private name', version: 1 }]);
       expect(body.repo_map_version).toBeNull();
-      expect(JSON.stringify(body)).not.toContain('private name');
     });
 
     it("reads another account's entry (or a purged one) by the same label as a deleted one, and never names it", async () => {
