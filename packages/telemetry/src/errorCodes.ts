@@ -183,6 +183,7 @@ export const OWN_ERROR_CODES: readonly string[] = [
   "ledger_closed",
   "mirrors_root_overlap",
   "api_key_not_configured",
+  "context_spill_unwritable",
   // D#6 R5b-3: the key file holds something that is not a key, or is a link, or belongs to another user or is open to other users.
   "api_key_format",
   "api_key_unsafe",

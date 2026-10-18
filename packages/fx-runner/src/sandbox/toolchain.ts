@@ -172,8 +172,8 @@ export function describeToolchain(toolchain: Toolchain): { line: string; warning
 export function toolchainReport(searchPath: string, input: { home: string | undefined; stateDir: string; binaryPath: string | undefined; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { level: "INFO" | "WARN"; line: string; warnings: string[]; hasNode: boolean } | undefined {
   if (input.home === undefined || !path.isAbsolute(input.home)) return undefined;
   const binaryDir = input.binaryPath === undefined ? path.join(input.stateDir, "engine") : path.dirname(input.binaryPath);
-  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome });
-  const toolchain = resolveToolchain(searchPath, { home: input.home, stateDir: input.stateDir, binaryDir, jobAreas: [mirrorsRoot, workspaceRoot, tempRoot] });
+  const { mirrorsRoot, workspaceRoot, tempRoot, spillRoot } = cacheRootsFor({ home: input.home, platform: input.platform, xdgCacheHome: input.xdgCacheHome });
+  const toolchain = resolveToolchain(searchPath, { home: input.home, stateDir: input.stateDir, binaryDir, jobAreas: [mirrorsRoot, workspaceRoot, tempRoot, spillRoot] });
   const described = describeToolchain(toolchain);
   return { level: toolchain.missing.includes("node") || toolchain.refused.length > 0 ? "WARN" : "INFO", ...described, hasNode: toolchain.tools.some((tool) => tool.name === "node") };
 }

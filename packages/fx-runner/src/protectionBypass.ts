@@ -64,8 +64,8 @@ function locationOk(file: string, handle: { dev: number; ino: number }, place: B
     const onDisk = statSync(real);
     if (onDisk.dev !== handle.dev || onDisk.ino !== handle.ino) return false;
     if (!within(realpathSync(place.home), real)) return false;
-    const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home: place.home, platform: place.platform, xdgCacheHome: place.xdgCacheHome });
-    return ![mirrorsRoot, workspaceRoot, tempRoot].some((root) => pathsOverlap(root, real));
+    const { mirrorsRoot, workspaceRoot, tempRoot, spillRoot } = cacheRootsFor({ home: place.home, platform: place.platform, xdgCacheHome: place.xdgCacheHome });
+    return ![mirrorsRoot, workspaceRoot, tempRoot, spillRoot].some((root) => pathsOverlap(root, real));
   } catch {
     // fx-swallow-ok: a path that cannot be resolved is not accepted; the closed code carries no error text
     return false;

@@ -291,7 +291,7 @@ export interface ExecutionRun {
   /**
    * D#600 CX-4a: the prompt was cut and its cut text is in these files, which a SANDBOX target writes to `/fx/context/<code>.md` before the agent starts.
    * If a file cannot be written it sends `uncut.prompt` and records `uncut.sections` instead: a cut never happens without a readable file. A runner target
-   * ignores it (the prompt then holds no marker; the runner-side writer is CX-4b). `fallbackContextSpill` is the same for `fallbackPrompt`.
+   * puts the files in the signed job (`spill`), which the runner writes under its own spill root (D#600 CX-4b); a cut prompt is never sent to a runner without them. `fallbackContextSpill` is the same for `fallbackPrompt`.
    */
   contextSpill?: ContextSpill;
   fallbackContextSpill?: ContextSpill;

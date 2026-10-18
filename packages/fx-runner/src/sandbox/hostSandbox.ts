@@ -50,6 +50,8 @@ export interface HostSandboxConfig {
   toolchainReadPaths?: readonly string[];
   /** Where the repo mirrors live (git path B, C25 section 2): never writable, and open to a job only for one mirror's `objects` directory, passed as the job's `extraReadPaths`. */
   mirrorsRoot?: string;
+  /** D#600 CX-4b: the directory the per-run spill directories sit under: denied whole to every job, with only the job's own directory granted (see `SandboxInput.spillRoot`). */
+  spillRoot?: string;
   /**
    * D#6 R7b: the directory the per-repo package stores live in, one directory per repo directly under it (read and write for a job of that repo
    * that carries allowances, hidden from every other job). Without it a job with allowances gets no store.
@@ -187,6 +189,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       ...(toolchain.length === 0 ? {} : { toolchainReadPaths: toolchain }),
       ...(config.registries === undefined ? {} : { registries: config.registries }),
       ...(config.mirrorsRoot === undefined ? {} : { mirrorsRoot: config.mirrorsRoot }),
+      ...(config.spillRoot === undefined ? {} : { spillRoot: config.spillRoot }),
       ...(opts.extraReadPaths === undefined ? {} : { extraReadPaths: opts.extraReadPaths }),
       extraDomains: [...opts.networkPolicy.map((rule) => rule.host), ...(grants?.domains ?? [])],
       ...(grants === undefined ? {} : { allowanceReadPaths: grants.readPaths, allowanceWritePaths: grants.writePaths, allowLoopbackBind: grants.loopback }),
@@ -246,6 +249,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       const started = await runtime.start({
         runId: opts.runId, role, roleCard, prompt, model, workdir, capUsd,
         ...(opts.excludes === undefined || opts.excludes.length === 0 ? {} : { excludes: opts.excludes }),
+        ...(opts.spillDir === undefined ? {} : { spillDir: opts.spillDir }),
         ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
         onEvent: (event: NormalizedEvent) => {
           last = event;

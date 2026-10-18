@@ -52,15 +52,16 @@ export function mirrorsRootFor(input: { home: string; platform: NodeJS.Platform;
  * The three runner directories under the cache directory that a job's sandbox can read or is made under: the mirrors, the workspaces
  * and the job temp directories. One function, used by `run`, the sandbox probe and the protection-bypass location check, so they agree.
  */
-export function cacheRootsFor(input: { home: string; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { mirrorsRoot: string; workspaceRoot: string; tempRoot: string } {
+export function cacheRootsFor(input: { home: string; platform: NodeJS.Platform; xdgCacheHome?: string | undefined }): { mirrorsRoot: string; workspaceRoot: string; tempRoot: string; spillRoot: string } {
   const mirrorsRoot = mirrorsRootFor(input);
   const cacheDir = path.dirname(mirrorsRoot);
-  return { mirrorsRoot, workspaceRoot: path.join(cacheDir, "workspaces"), tempRoot: path.join(cacheDir, "tmp") };
+  // `spillRoot` (D#600 CX-4b): one directory per run holds the full text a cut prompt points at. It sits beside the workspaces, not in the state directory the agent may not read.
+  return { mirrorsRoot, workspaceRoot: path.join(cacheDir, "workspaces"), tempRoot: path.join(cacheDir, "tmp"), spillRoot: path.join(cacheDir, "spill") };
 }
 
 /** The runner roots and protected locations the mirrors directory must not overlap, as the sandbox builder lists them. */
-export function mirrorKeepClear(input: { home: string; stateDir: string; binaryDir: string; workspaceRoot: string; tempRoot: string }): string[] {
-  return [input.stateDir, input.binaryDir, input.workspaceRoot, input.tempRoot, ...CREDENTIAL_FLOOR.map((entry) => path.join(input.home, entry))];
+export function mirrorKeepClear(input: { home: string; stateDir: string; binaryDir: string; workspaceRoot: string; tempRoot: string; spillRoot?: string }): string[] {
+  return [input.stateDir, input.binaryDir, input.workspaceRoot, input.tempRoot, ...(input.spillRoot === undefined ? [] : [input.spillRoot]), ...CREDENTIAL_FLOOR.map((entry) => path.join(input.home, entry))];
 }
 
 /** The part of a review job the workspace is made from: the one commit to review. */

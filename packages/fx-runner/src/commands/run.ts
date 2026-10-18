@@ -53,6 +53,7 @@ import { createFileLedger, LedgerLockedError, type FileLedger } from "../daemon/
 import { cacheRootsFor, mirrorKeepClear, type RepoRef } from "../daemon/mirror.js";
 import { abortOnSignals, pollLoop, type PollEvent } from "../daemon/pollLoop.js";
 import { removeStaleLedgerTemp } from "../daemon/staleTemp.js";
+import { spillRootFor, sweepStaleSpill } from "../job/spillFiles.js";
 import { cleanEnv, type CredentialMode } from "../job/cleanEnv.js";
 import { createWorkspaceStore } from "../job/workspace.js";
 import { loadRunnerKey } from "../keys.js";
@@ -202,15 +203,15 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
   const { binaryPath, toolDirs } = localTools(host, searchPath);
   // The minimum toolchain for a project's own tests (D#6 R4d-3): found once here, its directories at the end of the agent's PATH, and the
   // install prefixes under the home directory as read-only grants. A tool that is not found is skipped; one that may not be granted is left out.
-  const { mirrorsRoot, workspaceRoot, tempRoot } = cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
-  const toolchain = resolveToolchain(searchPath, { home, stateDir: ctx.stateDir, binaryDir: path.dirname(binaryPath), jobAreas: [mirrorsRoot, workspaceRoot, tempRoot] });
+  const { mirrorsRoot, workspaceRoot, tempRoot, spillRoot } = cacheRootsFor({ home, platform: host.platform, xdgCacheHome: host.xdgCacheHome });
+  const toolchain = resolveToolchain(searchPath, { home, stateDir: ctx.stateDir, binaryDir: path.dirname(binaryPath), jobAreas: [mirrorsRoot, workspaceRoot, tempRoot, spillRoot] });
   const toolchainDirs = toolchainPathDirs(toolchain);
   toolDirs.push(...toolchainDirs.filter((dir) => !toolDirs.includes(dir)));
   const envOptions = { extraPathDirs: toolDirs };
 
   // The runner's own directories. The state directory is private; the workspaces, temp directories and mirrors sit beside each other in the cache directory.
   const stateDir = ctx.stateDir;
-  const keepClear = mirrorKeepClear({ home, stateDir, binaryDir: path.dirname(binaryPath), workspaceRoot, tempRoot });
+  const keepClear = mirrorKeepClear({ home, stateDir, binaryDir: path.dirname(binaryPath), workspaceRoot, tempRoot, spillRoot });
   if (keepClear.some((other) => pathsOverlap(mirrorsRoot, other))) throw new CliError("mirrors_root_overlap: the repo mirrors directory overlaps the runner's state, binary, workspace or temp directory");
 
   // Per-job hard limits (D#6 C43-5): tried once here. Without them the runner holds back (2 jobs, 1 heavy) and says so.
@@ -226,6 +227,10 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
     if (error instanceof LedgerLockedError) throw new CliError("another fx-runner run is using this state directory");
     throw error;
   }
+  // D#600 CX-4b: spill directories a crash or kill left behind hold cut prompt text and have no run to end them. They are swept only now that this daemon holds the ledger lock (a second
+  // start on the same state directory exits above and touches nothing), and only in this state directory's own spill root, so another daemon's live runs are never reached.
+  const ownSpillRoot = spillRootFor(spillRoot, stateDir);
+  sweepStaleSpill(ownSpillRoot);
   try {
     // Closed (damaged or quarantined): nothing that is not on the ledger runs, so no claim is made. One message, one exit, no polling.
     if (ledger.closed) throw new CliError("ledger_closed: the job ledger is damaged and was moved aside (see jobs.ledger.damaged-* in the state directory), so no job can be claimed");
@@ -249,6 +254,8 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       stateDir,
       binaryDir: path.dirname(binaryPath),
       mirrorsRoot,
+      // D#600 CX-4b: the root a run's spill directory sits under: denied whole, with the run's own directory the one read grant under it.
+      spillRoot,
       toolchainReadPaths: toolchainReadPaths(toolchain),
       packageStoreRoot,
       makeRuntime: (sandboxSettings, protectedPaths, jobEnv, runId) => host.engine.makeRuntime({ binaryPath, credentials, envOptions, sandboxSettings, protectedPaths, stateDir, onLocalEvent: (event) => (usage.observe(event), relay.emit(runId, event)), onNearLimit: (info) => usage.warn(info), ...(jobEnv === undefined ? {} : { jobEnv }), ...(limits === undefined ? {} : { limits }) }),
@@ -293,6 +300,7 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
       sandbox,
       events: relay,
       shutdown: stopped.signal,
+      spillRoot: ownSpillRoot,
       run: { workspaces: createWorkspaceStore(workspaceRoot), credentials, envOptions, planSession: (continues) => host.engine.planSession(stateDir, continues), defaultModel: DEFAULT_MODEL },
       recordSession: (sessionId, workspace) => host.engine.recordSession(stateDir, sessionId, workspace),
     });

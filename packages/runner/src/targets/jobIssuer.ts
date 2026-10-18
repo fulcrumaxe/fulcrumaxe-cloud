@@ -5,6 +5,7 @@ import {
   CONTINUES_CROSS_SIDE_MIN_PROTOCOL,
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
+  SPILL_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -422,6 +423,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
         // D#600 CX-5c: omitted when the item has none (never null, never empty), so such a job's signed bytes are unchanged.
         ...(excludes.length > 0 ? { excludes } : {}),
+        // D#600 CX-4b: the full text the prompt cut, in the run's own spill files (closed codes and text, nothing else). Omitted when the prompt cut nothing. The prompt already carries the marker.
+        ...(run.contextSpill && run.contextSpill.files.length > 0 ? { spill: run.contextSpill.files.map((f) => ({ code: f.code, text: f.text })) } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),
@@ -448,8 +451,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0) || null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

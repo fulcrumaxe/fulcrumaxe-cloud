@@ -12,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpill.js";
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { JobAllowancesSchema } from "./sandboxAllowances.js";
 
@@ -152,6 +153,20 @@ export const JobExcludesSchema = z
   .refine((paths) => new Set(paths).size === paths.length, { message: "an excluded path appears once" });
 export type JobExcludes = z.infer<typeof JobExcludesSchema>;
 
+/**
+ * D#600 CX-4b: the full text a cut prompt points at, one entry per closed section code (`CONTEXT_SPILL_CODES`), so no key and no code can name a path. At least one (an empty list is omitted),
+ * each text non-empty and the texts together within `CONTEXT_SPILL_MAX_TOTAL_BYTES`. This is cloud-assembled text going down to the runner; nothing of it comes back up.
+ */
+export const JobSpillSchema = z
+  .array(z.object({ code: z.enum(CONTEXT_SPILL_CODES), text: z.string().min(1).max(CONTEXT_SPILL_MAX_TOTAL_BYTES) }).strict())
+  .min(1)
+  .max(CONTEXT_SPILL_CODES.length)
+  .superRefine((files, ctx) => {
+    if (new Set(files.map((f) => f.code)).size !== files.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a spill code appears once" });
+    if (files.reduce((n, f) => n + Buffer.byteLength(f.text, "utf8"), 0) > CONTEXT_SPILL_MAX_TOTAL_BYTES) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `the spill texts are at most ${CONTEXT_SPILL_MAX_TOTAL_BYTES} bytes together` });
+  });
+export type JobSpill = z.infer<typeof JobSpillSchema>;
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -194,6 +209,10 @@ export const JobSchema = z
     // never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `EXCLUDES_JOB_MIN_PROTOCOL` or
     // later: an older runner's strict parse would refuse the key, and a runner that started without the list would run the agent with nothing denied. Pin content is never here.
     excludes: JobExcludesSchema.optional(),
+    // D#600 CX-4b: the full text of what this run's prompt cut, written by the runner under its own spill root before the agent starts. Present only on a job whose prompt carries a trimmed marker and omitted
+    // (never null, never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `SPILL_JOB_MIN_PROTOCOL` or later. It is
+    // text for the agent to read, never a path: the runner builds every path itself from the closed code.
+    spill: JobSpillSchema.optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

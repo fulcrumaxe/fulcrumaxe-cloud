@@ -43,6 +43,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   allowances?: JobAllowanceGrant;
   /** D#600 CX-5c: the repository paths and globs kept out of this run's context; they become deny entries in the agent's settings, for a start and a resume alike. Absent or empty: none. */
   excludes?: readonly string[];
+  /** D#600 CX-4b: this run's spill directory. The agent's file tools may read it (and nothing else outside the workspace); it is also passed in `extraReadPaths` for the shell sandbox. */
+  spillDir?: string;
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

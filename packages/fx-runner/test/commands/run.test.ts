@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EXCLUDES_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-protocol";
+import { SPILL_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-protocol";
+import { spillRootFor } from "../../src/job/spillFiles.js";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
 import { RUNNER_VERSION } from "../../src/version.js";
@@ -166,7 +167,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(cloud.seen.findIndex((s) => s.path === "/api/runner/hello")).toBeLessThan(cloud.seen.findIndex((s) => s.path === "/api/runner/claim"));
     const sent = HelloMessage.parse(hellos()[0]!.body);
     expect(sent).toMatchObject({ protocol_version: CURRENT_PROTOCOL_VERSION, isolation: "host_sandbox", binary_version: RUNNER_VERSION });
-    expect(sent.protocol_version).toBe(EXCLUDES_JOB_MIN_PROTOCOL);
+    expect(sent.protocol_version).toBe(SPILL_JOB_MIN_PROTOCOL);
     expect(sent.facts).toEqual(readHostFacts());
     expect(sent.facts).toMatchObject({ os: "linux", sandbox_engine: "os_sandbox" });
     expect(await stop(run)).toMatchObject({ code: 0 });
@@ -324,6 +325,41 @@ describe("2. the ledger: this process's pid, a real liveness check, one run per 
     expect(existsSync(lockFile())).toBe(true);
     expect(await stop(first)).toMatchObject({ code: 0 });
     expect(existsSync(lockFile())).toBe(false);
+  });
+
+  it("D#600 CX-4b: at start, run directories a crash left under the spill root are removed (links as links); anything else there, and the targets of links, stay", async () => {
+    const shared = path.join(home, ".cache", "fx-runner", "spill");
+    const spill = spillRootFor(shared, stateDir);
+    const otherDaemon = path.join(spillRootFor(shared, path.join(home, ".other-state")), "7d2a8e3c-4b6f-4c9a-9e53-0f8b2c3d4e5f");
+    mkdirSync(otherDaemon, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(otherDaemon, "note.md"), "another daemon's live run");
+    const stale = path.join(spill, "5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d");
+    const outside = path.join(stateDir, "outside-of-spill");
+    mkdirSync(stale, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(stale, "findings.md"), "left by a crash", { mode: 0o444 });
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "victim.md"), "keep me");
+    symlinkSync(outside, path.join(spill, "6c1f7d2b-3a5e-4b8f-8d42-9e7a1b2c3d4e"));
+    mkdirSync(path.join(spill, "not-a-run-id"));
+    const run = start();
+    await until(() => claims() >= 1);
+    expect(readdirSync(spill).sort()).toEqual(["not-a-run-id"]);
+    expect(readFileSync(path.join(outside, "victim.md"), "utf8")).toBe("keep me");
+    // A daemon with another state directory shares the cache directory and its spill root: its run directory is not this daemon's to remove.
+    expect(readFileSync(path.join(otherDaemon, "note.md"), "utf8")).toBe("another daemon's live run");
+    expect(await stop(run)).toMatchObject({ code: 0 });
+  });
+
+  it("D#600 CX-4b: a second start on a locked state directory exits without sweeping: the first run's live spill directory is still there", async () => {
+    const first = start();
+    await until(() => claims() >= 1);
+    const live = path.join(spillRootFor(path.join(home, ".cache", "fx-runner", "spill"), stateDir), "5b0e6c1a-2f4d-4a7e-9c31-8d6f0a1b2c3d");
+    mkdirSync(live, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(live, "findings.md"), "a live run's full text");
+    const second = await start().done;
+    expect(second.message).toBe("another fx-runner run is using this state directory");
+    expect(readFileSync(path.join(live, "findings.md"), "utf8")).toBe("a live run's full text");
+    expect(await stop(first)).toMatchObject({ code: 0 });
   });
 
   it("a lock held by a live process of another user (pid 1) or another live process refuses; no claim is made", async () => {

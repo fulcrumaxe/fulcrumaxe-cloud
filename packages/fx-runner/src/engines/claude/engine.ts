@@ -7,7 +7,7 @@ import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type Credential
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
 import type { JobLimits } from "../../sandbox/jobLimits.js";
 import { claudeArgv } from "./argv.js";
-import { confineFileTools } from "./filePermissions.js";
+import { confineFileTools, readRulesFor } from "./filePermissions.js";
 import { authPresent } from "./authStatus.js";
 import type { SpawnFn } from "./capture.js";
 import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
@@ -72,7 +72,7 @@ export interface RunOutcome {
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
-export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[] };
+export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string };
 
 /** How a run ended: the promise every handle this engine returns carries. */
 export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
@@ -139,8 +139,8 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     if (!(await authPresent(config.credentials.mode, { binaryPath: binary.path, env, spawn: spawnFn })).present) throw new EngineRefusal("auth_missing");
 
     const excludes = (opts as EngineStartOptions).excludes;
-    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes);
-    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: confineFileTools(roleTools, path.resolve(workdir)), ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
+    const files = writeJobFiles(jobDir, workdir, opts.role, config.sandboxSettings, config.protectedPaths, excludes, (opts as EngineStartOptions).spillDir);
+    const argv = claudeArgv({ cliModel: opts.model, roleTools, allowRules: [...confineFileTools(roleTools, path.resolve(workdir)), ...((opts as EngineStartOptions).spillDir === undefined ? [] : readRulesFor((opts as EngineStartOptions).spillDir!))], ...files, ...(resumeSessionId === undefined ? {} : { resumeSessionId }) });
     const secrets = [env.ANTHROPIC_API_KEY, env[SUBSCRIPTION_TOKEN_VAR]].filter((value): value is string => typeof value === "string");
     const log = createRunLog(config.logDir, opts.runId, secrets);
 

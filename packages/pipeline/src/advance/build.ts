@@ -98,7 +98,7 @@ export function buildExecutorPrompt(input: ExecutorPromptInput): string {
 
 /** The executor's prompt and the section list the context ledger stores (D#600 CX-2). */
 export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: AssembleOptions): AssembledPrompt {
-  if (input.runtime === "runner") return buildRunnerExecutorPrompt(input);
+  if (input.runtime === "runner") return buildRunnerExecutorPrompt(input, options);
   const { owner, name, number, version } = input;
   const branch = branchFor(number);
   const repo = `${owner}/${name}`;
@@ -161,7 +161,7 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
  * D#601 MEM-3b: the recalled memory is not in this text. It comes back as `memoryAside` and travels in the signed job, where the runner places it (the person's lines after the
  * role card, the rest inside its own untrusted block).
  */
-function buildRunnerExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt {
+function buildRunnerExecutorPrompt(input: ExecutorPromptInput, options?: AssembleOptions): AssembledPrompt {
   const { owner, name, number, version } = input;
   const repo = `${owner}/${name}`;
   return assemblePrompt({
@@ -191,7 +191,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt 
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
       ...agentOutputBlock('{"verdict":"done","tests":"passed","summary":"<plain-text summary for the repository owner>"}'),
     ].join("\n"),
-  }, { memoryAside: true });
+  }, { ...options, memoryAside: true });
 }
 
 interface BuildFacts {
@@ -363,8 +363,9 @@ export async function startBuildForItem(
     if (stack.base !== null) stackBase = stack.base;
   }
   // D#600 CX-4a: a sandbox prompt over its budget spills what it cuts to /fx/context. The budget is the repository's setting, else the role's default, derived now and never stored.
+  // CX-4b: a runner prompt spills too: the cut text rides in the signed job and the runner writes it under its own spill root (the memory travels in the job and is never cut).
   const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
-  const budgetBytes = sandboxPrompt && facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
+  const budgetBytes = facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
   // D#600 CX-5b: the item's rules as they stand now (its own over the repository's). The excludes only add a prompt line here (the settings that refuse the reads are written
   // at each launch, from the rules then); the pins are read on the cloud side at the run's start commit and go in full. A runner run gets neither from here (CX-5c).
   const rules = sandboxPrompt && !prior ? await withTenant(pool, accountId, (client) => readItemRules(client, accountId, workItemId)) : [];
@@ -382,7 +383,7 @@ export async function startBuildForItem(
       ...(rules.some((r) => r.kind === "exclude") ? { excludeLine: true } : {}),
       ...(pinRead && pinRead.items.length > 0 ? { pins: pinRead.items.map((p, i) => ({ label: `PINNED FILE ${i + 1} of ${pinRead.items.length}`, text: `path: ${p.path}\n${p.text}` })) } : {}),
     },
-    { spill: sandboxPrompt, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
+    { spill: true, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
   );
   const { prompt, spill: assembledSpill, memoryAside } = assembled;
   const notesOfPins = pinRead ? pinLedgerNotes(pinRead, budgetBytes) : [];

@@ -3,7 +3,7 @@ import path from "node:path";
 import { excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 import { roleToolsFor } from "../../job/roleTools.js";
 import type { ProtectedPaths } from "../../sandbox/sandboxSettings.js";
-import { confineFileTools, denyRules } from "./filePermissions.js";
+import { confineFileTools, denyRules, readRulesFor } from "./filePermissions.js";
 import { EngineRefusal } from "./refusal.js";
 
 /**
@@ -13,10 +13,11 @@ import { EngineRefusal } from "./refusal.js";
  * (deny outranks allow) and reads outside the working directory are refused. The bytes depend only on the role, the
  * workspace and the sandbox block, so a fresh run and a resume get the same file.
  */
-export function settingsFor(role: string, sandbox: Record<string, unknown>, workspace: string, protectedList: ProtectedPaths, excludes: readonly string[] = []): Record<string, unknown> {
+export function settingsFor(role: string, sandbox: Record<string, unknown>, workspace: string, protectedList: ProtectedPaths, excludes: readonly string[] = [], spillDir?: string): Record<string, unknown> {
   return {
     disableAllHooks: true,
-    permissions: { defaultMode: "dontAsk", allow: confineFileTools(roleToolsFor(role), workspace), deny: [...denyRules(protectedList), ...excludeRules(excludes)], blockReadsOutsideWorkingDirectories: true },
+    // D#600 CX-4b: the run's spill directory is read-only to the file tools: a `Read` rule for it, and no `Edit` rule (the bare file tools of the role are confined to the workspace).
+    permissions: { defaultMode: "dontAsk", allow: [...confineFileTools(roleToolsFor(role), workspace), ...(spillDir === undefined ? [] : readRulesFor(spillDir))], deny: [...denyRules(protectedList), ...excludeRules(excludes)], blockReadsOutsideWorkingDirectories: true },
     sandbox,
   };
 }
@@ -43,13 +44,13 @@ export function mcpConfigFor(_job: { role: string }): { mcpServers: Record<strin
  * Writes `settings.json` and `mcp.json` (0600) into `jobDir` (0700) and returns their paths. `jobDir` must be outside
  * the workspace: a file inside it would be readable and writable by the agent.
  */
-export function writeJobFiles(jobDir: string, workspace: string, role: string, sandbox: Record<string, unknown>, protectedList: ProtectedPaths, excludes: readonly string[] = []): { settingsPath: string; mcpPath: string } {
+export function writeJobFiles(jobDir: string, workspace: string, role: string, sandbox: Record<string, unknown>, protectedList: ProtectedPaths, excludes: readonly string[] = [], spillDir?: string): { settingsPath: string; mcpPath: string } {
   const rel = path.relative(path.resolve(workspace), path.resolve(jobDir));
   if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) throw new EngineRefusal("bad_start_options", "job directory is inside the workspace");
   mkdirSync(jobDir, { recursive: true, mode: 0o700 });
   const settingsPath = path.join(jobDir, "settings.json");
   const mcpPath = path.join(jobDir, "mcp.json");
-  writeFileSync(settingsPath, `${JSON.stringify(settingsFor(role, sandbox, path.resolve(workspace), protectedList, excludes), null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(settingsPath, `${JSON.stringify(settingsFor(role, sandbox, path.resolve(workspace), protectedList, excludes, spillDir), null, 2)}\n`, { mode: 0o600 });
   writeFileSync(mcpPath, `${JSON.stringify(mcpConfigFor({ role }), null, 2)}\n`, { mode: 0o600 });
   return { settingsPath, mcpPath };
 }

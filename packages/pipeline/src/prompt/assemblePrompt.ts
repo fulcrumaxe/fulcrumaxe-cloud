@@ -216,12 +216,12 @@ export interface AssembleOptions {
   /**
    * A runner prompt (D#601 MEM-3b): the recalled memory is not written into `prompt`. It comes back in `memoryAside`, split by author, for the job to carry, and the runner renders it
    * (the person's lines after the role card, the rest inside its own untrusted block). The section list still holds the memory sections, so the ledger shows what the agent was given.
-   * Nothing is spilled to a file for such a prompt.
+   * The memory sections are not in the prompt, so they are never cut, spilled or counted against the budget; the findings and the notes still can be (CX-4b).
    */
   memoryAside?: boolean;
   /** The most bytes the prompt may hold. Absent: no budget cut. Acted on only with `spill`. */
   budgetBytes?: number;
-  /** The run can read `/fx/context/<code>.md` (a sandbox run). Without it nothing is cut for the budget and no marker is written: a cut never happens without a readable file. */
+  /** The run can read the files its prompt points at (`/fx/context/<code>.md` on the sandbox; the runner rewrites the marker to its own spill root). Without it nothing is cut for the budget and no marker is written: a cut never happens without a readable file. */
   spill?: boolean;
 }
 
@@ -248,7 +248,7 @@ interface Slot {
 }
 
 /** The pieces of the prompt in the fixed order. `full` builds the same prompt with nothing cut and no marker (the fallback for a file that cannot be written). */
-function slotsOf(parts: PromptParts, spill: boolean, full: boolean): Slot[] {
+function slotsOf(parts: PromptParts, spill: boolean, full: boolean, aside = false): Slot[] {
   const slots: Slot[] = [];
   const add = (code: ContextSectionCode, text: string | undefined, joiner = "\n\n", extra: Partial<Slot> = {}): void => {
     if (text !== undefined && text !== "") slots.push({ code, text, joiner, trimmed: 0, ...extra });
@@ -266,7 +266,7 @@ function slotsOf(parts: PromptParts, spill: boolean, full: boolean): Slot[] {
     if (m.trimmedBytes <= 0) return add(code, m.text);
     // The fallback keeps the slot at its cap, as before the budget work: the memory slot is a hard bound shared with the memory work. No marker, no file.
     if (full) return add(code, m.text, "\n\n", { trimmed: m.trimmedBytes, reason: "memory_slot" });
-    const marked = m.full !== undefined && reserve(m.full);
+    const marked = !aside && m.full !== undefined && reserve(m.full);
     if (!marked) return add(code, m.text, "\n\n", { trimmed: m.trimmedBytes, reason: "memory_slot" });
     // The marker is part of the slot, so the slot is cut again to leave room for it: marked, it is never larger than the cap the unmarked slot had.
     const tail = `\n${trimmedMarker(code)}`;
@@ -347,14 +347,16 @@ function asideOf(parts: PromptParts): AssembledPrompt["memoryAside"] {
 
 export function assemblePrompt(parts: PromptParts, options: AssembleOptions = {}): AssembledPrompt {
   const aside = options.memoryAside === true;
-  const spill = options.spill === true && !aside;
-  const slots = slotsOf(parts, spill, false);
+  const spill = options.spill === true;
+  const slots = slotsOf(parts, spill, false, aside);
   const spilled = (s: Slot): number => (s.spillText === undefined ? 0 : bytesOf(s.spillText));
   if (spill && options.budgetBytes !== undefined) {
     let room = CONTEXT_SPILL_MAX_TOTAL_BYTES - slots.reduce((n, s) => n + spilled(s), 0);
-    const over = (): boolean => bytesOf(promptOf(groupsOf(slots))) > options.budgetBytes!;
+    // A runner prompt carries no memory section (it travels in the job), so those slots are neither counted nor cut.
+    const inPrompt = (): Slot[] => (aside ? slots.filter((s) => !MEMORY_CODES.includes(s.code)) : slots);
+    const over = (): boolean => bytesOf(promptOf(groupsOf(inPrompt()))) > options.budgetBytes!;
     for (const klass of BUDGET_CUT_ORDER) {
-      for (const slot of slots.filter((s) => (klass as readonly string[]).includes(s.code)).reverse()) {
+      for (const slot of inPrompt().filter((s) => (klass as readonly string[]).includes(s.code)).reverse()) {
         if (!over()) break;
         if (!isContextSpillCode(slot.code)) continue;
         const marker = trimmedMarker(slot.code);
@@ -374,7 +376,7 @@ export function assemblePrompt(parts: PromptParts, options: AssembleOptions = {}
     return texts.length === 0 ? [] : [{ code, text: texts.join("\n\n") }];
   });
   if (files.length === 0) return cut;
-  const uncut = finish(slotsOf(parts, false, true));
+  const uncut = finish(slotsOf(parts, false, true, aside), aside);
   // A fallback the worker would refuse is no fallback: then nothing is cut for a file.
   if (uncut.prompt.length > CONTEXT_SPILL_MAX_PROMPT_CHARS) return assemblePrompt(parts, { ...options, spill: false });
   return { ...cut, spill: { files, uncut } };
