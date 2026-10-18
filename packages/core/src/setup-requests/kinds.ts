@@ -16,6 +16,17 @@ export type AgentProposableKind = (typeof AGENT_PROPOSABLE_KINDS)[number];
 export const SETUP_REQUEST_CHECK_KINDS = ['env_var_present'] as const;
 export type SetupRequestCheckKind = (typeof SETUP_REQUEST_CHECK_KINDS)[number];
 
+/**
+ * The Vercel environment an env-var request is checked against (D#598 P8d). The proposer sets it, production when it does not; the check and
+ * the "set on {project}, but not for {environment}" sentence both read it from the request, so they cannot name different ones.
+ */
+export const TARGET_ENVIRONMENTS = ['production', 'preview', 'development'] as const;
+export type TargetEnvironment = (typeof TARGET_ENVIRONMENTS)[number];
+export const DEFAULT_TARGET_ENVIRONMENT: TargetEnvironment = 'production';
+export function isTargetEnvironment(value: unknown): value is TargetEnvironment {
+  return typeof value === 'string' && (TARGET_ENVIRONMENTS as readonly string[]).includes(value);
+}
+
 export const SETUP_REQUEST_STATES = ['open', 'done', 'withdrawn'] as const;
 export type SetupRequestState = (typeof SETUP_REQUEST_STATES)[number];
 

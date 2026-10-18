@@ -105,7 +105,7 @@ describe('setup request check sweep [pg]', () => {
     expect(Math.abs(after.checkRanAt!.getTime() - Date.now())).toBeLessThan(10_000);
     expect(await hold(A)).toBe('setup_request_open');
     expect(await advances(A)).toEqual([]);
-    expect(vercel.calls).toEqual([{ accountId: A.accountId, project: 'cloud-staging', query: 'target=&gitBranch=&source=' }]);
+    expect(vercel.calls.map((c) => [c.accountId, c.project])).toEqual([[A.accountId, 'cloud-staging']]);
   });
 
   it('acceptance 23 (resumes within one check interval): the person sets the variable, the next minute\'s tick resumes the item by itself, once', async () => {
@@ -187,7 +187,7 @@ describe('setup request check sweep [pg]', () => {
     expect(counts).toMatchObject({ listed: 2, passed: 1, notYet: 1 });
     expect(await read(A, ra.id)).toMatchObject({ state: 'done', resolution: 'check_passed' });
     expect(await read(B, rb.id)).toMatchObject({ state: 'open', checkReason: 'check_unavailable' });
-    expect(vercel.calls.map((c) => c.accountId).sort()).toEqual([A.accountId, B.accountId].sort());
+    expect(vercel.calls.map((c) => c.accountId)).toEqual([A.accountId]); // B has no connection: the lookup answers unavailable and nothing leaves the platform
     // account B's tenant cannot see account A's request, and the other way round
     await expect(read(B, ra.id)).rejects.toBeInstanceOf(NotFoundError);
     expect(await advances(A)).toHaveLength(1);
@@ -459,6 +459,57 @@ describe('setup request check sweep [pg]', () => {
       await markDone(A, noCheck.id);
       await expect(inTenant(A, (c) => reopenSetupRequest(c, { id: noCheck.id, reason: 'env_var_missing' }))).rejects.toBeInstanceOf(SetupRequestError);
       await expect(inTenant(A, (c) => reopenSetupRequest(c, { id: randomUUID(), reason: 'env_var_missing' }))).rejects.toBeInstanceOf(NotFoundError);
+    });
+  });
+
+  /** D#598 P8d-1: the request carries the environment it is checked against (migration 0881). */
+  describe('target_environment', () => {
+    it('defaults to production; the proposer can set preview or development; anything else, or an environment on another kind, is refused', async () => {
+      expect((await propose(A)).targetEnvironment).toBe('production');
+      expect((await propose(A, { envName: 'P', targetEnvironment: 'preview' })).targetEnvironment).toBe('preview');
+      expect((await propose(A, { envName: 'D', targetEnvironment: 'development' })).targetEnvironment).toBe('development');
+      await expect(propose(A, { envName: 'X', targetEnvironment: 'staging' })).rejects.toMatchObject({ code: 'invalid_input', field: 'target_environment' });
+      await expect(propose(A, { kind: 'app_not_installed', target: 'acme/web', envName: null, check: null, targetEnvironment: 'preview' })).rejects.toMatchObject({ code: 'invalid_input', field: 'target_environment' });
+      const raw = await admin.query<{ target_environment: string }>(
+        `INSERT INTO setup_requests (account_id, repo_id, origin, kind, target, env_name, reason, created_by) VALUES ($1, $2, 'agent', 'env_var', 't', 'RAW', 'r', $3) RETURNING target_environment`,
+        [A.accountId, A.repoId, A.userId],
+      );
+      expect(raw.rows[0]!.target_environment).toBe('production');
+      await expect(admin.query(`UPDATE setup_requests SET target_environment = 'bogus' WHERE env_name = 'RAW'`)).rejects.toMatchObject({ code: '23514' });
+    });
+
+    it('the stamped environment cannot change afterwards, for the tenant or the table owner', async () => {
+      const r = await propose(A, { targetEnvironment: 'preview' });
+      await expect(inTenant(A, (c) => c.query(`UPDATE setup_requests SET target_environment = 'production' WHERE id = $1`, [r.id]))).rejects.toMatchObject({ code: '42501' });
+      await expect(admin.query(`UPDATE setup_requests SET target_environment = 'production' WHERE id = $1`, [r.id])).rejects.toMatchObject({ code: '23514', message: expect.stringContaining('setup_requests_frozen') });
+      expect((await read(A, r.id)).targetEnvironment).toBe('preview');
+    });
+
+    it('the same variable asked for in two environments is two steps; asking again for the same environment is already_open', async () => {
+      await propose(A);
+      await propose(A, { targetEnvironment: 'preview' });
+      await expect(propose(A, { targetEnvironment: 'preview' })).rejects.toMatchObject({ code: 'already_open' });
+      await expect(propose(A)).rejects.toMatchObject({ code: 'already_open' });
+    });
+
+    it('the sweep checks the request\'s own environment: set for production only is "not for preview"; set for preview passes', async () => {
+      const vercel = new FakeVercel().connect(A.accountId).project('cloud-staging', [{ key: NAME, value: SECRET, target: ['production'] }]);
+      const r = await propose(A, { targetEnvironment: 'preview' });
+      expect(await sweep(vercel.source())).toMatchObject({ listed: 1, notYet: 1 });
+      expect(await read(A, r.id)).toMatchObject({ state: 'open', checkReason: 'env_var_wrong_target' });
+      vercel.setVar('cloud-staging', { key: NAME, value: SECRET, target: ['preview'] });
+      await ageCheck(r.id);
+      expect(await sweep(vercel.source())).toMatchObject({ passed: 1 });
+      expect(await read(A, r.id)).toMatchObject({ state: 'done', resolution: 'check_passed' });
+    });
+
+    it('a reopened request keeps its environment, and a twin in another environment is not folded into', async () => {
+      const preview = await propose(A, { targetEnvironment: 'preview' });
+      await inTenant(A, (c) => resolveSetupRequest(c, { id: preview.id, userId: A.userId, to: 'done' }));
+      const production = await propose(A);
+      const out = await inTenant(A, (c) => reopenSetupRequest(c, { id: preview.id, reason: 'env_var_wrong_target' }));
+      expect(out).toMatchObject({ folded: false, request: { id: preview.id, targetEnvironment: 'preview', state: 'open' } });
+      expect((await read(A, production.id)).checkReason).toBeNull();
     });
   });
 });

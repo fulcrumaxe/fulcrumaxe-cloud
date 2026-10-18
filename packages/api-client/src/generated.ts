@@ -1442,6 +1442,7 @@ export interface Operations {
         title: string;
         target: string;
         env_name: string | null;
+        target_environment: ("production" | "preview" | "development") | (null);
         reason: string;
         provider_url: string | null;
         check: ("env_var_present") | (null);
@@ -1469,6 +1470,7 @@ export interface Operations {
       work_item_id?: (string) | (null);
       target: string;
       env_name?: (string) | (null);
+      target_environment?: ("production" | "preview" | "development") | (null);
       reason: string;
       provider_url?: (string) | (null);
       check?: ("env_var_present") | (null);
@@ -1481,6 +1483,7 @@ export interface Operations {
       title: string;
       target: string;
       env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
       reason: string;
       provider_url: string | null;
       check: ("env_var_present") | (null);
@@ -1511,6 +1514,7 @@ export interface Operations {
       title: string;
       target: string;
       env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
       reason: string;
       provider_url: string | null;
       check: ("env_var_present") | (null);
@@ -1541,6 +1545,7 @@ export interface Operations {
       title: string;
       target: string;
       env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
       reason: string;
       provider_url: string | null;
       check: ("env_var_present") | (null);
@@ -1571,6 +1576,7 @@ export interface Operations {
       title: string;
       target: string;
       env_name: string | null;
+      target_environment: ("production" | "preview" | "development") | (null);
       reason: string;
       provider_url: string | null;
       check: ("env_var_present") | (null);

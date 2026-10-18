@@ -1,4 +1,4 @@
-import type { SetupRequestCheckKind, SetupRequestState } from './kinds.js';
+import type { SetupRequestCheckKind, SetupRequestState, TargetEnvironment } from './kinds.js';
 
 /**
  * D#598 P8b: the words a person reads about a setup request's check. One constant per sentence, filled only from structured fields (the
@@ -17,9 +17,8 @@ export function isCheckReasonCode(value: unknown): value is CheckReasonCode {
   return typeof value === 'string' && (CHECK_REASON_CODES as readonly string[]).includes(value);
 }
 
-/** The provider named in `check_unavailable`, and the environment the env-var check requires. */
+/** The provider named in `check_unavailable`. */
 export const CHECK_PROVIDER_NAME = 'Vercel';
-export const ENV_VAR_CHECK_ENVIRONMENT = 'production';
 
 export const COPY_WAITING_CHECKED = "We check for this every {interval}. The item continues by itself once it's done, or press Mark done.";
 export const COPY_WAITING_UNCHECKED = "We can't check this one for you. Press Mark done when it's finished.";
@@ -37,13 +36,13 @@ function fill(template: string, values: Readonly<Record<string, string>>): strin
 
 const secondsText = (n: number): string => `${n} ${n === 1 ? 'second' : 'seconds'}`;
 
-/** What the check found, as a sentence. `name` and `project` are the request's own structured fields. */
-export function checkReasonSentence(code: CheckReasonCode, fields: { name: string; project: string }): string {
-  return fill(COPY_REASON[code], { name: fields.name, project: fields.project, environment: ENV_VAR_CHECK_ENVIRONMENT, provider: CHECK_PROVIDER_NAME });
+/** What the check found, as a sentence. `name`, `project` and `environment` are the request's own structured fields (the environment is the one the check used). */
+export function checkReasonSentence(code: CheckReasonCode, fields: { name: string; project: string; environment: TargetEnvironment }): string {
+  return fill(COPY_REASON[code], { name: fields.name, project: fields.project, environment: fields.environment, provider: CHECK_PROVIDER_NAME });
 }
 
 /** Sentence 4: "Mark done" was pressed and the check says it is not done. The reason's own full stop is dropped so the sentence does not end ".." before "The item". */
-export function repausedSentence(code: CheckReasonCode, fields: { name: string; project: string }): string {
+export function repausedSentence(code: CheckReasonCode, fields: { name: string; project: string; environment: TargetEnvironment }): string {
   return fill(COPY_REPAUSED, { reason: checkReasonSentence(code, fields).replace(/\.$/, '') });
 }
 
@@ -63,6 +62,8 @@ export interface StatusSentenceInput {
   /** The project's name and the variable's name: the fields sentence 4 is filled from. */
   target?: string;
   envName?: string | null;
+  /** The environment the check used; sentence 4 names it. */
+  targetEnvironment?: TargetEnvironment;
 }
 
 export interface StatusSentenceOptions {
@@ -94,8 +95,8 @@ export function statusSentence(request: StatusSentenceInput, opts: StatusSentenc
   }
   if (request.state !== 'open') return null;
   if (request.checkKind === null || !opts.checksAvailable || request.checkReason === 'check_unavailable') return COPY_WAITING_UNCHECKED;
-  if ((request.repausedAt ?? null) !== null && isCheckReasonCode(request.checkReason) && request.target !== undefined) {
-    return repausedSentence(request.checkReason, { name: request.envName ?? request.target, project: request.target });
+  if ((request.repausedAt ?? null) !== null && isCheckReasonCode(request.checkReason) && request.target !== undefined && request.targetEnvironment !== undefined) {
+    return repausedSentence(request.checkReason, { name: request.envName ?? request.target, project: request.target, environment: request.targetEnvironment });
   }
   return fill(COPY_WAITING_CHECKED, { interval: secondsText(opts.intervalSeconds ?? CHECK_INTERVAL_SECONDS) });
 }

@@ -8,6 +8,7 @@
       "title": "Add the environment variable STRIPE_WEBHOOK_SECRET to cloud-staging",
       "target": "cloud-staging",
       "env_name": "STRIPE_WEBHOOK_SECRET",
+      "target_environment": "production",
       "reason": "The webhook route needs this name set before the build can be checked.",
       "provider_url": "https://vercel.com/docs/environment-variables",
       "check": "env_var_present",

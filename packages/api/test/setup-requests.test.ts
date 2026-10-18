@@ -26,6 +26,7 @@ interface Dto {
   title: string;
   target: string;
   env_name: string | null;
+  target_environment: string | null;
   reason: string;
   provider_url: string | null;
   check: string | null;
@@ -196,6 +197,8 @@ describe('D#598 P8a: setup requests', () => {
       { kind: 'app_not_installed', repo_id: f.repoId, target: 'a/b', reason: 'x', env_name: 'FOO' },
       { kind: 'app_not_installed', repo_id: f.repoId, target: 'a/b', reason: 'x', check: 'env_var_present' },
       envBody(f, { check: 'anything_else' }),
+      envBody(f, { target_environment: 'staging' }),
+      { kind: 'app_not_installed', repo_id: f.repoId, target: 'a/b', reason: 'x', target_environment: 'preview' },
       envBody(f, { target: '' }),
       envBody(f, { target: 'multi\nline' }),
       envBody(f, { reason: '' }),
@@ -214,6 +217,23 @@ describe('D#598 P8a: setup requests', () => {
       expect(((await res.json()) as ErrorBody).details?.[0]?.path).toMatch(/reason|target/);
     }
     expect(await rows(f.owner.accountId)).toHaveLength(0);
+  });
+
+  it('D#598 P8d: target_environment defaults to production, can be set to preview or development, is null on other kinds, and is in the list and get answers', async () => {
+    const f = await fixture();
+    expect((await created(f.admin, envBody(f))).target_environment).toBe('production');
+    const preview = await created(f.admin, envBody(f, { target: 'cloud-preview', target_environment: 'preview' }));
+    expect(preview.target_environment).toBe('preview');
+    expect((await created(f.admin, envBody(f, { target: 'cloud-dev', target_environment: 'development' }))).target_environment).toBe('development');
+    expect((await created(f.admin, envBody(f, { target: 'cloud-null', target_environment: null }))).target_environment).toBe('production');
+    expect((await created(f.owner, { kind: 'app_not_installed', repo_id: f.repoId, target: 'acme/web', reason: 'x' })).target_environment).toBeNull();
+    const got = (await (await call(f.admin, 'GET', `/setup-requests/${preview.id}`)).json()) as Dto;
+    expect(got.target_environment).toBe('preview');
+    const listed = (await (await call(f.admin, 'GET', '/setup-requests')).json()) as { requests: Dto[] };
+    expect(listed.requests.map((r) => r.target_environment).sort()).toEqual(['development', null, 'preview', 'production', 'production']);
+    // the same step in another environment is a different request; the same environment twice is the one that already exists
+    expect((await create(f.admin, envBody(f, { target_environment: 'preview' }))).status).toBe(200);
+    expect((await create(f.admin, envBody(f, { target_environment: 'preview' }))).status).toBe(409);
   });
 
   it('AC22: reason is stored and returned as literal plain text; markup and a URL in it are not links, title is not built from it', async () => {

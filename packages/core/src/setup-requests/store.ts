@@ -7,7 +7,9 @@ import type { CheckOutcome } from './checks.js';
 import type { CheckReasonCode } from './copy.js';
 import {
   ENV_NAME_RE,
+  DEFAULT_TARGET_ENVIRONMENT,
   isAgentProposableKind,
+  isTargetEnvironment,
   isValidReason,
   isValidTarget,
   normalizeProviderUrl,
@@ -15,6 +17,7 @@ import {
   type SetupRequestCheckKind,
   type SetupRequestKind,
   type SetupRequestState,
+  type TargetEnvironment,
 } from './kinds.js';
 
 /**
@@ -49,6 +52,8 @@ export interface SetupRequest {
   kind: SetupRequestKind;
   target: string;
   envName: string | null;
+  /** The Vercel environment an env_var request is checked against (production for every other kind, where it means nothing). */
+  targetEnvironment: TargetEnvironment;
   reason: string;
   providerUrl: string | null;
   checkKind: SetupRequestCheckKind | null;
@@ -72,6 +77,7 @@ interface Row {
   kind: SetupRequestKind;
   target: string;
   env_name: string | null;
+  target_environment: TargetEnvironment;
   reason: string;
   provider_url: string | null;
   check_kind: SetupRequestCheckKind | null;
@@ -86,7 +92,7 @@ interface Row {
   repaused_at: Date | null;
 }
 
-const COLUMNS = `id, repo_id, work_item_id, origin, kind, target, env_name, reason, provider_url, check_kind, state, created_by, created_at,
+const COLUMNS = `id, repo_id, work_item_id, origin, kind, target, env_name, target_environment, reason, provider_url, check_kind, state, created_by, created_at,
   resolution, resolved_by, resolved_at, check_reason, check_ran_at, repaused_at`;
 
 const map = (r: Row): SetupRequest => ({
@@ -97,6 +103,7 @@ const map = (r: Row): SetupRequest => ({
   kind: r.kind,
   target: r.target,
   envName: r.env_name,
+  targetEnvironment: r.target_environment,
   reason: r.reason,
   providerUrl: r.provider_url,
   checkKind: r.check_kind,
@@ -123,6 +130,8 @@ export interface ProposeSetupRequestInput {
   target: string;
   /** `env_var` only: the variable's NAME. There is no value field. */
   envName?: string | null;
+  /** `env_var` only: production | preview | development. Production when absent. */
+  targetEnvironment?: string | null;
   reason: string;
   providerUrl?: string | null;
   /** `env_var` only. */
@@ -147,6 +156,9 @@ export async function proposeSetupRequest(client: PoolClient, input: ProposeSetu
   const envName = input.envName ?? null;
   if ((input.kind === 'env_var') !== (envName !== null)) bad('env_name', input.kind === 'env_var' ? 'an env_var request names the variable' : 'only an env_var request names a variable');
   if (envName !== null && !ENV_NAME_RE.test(envName)) bad('env_name', 'env_name must be a variable name');
+  const targetEnvironment = input.targetEnvironment ?? DEFAULT_TARGET_ENVIRONMENT;
+  if (!isTargetEnvironment(targetEnvironment)) bad('target_environment', 'target_environment must be production, preview or development');
+  if (input.kind !== 'env_var' && targetEnvironment !== DEFAULT_TARGET_ENVIRONMENT) bad('target_environment', 'only an env_var request names an environment');
   const check = input.check ?? null;
   if (check !== null && input.kind !== 'env_var') bad('check', 'only an env_var request can carry a check');
   let providerUrl: string | null = null;
@@ -166,10 +178,10 @@ export async function proposeSetupRequest(client: PoolClient, input: ProposeSetu
 
   try {
     const { rows } = await client.query<Row>(
-      `INSERT INTO setup_requests (account_id, repo_id, work_item_id, origin, kind, target, env_name, reason, provider_url, check_kind, created_by)
-       VALUES (NULLIF(current_setting('app.account_id', true), '')::uuid, $1::uuid, $2::uuid, 'agent', $3, $4, $5, $6, $7, $8, $9::uuid)
+      `INSERT INTO setup_requests (account_id, repo_id, work_item_id, origin, kind, target, env_name, target_environment, reason, provider_url, check_kind, created_by)
+       VALUES (NULLIF(current_setting('app.account_id', true), '')::uuid, $1::uuid, $2::uuid, 'agent', $3, $4, $5, $10, $6, $7, $8, $9::uuid)
        RETURNING ${COLUMNS}`,
-      [input.repoId, workItemId, input.kind, input.target, envName, input.reason, providerUrl, check, input.userId],
+      [input.repoId, workItemId, input.kind, input.target, envName, input.reason, providerUrl, check, input.userId, targetEnvironment],
     );
     // A request with an automatic check is looked at by the check sweep; tell it there is work (an idle platform opens no connection).
     if (check !== null) markSetupRequestCheckPending();
@@ -435,9 +447,9 @@ export async function reopenSetupRequest(client: PoolClient, input: { id: string
     const twin = await client.query<{ id: string }>(
       `SELECT id FROM setup_requests
         WHERE state = 'open' AND id <> $1::uuid AND repo_id = $2::uuid AND kind = $3 AND target = $4
-          AND COALESCE(env_name, '') = COALESCE($5, '') AND work_item_id IS NOT DISTINCT FROM $6::uuid
+          AND COALESCE(env_name, '') = COALESCE($5, '') AND target_environment = $7 AND work_item_id IS NOT DISTINCT FROM $6::uuid
         FOR UPDATE`,
-      [old.id, old.repo_id, old.kind, old.target, old.env_name, old.work_item_id],
+      [old.id, old.repo_id, old.kind, old.target, old.env_name, old.work_item_id, old.target_environment],
     );
     if (twin.rows[0] !== undefined) {
       const request = map((await stamp(twin.rows[0].id)).rows[0]!);

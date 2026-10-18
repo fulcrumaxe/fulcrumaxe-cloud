@@ -16,7 +16,7 @@ import { SETUP_REQUEST_DUE_AFTER_SECONDS } from '@fx/db/src/setupRequestLister.j
 
 /** D#598 P8b: the approved customer copy (C8 section 1, C9 ruling 1) as the strings the API will expose. */
 describe('setup request copy (P8b)', () => {
-  const FIELDS = { name: 'STRIPE_KEY', project: 'cloud-staging' };
+  const FIELDS = { name: 'STRIPE_KEY', project: 'cloud-staging', environment: 'production' as const };
 
   it('sentence 1: a waiting request with an automatic check states the interval it really runs at', () => {
     expect(statusSentence({ state: 'open', checkKind: 'env_var_present', checkReason: null }, { checksAvailable: true })).toBe(
@@ -66,12 +66,12 @@ describe('setup request copy (P8b)', () => {
   });
 
   it('the sentences are built from structured fields only: a name with markup stays literal text in the sentence', () => {
-    expect(checkReasonSentence('env_var_missing', { name: 'A_B', project: '<b>x</b>' })).toBe("A_B isn't set on <b>x</b> yet.");
+    expect(checkReasonSentence('env_var_missing', { name: 'A_B', project: '<b>x</b>', environment: 'production' })).toBe("A_B isn't set on <b>x</b> yet.");
   });
 
   describe('sentences 3 and 4 are derived from the row (P8b-2)', () => {
     const t0 = Date.parse('2026-10-18T10:00:00Z');
-    const closed = { state: 'done' as const, checkKind: 'env_var_present' as const, checkReason: null, resolution: 'marked_done' as const, resolvedAt: new Date(t0), checkRanAt: null, target: 'cloud-staging', envName: 'STRIPE_KEY' };
+    const closed = { state: 'done' as const, checkKind: 'env_var_present' as const, checkReason: null, resolution: 'marked_done' as const, resolvedAt: new Date(t0), checkRanAt: null, target: 'cloud-staging', envName: 'STRIPE_KEY', targetEnvironment: 'production' as const };
 
     it('sentence 3: marked done, check not yet answered, inside the window and with a source bound', () => {
       expect(statusSentence(closed, { checksAvailable: true, now: t0 + 1000 })).toBe(COPY_CHECKING_NOW);
@@ -91,6 +91,8 @@ describe('setup request copy (P8b)', () => {
       expect(statusSentence({ ...back, checkReason: 'env_var_wrong_target' }, { checksAvailable: true })).toBe(
         'We checked and it isn\'t done yet: STRIPE_KEY is set on cloud-staging, but not for production. The item is paused again.',
       );
+      // The environment named is the request's own.
+      expect(statusSentence({ ...back, targetEnvironment: 'preview', checkReason: 'env_var_wrong_target' }, { checksAvailable: true })).toContain('but not for preview.');
       // A later look that could not reach the provider reads as unchecked, as for any request; with no source bound too.
       expect(statusSentence({ ...back, checkReason: 'check_unavailable' }, { checksAvailable: true })).toBe(COPY_WAITING_UNCHECKED);
       expect(statusSentence({ ...back, checkReason: 'env_var_missing' }, { checksAvailable: false })).toBe(COPY_WAITING_UNCHECKED);

@@ -12189,6 +12189,21 @@
                               "null"
                             ]
                           },
+                          "target_environment": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "production",
+                                  "preview",
+                                  "development"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
                           "reason": {
                             "type": "string"
                           },
@@ -12302,6 +12317,7 @@
                           "title",
                           "target",
                           "env_name",
+                          "target_environment",
                           "reason",
                           "provider_url",
                           "check",
@@ -12446,6 +12462,21 @@
                       }
                     ]
                   },
+                  "target_environment": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "production",
+                          "preview",
+                          "development"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "reason": {
                     "type": "string",
                     "minLength": 1,
@@ -12530,6 +12561,21 @@
                       "type": [
                         "string",
                         "null"
+                      ]
+                    },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
                       ]
                     },
                     "reason": {
@@ -12645,6 +12691,7 @@
                     "title",
                     "target",
                     "env_name",
+                    "target_environment",
                     "reason",
                     "provider_url",
                     "check",
@@ -12810,6 +12857,21 @@
                         "null"
                       ]
                     },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "reason": {
                       "type": "string"
                     },
@@ -12923,6 +12985,7 @@
                     "title",
                     "target",
                     "env_name",
+                    "target_environment",
                     "reason",
                     "provider_url",
                     "check",
@@ -13060,6 +13123,21 @@
                         "null"
                       ]
                     },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "reason": {
                       "type": "string"
                     },
@@ -13173,6 +13251,7 @@
                     "title",
                     "target",
                     "env_name",
+                    "target_environment",
                     "reason",
                     "provider_url",
                     "check",
@@ -13339,6 +13418,21 @@
                         "null"
                       ]
                     },
+                    "target_environment": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "production",
+                            "preview",
+                            "development"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "reason": {
                       "type": "string"
                     },
@@ -13452,6 +13546,7 @@
                     "title",
                     "target",
                     "env_name",
+                    "target_environment",
                     "reason",
                     "provider_url",
                     "check",
