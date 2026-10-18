@@ -35,6 +35,11 @@ export function confineFileTools(roleEntry: readonly string[], workspace: string
   return out;
 }
 
+/** D#600 CX-4b: the `Read` rules (which cover Glob, Grep and LS) for one directory the agent may read and not change. A path that cannot be written literally is refused. */
+export function readRulesFor(abs: string): string[] {
+  return [`Read(${anchored(abs)})`, `Read(${anchored(abs)}/**)`];
+}
+
 /**
  * The deny floor, generated from the one protected list. A path may be a file or a directory, so each gets a rule for
  * itself and one for what is under it. Deny outranks allow, so this holds even if the allow entries are wrong.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/contextSpill.js";
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
 import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
@@ -16,7 +17,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -359,6 +360,56 @@ describe("excludes (D#600 CX-5c)", () => {
   it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
     const before = JobSchema.omit({ excludes: true });
     expect(before.safeParse(sampleJob({ excludes: ["secret/a.txt"] })).success).toBe(false);
+    expect(before.safeParse(sampleJob()).success).toBe(true);
+  });
+});
+
+describe("spill (D#600 CX-4b)", () => {
+  const ok = (spill: unknown): boolean => JobSchema.safeParse(sampleJob({ spill })).success;
+
+  it("accepts one entry per closed code", () => {
+    expect(ok([{ code: "findings", text: "the whole finding" }])).toBe(true);
+    expect(ok(CONTEXT_SPILL_CODES.map((code) => ({ code, text: `text of ${code}` })))).toBe(true);
+  });
+
+  it("is omitted, never null and never empty, so a job without a spill keeps its canonical JSON", () => {
+    expect("spill" in (JobSchema.parse(sampleJob()) as object)).toBe(false);
+    expect(ok(null)).toBe(false);
+    expect(ok([])).toBe(false);
+  });
+
+  it("refuses a code outside the closed list (a path, a dot-dot, an absolute path, a section that is never cut)", () => {
+    for (const code of ["spec", "pinned", "output", "../x", "/abs/x", "findings/../note", "findings.md", "", "Findings", 1, null]) expect(ok([{ code, text: "x" }]), String(code)).toBe(false);
+  });
+
+  it("refuses a free-text key, a missing key, an empty text, a repeated code and a non-string text", () => {
+    expect(ok([{ code: "note", text: "x", path: "/tmp/x" }])).toBe(false);
+    expect(ok([{ code: "note", text: "x", name: "y" }])).toBe(false);
+    expect(ok([{ code: "note" }])).toBe(false);
+    expect(ok([{ text: "x" }])).toBe(false);
+    expect(ok([{ code: "note", text: "" }])).toBe(false);
+    expect(ok([{ code: "note", text: "a" }, { code: "note", text: "b" }])).toBe(false);
+    expect(ok([{ code: "note", text: 1 }])).toBe(false);
+    expect(ok("note")).toBe(false);
+  });
+
+  it("holds at most the total cap in bytes (multi-byte text counts by its bytes)", () => {
+    expect(CONTEXT_SPILL_MAX_TOTAL_BYTES).toBe(262_144);
+    expect(ok([{ code: "note", text: "a".repeat(CONTEXT_SPILL_MAX_TOTAL_BYTES) }])).toBe(true);
+    expect(ok([{ code: "note", text: "a".repeat(CONTEXT_SPILL_MAX_TOTAL_BYTES + 1) }])).toBe(false);
+    expect(ok([{ code: "note", text: "a".repeat(200_000) }, { code: "findings", text: "b".repeat(62_144) }])).toBe(true);
+    expect(ok([{ code: "note", text: "a".repeat(200_000) }, { code: "findings", text: "b".repeat(62_145) }])).toBe(false);
+    expect(ok([{ code: "note", text: "é".repeat(CONTEXT_SPILL_MAX_TOTAL_BYTES / 2 + 1) }])).toBe(false);
+  });
+
+  it("has a protocol floor above the excludes floor that the current version meets", () => {
+    expect(SPILL_JOB_MIN_PROTOCOL).toBe(EXCLUDES_JOB_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(SPILL_JOB_MIN_PROTOCOL);
+  });
+
+  it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
+    const before = JobSchema.omit({ spill: true });
+    expect(before.safeParse(sampleJob({ spill: [{ code: "note", text: "x" }] })).success).toBe(false);
     expect(before.safeParse(sampleJob()).success).toBe(true);
   });
 });

@@ -128,6 +128,7 @@ export const GIT_PATH_LINES = {
   head_not_from_base: COPY.headNotFromBase,
   sandbox_stub_committed: COPY.sandboxStubCommitted,
   review_sha_not_in_mirror: "The runner's copy of the repository does not have the commit to review on any branch, so the review did not start. If the pull request comes from a fork, it cannot be reviewed on your machine. Otherwise, review again.",
+  context_spill_unwritable: "The runner could not save the longer text this run's prompt points to, so it did not start the agent with a reference to a file that is not there. Check the disk space and folder permissions on that machine, then Build again.",
 } as const;
 
 /**

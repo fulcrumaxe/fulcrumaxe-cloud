@@ -109,6 +109,12 @@ export interface SandboxInput {
    * It may not overlap the state directory, the binary directory, the workspace and temp roots, the credential floor or a persistence target.
    */
   mirrorsRoot?: string;
+  /**
+   * D#600 CX-4b: the directory the per-run spill directories sit under (absolute). Like the workspace, temp and mirrors roots it is denied for reading whole, so a cache directory outside the
+   * home directory does not leave one run's spill files readable to another run's shell; this run's own directory is the one narrower read grant in `extraReadPaths`. It is kept clear of every
+   * allowance path, and it is the root an `extraReadPaths` grant under it is checked against.
+   */
+  spillRoot?: string;
 }
 
 const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -236,7 +242,8 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   const workspace = assertGrantable("workspace", input.workspace, home, guarded, [path.normalize(input.workspaceRoot)]);
   const tempDir = assertGrantable("tempDir", input.tempDir, home, guarded, [path.normalize(input.tempRoot)]);
   const mirrorsRoot = input.mirrorsRoot === undefined ? undefined : assertGrantable("mirrors root", input.mirrorsRoot, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot)], [input.mirrorsRoot], true);
-  const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true)), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])];
+  const spillRoot = input.spillRoot === undefined ? undefined : assertGrantable("spill root", input.spillRoot, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])], [input.spillRoot], true);
+  const roots = [workspace, tempDir, ...(input.extraRoots ?? []).map((root) => assertGrantable("extra root", root, home, guarded, [root], true)), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot])];
   const extraRead = (input.extraReadPaths ?? []).map((value) => assertGrantable("extra read path", value, home, guarded, roots));
   const toolchainRead = (input.toolchainReadPaths ?? []).map((value) => assertGrantable("toolchain read path", value, home, guarded, [value], true));
   const extraWrite = (input.extraWritePaths ?? []).map((value) => assertGrantable("extra write path", value, home, guarded, roots));
@@ -245,7 +252,7 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
   // Allowance grants (R7b): each path its own root, kept clear of the home directory and of every runner-owned area. The package store is the one
   // grant that sits in the runner's own cache directory (in the home directory), strictly under its root and clear of the other runner areas.
   const store = input.packageStore === undefined ? undefined : assertGrantable("package store", input.packageStore.dir, home, [...guarded, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])], [path.normalize(input.packageStore.root)]);
-  const keepClear = [...guarded, home, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(store === undefined ? [] : [store])];
+  const keepClear = [...guarded, home, path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...(store === undefined ? [] : [store])];
   const allowRead = (input.allowanceReadPaths ?? []).map((value) => assertGrantable("allowance read path", value, home, keepClear, [value], true));
   const allowWrite = (input.allowanceWritePaths ?? []).map((value) => assertGrantable("allowance write path", value, home, keepClear, [value], true));
   const storeRoot = input.packageStoreRoot !== undefined ? path.normalize(input.packageStoreRoot) : input.packageStore === undefined ? undefined : path.normalize(input.packageStore.root);
@@ -266,7 +273,7 @@ export function sandboxSettings(input: SandboxInput): Record<string, unknown> {
       denyWrite: unique([path.normalize(input.stateDir), path.normalize(input.binaryDir), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot])]),
       // The workspace, temp and package-store roots are denied like the mirrors root and the home directory: a cache directory outside the home
       // directory would leave them readable. This job's own workspace, temp directory and store are re-allowed below (a narrower allow wins).
-      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...toolchainDeny]),
+      denyRead: unique([home, path.normalize(input.stateDir), path.normalize(input.binaryDir), path.normalize(input.workspaceRoot), path.normalize(input.tempRoot), ...(storeRoot === undefined ? [] : [storeRoot]), ...(mirrorsRoot === undefined ? [] : [mirrorsRoot]), ...(spillRoot === undefined ? [] : [spillRoot]), ...toolchainDeny]),
       allowRead: unique([workspace, tempDir, ...extraRead, ...toolchainRead, ...allowRead, ...allowWrite, ...(store === undefined ? [] : [store])]),
     },
     credentials: { files: [...floor, ...toolchainDeny].map((file) => ({ path: file, mode: "deny" })), envVars: [] as unknown[] },

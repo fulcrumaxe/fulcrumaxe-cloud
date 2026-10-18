@@ -23,6 +23,7 @@ import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
 import { repoMapDigest } from "../job/repoMap.js";
+import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../job/spillFiles.js";
 import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
@@ -102,6 +103,11 @@ export interface JobHandlerDeps {
   depsInstall?: DepsInstaller;
   /** The directory of the per-repo package stores (the host sandbox's `packageStoreRoot`); the install uses the job's own store in it. Absent: no install is done. */
   packageStoreRoot?: string;
+  /**
+   * D#600 CX-4b: the directory the per-run spill directories are made under (a sibling of the workspaces; `cacheRootsFor`). Never taken from a job. Absent: a job that carries a spill
+   * ends `context_spill_unwritable` instead of starting with a marker that leads nowhere.
+   */
+  spillRoot?: string;
   /** Replaceable so a test can count the calls. */
   runJobFn?: typeof runJob;
   heartbeatMs?: number;
@@ -149,6 +155,20 @@ export function withAllowances(port: SandboxPort, grant: JobAllowanceGrant): San
 export function withExcludes(port: SandboxPort, excludes: readonly string[] | undefined): SandboxPort {
   if (excludes === undefined || excludes.length === 0) return port;
   const carry = <T extends object>(opts: T): T => ({ ...opts, excludes });
+  return {
+    ...port,
+    startDetached: (handle, opts) => port.startDetached(handle, carry(opts)),
+    resume: (handle, sessionId, prompt, opts) => port.resume(handle, sessionId, prompt, carry(opts)),
+  };
+}
+
+/**
+ * D#600 CX-4b: a port whose every start and resume carries this run's spill directory: as a read-only grant of the shell sandbox (`extraReadPaths`, checked again by the host
+ * sandbox's builder against its runner-owned roots) and as the one extra place the agent's file tools may read.
+ */
+export function withSpillDir(port: SandboxPort, dir: string | undefined): SandboxPort {
+  if (dir === undefined) return port;
+  const carry = <T extends { extraReadPaths?: readonly string[] | undefined }>(opts: T): T => ({ ...opts, extraReadPaths: [...(opts.extraReadPaths ?? []), dir], spillDir: dir });
   return {
     ...port,
     startDetached: (handle, opts) => port.startDetached(handle, carry(opts)),
@@ -360,6 +380,22 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       await deps.clock.sleep(TAKEOVER_STOP_GRACE_MS, ran.signal);
       if (!ran.signal.aborted) await deps.sandbox.stop(handle).catch(() => undefined);
     }
+    let spillHeld: SpillHandle | undefined;
+    /**
+     * D#600 CX-4b: writes the job's spill files before anything else starts (no mirror fetch, no sandbox) and keeps the handle. True when the job has a spill and it could not be
+     * made: with no spill root, a damaged root, a file that could not be written, or a marker with no text behind it. The run then ends and the agent never sees a dangling marker.
+     */
+    const spillFails = (): boolean => {
+      if (job.spill === undefined) return false;
+      try {
+        if (deps.spillRoot === undefined) throw new SpillRefused();
+        spillHeld = prepareSpill(deps.spillRoot, job.run_id, job.spill, job.task.prompt);
+        return false;
+      } catch (error) {
+        if (!(error instanceof SpillRefused)) throw error;
+        return true;
+      }
+    };
     try {
       const started: { base?: string } = {};
       const promptNotes: string[] = [];
@@ -371,6 +407,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         // `runJob` keeps its own check for callers that do not come through here.
         if (cliModelFor(job, deps.run.defaultModel) === undefined) result = { status: "failed", reason: "model_unsupported" };
         else if ((notReady = deps.credentialsReady?.()) !== undefined) result = { status: "failed", reason: notReady };
+        else if (spillFails()) result = { status: "failed", reason: "context_spill_unwritable" };
         else {
           git.check(job, claimed);
           // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
@@ -405,9 +442,9 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           };
           const granted = withReadGrants(deps.sandbox, git.readGrants(job));
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
-          const allowed = withExcludes(withGrants, job.excludes);
+          const allowed = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
           usedPort = allowed;
-          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
@@ -486,6 +523,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     } finally {
       ran.abort();
       detach();
+      // The run's spill files go with the run, on every way out; a directory that is not the one made is left alone.
+      if (spillHeld !== undefined) try { removeSpill(spillHeld); } catch { /* fx-swallow-ok: a refused or failed removal leaves the daemon's own directory, cleared the next time this run id is seen */ }
       deps.planePush?.baseLedger.forget(claimed.runId);
       await lease.close({ abandon: abandonSend });
       await watched?.finish();

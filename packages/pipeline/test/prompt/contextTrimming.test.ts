@@ -287,3 +287,62 @@ describe("ROLE_CONTEXT_DEFAULTS (acceptance 6; provisional until CX-10 measures 
     expect(effectiveContextBudget("debater", 3_000_000)).toBe(ROLE_CONTEXT_DEFAULTS.debater);
   });
 });
+
+describe("a runner prompt spills too (D#600 CX-4b)", () => {
+  const aside = { memoryAside: true, spill: true } as const;
+  const asideFull = assemblePrompt(parts(), { memoryAside: true });
+  const asideBytes = bytes(asideFull.prompt);
+
+  it("cuts the notes of a runner prompt over its budget: the marker is in the prompt and the full text is a file to send", () => {
+    const r = assemblePrompt(parts(), { ...aside, budgetBytes: asideBytes - 100 });
+    expect(r.prompt).toContain(trimmedMarker("note"));
+    expect(r.prompt).not.toContain(NOTE);
+    expect(file(r, "note")).toContain(NOTE);
+    expect(section(r, "note")).toMatchObject({ trimmed_reason: "over_budget" });
+    expect(section(r, "note")!.trimmed_bytes).toBeGreaterThan(3000);
+    expect(bytes(r.prompt)).toBeLessThanOrEqual(asideBytes - 100);
+    expect(isContextSpill(r.spill)).toBe(true);
+  });
+
+  it("never cuts, spills or counts the memory sections: they are not in the prompt, whatever the budget", () => {
+    const r = assemblePrompt(parts(), { ...aside, budgetBytes: 10 });
+    for (const code of ["memory_item", "memory_stable"]) expect(section(r, code)!.trimmed_bytes).toBe(0);
+    expect(r.spill!.files.map((f) => f.code).sort()).toEqual(["map", "note"]);
+    expect(r.prompt).not.toContain(STABLE);
+    expect(r.prompt).not.toContain(ITEM);
+    // A prompt that fits without the memory is not cut for the memory's sake.
+    const justFits = assemblePrompt(parts(), { ...aside, budgetBytes: asideBytes });
+    expect(justFits.spill).toBeUndefined();
+    expect(justFits.prompt).toBe(asideFull.prompt);
+    expect(r.memoryAside).toBeDefined();
+  });
+
+  it("the uncut fallback of a runner prompt holds no memory section and no marker", () => {
+    const r = assemblePrompt(parts(), { ...aside, budgetBytes: asideBytes - 100 });
+    expect(r.spill!.uncut.prompt).toContain(NOTE);
+    expect(r.spill!.uncut.prompt).not.toContain("[trimmed:");
+    expect(r.spill!.uncut.prompt).not.toContain(STABLE);
+    expect(r.spill!.uncut.prompt).toBe(asideFull.prompt);
+  });
+
+  it("a runner prompt without spill is not cut, as before", () => {
+    const r = assemblePrompt(parts(), { memoryAside: true, budgetBytes: 10 });
+    expect(r.spill).toBeUndefined();
+    expect(r.prompt).toBe(asideFull.prompt);
+  });
+
+  it("the Spec is never cut at any budget on the runner side either", () => {
+    const r = assemblePrompt(parts(), { ...aside, budgetBytes: 1 });
+    expect(r.prompt).toContain(SPEC);
+    expect(section(r, "spec")!.trimmed_bytes).toBe(0);
+  });
+
+  it("the executor's runner builder passes the options on, so its cut notes spill", () => {
+    const input = { owner: "acme", name: "widgets", number: 41, version: 3, spec: SPEC, runtime: "runner" as const, runNotes: NOTE };
+    const whole = assembleExecutorPrompt(input, { spill: true });
+    expect(whole.spill).toBeUndefined();
+    const cut = assembleExecutorPrompt(input, { spill: true, budgetBytes: bytes(whole.prompt) - 100 });
+    expect(cut.prompt).toContain(trimmedMarker("note"));
+    expect(file(cut, "note")).toContain(NOTE);
+  });
+});

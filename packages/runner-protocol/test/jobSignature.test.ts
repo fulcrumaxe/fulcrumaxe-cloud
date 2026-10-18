@@ -77,6 +77,28 @@ describe("job signature over excludes (D#600 CX-5c)", () => {
   });
 });
 
+describe("job signature over spill (D#600 CX-4b)", () => {
+  const withSpill = { ...job, spill: [{ code: "note", text: "the whole note" }, { code: "findings", text: "the whole findings" }] } as Job;
+
+  it("signs the spill: an edited text, a changed or reordered code, a stripped or added list fails", () => {
+    const signed = signJob(withSpill, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW })).toEqual(withSpill);
+    const edit = (spill: unknown) => ({ ...signed, job: { ...signed.job, spill } });
+    for (const altered of [[{ code: "note", text: "the whole note!" }, { code: "findings", text: "the whole findings" }], [{ code: "map", text: "the whole note" }, { code: "findings", text: "the whole findings" }], [{ code: "findings", text: "the whole findings" }, { code: "note", text: "the whole note" }], [{ code: "note", text: "the whole note" }]]) {
+      expect(codeOf(() => verifyJob(edit(altered), keyring, { now: NOW }))).toBe("bad_signature");
+    }
+    const { spill: dropped, ...stripped } = signed.job as Job & { spill?: unknown };
+    void dropped;
+    expect(codeOf(() => verifyJob({ ...signed, job: stripped }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("a job without a spill signs to the same bytes as before the field existed", () => {
+    expect(canonicalJson(job)).not.toContain("spill");
+    const signed = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...signed, job: { ...signed.job, spill: [{ code: "note", text: "x" }] } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+});
+
 describe("job signature", () => {
   it("verifies a signed job and returns it", () => {
     expect(verifyJob(signJob(job, privateKey), keyring, { now: NOW })).toEqual(job);

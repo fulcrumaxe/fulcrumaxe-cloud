@@ -136,7 +136,7 @@ export type PromptJob = Pick<Job, "role" | "task" | "role_card"> & Partial<Pick<
  * block. This function only builds a string: nothing in this package runs text from a job, and it is never put in an
  * argument list. An unknown role throws.
  */
-export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoMap?: { version: string; text: string }): string {
+export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoMap?: { version: string; text: string }, taskPrompt: string = job.task.prompt): string {
   roleToolsFor(job.role);
   return [
     `You are a ${job.role} agent in the autonomous development team.`,
@@ -161,7 +161,8 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoM
     ...(repoMap === undefined ? [] : [repoMapHeading(repoMap.version), escapeUntrustedClose(repoMap.text), ""]),
     // D#601 MEM-3b: memory an agent, an import or a runner wrote is untrusted text, so it rides inside the block, before the task, with a closing tag neutralised like any other.
     ...(job.memory === undefined || job.memory.fenced === "" ? [] : [FENCED_MEMORY_HEADING, escapeUntrustedClose(stripControlChars(job.memory.fenced)), ""]),
-    escapeUntrustedClose(job.task.prompt),
+    // D#600 CX-4b: `taskPrompt` is the job's task text with its trimmed markers pointing at this run's spill files (the signed text is unchanged and its hash was checked on it).
+    escapeUntrustedClose(taskPrompt),
     CLOSING,
     "",
   ].join("\n");

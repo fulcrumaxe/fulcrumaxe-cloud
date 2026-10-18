@@ -372,8 +372,8 @@ export async function startFixBody(
   let heldSpec: { version: number; sha256: string } | null = null;
   try {
     const runtime = promptRuntimeOf(ctx.executionMode);
-    // D#600 CX-4a: a sandbox round can read /fx/context, so the findings its caps cut are spilled there and marked; a runner round has no spill (CX-4b).
-    const spillOptions = { spill: runtime === "sandbox" };
+    // D#600 CX-4a: the findings the caps cut are spilled and marked: a sandbox round reads /fx/context, a runner round the files its runner writes (CX-4b, from the signed job).
+    const spillOptions = { spill: true };
     const base = { owner: ctx.owner, name: ctx.name, issue: ctx.issue, pr: pr.number, headSha: pr.headSha, branch: pr.branch, version: spec.version, spec: spec.body, findings, runtime, ...(crossSide ? { crossSide } : {}) };
     // A sandbox fix round resumes the build's own session, so it sends only the unchanged line, and the worker checks that line against the Spec version pinned on
     // the run being continued before it goes out. A runner round may be a follow-up in a fresh session after a lost one, so it keeps the body.

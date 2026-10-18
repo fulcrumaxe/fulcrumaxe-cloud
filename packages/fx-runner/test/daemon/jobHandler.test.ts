@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, JobSchema, type LocalOnlyEvent, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, SPILL_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, JobSchema, type LocalOnlyEvent, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { readyOrCode } from "../../src/commands/run.js";
 import type { CommandContext } from "../../src/context.js";
 import { API_KEY_FILE, CREDENTIALS_DIR, clearApiKey, perJobApiKey, writeApiKey } from "../../src/credentials.js";
@@ -1221,11 +1221,11 @@ describe("a cross-side fix round on the item's pull request branch (D#599 PL-2b-
     expect(sh("-C", remote, "for-each-ref", "--format=%(refname)").split("\n").filter(Boolean).sort()).toEqual([`refs/heads/${ITEM_BRANCH}`, "refs/heads/main"]);
   });
 
-  it("sends the version this build declares, which is at least the cross-side floor and is the excludes floor", () => {
-    expect(CURRENT_PROTOCOL_VERSION).toBe(5);
+  it("sends the version this build declares, which is at least the cross-side floor and is the spill floor", () => {
+    expect(CURRENT_PROTOCOL_VERSION).toBe(6);
     expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBe(3);
     expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
     expect(MEMORY_JOB_MIN_PROTOCOL).toBe(4);
-    expect(EXCLUDES_JOB_MIN_PROTOCOL).toBe(CURRENT_PROTOCOL_VERSION);
+    expect(SPILL_JOB_MIN_PROTOCOL).toBe(CURRENT_PROTOCOL_VERSION);
   });
 });
