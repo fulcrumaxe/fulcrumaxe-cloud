@@ -21,6 +21,7 @@
     { "tool": "Glob", "bytes": 4000 }
   ],
   "compactions": 0,
+  "denied_tool_calls": null,
   "recalled_memory": [],
   "repo_map_version": null
 }

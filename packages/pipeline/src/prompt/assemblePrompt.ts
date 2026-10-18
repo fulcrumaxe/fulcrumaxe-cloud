@@ -176,7 +176,7 @@ export interface FindingsSlot {
   items: ReadonlyArray<{ label: string; text: string; full?: string }>;
 }
 
-/** D#600 CX-4a: a file a person pinned (CX-5 supplies them). Put in full, never cut, whatever the budget. */
+/** D#600 CX-4a: a file a person pinned (CX-5b supplies them, read cloud-side). Put in full, never cut, whatever the budget. */
 export interface PinnedItem {
   label: string;
   text: string;
@@ -187,6 +187,8 @@ export interface PromptParts {
   boundary?: string;
   card?: string;
   backstops?: string;
+  /** D#600 CX-5b: the one line about excluded paths (`EXCLUDE_PROMPT_LINE`), present only when the run has excludes. Put once, right after the backstops. */
+  contextRulesLine?: string;
   /** The repository map, text built by the platform. Fenced here. */
   map?: { version: string; text: string };
   memoryStable?: RenderedMemory;
@@ -276,6 +278,7 @@ function slotsOf(parts: PromptParts, spill: boolean, full: boolean): Slot[] {
   add("boundary", parts.boundary, "\n");
   add("card", parts.card);
   add("boundary", parts.backstops);
+  add("boundary", parts.contextRulesLine);
   if (parts.map) add("map", `REPOSITORY MAP (version ${parts.map.version}):\n${sanitize(parts.map.text)}`);
   memory("memory_stable", parts.memoryStable);
   if (parts.spec) add("spec", specText(parts.spec));

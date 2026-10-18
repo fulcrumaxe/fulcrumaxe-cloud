@@ -25,8 +25,8 @@ export interface RepoTreeSource {
   headSha(): Promise<string | null>;
   /** The whole tree at `sha` (a commit or tree id), or null when GitHub has none. */
   tree(sha: string): Promise<RepoTree | null>;
-  /** A blob's text, or null when it is missing, over `BLOB_MAX_BYTES` or not UTF-8. */
-  blob(sha: string): Promise<string | null>;
+  /** A blob's text, or null when it is missing, over `maxBytes` (default `BLOB_MAX_BYTES`; D#600 CX-5b reads pinned files with a larger one) or not UTF-8. */
+  blob(sha: string, maxBytes?: number): Promise<string | null>;
 }
 
 export const BLOB_MAX_BYTES = 65_536;
@@ -65,10 +65,10 @@ export function createRepoTreeSource(http: InstallationHttp, repo: { owner: stri
       }
       return { truncated: body.truncated === true, entries };
     },
-    async blob(sha) {
+    async blob(sha, maxBytes = BLOB_MAX_BYTES) {
       if (!SHA_RE.test(sha)) return null;
       const body = await get(`${root}/git/blobs/${sha}`);
-      if (!isObj(body) || body.encoding !== "base64" || typeof body.content !== "string" || typeof body.size !== "number" || body.size > BLOB_MAX_BYTES) return null;
+      if (!isObj(body) || body.encoding !== "base64" || typeof body.content !== "string" || typeof body.size !== "number" || body.size > maxBytes) return null;
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(body.content, "base64"));
       } catch {

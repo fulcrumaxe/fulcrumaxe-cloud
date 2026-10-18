@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
+import { readItemRules } from "@fx/core/src/context/contextRules.js";
 import type { HostLookup } from "@fx/net-guard";
 import {
   claudeModelIds,
@@ -385,6 +386,8 @@ export class SandboxTarget implements ExecutionTarget {
     // with no usable key is refused with nothing created and nothing to
     // clean up.
     const { networkPolicyRules, env, installPolicy } = await this.buildRunMaterials(run, payerAccountId);
+    // D#600 CX-5b: the excludes as they stand now, read before any sandbox exists. A read that fails ends the launch (fail closed on the deny side).
+    const excludes = await this.readExcludes(run);
 
     await this.markRequested(run, sandboxName);
     let handle: SandboxHandle;
@@ -479,6 +482,7 @@ export class SandboxTarget implements ExecutionTarget {
       onModelCalls: (n) => (bk.meteredModelCalls += n),
       onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
       ...this.spillOf(run, bk),
+      ...(excludes.length > 0 && { excludes }),
       ...(run.limits && { limits: run.limits }),
       onEvent,
       onStage,
@@ -666,6 +670,9 @@ export class SandboxTarget implements ExecutionTarget {
     bk.handle = handle;
 
     const { networkPolicyRules, env, installPolicy } = await this.buildRunMaterials(run, payerAccountId);
+    // D#600 CX-5b: a resumed round uses the excludes as they stand now, not those of the first start: an exclude is a safety control, so what the person has set
+    // since applies; one removed since stops denying. A fresh start after an expired snapshot (the `dispatch` below) reads them again.
+    const excludes = await this.readExcludes(run);
     const { onEvent, onStage, getSessionId } = await this.buildMeteredOnEvent(run, payerAccountId, handle, bk);
 
     let startResult: StartDetachedResult;
@@ -689,6 +696,7 @@ export class SandboxTarget implements ExecutionTarget {
         onModelCalls: (n) => (bk.meteredModelCalls += n),
         onContextLedger: (m) => (bk.contextLedger = mergeContextLedgerMeasures(bk.contextLedger, m)),
         ...this.spillOf(run, bk),
+        ...(excludes.length > 0 && { excludes }),
         ...(run.limits && { limits: run.limits }),
         onEvent,
         onStage,
@@ -960,6 +968,17 @@ export class SandboxTarget implements ExecutionTarget {
     const spill = run.contextSpill;
     if (spill === undefined) return {};
     return { spill, onSpill: (written) => { bk.uncutSections = written ? undefined : spill.uncut.sections; } };
+  }
+
+  /**
+   * D#600 CX-5b: the repository paths and globs kept out of this run's context, as the rules stand now: the item's own exclude rules over the repository's
+   * (an item rule on a path replaces the repository's for it). A run with no work item has none. Read just before a start or a resume, on the account's
+   * tenant scope; an error is not caught here, so a launch that cannot read its excludes does not start without them.
+   */
+  private async readExcludes(run: ExecutionRun): Promise<string[]> {
+    if (run.workItemId === undefined || run.workItemId === null) return [];
+    const rules = await this.withAccount(run.accountId, (client) => readItemRules(client, run.accountId, run.workItemId!));
+    return rules.filter((r) => r.kind === "exclude").map((r) => r.path);
   }
 
   private async recordContext(run: ExecutionRun): Promise<void> {

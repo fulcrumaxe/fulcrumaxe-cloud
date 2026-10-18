@@ -34,8 +34,14 @@ export const CONTEXT_SECTION_CODES = [
 ] as const;
 export type ContextSectionCode = (typeof CONTEXT_SECTION_CODES)[number];
 
-/** Why a section was cut (D#600 CX-4a), a closed enum the definer checks: the findings caps, the memory slot's size, or the run's context budget. */
-export const CONTEXT_TRIMMED_REASONS = ["findings_cap", "memory_slot", "over_budget"] as const;
+/**
+ * Why a section was cut (D#600 CX-4a), a closed enum the definer checks: the findings caps, the memory slot's size, or the run's context budget.
+ * CX-5b adds two notes about pinned files, which are never cut. Each is one `pinned` entry that carries a figure, not text, in `bytes`: `pin_missing`
+ * (how many pinned files the run could not read: deleted, renamed, not text, or GitHub unreachable), `pin_too_large` (how many were over the run-time cap of
+ * 190,000 characters, below the 200,000 the prompt fence can hold, so they were skipped rather than cut), `pin_excluded` (how many sat under an exclude, which wins
+ * over a pin, and were never fetched) and `pins_over_budget` (how many bytes the pins stand over the repository's budget; they are still included in full).
+ */
+export const CONTEXT_TRIMMED_REASONS = ["findings_cap", "memory_slot", "over_budget", "pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"] as const;
 export type ContextTrimmedReason = (typeof CONTEXT_TRIMMED_REASONS)[number];
 
 /** The tools a tool result is attributed to; anything else is `other`. */
@@ -80,6 +86,11 @@ export interface ContextLedgerMeasure {
   cache_write_tokens: number | null;
   tool_output_bytes: Partial<Record<ContextTool, number>>;
   compactions: number;
+  /**
+   * D#600 CX-5b: tool calls the CLI refused for a permission rule, counted from the stream. Sandbox runs only: the sandbox port sets it (0 when none), the
+   * runner daemon's measure and the runner wire never carry it, so a runner row stays null ("Not recorded").
+   */
+  denied_tool_calls?: number;
 }
 
 /** A count above this is not a real one (a run does not reach a thousandth of it); the field is ignored. */
@@ -89,6 +100,14 @@ const MAX_TRACKED_TURNS = 20_000;
 const MAX_TRACKED_TOOL_CALLS = 20_000;
 const MAX_ID_CHARS = 200;
 const MAX_BLOCKS_PER_LINE = 64;
+const MAX_TRACKED_DENIALS = 20_000;
+/** The tools whose permission refusals are counted: the file tools an exclude denies. */
+const DENIABLE_TOOLS: ReadonlySet<ContextTool> = new Set<ContextTool>(["Read", "Grep", "Glob", "LS"]);
+/**
+ * What the CLI's refusal reads like in a `tool_result` ("Permission to use Read has been denied", "... denied by your permission settings"). A shell or
+ * filesystem error such as EACCES says "permission denied" and is not a refusal by a rule, so it is not matched.
+ */
+const DENIAL_TEXT = /\bhas been denied\b|\bdenied by your permission|\brequested permissions to use\b|\bpermission to use\b/i;
 
 const TOOLS: ReadonlySet<string> = new Set(CONTEXT_TOOL_ENUM);
 
@@ -115,7 +134,26 @@ function resultBytes(content: unknown): number {
   return total;
 }
 
+/** The text of a `tool_result` (a string, or the text blocks of an array), bounded; used only to recognise a refusal, never kept. */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content.slice(0, 2000);
+  if (!Array.isArray(content)) return "";
+  return content
+    .slice(0, MAX_BLOCKS_PER_LINE)
+    .map((b) => (isRecord(b) && b.type === "text" && typeof b.text === "string" ? b.text.slice(0, 2000) : ""))
+    .join("\n");
+}
+
+/**
+ * A tool our settings turn off is not refused by a rule: the CLI answers `Error: No such tool available: Grep. ...` (seen from CLI 2.1.302). That counts as a
+ * refusal only for a tool the caller says it disabled, and only when the text names that very tool right after the phrase.
+ */
+const noSuchTool = (tool: ContextTool): RegExp => new RegExp(`No such tool available: ${tool}\\b`);
+
 export class ContextLedgerCapture {
+  /** @param disabledTools the tools the run's settings turn off (D#600 CX-5b: Grep and Glob when the run has excludes). Only these can be counted by the "No such tool" wording. */
+  constructor(private readonly disabledTools: readonly ContextTool[] = []) {}
+
   private firstId: string | undefined;
   private firstContext = 0;
   private peak = 0;
@@ -126,6 +164,8 @@ export class ContextLedgerCapture {
   private readonly toolById = new Map<string, ContextTool>();
   private readonly toolBytes = new Map<ContextTool, number>();
   private compactions = 0;
+  /** Tool call ids the CLI refused for a permission rule: from a refused `tool_result` and from the final `result`'s `permission_denials`; one id counts once. */
+  private readonly denied = new Set<string>();
 
   /** Feed one parsed stream-json line (any shape). Never throws. */
   observe(line: unknown): void {
@@ -133,6 +173,19 @@ export class ContextLedgerCapture {
     if (line.type === "assistant") this.assistant(line);
     else if (line.type === "user") this.user(line);
     else if (line.type === "system" && line.subtype === "compact_boundary") this.compactions = Math.min(this.compactions + 1, CONTEXT_MAX_COUNT);
+    else if (line.type === "result" && Array.isArray(line.permission_denials)) {
+      // Only the file tools an exclude concerns: under dontAsk every tool off the role's list is refused and listed here too (WebFetch, Task, a Bash prefix), and those are not this count.
+      for (const d of line.permission_denials.slice(0, MAX_TRACKED_DENIALS)) if (isRecord(d) && DENIABLE_TOOLS.has(toolOf(d.tool_name))) this.deny(d.tool_use_id);
+    }
+  }
+
+  private deny(id: unknown): void {
+    if (typeof id === "string" && id !== "" && id.length <= MAX_ID_CHARS && this.denied.size < MAX_TRACKED_DENIALS) this.denied.add(id);
+  }
+
+  /** How many tool calls the CLI refused for a permission rule so far. An integer; no tool input, path or text is kept. */
+  deniedToolCalls(): number {
+    return this.denied.size;
   }
 
   private assistant(line: Record<string, unknown>): void {
@@ -175,6 +228,10 @@ export class ContextLedgerCapture {
     for (const block of content) {
       if (!isRecord(block) || block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
       const tool = this.toolById.get(block.tool_use_id) ?? "other";
+      if (block.is_error === true && DENIABLE_TOOLS.has(tool)) {
+        const text = resultText(block.content);
+        if (DENIAL_TEXT.test(text) || (this.disabledTools.includes(tool) && noSuchTool(tool).test(text))) this.deny(block.tool_use_id);
+      }
       const next = (this.toolBytes.get(tool) ?? 0) + resultBytes(block.content);
       this.toolBytes.set(tool, Math.min(next, CONTEXT_MAX_COUNT));
     }
@@ -220,6 +277,7 @@ export function mergeContextLedgerMeasures(a: ContextLedgerMeasure | undefined, 
     cache_write_tokens: add(a.cache_write_tokens, b.cache_write_tokens),
     tool_output_bytes,
     compactions: Math.min(a.compactions + b.compactions, CONTEXT_MAX_COUNT),
+    ...(a.denied_tool_calls === undefined && b.denied_tool_calls === undefined ? {} : { denied_tool_calls: Math.min((a.denied_tool_calls ?? 0) + (b.denied_tool_calls ?? 0), 1_000_000) }),
   };
 }
 

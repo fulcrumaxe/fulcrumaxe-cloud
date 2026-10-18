@@ -13,6 +13,7 @@ import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman, startBui
 import { JobMemorySchema, MAX_JOB_MEMORY_BYTES } from "@fulcrumaxe/runner-protocol";
 import { MEMORY_SLOT_MAX_BYTES } from "../src/prompt/assemblePrompt.js";
 import { createPgRepoMapCache, createRepoMapPort, type RepoMapSource } from "../src/prompt/repoMap.js";
+import { PIN_FILE_MAX_BYTES, createPinContentPort, type PinContentPort, type PinSource } from "../src/prompt/pinContent.js";
 import { runPanelForItem, runSpecForItem, STEP_LIMIT_MS, SEAT_ROUND_TIMEOUT_MS, PM_TIMEOUT_MS, REPLAY_PANEL_TIMEOUT_MS } from "../src/advance/specFlow.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
 
@@ -539,6 +540,239 @@ describe("the build", () => {
       expect(req.contextSections?.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
       expect(req.prompt).not.toContain("REPOSITORY MAP");
       expect(req.prompt).not.toContain("should-not-appear");
+    });
+  });
+
+  describe("D#600 CX-5b: pins and excludes in the build", () => {
+    const START = "e".repeat(40);
+    /** GitHub as the trees and blobs APIs answer it: a tree entry carries the blob's id and size, a blob answers by id and refuses a file over the caller's cap. */
+    class FakeGithub implements PinSource {
+      calls = { head: 0, tree: 0, blob: 0 };
+      files = new Map<string, string>();
+      down = false;
+      shaOf = (path: string): string => createHash("sha1").update(path).digest("hex");
+      async headSha() {
+        this.calls.head += 1;
+        if (this.down) throw new Error("repoTreeSource: status_502");
+        return START;
+      }
+      async tree(sha: string) {
+        this.calls.tree += 1;
+        if (this.down) throw new Error("repoTreeSource: status_502");
+        expect(sha).toBe(START);
+        return { truncated: false, entries: [...this.files].map(([path, text]) => ({ path, type: "blob" as const, sha: this.shaOf(path), size: Buffer.byteLength(text, "utf8") })) };
+      }
+      async blob(sha: string, maxBytes = 65_536) {
+        this.calls.blob += 1;
+        const hit = [...this.files].find(([path]) => this.shaOf(path) === sha);
+        return hit === undefined || Buffer.byteLength(hit[1], "utf8") > maxBytes ? null : hit[1];
+      }
+    }
+    const port = (gh: FakeGithub) => createPinContentPort({ open: async () => gh });
+
+    async function world() {
+      const t = await atSpecReady();
+      const repo = (await h.admin.query<{ repo_id: string }>("SELECT repo_id FROM work_items WHERE id = $1", [t.workItemId])).rows[0]!.repo_id;
+      const user = randomUUID();
+      await h.admin.query("INSERT INTO users (id, email) VALUES ($1, $2)", [user, `${user}@example.test`]);
+      const rule = async (scope: "repo" | "item", kind: "pin" | "exclude", path: string) =>
+        h.admin.query(
+          `INSERT INTO context_rules (account_id, scope, repo_id, work_item_id, kind, path, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [t.accountId, scope, scope === "repo" ? repo : null, scope === "item" ? t.workItemId : null, kind, path, user],
+        );
+      const build = (pins?: PinContentPort) => startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, pins ? { pins } : {});
+      return { t, repo, user, rule, build };
+    }
+    const LINE = "kept out of your context";
+    const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+    it("acceptance 3: a pin for a path that exists at the start commit is in the pinned section in full; a pin for a missing path is skipped, the run starts, and the ledger carries pin_missing", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("docs/guide.md", "# Guide\nline two with é and `code`\n");
+      await w.rule("repo", "pin", "docs/guide.md");
+      await w.rule("item", "pin", "docs/deleted.md");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).toContain("line two with é");
+      expect(req.prompt).toContain("path: docs/guide.md");
+      expect(req.prompt).not.toContain("docs/deleted.md");
+      // Between the Spec and the output block, ahead of the item's memory and notes.
+      expect(req.prompt.indexOf("SPEC (version")).toBeLessThan(req.prompt.indexOf("# Guide"));
+      expect(req.prompt.indexOf("# Guide")).toBeLessThan(req.prompt.lastIndexOf("AGENT_OUTPUT"));
+      const sections = req.contextSections!;
+      expect(sections.map((s) => s.code)).toEqual(["boundary", "spec", "pinned", "output", "pinned"]);
+      const body = sections.find((s) => s.code === "pinned")!;
+      expect(body.bytes).toBeGreaterThan(Buffer.byteLength("# Guide\nline two with é and `code`\n", "utf8"));
+      expect(body.trimmed_bytes).toBe(0);
+      // The missing pin is one note carrying a count and a fixed hash; no path.
+      const note = sections.at(-1)!;
+      expect(note).toMatchObject({ code: "pinned", bytes: 1, trimmed_bytes: 0, trimmed_reason: "pin_missing" });
+      expect(JSON.stringify(sections)).not.toContain("deleted");
+      // The cloud read it once: one tree, one blob, at the head (no stacked start).
+      expect(gh.calls).toEqual({ head: 1, tree: 1, blob: 1 });
+    });
+
+    it("pins are never cut: at a budget far below their size the pinned text is whole, and the ledger records the overage (pins_over_budget) instead of a trim", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      const big = `${"pinned line of text\n".repeat(400)}THE END`;
+      gh.files.set("notes/big.md", big);
+      await w.rule("repo", "pin", "notes/big.md");
+      // A stored budget lowered after the pins were saved (the save path is the only refusal point; the minimum the column allows).
+      await h.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, updated_by, context_budget_bytes) VALUES ($1, $2, 2048, $3, 4096)", [w.t.accountId, w.repo, w.user]);
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).toContain("THE END");
+      expect(occurrences(req.prompt, "pinned line of text")).toBe(400);
+      const over = req.contextSections!.find((s) => s.trimmed_reason === "pins_over_budget")!;
+      expect(over).toMatchObject({ code: "pinned", bytes: Buffer.byteLength(big, "utf8") - 4096, trimmed_bytes: 0 });
+      expect(req.contextSections!.some((s) => s.trimmed_reason === "pin_missing")).toBe(false);
+    });
+
+    it("GitHub unreachable: every pin is skipped and counted, the run still starts, and the excludes' prompt line is unaffected", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("a.md", "A");
+      gh.down = true;
+      await w.rule("repo", "pin", "a.md");
+      await w.rule("repo", "pin", "b.md");
+      await w.rule("repo", "exclude", "secret/a.txt");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.contextSections!.at(-1)).toMatchObject({ code: "pinned", bytes: 2, trimmed_reason: "pin_missing" });
+      expect(occurrences(req.prompt, LINE)).toBe(1);
+      // A port that throws outright is the same.
+      await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [w.t.workItemId]);
+      expect(await w.build({ forRun: async () => { throw new Error("boom"); } })).toMatchObject({ status: "started" });
+      expect(w.t.world.requests[1]!.contextSections!.at(-1)).toMatchObject({ bytes: 2, trimmed_reason: "pin_missing" });
+      // No port at all (a deployment that did not wire one): the same again.
+      await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [w.t.workItemId]);
+      expect(await w.build()).toMatchObject({ status: "started" });
+      expect(w.t.world.requests[2]!.contextSections!.at(-1)).toMatchObject({ bytes: 2, trimmed_reason: "pin_missing" });
+    });
+
+    it("a folder and a file with a NUL byte read as missing; a file over the fetch cap is never downloaded and counts as too large", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("big.bin", "x".repeat(PIN_FILE_MAX_BYTES + 1));
+      gh.files.set("nul.dat", "ab\0cd");
+      gh.files.set("ok.txt", "fine");
+      for (const p of ["big.bin", "nul.dat", "ok.txt", "docs"]) await w.rule("repo", "pin", p);
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).toContain("fine");
+      const notes = req.contextSections!.filter((s) => s.trimmed_reason !== undefined);
+      expect(notes).toMatchObject([{ bytes: 2, trimmed_reason: "pin_missing" }, { bytes: 1, trimmed_reason: "pin_too_large" }]);
+      expect(gh.calls.blob).toBe(2); // big.bin was refused on its tree size; nul.dat and ok.txt were fetched
+    });
+
+    it("never cut: a 189,000-character pin is in the prompt in full; a 300,000-character pin is skipped and recorded as pin_too_large, with none of it in the prompt", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("fits.md", `${"f".repeat(189_000 - 8)}FITS-END`);
+      gh.files.set("huge.md", `${"h".repeat(300_000 - 8)}HUGE-END`);
+      await w.rule("repo", "pin", "fits.md");
+      await w.rule("repo", "pin", "huge.md");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).toContain("FITS-END");
+      expect(req.prompt).not.toContain("hhhhhhhh");
+      expect(req.prompt).not.toContain("HUGE-END");
+      expect(req.prompt).not.toMatch(/truncat/i);
+      const pinned = req.contextSections!.filter((s) => s.code === "pinned" && s.trimmed_reason === undefined);
+      expect(pinned).toHaveLength(1);
+      expect(pinned[0]!.bytes).toBeGreaterThan(189_000);
+      expect(req.contextSections!.find((s) => s.trimmed_reason === "pin_too_large")).toMatchObject({ code: "pinned", bytes: 1, trimmed_bytes: 0 });
+    });
+
+    it("an exclude wins over a pin at any scope: repo exclude `secrets` and item pin `secrets/key.txt` is never fetched, never in the prompt, and recorded as pin_excluded; a glob and a bare name too", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("secrets/key.txt", "THE-SECRET-KEY");
+      gh.files.set("cfg/prod.pem", "PEM-BODY");
+      gh.files.set("a/b/.env", "ENV-BODY");
+      gh.files.set("docs/ok.md", "fine docs");
+      await w.rule("repo", "exclude", "secrets");
+      await w.rule("repo", "exclude", "**/*.pem");
+      await w.rule("repo", "exclude", ".env");
+      await w.rule("item", "pin", "secrets/key.txt");
+      await w.rule("item", "pin", "cfg/prod.pem");
+      await w.rule("item", "pin", "a/b/.env");
+      await w.rule("item", "pin", "docs/ok.md");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).toContain("fine docs");
+      for (const leak of ["THE-SECRET-KEY", "PEM-BODY", "ENV-BODY"]) expect(req.prompt).not.toContain(leak);
+      expect(gh.calls.blob).toBe(1); // only docs/ok.md was fetched
+      expect(req.contextSections!.at(-1)).toMatchObject({ code: "pinned", bytes: 3, trimmed_bytes: 0, trimmed_reason: "pin_excluded" });
+    });
+
+    it("case does not matter: exclude `secret` plus pin `Secret/a.txt` is not fetched and is recorded as pin_excluded", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("Secret/a.txt", "MIXED-CASE-SECRET");
+      await w.rule("repo", "exclude", "secret");
+      await w.rule("item", "pin", "Secret/a.txt");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).not.toContain("MIXED-CASE-SECRET");
+      expect(gh.calls.blob).toBe(0);
+      expect(req.contextSections!.at(-1)).toMatchObject({ code: "pinned", bytes: 1, trimmed_bytes: 0, trimmed_reason: "pin_excluded" });
+    });
+
+    it("an item rule that replaces the repository's exclude on the same path leaves the pin standing (the item's rule wins for that path)", async () => {
+      const w = await world();
+      const gh = new FakeGithub();
+      gh.files.set("shared.md", "shared text");
+      await w.rule("repo", "exclude", "shared.md");
+      await w.rule("item", "pin", "shared.md");
+      expect(await w.build(port(gh))).toMatchObject({ status: "started" });
+      expect(w.t.world.requests[0]!.prompt).toContain("shared text");
+    });
+
+    it("acceptance 4: the prompt holds the exclude line exactly once, with one rule or several, and none without an exclude", async () => {
+      const w = await world();
+      await w.rule("repo", "exclude", "secret/a.txt");
+      await w.rule("repo", "exclude", "**/*.pem");
+      await w.rule("item", "exclude", "keys/");
+      expect(await w.build()).toMatchObject({ status: "started" });
+      const req = w.t.world.requests[0]!;
+      expect(occurrences(req.prompt, LINE)).toBe(1);
+      expect(req.prompt).not.toContain("secret/a.txt");
+      expect(req.prompt).toContain("not a security boundary");
+      // Part of the boundary section, not a section of its own.
+      expect(req.contextSections!.map((s) => s.code)).toEqual(["boundary", "spec", "output"]);
+      // Removing the rules (the undo): the next run's prompt has no line.
+      await h.admin.query("DELETE FROM context_rules WHERE account_id = $1", [w.t.accountId]);
+      await h.admin.query("UPDATE work_items SET stage = 'spec_ready' WHERE id = $1", [w.t.workItemId]);
+      expect(await w.build()).toMatchObject({ status: "started" });
+      expect(occurrences(w.t.world.requests[1]!.prompt, LINE)).toBe(0);
+    });
+
+    it("a runner build gets neither: the pin port is not called, and the prompt has no pinned file and no exclude line (CX-5c carries excludes to the daemon)", async () => {
+      const w = await world();
+      await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [w.repo]);
+      await w.rule("repo", "pin", "a.md");
+      await w.rule("repo", "exclude", "b.md");
+      let calls = 0;
+      const spy: PinContentPort = { forRun: async () => { calls += 1; return { items: [{ path: "a.md", text: "SHOULD-NOT-APPEAR" }], missing: 0, tooLarge: 0 }; } };
+      expect(await w.build(spy)).toMatchObject({ status: "started" });
+      expect(calls).toBe(0);
+      const req = w.t.world.requests[0]!;
+      expect(req.prompt).not.toContain("SHOULD-NOT-APPEAR");
+      expect(occurrences(req.prompt, LINE)).toBe(0);
+      expect(req.contextSections!.some((s) => s.code === "pinned")).toBe(false);
+    });
+
+    it("another account's rules are never read: an account-B rule on the same repository path does not reach this build", async () => {
+      const w = await world();
+      const other = await tenant();
+      const otherRepo = randomUUID();
+      await seedRepo(h.admin, other, otherRepo);
+      await h.admin.query("INSERT INTO context_rules (account_id, scope, repo_id, kind, path, created_by) VALUES ($1, 'repo', $2, 'exclude', 'leak.txt', $3)", [other, otherRepo, w.user]);
+      expect(await w.build()).toMatchObject({ status: "started" });
+      expect(occurrences(w.t.world.requests[0]!.prompt, LINE)).toBe(0);
     });
   });
 

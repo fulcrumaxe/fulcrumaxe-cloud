@@ -5431,7 +5431,11 @@
                             "enum": [
                               "findings_cap",
                               "memory_slot",
-                              "over_budget"
+                              "over_budget",
+                              "pin_missing",
+                              "pins_over_budget",
+                              "pin_too_large",
+                              "pin_excluded"
                             ]
                           }
                         },
@@ -5553,6 +5557,18 @@
                         }
                       ]
                     },
+                    "denied_tool_calls": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "recalled_memory": {
                       "maxItems": 50,
                       "type": "array",
@@ -5608,6 +5624,7 @@
                     "memory_tokens",
                     "tool_output",
                     "compactions",
+                    "denied_tool_calls",
                     "recalled_memory",
                     "repo_map_version"
                   ],

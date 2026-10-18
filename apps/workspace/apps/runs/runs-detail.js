@@ -305,6 +305,7 @@ const SECTION_NAMES = {
   findings: "Findings",
   output: "Output block",
   repo_instructions: "Repo instructions",
+  pinned: "Pinned files",
 };
 const TOOL_NAMES = {
   Read: "Files read",
@@ -360,7 +361,7 @@ export function readContext(raw) {
   const sections = (Array.isArray(b.sections) ? b.sections : [])
     .filter((x) => isObj(x) && typeof x.code === "string" && countOrNull(x.bytes) !== null)
     .slice(0, 64)
-    .map((x) => ({ code: x.code, bytes: x.bytes, trimmed_bytes: countOrNull(x.trimmed_bytes) ?? 0 }));
+    .map((x) => ({ code: x.code, bytes: x.bytes, trimmed_bytes: countOrNull(x.trimmed_bytes) ?? 0, ...(typeof x.trimmed_reason === "string" ? { reason: x.trimmed_reason } : {}) }));
   const tools = (Array.isArray(b.tool_output) ? b.tool_output : [])
     .filter((x) => isObj(x) && typeof x.tool === "string" && countOrNull(x.bytes) !== null)
     .slice(0, 32)
@@ -382,6 +383,7 @@ export function readContext(raw) {
     memory_tokens: countOrNull(b.memory_tokens),
     tool_output: tools,
     compactions: countOrNull(b.compactions),
+    denied_tool_calls: countOrNull(b.denied_tool_calls),
     recalled_memory: memory,
     repo_map_version: typeof b.repo_map_version === "string" && b.repo_map_version !== "" ? b.repo_map_version : null,
   };
@@ -400,7 +402,22 @@ export function contextModel(ctx) {
   }
   const runner = ctx.runtime === "runner";
   const est = ctx.basis === "partial";
-  const secTotal = ctx.sections.reduce((n, x) => n + x.bytes, 0);
+  // D#600 CX-5b: two `pinned` entries are notes about the pins, not prompt text: how many pinned files could not be read, and how far the pins stand over the budget
+  // (they are included in full either way). They carry a count or a size in `bytes`, so they are not rows with a share.
+  const PIN_NOTE_REASONS = ["pin_missing", "pins_over_budget", "pin_too_large", "pin_excluded"];
+  const notes = ctx.sections.filter((x) => PIN_NOTE_REASONS.includes(x.reason));
+  const body = ctx.sections.filter((x) => !notes.includes(x));
+  const missing = notes.filter((x) => x.reason === "pin_missing").reduce((n, x) => n + x.bytes, 0);
+  const over = notes.filter((x) => x.reason === "pins_over_budget").reduce((n, x) => n + x.bytes, 0);
+  const sum = (reason) => notes.filter((x) => x.reason === reason).reduce((n, x) => n + x.bytes, 0);
+  const files = (n) => (n === 1 ? "1 pinned file was" : n + " pinned files were");
+  const pinNotes = [
+    missing > 0 ? (missing === 1 ? "1 pinned file was not included: it was missing or not text, or GitHub could not be read." : missing + " pinned files were not included: they were missing or not text, or GitHub could not be read.") : null,
+    sum("pin_too_large") > 0 ? files(sum("pin_too_large")) + " not included: over the 190,000-character limit for one pinned file. Pins are never cut." : null,
+    sum("pin_excluded") > 0 ? files(sum("pin_excluded")) + " not included: the path is also kept out of context, and keeping out wins over pinning." : null,
+    over > 0 ? "Pinned files stand " + bytesText(over) + " over this repository's context budget. They are never cut, so they were included in full." : null,
+  ].filter((t) => t !== null);
+  const secTotal = body.reduce((n, x) => n + x.bytes, 0);
   const toolTotal = ctx.tool_output.reduce((n, x) => n + x.bytes, 0);
   const row = (key, label, bytes, whole, trimmed) => {
     const s = share(bytes, whole);
@@ -413,7 +430,8 @@ export function contextModel(ctx) {
     state: est ? "partial" : "ready",
     estimated: est,
     runner: runner ? { title: CONTEXT_WORDS.runner, help: CONTEXT_WORDS.runnerHelp } : null,
-    sections: ctx.sections.map((x) => row("section-" + x.code, SECTION_NAMES[x.code] || word(x.code), x.bytes, secTotal, x.trimmed_bytes)),
+    sections: body.map((x) => row("section-" + x.code, SECTION_NAMES[x.code] || word(x.code), x.bytes, secTotal, x.trimmed_bytes)),
+    pinNotes,
     tools: ctx.tool_output.map((x) => row("tool-" + x.tool, TOOL_NAMES[x.tool] || word(x.tool), x.bytes, toolTotal, 0)),
     // The ledger holds the cache's reads and writes and not the uncached input, so "from cache" is the reads out of all cache traffic.
     cache: read !== null && write !== null ? figure(read.toLocaleString("en-US") + " of " + (read + write).toLocaleString("en-US") + " tokens from cache", est) : "Cache use: " + CONTEXT_WORDS.notRecorded,
@@ -421,6 +439,8 @@ export function contextModel(ctx) {
       ["First turn", figure(tokenText(ctx.first_turn_input_tokens), est)],
       ["Largest context", figure(tokenText(ctx.peak_context_tokens), est)],
       ["Compacted", comp === null ? CONTEXT_WORDS.notRecorded : comp === 0 ? "Not compacted" : comp === 1 ? "Once" : comp + " times"],
+      // D#600 CX-5b: reads and searches refused because a path is kept out of context. Not recorded for a runner run and for a run from before the count; 0 is a measured "none".
+      ["Calls refused (kept out of context)", ctx.denied_tool_calls === null ? CONTEXT_WORDS.notRecorded : ctx.denied_tool_calls === 0 ? "None" : ctx.denied_tool_calls === 1 ? "1 tool call" : ctx.denied_tool_calls + " tool calls"],
     ],
     memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })) },
     mapVersion: runner ? null : ctx.repo_map_version,
@@ -455,6 +475,7 @@ export function contextSection(context, retry) {
     m.runner ? h("p", { class: "runs-muted", "data-testid": "runs-ctx-runner" }, h("strong", null, m.runner.title), ". " + m.runner.help) : null,
     m.estimated ? h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-estimated" }, CONTEXT_WORDS.partial) : null,
     ...group("What the prompt held", m.sections, "runs-ctx-sections"),
+    ...m.pinNotes.map((t) => h("p", { class: "runs-muted", role: "status", "data-testid": "runs-ctx-pin-note" }, t)),
     h("p", { "data-testid": "runs-ctx-cache" }, m.cache),
     h("dl", { class: "runs-factlist", "data-testid": "runs-ctx-facts" }, m.facts.map(([k, v]) => h("div", { class: "runs-fact" }, h("dt", null, k), h("dd", null, v)))),
     ...group("What tools returned", m.tools, "runs-ctx-tools"),

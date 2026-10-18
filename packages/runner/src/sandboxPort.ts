@@ -125,6 +125,11 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
    */
   spill?: ContextSpill;
   onSpill?: (written: boolean) => void;
+  /**
+   * D#600 CX-5b: the repository paths (and globs) kept out of this run's context, as the rules stand when the command launches. They become `Read` deny entries
+   * (and bare `Grep` and `Glob`) in the agent's settings, for a start and a resume alike. Absent or empty: no deny entries.
+   */
+  excludes?: readonly string[];
   /** D#2 H14c-3-2d-1 (C56 s1): this run's limits. Fields left out take the port's
    * own defaults, so nothing one run sets reaches another. The port refuses a launch
    * whose `maxRunMs` is not below its sandbox's `timeoutMs` (MP-CLOCK). */

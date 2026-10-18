@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { createRepoTreeSource } from "@fx/github";
-import { createPgRepoMapCache, createRepoMapPort, createStackBasePort, startBuildForItem } from "@fx/pipeline";
+import { createPgRepoMapCache, createPinContentPort, createRepoMapPort, createStackBasePort, startBuildForItem } from "@fx/pipeline";
 import { openInstallationHttp } from "./installationHttp";
 
 /**
@@ -16,6 +16,11 @@ export function createBuildWithRepoMap(open: typeof openInstallationHttp = openI
         cache: createPgRepoMapCache(pool),
         open: async (r) => createRepoTreeSource(await open("repo_map", { repoId: r.repoId, owner: r.owner, name: r.name }), { owner: r.owner, name: r.name }),
         log: (reason) => console.info(JSON.stringify({ event: "advance.repo_map_skipped", reason })),
+      }),
+      // D#600 CX-5b: the files a person pinned, read with the same one-repository token (trees at the start commit, then blobs by id). A pin that cannot be read is skipped and counted in the run's ledger.
+      pins: createPinContentPort({
+        open: async (r) => createRepoTreeSource(await open("repo_map", { repoId: r.repoId, owner: r.owner, name: r.name }), { owner: r.owner, name: r.name }),
+        log: (reason) => console.info(JSON.stringify({ event: "advance.pins_skipped", reason })),
       }),
       // D#598 P3b: an item with a stack parent reads the parent's open pull request and branch tip (read-only tokens) before its run starts.
       stackBase: createStackBasePort({ open: (kind, r) => open(kind, { repoId: r.repoId, owner: r.owner, name: r.name }) }),

@@ -57,12 +57,13 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
       tools: {},
       compactions: 0,
       basis: 'partial',
+      denied: null,
       ...p,
     };
     await admin.query(
-      `INSERT INTO run_context_ledger (account_id, run_id, sections, first_turn_input_tokens, peak_context_tokens, cache_read_tokens, cache_write_tokens, memory_tokens, tool_output_bytes, compactions, basis)
-       VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)`,
-      [accountId, runId, JSON.stringify(v.sections), v.first, v.peak, v.read, v.write, v.memory, JSON.stringify(v.tools), v.compactions, v.basis],
+      `INSERT INTO run_context_ledger (account_id, run_id, sections, first_turn_input_tokens, peak_context_tokens, cache_read_tokens, cache_write_tokens, memory_tokens, tool_output_bytes, compactions, basis, denied_tool_calls)
+       VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)`,
+      [accountId, runId, JSON.stringify(v.sections), v.first, v.peak, v.read, v.write, v.memory, JSON.stringify(v.tools), v.compactions, v.basis, v.denied],
     );
   }
 
@@ -74,6 +75,49 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
     expect(route!.minRole).toBe('member');
     expect(route!.idempotency).toBe('never');
     expect(ROUTES).toContain(route);
+  });
+
+  it('D#600 CX-5b: denied_tool_calls is the stored count, 0 stays 0, and a row without one (a runner run, a row from before the count) is null, never 0', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const counted = await seedRun(accountId);
+    await seedLedger(accountId, counted, { basis: 'measured', first: 1, peak: 2, denied: 2 });
+    const none = await seedRun(accountId);
+    await seedLedger(accountId, none, { basis: 'measured', first: 1, peak: 2, denied: 0 });
+    const runner = await seedRun(accountId, { runtime: 'runner' });
+    await seedLedger(accountId, runner, { basis: 'partial' });
+    const read = async (id: string) => {
+      const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+      expect(runContextResponseSchema.parse(body)).toEqual(body);
+      return body.denied_tool_calls;
+    };
+    expect(await read(counted)).toBe(2);
+    expect(await read(none)).toBe(0);
+    expect(await read(runner)).toBeNull();
+    // A run with no ledger row at all is null too.
+    expect(await read(await seedRun(accountId, { status: 'running' }))).toBeNull();
+  });
+
+  it('D#600 CX-5b: the two pin notes come back as sections with their reasons (a count or a size in bytes, no path), and another account sees neither the run nor its count', async () => {
+    const { accountId, userId } = await seedAccountWithMember(admin);
+    const id = await seedRun(accountId);
+    await seedLedger(accountId, id, {
+      sections: [
+        { code: 'pinned', bytes: 4000, sha256: SHA, trimmed_bytes: 0 },
+        { code: 'pinned', bytes: 2, sha256: SHA, trimmed_bytes: 0, trimmed_reason: 'pin_missing' },
+        { code: 'pinned', bytes: 900, sha256: SHA, trimmed_bytes: 0, trimmed_reason: 'pins_over_budget' },
+      ],
+      denied: 1,
+    });
+    const body = (await (await get(id, { accountId, userId })).json()) as RunContextPanel;
+    expect(runContextResponseSchema.parse(body)).toEqual(body);
+    expect(body.sections).toEqual([
+      { code: 'pinned', bytes: 4000, trimmed_bytes: 0 },
+      { code: 'pinned', bytes: 2, trimmed_bytes: 0, trimmed_reason: 'pin_missing' },
+      { code: 'pinned', bytes: 900, trimmed_bytes: 0, trimmed_reason: 'pins_over_budget' },
+    ]);
+    const stranger = await seedAccountWithMember(admin);
+    const res = await get(id, { accountId: stranger.accountId, userId: stranger.userId });
+    expect(res.status).toBe(404);
   });
 
   it('D#600 CX-4a: the reader returns trimmed_reason from the stored section, drops one outside the closed list, and leaves a section that was not cut without the key', async () => {

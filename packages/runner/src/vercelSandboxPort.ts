@@ -38,6 +38,7 @@ import {
   FX_AGENT_MCP_CONFIG,
   FX_AGENT_MCP_PATH,
   agentSettingsFor,
+  disabledToolsFor,
   FX_AGENT_SETTINGS_PATH,
   FX_LIMIT_HOOK_PATH,
   FX_LIMIT_HOOK_SCRIPT,
@@ -984,7 +985,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
               { path: promptFile, content: promptBody, mode: 0o600 },
               // Rewritten before EVERY agent command (start and resume): an
               // earlier command runs as the same uid and may have edited them.
-              { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role)), mode: 0o444 },
+              { path: FX_AGENT_SETTINGS_PATH, content: JSON.stringify(agentSettingsFor(opts.role, opts.excludes)), mode: 0o444 },
               { path: FX_AGENT_MCP_PATH, content: JSON.stringify(FX_AGENT_MCP_CONFIG), mode: 0o444 },
               // C66: the runner's one hook, and the deadline it warns from (W-1).
               { path: FX_LIMIT_HOOK_PATH, content: FX_LIMIT_HOOK_SCRIPT, mode: 0o444 },
@@ -1139,7 +1140,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
         extension,
       );
       // D#600 CX-1a: measures this command's context from the same lines the meter reads; integers only.
-      const ledger = new ContextLedgerCapture();
+      const ledger = new ContextLedgerCapture(disabledToolsFor(opts.excludes));
       const deliver = async (line: string): Promise<void> => {
         if (run.stopped || limitHit !== undefined) return;
         let parsed: unknown;
@@ -1221,7 +1222,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
             // fx-swallow-ok: the only observer adds to a counter and cannot throw; if it ever did, the count stays a floor and the run ends as it would have
           }
           try {
-            opts.onContextLedger?.(ledger.snapshot());
+            opts.onContextLedger?.({ ...ledger.snapshot(), denied_tool_calls: ledger.deniedToolCalls() });
           } catch {
             // fx-swallow-ok: the only observer stores the measure on the run's bookkeeping and cannot throw; a ledger is never worth ending a run for
           }

@@ -74,8 +74,57 @@ export function toolsForRole(role: string): readonly string[] {
  * The settings file for one role: the runner's hook, the role's allow list and `defaultMode: "dontAsk"`. The same bytes
  * are written before a fresh run and before a resumed one, so a resume has exactly the permissions of a start.
  */
-export function agentSettingsFor(role: string): Record<string, unknown> {
-  return { ...FX_AGENT_SETTINGS, permissions: { defaultMode: "dontAsk", allow: [...toolsForRole(role)], deny: [] as string[] } };
+export function agentSettingsFor(role: string, excludes: readonly string[] = []): Record<string, unknown> {
+  return { ...FX_AGENT_SETTINGS, permissions: { defaultMode: "dontAsk", allow: [...toolsForRole(role)], deny: excludeDenyRules(excludes) } };
+}
+
+/** The most excluded paths one run's settings carry. More is refused (the launch fails), never cut: a cut list would let a path through. */
+export const MAX_EXCLUDE_RULES = 500;
+
+/**
+ * D#600 CX-5b: the one prompt line that tells the agent about excluded paths. It goes in once, and only when the run has excludes. It is a context control and
+ * says so; the settings are what refuse the reads.
+ */
+export const EXCLUDE_PROMPT_LINE =
+  "Some paths in this repository are kept out of your context by the person who owns this work. Reading them is refused and the Grep and Glob tools are turned off; do not try to get around it. This is a context control, not a security boundary.";
+
+/**
+ * Escapes one path for a `Read(...)` rule. Two layers: the ignore-file pattern syntax the CLI matches a rule's path with, then the rule syntax's own.
+ *  - "glob" (an exclude, which keeps full glob syntax): `* ? [ab] **` and `{}` keep their meaning. Only what would change it unasked is escaped: a leading
+ *    `!` (negation) or `#` (comment), a trailing space (dropped), and `(` `)` (the rule syntax's delimiters, not glob characters).
+ *  - "literal" (a pinned path or any exact path): `[ ] { }` are escaped too, so `app/[id]/page.tsx` means exactly that file. A literal holds no `*` or `?`.
+ * The second layer doubles the backslashes the first wrote and escapes `(` `)`.
+ */
+export function escapeRulePath(path: string, mode: "glob" | "literal" = "glob"): string {
+  const marks = mode === "literal" ? path.replace(/[[\]{}]/g, "\\$&") : path;
+  const first = marks.replace(/^[!#]/, "\\$&").replace(/ $/, "\\ ");
+  return first.replace(/\\/g, "\\\\").replace(/[()]/g, "\\$&");
+}
+
+/** The tools the settings turn off outright for a run with these excludes (bare `Grep` and `Glob`, which cannot be limited to a path); the capture counts their "No such tool" answers as refusals. */
+export function disabledToolsFor(excludes: readonly string[] | undefined): Array<"Grep" | "Glob"> {
+  return excludes !== undefined && excludes.length > 0 ? ["Grep", "Glob"] : [];
+}
+
+/**
+ * The deny entries for a run's excluded paths: `Read(<path>)` and `Read(<path>/**)` for each (a glob stays a glob), and bare `Grep` and `Glob` once, because
+ * those two tools cannot be limited to a path. Sorted, so the same rules give the same bytes. Fails closed: a path that cannot be written as a rule (empty,
+ * absolute, a control character, a backslash, a `.` or `..` segment) or more than MAX_EXCLUDE_RULES paths throws, so the launch fails rather than starts
+ * with a rule missing. The database refuses such paths at save time; this is the second check, on what the run actually reads.
+ */
+export function excludeDenyRules(excludes: readonly string[], mode: "glob" | "literal" = "glob"): string[] {
+  const paths = [...new Set(excludes)].sort();
+  if (paths.length === 0) return [];
+  if (paths.length > MAX_EXCLUDE_RULES) throw new Error("agentSettingsFor: too many excluded paths");
+  const rules: string[] = [];
+  for (const p of paths) {
+    if (p === "" || [...p].length > 512 || /[\p{Cc}\\]/u.test(p) || p.startsWith("/") || p.startsWith("~") || p.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) {
+      throw new Error("agentSettingsFor: an excluded path cannot be written as a permission rule");
+    }
+    const e = escapeRulePath(p, mode);
+    rules.push(`Read(${e})`, `Read(${e}/**)`);
+  }
+  return [...rules, "Grep", "Glob"];
 }
 
 /**
