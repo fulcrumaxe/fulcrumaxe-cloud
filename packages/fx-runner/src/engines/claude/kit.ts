@@ -1,15 +1,39 @@
 import path from "node:path";
 import type { EngineKit } from "../../daemon/engineKit.js";
-import { cleanEnv } from "../../job/cleanEnv.js";
+import { cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { runCapture, runForeground, runInstall, type SpawnFn } from "./capture.js";
 import { authState } from "./authStatus.js";
 import { createClaudeEngine } from "./engine.js";
-import { MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
+import { type InstructionCanaryResult, guardJobBuild } from "../../instructionCanaryState.js";
+import { canaryArgvFingerprint, runInstructionCanary } from "./instructionCanary.js";
+import { EngineRefusal } from "./refusal.js";
+import { type BinarySource, MIN_CLAUDE_VERSION, inspectBinary, resolveClaudePath, storedBinarySource, versionSupported } from "./pin.js";
 import { planSession, readSessionIndex, recordSession } from "./session.js";
 import { sessionOfRun, takeoverCommand } from "./takeover.js";
 
+/**
+ * D#601 MEM-7 (CWE-367): the binary source of a job when the instruction-file check is on. Each job compares the build it is about to run with the
+ * build the stored pass describes. A different build (an in-place CLI update under the running daemon) refuses the job unstarted, holds claiming
+ * and runs the check again for the new build; a pass lets later jobs and claims go on.
+ */
+export function canaryGuardedSource(input: { binaryPath: string; stateDir: string }, base: BinarySource, check: () => Promise<InstructionCanaryResult>): BinarySource {
+  return async (env) => {
+    const binary = await base(env);
+    const blocked = await guardJobBuild({
+      stateDir: input.stateDir,
+      binaryPath: input.binaryPath,
+      binaryVersion: binary.version,
+      argv: canaryArgvFingerprint(),
+      now: () => new Date(),
+      check,
+    });
+    if (blocked !== undefined) throw new EngineRefusal("claude_version_unsupported", `the Claude Code build (${binary.version}) is not the one the instruction-file check passed on; no job is claimed until the check passes again (${blocked})`);
+    return binary;
+  };
+}
+
 /** The kit for the user's installed Claude Code CLI. `spawnFn` is the real process start, handed in by the program's entry point. */
-export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
+export function createClaudeKit(spawnFn: SpawnFn, options: { instructionCanary?: boolean } = {}): EngineKit {
   const starter = { spawn: spawnFn };
   const sessionsFile = (stateDir: string): string => path.join(stateDir, "sessions.json");
   return {
@@ -27,9 +51,18 @@ export function createClaudeKit(spawnFn: SpawnFn): EngineKit {
         ...(login.authMethod === undefined ? {} : { authMethod: login.authMethod }),
       };
     },
+    // D#601 MEM-7: one model turn at the start of `run`, so only the program's entry point turns it on (the tests that count spawns do not).
+    ...(options.instructionCanary === true
+      ? {
+          instructionCanary: (input: { binaryPath: string; credentials: CredentialMode; envOptions: CleanEnvOptions }) => runInstructionCanary({ binaryPath: input.binaryPath, env: cleanEnv(input.credentials, input.envOptions), spawn: spawnFn }),
+          instructionCanaryKey: canaryArgvFingerprint,
+        }
+      : {}),
     makeRuntime: (input) =>
       createClaudeEngine({
-        binary: storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }),
+        binary: options.instructionCanary === true
+          ? canaryGuardedSource(input, storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }), () => runInstructionCanary({ binaryPath: input.binaryPath, env: cleanEnv(input.credentials, input.envOptions), spawn: spawnFn }))
+          : storedBinarySource({ storedPath: input.binaryPath, cacheDir: input.stateDir, spawn: spawnFn }),
         credentials: input.credentials,
         envOptions: input.jobEnv === undefined ? input.envOptions : { ...input.envOptions, jobEnv: input.jobEnv },
         sandboxSettings: input.sandboxSettings,

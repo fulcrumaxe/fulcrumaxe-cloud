@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { CANARY_STATE_FILE } from "../../src/instructionCanaryState.js";
 import { DEFAULT_BUDGET, PAUSE_FILE, SETTINGS_FILE, isPaused, loadSettings } from "../../src/runnerSettings.js";
 import { useRig } from "./harness.js";
 
@@ -26,6 +27,25 @@ describe("fx-runner pause and resume (D#6 C43-4)", () => {
     expect((await rig.run(["status"])).out).toContain("Claiming:        on (at most 8 jobs, 4 heavy)");
     await rig.run(["pause"]);
     expect((await rig.run(["status"])).out).toContain("paused by you; run: fx-runner resume");
+  });
+
+  it("status names a blocked instruction-file check and exits 1; a stored pass shows ok; none says not checked (D#601 MEM-7)", async () => {
+    await rig.register("subscription");
+    expect((await rig.run(["status"])).out).toContain("Instruction files: not checked yet");
+    const state = { binary_path: "claude", binary_version: "2.1.295", argv: "k", checked_at: "2026-10-17T10:00:00.000Z" };
+    writeFileSync(path.join(rig.dir, CANARY_STATE_FILE), JSON.stringify({ status: "passed", ...state }));
+    const ok = await rig.run(["status"]);
+    expect(ok.code).toBe(0);
+    expect(ok.out).toContain("Instruction files: ok");
+    writeFileSync(path.join(rig.dir, CANARY_STATE_FILE), JSON.stringify({ status: "passed" }));
+    const damaged = await rig.run(["status"]);
+    expect(damaged.code).toBe(0);
+    expect(damaged.out).toContain("Instruction files: not checked yet");
+    expect(damaged.out).not.toContain("undefined");
+    writeFileSync(path.join(rig.dir, CANARY_STATE_FILE), JSON.stringify({ status: "blocked", reason: "instruction_file_loaded", ...state }));
+    const blocked = await rig.run(["status"]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.out).toContain("Instruction files: BLOCKED (instruction_file_loaded)");
   });
 
   it("takes no argument", async () => {

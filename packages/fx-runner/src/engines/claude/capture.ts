@@ -1,5 +1,5 @@
 import type { spawn } from "node:child_process";
-import { OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
+import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
 
 export type SpawnFn = typeof spawn;
 
@@ -44,6 +44,40 @@ export function runCapture(spawnFn: SpawnFn, command: string, args: readonly str
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => finish(code));
+  });
+}
+
+/**
+ * Like `runCapture`, with a working directory and a text written to the program's standard input (which is then closed); error output is dropped.
+ * The whole process group is ended on the time limit. Used for the one short model turn of the instruction-file canary (D#601 MEM-7).
+ */
+export function runCaptureWithInput(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, input: string, timeoutMs: number, maxChars: number): Promise<Captured> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let timedOut = false;
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code, stdout, timedOut });
+    };
+    const child = spawnFn(command, [...args], { cwd, env, shell: false, detached: OWN_PROCESS_GROUP, stdio: ["pipe", "pipe", "ignore"] });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Settle only once the whole group is gone, so the caller can remove the working directory without racing the CLI's exit.
+      void terminateGroup(child, DEFAULT_KILL_GRACE_MS).then(() => finish(null));
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < maxChars) stdout += chunk.toString("utf8");
+    });
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(input);
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      // Clear anything the program left in its group too.
+      void terminateGroup(child, 500).then(() => finish(code));
+    });
   });
 }
 
