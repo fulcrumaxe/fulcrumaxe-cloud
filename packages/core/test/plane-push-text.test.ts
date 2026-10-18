@@ -167,7 +167,8 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
     const importers: string[] = [];
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
-        if (name === "node_modules" || name === ".next" || name === ".git" || name.startsWith(".")) continue;
+        // `_generated` holds build copies (the publish hook bundle, the workspace index): the guard reads the SOURCE the copy was made from.
+        if (name === "node_modules" || name === ".next" || name === ".git" || name === "_generated" || name.startsWith(".")) continue;
         const full = path.join(dir, name);
         const stat = statSync(full);
         if (stat.isDirectory()) walk(full);
@@ -175,7 +176,9 @@ describe("buildPlanePushText takes the item title and the run id and nothing els
       }
     };
     for (const top of ["packages", "apps"]) walk(path.join(root, top));
-    expect(importers.sort()).toEqual(["packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts"]);
+    // packages/worker/src/planePublish.ts is the sandbox twin of the runner token route: it calls the builder with the item's stored title and the executor run's id,
+    // both the platform's own rows, and nothing an agent wrote (the hook's output is parsed and verified separately and never reaches this call).
+    expect(importers.sort()).toEqual(["packages/core/src/repos/planePushText.ts", "packages/runner-cloud/src/planePush.ts", "packages/runner-protocol/src/planePush/planePushRoute.ts", "packages/runner-protocol/src/replies.ts", "packages/worker/src/planePublish.ts"]);
   });
 });
 

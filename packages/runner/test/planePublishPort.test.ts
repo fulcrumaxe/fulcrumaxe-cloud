@@ -9,7 +9,7 @@ import { SANDBOX_CA_ENV, buildSandboxEnv } from "../src/sandboxEnv.js";
 import { buildPublishFirewallPolicy } from "../src/firewallPolicy.js";
 import { loadGithubForwardConfig } from "../src/githubForwardConfig.js";
 import { RUN_COMMAND_MAX_OUTPUT_CHARS, PublishSandboxAgentRefused } from "../src/runCommand.js";
-import { PLANE_PUBLISH_HOOK_PATH, PLANE_PUBLISH_INPUT_PATH, phaseLine, type PlanePublishInput } from "../src/planePublish/protocol.js";
+import { PLANE_PUBLISH_HOOK_PATH, PLANE_PUBLISH_INPUT_PATH, parsePhaseOutput, phaseLine, type PlanePublishInput } from "../src/planePublish/protocol.js";
 import { runPublishSandbox } from "../src/planePublish/run.js";
 import type { NetworkPolicyRule } from "../src/networkPolicy.js";
 
@@ -54,7 +54,7 @@ describe("naming, env and policy of the publish role", () => {
     expect(() => sandboxNameFor({ role: PLANE_PUBLISH_ROLE, runId: "x" })).toThrow(/attemptId/);
     expect(() => sandboxNameFor({ role: PLANE_PUBLISH_ROLE, runId: "x", attemptId: "../x" })).toThrow(/UUID/);
     expect(NAME.startsWith("ex-") || NAME.startsWith("rn-")).toBe(false);
-    expect(parseSandboxName(NAME)).toBeNull(); // the reaper reads pp- names by their own pattern (P1f-5r), not through parseSandboxName
+    expect(parseSandboxName(NAME)).toEqual({ kind: "publish", attemptId: ATTEMPT }); // pp- is read back by shape (the inventory lists it)
     expect(LISTABLE_PREFIXES).toEqual(["ex-", "rn-", "pp-"]); // added by P1f-5r; asserted here so a change to it is seen
   });
 
@@ -375,5 +375,30 @@ describe("the real adapter on a fake SDK", () => {
     const fake = Object.keys(createFakeSandbox(noRuntime).port).sort();
     expect(fake).toEqual(real);
     expect(real).toEqual(expect.arrayContaining(["runCommand", "writeFiles"]));
+  });
+});
+
+describe("a refused marked line makes the run a crash (D#598 P1f-5b)", () => {
+  const TERMINAL = phaseLine({ phase: "no_change" });
+  const BAD = '{"fx":"plane_publish","phase":"building","diff":"secret"}';
+  const run = async (stdout: string) => {
+    const f = createFakeSandbox(noRuntime);
+    const port = { ...f.port, createSandbox: async (o: Parameters<typeof f.port.createSandbox>[0]) => { const h = await f.port.createSandbox(o); f.scriptCommand(o.sandboxName, { exitCode: 0, stdout }); return h; } };
+    const r = await runPublishSandbox(port as typeof f.port, { sandboxName: NAME, hook: "// hook", input: INPUT, networkPolicy: POLICY });
+    expect(f.state.deleted.map((h) => h.sandboxName)).toEqual([NAME]);
+    return r;
+  };
+
+  it("the parser counts marked lines it refuses (unknown field, bad value, not JSON, past the cap) and drops unmarked noise silently", () => {
+    expect(parsePhaseOutput(`${TERMINAL}\nnoise\n${BAD}\n{"fx":"plane_publish",oops\n`)).toMatchObject({ rejected: 2, lines: [{ phase: "no_change" }] });
+    const many = Array.from({ length: 22 }, () => phaseLine({ phase: "building" })).join("\n");
+    expect(parsePhaseOutput(many)).toMatchObject({ rejected: 2 });
+    expect(parsePhaseOutput(`${TERMINAL}\nplain log line\n`).rejected).toBe(0);
+  });
+
+  it("a valid terminal line beside a refused marked line is crashed, never finished; the sandbox is still deleted", async () => {
+    const r = await run(`${TERMINAL}\n${BAD}\n`);
+    expect(r).toMatchObject({ kind: "crashed", why: "rejected_line" });
+    expect(await run(`${TERMINAL}\n`)).toMatchObject({ kind: "finished" });
   });
 });

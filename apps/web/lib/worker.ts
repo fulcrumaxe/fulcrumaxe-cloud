@@ -6,6 +6,7 @@ import { getAuthorCheck } from "./github/authorCheck";
 import { createAppRepoVisibility } from "./github/repoVisibility";
 import { createBuildWithRepoMap } from "./github/repoMap";
 import { createAppContinuationBase } from "./github/runnerPullRequest";
+import { createPlanePublishPorts } from "./github/planePublish";
 import { createAppContinuationBinding } from "./github/continuationBinding";
 import { createStartAdvance } from "./advance";
 import { createReviewDeps } from "./advanceReview";
@@ -62,7 +63,7 @@ export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 const productionProvider: WorkerOptionsProvider = () => {
   const env = process.env;
   if (!env.VERCEL_TEAM_ID?.trim() || !env.VERCEL_PROJECT_ID?.trim()) return null;
-  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), continuationBinding: createAppContinuationBinding() }, previewPrompt: buildPreviewPrompt, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
+  return { vercel: productionVercelCredentials(env), ports: { hooks: createHooksPort(), authorCheck: getAuthorCheck, follow: createFollow(), repoVisibility: createAppRepoVisibility(), continuationBase: createAppContinuationBase(), continuationBinding: createAppContinuationBinding(), planePublish: createPlanePublishPorts(env) }, previewPrompt: buildPreviewPrompt, advance: { startAdvance: createStartAdvance(), triage: triageIssueItem, panel: runPanelForItem, spec: runSpecForItem, build: createBuildWithRepoMap(), buildFailed: markBuildNeedsHuman, buildWaitReason: readBuildWaitReason, review: createReviewDeps(), lightSpec: publishLightSpec, respec: publishRespec, amendSpec: publishAmendment }, targetOverrides: { keepAlive: createVercelKeepAlive(waitUntil) } };
 };
 
 let provider: WorkerOptionsProvider = productionProvider;

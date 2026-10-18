@@ -3,6 +3,7 @@ export type { RunActionFacade, RunActionPrincipal, ClaimedRunAction, SettleRunAc
 export type { RunnerLeaseFacade, FailRunnerLeasesInput, FailRunnerLeasesResult, RunnerLeaseFailReason } from "./runnerLeases.js";
 export type { RunnerClaimFacade, ClaimRunnerRunInput, ClaimRunnerRunResult, HeartbeatRunnerRunInput, HeartbeatRunnerRunResult, IngestRunnerEventsInput, IngestRunnerEventsResult, LeaseVerdict } from "./runnerClaims.js";
 export type { RunnerDoneFacade, RunnerDoneVerdict, DoneFailureReason, BeginRunnerDoneResult, FinishRunnerDoneInput, FinishRunnerDoneResult } from "./runnerDone.js";
+export { mayRetryPublish, createPublishSettler, type PlanePublish, type PlanePublishDeps, type PublishResult, type RetryFacts } from "./planePublish.js";
 export type { RunnerPlanePushFacade, PlanePushGrantResult, PlanePushPairing, PlanePushPairingResult, PlanePushRecordInput, PlanePushRecordResult, PlanePushReportContextResult } from "./runnerPlanePush.js";
 export type { RunnerGitTicketFacade, GitTicketContext, GitTicketContextResult, SignGitTicketInput, SignedGitTicket } from "./runnerGitTicket.js";
 export type { RunnerLimits, RunnerLimitsSource } from "./runnerLimits.js";

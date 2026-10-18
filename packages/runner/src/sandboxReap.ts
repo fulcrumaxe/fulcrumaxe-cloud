@@ -393,8 +393,8 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
   const alerts: string[] = [];
   const listed = new Map<string, "live" | "stopped">();
   let complete = true;
-  for (const prefix of ["ex-", "rn-"] as const) {
-    const kind = prefix === "ex-" ? "executor" : "ephemeral";
+  for (const prefix of ["ex-", "rn-", "pp-"] as const) {
+    const kind = prefix === "ex-" ? "executor" : prefix === "rn-" ? "ephemeral" : "publish";
     let cursor: string | undefined;
     let pages = 0;
     for (;;) {
@@ -414,7 +414,7 @@ export async function sandboxInventory(deps: SandboxInventoryDeps, input: Sandbo
   const states = [...listed.values()];
   const live = states.filter((x) => x === "live").length;
   const stoppedExecutor = [...listed].filter(([name, x]) => x === "stopped" && name.startsWith("ex-")).length;
-  const stoppedEphemeral = [...listed].filter(([name, x]) => x === "stopped" && name.startsWith("rn-")).length;
+  const stoppedEphemeral = [...listed].filter(([name, x]) => x === "stopped" && (name.startsWith("rn-") || name.startsWith("pp-"))).length;
   if (listed.size > SANDBOX_TOTAL_HIGH) alerts.push("sandbox_total_high");
   let accounts = 0;
   let orphans = 0;

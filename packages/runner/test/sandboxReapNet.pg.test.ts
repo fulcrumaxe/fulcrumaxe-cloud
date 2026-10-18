@@ -347,6 +347,21 @@ describe("D#2 SANDBOX-REAPER-1b: the safety net and the inventory [pg]", () => {
       expect(logged("sandbox_inventory")).toEqual([{ event: "sandbox_inventory", accounts: 2, live: 2, stopped_executor: 3, stopped_ephemeral: 2, total: 7, orphans: 0, complete: true }]);
     });
 
+    it("a publish sandbox (pp-) is listed: with a run row it belongs to its account (a stopped one counts as ephemeral), with none it is an orphan; a near-miss pp- name is ignored", async () => {
+      const w = await world();
+      const item = randomUUID();
+      await db.admin.query(`INSERT INTO work_items (id, account_id, repo_id, kind, gh_number, provenance, stage) VALUES ($1, $2, $3, 'feature', 9, 'internal', 'in_progress')`, [item, w.accountId, w.repoId]);
+      const name = `pp-${randomUUID()}`;
+      await db.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, sandbox_name, dispatch_repo_id) VALUES ($1, $2, $3, 'plane_publish', 'production', 'succeeded', $4, $5)`, [randomUUID(), w.accountId, item, name, w.repoId]);
+      h.fakeSandbox.seedProviderSandbox(name, { status: "stopped", persistent: false });
+      h.fakeSandbox.seedProviderSandbox(`pp-${randomUUID()}`, { status: "stopped", persistent: false }); // no run row anywhere
+      h.fakeSandbox.seedProviderSandbox("pp-not-a-uuid", {});
+      const result = await inventory();
+      expect(result).toMatchObject({ stoppedEphemeral: 2, orphans: 1 });
+      expect(result.alerts).toContain("sandbox_orphan_found");
+      expect(await rowsFor(w.accountId)).toMatchObject([{ live: 0, stopped_ephemeral: 1 }]);
+    });
+
     it("it keeps no history: the second pass replaces the first, and an account whose sandboxes are gone has no row", async () => {
       const w = await world();
       const name = await exRun(w, 1, { provider: "stopped" });

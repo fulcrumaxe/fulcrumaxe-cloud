@@ -2,7 +2,7 @@ import { buildSandboxEnv } from "../sandboxEnv.js";
 import { PLANE_PUBLISH_ROLE } from "../sandboxNaming.js";
 import { PLANE_PUBLISH_VCPUS, type SandboxPort } from "../sandboxPort.js";
 import type { NetworkPolicyRule } from "../networkPolicy.js";
-import { PLANE_PUBLISH_HOOK_PATH, PLANE_PUBLISH_INPUT_PATH, parsePhaseLines, terminalLine, type PlanePublishInput, type PlanePublishLine } from "./protocol.js";
+import { PLANE_PUBLISH_HOOK_PATH, PLANE_PUBLISH_INPUT_PATH, parsePhaseOutput, terminalLine, type PlanePublishInput, type PlanePublishLine } from "./protocol.js";
 
 /**
  * D#598 P1f-5a: one publish sandbox, from create to delete. The worker's publish step (P1f-5b) calls this with the hook's built bytes and the
@@ -18,7 +18,7 @@ export const PUBLISH_COMMAND_TIMEOUT_MS = 10 * 60_000;
 
 export type PublishRun =
   | { kind: "finished"; terminal: PlanePublishLine; lines: PlanePublishLine[] }
-  | { kind: "crashed"; why: "exit" | "timeout" | "truncated" | "no_terminal"; exitCode: number | null; lines: PlanePublishLine[] };
+  | { kind: "crashed"; why: "exit" | "timeout" | "truncated" | "no_terminal" | "rejected_line"; exitCode: number | null; lines: PlanePublishLine[] };
 
 export interface PublishSandboxRequest {
   sandboxName: string;
@@ -45,10 +45,12 @@ export async function runPublishSandbox(port: SandboxPort, req: PublishSandboxRe
       timeoutMs: PUBLISH_COMMAND_TIMEOUT_MS,
       ...(req.onSession !== undefined && { onSession: req.onSession }),
     });
-    const lines = parsePhaseLines(r.stdout);
+    const { lines, rejected } = parsePhaseOutput(r.stdout);
     if (r.timedOut) return { kind: "crashed", why: "timeout", exitCode: r.exitCode, lines };
     if (r.truncated) return { kind: "crashed", why: "truncated", exitCode: r.exitCode, lines };
     if (r.exitCode !== 0) return { kind: "crashed", why: "exit", exitCode: r.exitCode, lines };
+    // A marked line the contract refuses (an unknown field, content, a bad value, past the cap) makes the whole run a crash, even beside a valid terminal line.
+    if (rejected > 0) return { kind: "crashed", why: "rejected_line", exitCode: r.exitCode, lines };
     const terminal = terminalLine(lines);
     return terminal === undefined ? { kind: "crashed", why: "no_terminal", exitCode: r.exitCode, lines } : { kind: "finished", terminal, lines };
   } finally {
