@@ -152,11 +152,16 @@ const noSuchTool = (tool: ContextTool): RegExp => new RegExp(`No such tool avail
 
 export class ContextLedgerCapture {
   /** @param disabledTools the tools the run's settings turn off (D#600 CX-5b: Grep and Glob when the run has excludes). Only these can be counted by the "No such tool" wording. */
-  constructor(private readonly disabledTools: readonly ContextTool[] = []) {}
+  private readonly disabledTools: readonly ContextTool[];
+  constructor(disabledTools: readonly ContextTool[] = []) {
+    this.disabledTools = disabledTools;
+  }
 
   private firstId: string | undefined;
   private firstContext = 0;
   private peak = 0;
+  /** The main thread's most recent turn's context (input + cache read + cache write), for the window warning. */
+  private lastContext = 0;
   private readonly turns = new Map<string, { read: number; write: number }>();
   private cacheRead = 0;
   private cacheWrite = 0;
@@ -220,6 +225,12 @@ export class ContextLedgerCapture {
     if (this.firstId === undefined) this.firstId = id;
     if (id === this.firstId) this.firstContext = context;
     if (context > this.peak) this.peak = context;
+    this.lastContext = context;
+  }
+
+  /** The context of the main thread's latest turn, in tokens (0 before any turn). Not the peak: after a compaction it falls. */
+  lastContextTokens(): number {
+    return this.lastContext;
   }
 
   private user(line: Record<string, unknown>): void {

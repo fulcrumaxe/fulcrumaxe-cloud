@@ -80,6 +80,8 @@ const modelRate = z
     cacheReadUsdPerMTok: usd,
     reasoningUsdPerMTok: usd.optional(),
     cacheRatesProvisional: z.boolean().optional(),
+    /** D#600 CX-6a: the model's context window in tokens (200,000 for every claude model today). Optional: data that predates it loads, and a model without it gets no context warning (there is no default). */
+    contextWindowTokens: z.number().int().positive().max(10_000_000).optional(),
   })
   .strict();
 

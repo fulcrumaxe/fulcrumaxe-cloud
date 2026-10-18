@@ -23,7 +23,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("cleanEnv allowlist", () => {
   it("is a constant list, deep-equal to the documented one", () => {
     expect([...HOST_ENV_ALLOWLIST]).toEqual(["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ"]);
-    expect(FIXED_ENV).toEqual({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1" });
+    expect(FIXED_ENV).toEqual({ CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", FX_RUNNER_JOB: "1", BASH_MAX_OUTPUT_LENGTH: "30000", CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "85" });
     expect(Object.isFrozen(HOST_ENV_ALLOWLIST)).toBe(true);
   });
 

@@ -18,6 +18,8 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
+import { CONTEXT_WARN_PCT } from "@fulcrumaxe/runner-protocol";
+
 export const FX_AGENT_CONFIG_DIR = "/fx/agent-config";
 export const FX_AGENT_SETTINGS_PATH = `${FX_AGENT_CONFIG_DIR}/settings.json`;
 export const FX_AGENT_MCP_PATH = `${FX_AGENT_CONFIG_DIR}/mcp.json`;
@@ -128,7 +130,26 @@ export function excludeDenyRules(excludes: readonly string[], mode: "glob" | "li
 }
 
 /**
- * W-1/W-2: prints the advisory `additionalContext` from precomputed values in
+ * D#600 CX-6a: the three advisory warnings the hook can print. Each has its own code (the name a test or a label keys on) and its own text, so a time
+ * or call warning can never be mistaken for the context one. `{N}` is the number. A text holds no quote, backslash, dollar sign or backtick: it goes
+ * into the shell script and the hook's JSON as it is.
+ */
+export const LIMIT_WARNING_CODES = { time: "time_warning", calls: "calls_warning", context: "context_warning" } as const;
+export type LimitWarningCode = (typeof LIMIT_WARNING_CODES)[keyof typeof LIMIT_WARNING_CODES];
+export const LIMIT_WARNING_TEXT: Readonly<Record<LimitWarningCode, string>> = Object.freeze({
+  time_warning: "About {N} minutes remain in this run. If the work will not finish, end with a checkpoint envelope: verdict checkpoint and a short summary of what is done and what is left.",
+  calls_warning: "Only {N} model calls remain in this run; if the work will not finish, end with the same checkpoint envelope.",
+  context_warning: "Context is at {N}% of the window: finish, or end with a checkpoint envelope",
+});
+/** The text a warning prints for `n`. */
+export function limitWarningText(code: LimitWarningCode, n: number): string {
+  return LIMIT_WARNING_TEXT[code].replace("{N}", String(n));
+}
+/** A text as shell double-quoted text, its `{N}` read from the variable `name`. */
+const shellText = (code: LimitWarningCode, name: string): string => LIMIT_WARNING_TEXT[code].replace("{N}", `$${name}`);
+
+/**
+ * W-1/W-2/CX-6a: prints the advisory `additionalContext` from precomputed values in
  * `/fx/run-limits.json` (one line the runner writes). It reads only that file
  * and uses shell builtins only: no network, no workdir, no child process, and
  * no clock (the runner rewrites the file when its own timer passes 80%). Each
@@ -147,9 +168,13 @@ v() {
 }
 v time_warning_minutes; t=$r
 v model_calls_remaining; c=$r
+v context_pct; p=$r
+case $p in ????*) p= ;; esac
+[ -n "$p" ] && [ "$p" -lt ${CONTEXT_WARN_PCT} ] && p=
 msg=
-[ -n "$t" ] && msg="About $t minutes remain in this run. If the work will not finish, end with a checkpoint envelope: verdict checkpoint and a short summary of what is done and what is left."
-[ -n "$c" ] && msg="$msg Only $c model calls remain in this run; if the work will not finish, end with the same checkpoint envelope."
+[ -n "$t" ] && msg="${shellText("time_warning", "t")}"
+[ -n "$c" ] && msg="$msg ${shellText("calls_warning", "c")}"
+[ -n "$p" ] && msg="$msg ${shellText("context_warning", "p")}."
 [ -n "$msg" ] && printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\\n' "$msg"
 exit 0
 `;
@@ -161,6 +186,8 @@ export function runLimitsFileContent(p: {
   maxModelCalls: number;
   timeWarningMinutes?: number;
   modelCallsRemaining?: number;
+  /** CX-6a: whole percent of the model's window the latest turn fills; the runner passes it only from CONTEXT_WARN_PCT up. */
+  contextPct?: number;
 }): string {
   return JSON.stringify({
     started_epoch_s: Math.floor(p.startedMs / 1000),
@@ -168,6 +195,7 @@ export function runLimitsFileContent(p: {
     max_model_calls: p.maxModelCalls,
     ...(p.timeWarningMinutes === undefined ? {} : { time_warning_minutes: p.timeWarningMinutes }),
     ...(p.modelCallsRemaining === undefined ? {} : { model_calls_remaining: p.modelCallsRemaining }),
+    ...(p.contextPct === undefined ? {} : { context_pct: p.contextPct }),
   });
 }
 

@@ -64,10 +64,11 @@
         "outputUsdPerMTok": 5.5,
         "cacheWriteUsdPerMTok": 1.4,
         "cacheReadUsdPerMTok": 0.11,
-        "cacheRatesProvisional": true
+        "cacheRatesProvisional": true,
+        "contextWindowTokens": 200000
       },
-      "sonnet-5": { "inputUsdPerMTok": 2.2, "outputUsdPerMTok": 11, "cacheWriteUsdPerMTok": 2.75, "cacheReadUsdPerMTok": 0.22 },
-      "opus-5": { "inputUsdPerMTok": 5.5, "outputUsdPerMTok": 27.5, "cacheWriteUsdPerMTok": 6.9, "cacheReadUsdPerMTok": 0.55 }
+      "sonnet-5": { "inputUsdPerMTok": 2.2, "outputUsdPerMTok": 11, "cacheWriteUsdPerMTok": 2.75, "cacheReadUsdPerMTok": 0.22, "contextWindowTokens": 200000 },
+      "opus-5": { "inputUsdPerMTok": 5.5, "outputUsdPerMTok": 27.5, "cacheWriteUsdPerMTok": 6.9, "cacheReadUsdPerMTok": 0.55, "contextWindowTokens": 200000 }
     },
     "openai": {
       "gpt-5.3-codex": {

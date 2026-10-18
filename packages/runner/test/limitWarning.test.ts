@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FX_LIMIT_HOOK_SCRIPT, FX_RUN_LIMITS_PATH, runLimitsFileContent } from "../src/agentConfig.js";
+import { FX_LIMIT_HOOK_SCRIPT, FX_RUN_LIMITS_PATH, LIMIT_WARNING_CODES, LIMIT_WARNING_TEXT, limitWarningText, runLimitsFileContent } from "../src/agentConfig.js";
 import { CLAUDE_CLI_VERSION, createVercelSandboxPort, type SdkCommand, type SdkSandbox } from "../src/vercelSandboxPort.js";
 import type { RunLimits } from "../src/meteringGuard.js";
 import type { StartDetachedOptions } from "../src/sandboxPort.js";
@@ -18,9 +18,22 @@ import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { buildTerminalReport } from "../src/targets/sandboxTarget.js";
 import type { NormalizedEvent } from "../src/types.js";
 
+// D#600 CX-6a: lets one test make the price table report no window for the model (the real lookup is tested in packages/spend).
+const noWindow = vi.hoisted(() => ({ on: false }));
+vi.mock("@fx/spend", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@fx/spend")>();
+  return { ...real, contextWindowTokensFor: (model: string) => (noWindow.on ? undefined : real.contextWindowTokensFor(model)) };
+});
+
 const NAME = "rn-8-reviewer-run-1";
 const T0 = Date.parse("2030-01-01T00:00:00Z");
 const assistant = (id: string) => JSON.stringify({ type: "assistant", message: { id, content: [], usage: { input_tokens: 1 } } });
+const assistantCtx = (id: string, input: number, extra: { read?: number; write?: number; sub?: boolean } = {}) =>
+  JSON.stringify({
+    type: "assistant",
+    ...(extra.sub ? { parent_tool_use_id: "toolu_1" } : {}),
+    message: { id, content: [], usage: { input_tokens: input, cache_read_input_tokens: extra.read ?? 0, cache_creation_input_tokens: extra.write ?? 0 } },
+  });
 const finalResult = (text: string) => JSON.stringify({ type: "result", is_error: false, result: text });
 const checkpointEnvelope = (summary: unknown) =>
   `stop\n<!-- AGENT_OUTPUT -->\n\`\`\`json\n${JSON.stringify({ verdict: "checkpoint", summary })}\n\`\`\`\n<!-- /AGENT_OUTPUT -->`;
@@ -203,6 +216,141 @@ describe("the hook script (real /bin/sh)", () => {
 
   it("an invalid value is dropped on its own without silencing a valid one", () => {
     expect(speaks('{"time_warning_minutes":08,"model_calls_remaining":5}')).toMatch(/^ Only 5 model calls/);
+  });
+});
+
+describe("CX-6a: the context line of the hook (real shell)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "fx-limit-hook-ctx-"));
+  const script = path.join(dir, "hook.sh");
+  const limits = path.join(dir, "run-limits.json");
+  writeFileSync(script, FX_LIMIT_HOOK_SCRIPT.replace(FX_RUN_LIMITS_PATH, limits));
+  const run = (body: string) => {
+    writeFileSync(limits, body);
+    return spawnSync("sh", [script], { encoding: "utf8" });
+  };
+  const said = (body: string): string | undefined => {
+    const r = run(body);
+    expect({ status: r.status, stderr: r.stderr }).toEqual({ status: 0, stderr: "" });
+    return r.stdout === "" ? undefined : (JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string);
+  };
+
+  it("acceptance 1: {context_pct:72} prints the context line; 69, a leading zero and a 10-digit value print nothing", () => {
+    expect(said('{"context_pct":72}')).toBe(` ${limitWarningText("context_warning", 72)}.`);
+    expect(said('{"context_pct":72}')).toContain("Context is at 72% of the window: finish, or end with a checkpoint envelope");
+    expect(said('{"context_pct":69}')).toBeUndefined();
+    expect(said('{"context_pct":072}')).toBeUndefined();
+    expect(said('{"context_pct":0072}')).toBeUndefined();
+    expect(said('{"context_pct":1234567890}')).toBeUndefined();
+  });
+
+  it("the edges: 70, 100 and 999 speak; 1000, a 9-digit value, signed, quoted, empty, hostile and zero are silent", () => {
+    expect(said('{"context_pct":70}')).toContain("Context is at 70%");
+    expect(said('{"context_pct":100}')).toContain("Context is at 100%");
+    expect(said('{"context_pct":999}')).toContain("Context is at 999%");
+    for (const body of ['{"context_pct":1000}', '{"context_pct":123456789}', '{"context_pct":-80}', '{"context_pct":"80"}', '{"context_pct":}', '{"context_pct":$(id)}', '{"context_pct":0}']) {
+      expect(said(body), body).toBeUndefined();
+    }
+  });
+
+  it("the first occurrence wins, and the context line sits beside the time and call lines without hiding either", () => {
+    expect(said('{"context_pct":69,"context_pct":90}')).toBeUndefined();
+    const all = said('{"time_warning_minutes":3,"model_calls_remaining":9,"context_pct":88}')!;
+    expect(all).toMatch(/About 3 minutes.*Only 9 model calls.*Context is at 88%/);
+  });
+
+  it("acceptance 4: three warnings, three distinct codes and three distinct strings; each is what the hook prints for its own key", () => {
+    const codes = Object.values(LIMIT_WARNING_CODES);
+    expect(new Set(codes).size).toBe(3);
+    expect(new Set(Object.values(LIMIT_WARNING_TEXT)).size).toBe(3);
+    expect(Object.keys(LIMIT_WARNING_TEXT).sort()).toEqual([...codes].sort());
+    const printed = {
+      time_warning: said('{"time_warning_minutes":11}')!,
+      calls_warning: said('{"model_calls_remaining":11}')!,
+      context_warning: said('{"context_pct":81}')!,
+    };
+    for (const code of codes) {
+      expect(printed[code]).toContain(limitWarningText(code, code === "context_warning" ? 81 : 11));
+      for (const other of codes.filter((c) => c !== code)) expect(printed[code]).not.toContain(LIMIT_WARNING_TEXT[other].replace("{N}", "").slice(0, 20));
+    }
+    // a text goes into a shell string and a JSON string unescaped
+    for (const t of Object.values(LIMIT_WARNING_TEXT)) expect(t).not.toMatch(/["\\$`\n]/);
+  });
+
+  it("acceptance 2: over 1,000 runs the hook costs at most 10 ms at p99 above an empty script's own start-up", () => {
+    writeFileSync(limits, '{"time_warning_minutes":3,"model_calls_remaining":9,"context_pct":88}');
+    const empty = path.join(dir, "empty.sh");
+    writeFileSync(empty, "exit 0\n");
+    const time = (file: string): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < 1000; i++) {
+        const t0 = process.hrtime.bigint();
+        spawnSync("sh", [file]);
+        out.push(Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      return out.sort((a, b) => a - b);
+    };
+    const p99 = (xs: number[]): number => xs[Math.floor(xs.length * 0.99)]!;
+    const base = time(empty);
+    const hook = time(script);
+    // The harness spawns a process per run, so the empty script's own p99 is subtracted: that leaves the hook's cost.
+    expect(p99(hook) - p99(base)).toBeLessThanOrEqual(10);
+  }, 60_000);
+});
+
+describe("CX-6a: the runner writes context_pct from the latest turn against the model's window", () => {
+  // sonnet-5: a 200,000-token window in the price table.
+  it("is absent below 70%, present at 70% and above (input + cache read + cache write of the LAST turn), as a whole percent", async () => {
+    const h = harness([assistantCtx("m1", 100_000), assistantCtx("m2", 139_999), assistantCtx("m3", 40_000, { read: 100_000, write: 1_000 })]);
+    await h.run({});
+    const files = h.limitFiles();
+    expect(files).toHaveLength(2); // the start, then m3 (70.5% -> 70); m1 (50%) and m2 (69.99% -> 69) write nothing
+    expect(files[0]!.json.context_pct).toBeUndefined();
+    expect(files[1]!.json.context_pct).toBe(70);
+    expect(files[1]!.mode).toBe(0o444);
+  });
+
+  it("a figure that changes is rewritten, an unchanged one is not, and a compaction (the next turn is small) takes it away again", async () => {
+    const h = harness([assistantCtx("m1", 150_000), assistantCtx("m2", 150_500), assistantCtx("m3", 180_000), assistantCtx("m4", 30_000)]);
+    await h.run({});
+    expect(h.limitFiles().map((f) => f.json.context_pct)).toEqual([undefined, 75, 90, undefined]);
+  });
+
+  it("over the window is 100, never more", async () => {
+    const h = harness([assistantCtx("m1", 350_000)]);
+    await h.run({});
+    expect(h.limitFiles().at(-1)!.json.context_pct).toBe(100);
+  });
+
+  it("a subagent's turn is not the main thread's context", async () => {
+    const h = harness([assistantCtx("m1", 20_000), assistantCtx("s1", 190_000, { sub: true })]);
+    await h.run({});
+    expect(h.limitFiles()).toHaveLength(1);
+  });
+
+  it("a model with no window figure writes no context_pct, however full the context is, and the hook stays silent", async () => {
+    noWindow.on = true;
+    try {
+      const h = harness([assistantCtx("m1", 190_000), assistantCtx("m2", 199_000)]);
+      await h.run({});
+      const files = h.limitFiles();
+      expect(files).toHaveLength(1); // the start only
+      expect(files.every((f) => f.json.context_pct === undefined)).toBe(true);
+      const dir = mkdtempSync(path.join(tmpdir(), "fx-limit-hook-nowin-"));
+      const limits = path.join(dir, "run-limits.json");
+      const script = path.join(dir, "hook.sh");
+      writeFileSync(limits, files[0]!.content);
+      writeFileSync(script, FX_LIMIT_HOOK_SCRIPT.replace(FX_RUN_LIMITS_PATH, limits));
+      const r = spawnSync("sh", [script], { encoding: "utf8" });
+      expect({ status: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ status: 0, stdout: "", stderr: "" });
+    } finally {
+      noWindow.on = false;
+    }
+  });
+
+  it("the call warning keeps the context figure when it rewrites the file", async () => {
+    const h = harness([assistantCtx("m1", 160_000), ...Array.from({ length: 8 }, (_, i) => assistantCtx(`n${i}`, 160_000))]);
+    await h.run({ maxModelCalls: 10 });
+    expect(h.limitFiles().at(-1)!.json).toMatchObject({ context_pct: 80, model_calls_remaining: 2 });
   });
 });
 

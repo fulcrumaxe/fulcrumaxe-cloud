@@ -100,6 +100,20 @@ describe('loadPlanData', () => {
     }
   });
 
+  it('contextWindowTokens: the fixture carries 200000 for each claude model; a zero, fraction or string is refused by path; the field may be absent', () => {
+    for (const id of ['haiku-4.5', 'sonnet-5', 'opus-5']) expect(fixture().pricing.claude[id].contextWindowTokens).toBe(200000);
+    for (const bad of [0, -1, 1.5, '200000', 1e9]) {
+      const d = fixture();
+      d.pricing.claude['sonnet-5'].contextWindowTokens = bad;
+      expect(fail(d).message).toContain('pricing.claude.sonnet-5.contextWindowTokens');
+    }
+    const d = fixture();
+    delete d.pricing.claude['sonnet-5'].contextWindowTokens;
+    process.env.FX_PLAN_DATA = JSON.stringify(d);
+    resetPlanDataCache();
+    expect(loadPlanData().pricing.claude['sonnet-5'].contextWindowTokens).toBeUndefined();
+  });
+
   it('rejects negative numbers, naming the path', () => {
     const d = fixture();
     d.caps.featureUsd = -1;

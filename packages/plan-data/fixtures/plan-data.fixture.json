@@ -59,9 +59,9 @@
   "pricing": {
     "fetchedAt": "2000-01-01",
     "claude": {
-      "haiku-4.5": { "inputUsdPerMTok": 0.01, "outputUsdPerMTok": 0.02, "cacheWriteUsdPerMTok": 0.03, "cacheReadUsdPerMTok": 0.04 },
-      "sonnet-5": { "inputUsdPerMTok": 0.05, "outputUsdPerMTok": 0.06, "cacheWriteUsdPerMTok": 0.07, "cacheReadUsdPerMTok": 0.08 },
-      "opus-5": { "inputUsdPerMTok": 0.09, "outputUsdPerMTok": 0.1, "cacheWriteUsdPerMTok": 0.11, "cacheReadUsdPerMTok": 0.12 }
+      "haiku-4.5": { "inputUsdPerMTok": 0.01, "outputUsdPerMTok": 0.02, "cacheWriteUsdPerMTok": 0.03, "cacheReadUsdPerMTok": 0.04, "contextWindowTokens": 200000 },
+      "sonnet-5": { "inputUsdPerMTok": 0.05, "outputUsdPerMTok": 0.06, "cacheWriteUsdPerMTok": 0.07, "cacheReadUsdPerMTok": 0.08, "contextWindowTokens": 200000 },
+      "opus-5": { "inputUsdPerMTok": 0.09, "outputUsdPerMTok": 0.1, "cacheWriteUsdPerMTok": 0.11, "cacheReadUsdPerMTok": 0.12, "contextWindowTokens": 200000 }
     },
     "openai": {
       "gpt-5.3-codex": {
