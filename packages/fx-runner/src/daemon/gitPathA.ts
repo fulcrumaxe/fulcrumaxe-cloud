@@ -149,6 +149,7 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
       return session.mirrors.prepareWorkspace(job.repo, lease, workspace, job.continues, job.review ?? null);
     },
     readGrants: (job) => [forObjects.objects(job.repo)],
+    mirrorDir: (job) => forObjects.dir(job.repo),
     async publish(job, lease, workspace, base, stopped) {
       if (!PUSHING_ROLES.has(job.role)) return { pushed: false };
       const transport = {

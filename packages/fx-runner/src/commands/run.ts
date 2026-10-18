@@ -40,6 +40,9 @@ import type { EngineKit } from "../daemon/engineKit.js";
 import { createGitPath } from "../daemon/gitPath.js";
 import { createGitPathA } from "../daemon/gitPathA.js";
 import { createJobHandler } from "../daemon/jobHandler.js";
+import { createPlaneBaseLedger, createPlanePushHook } from "../daemon/planePush.js";
+import { createPlanePushGithub } from "../daemon/planePushGithub.js";
+import { createGitTransport } from "@fulcrumaxe/runner-protocol/planePush";
 import { createNixShell, findNix, findTool, identityVia } from "../daemon/nixShell.js";
 import { createDepsInstaller } from "../daemon/depsInstall.js";
 import { createJobWatch } from "../daemon/watch.js";
@@ -265,7 +268,14 @@ export async function runCommand(ctx: CommandContext, host: RunHost, hooks: RunH
         : createNixShell({ nixBin: findNix(searchPath), bwrapBin: findTool("bwrap", searchPath), ...(findTool("git", searchPath) === undefined ? {} : { gitBin: findTool("git", searchPath) }), capture: host.engine.captureLarge, dataDir: path.join(path.dirname(mirrorsRoot), "nix-shell"), identity: identityVia(host.engine.capture), signal: stopped.signal });
     // D#6 C44-4: the host-side dependency install, wired only where the engine offers the process-group capture.
     const depsInstall = host.engine.installCapture === undefined ? undefined : createDepsInstaller({ capture: host.engine.installCapture, envOptions, say: (line) => ctx.out(line) });
+    // D#598 P1f-3: the run-end hook for a repository paired with a public repository. It enters only for a fresh executor run the cloud says is paired.
+    const planeBase = createPlaneBaseLedger();
+    const planePush = {
+      baseLedger: planeBase,
+      run: createPlanePushHook({ client, github: createPlanePushGithub(), transport: createGitTransport(), baseLedger: planeBase, workRoot: path.join(stateDir, "plane-push"), uid: host.uid, say: (line) => ctx.out(line) }),
+    };
     const handle = createJobHandler({
+      planePush,
       ...(depsInstall === undefined ? {} : { depsInstall, packageStoreRoot }),
       onDepsDetail: (detail: string) => ctx.out(`fx-runner: dependencies for this job (${detail})`),
       ...(nix === undefined ? {} : { nix, onNixSkip: (skip: string) => ctx.out(`fx-runner: no Nix dev shell for this job (${skip})`), onNixDetail: (detail: string) => ctx.out(`fx-runner: Nix dev shell for this job (${detail})`) }),

@@ -56,17 +56,49 @@ describe("boundary: what the source may import, and every workspace import is de
   // parses a repo's lockfile and workspace file for the host-side install's pre-check (exact version, in dependencies).
   // It is declared exactly in package.json (a test below pins that), and no other third-party import is allowed.
   const THIRD_PARTY = new Set(["tuf-js", "tuf-js/dist/error.js", "js-yaml"]);
+  // The one protocol subpath src may import besides the root (D#598 P1f-3): the public-push route and its scanner, which run the version-control tool for the
+  // run-end hook. Only this exact subpath; the root never exports them (runner-protocol's root-closure test), and the files below are the only importers.
+  const PLANE_PUSH_SUBPATH = "@fulcrumaxe/runner-protocol/planePush";
+  const PLANE_PUSH_IMPORTERS = ["src/commands/run.ts", "src/daemon/planePush.ts"];
 
   it("src imports only itself, node built-ins, the protocol package and the TUF client", () => {
     const violations: string[] = [];
     for (const file of sourceFiles) {
       for (const match of readFileSync(file, "utf8").matchAll(specifier)) {
         const spec = match[1]!;
-        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol" || THIRD_PARTY.has(spec);
+        const ok = spec.startsWith("node:") || (spec.startsWith(".") && path.resolve(path.dirname(file), spec).startsWith(PACKAGE_DIR + path.sep)) || spec === "@fulcrumaxe/runner-protocol" || spec === PLANE_PUSH_SUBPATH || THIRD_PARTY.has(spec);
         if (!ok) violations.push(`${path.relative(PACKAGE_DIR, file)}: ${spec}`);
       }
     }
     expect(violations).toEqual([]);
+  });
+
+  it("the planePush subpath is imported only by the run-end hook and the command that wires it, and no other protocol subpath is allowed", () => {
+    const importers = new Set<string>();
+    for (const file of sourceFiles) {
+      for (const match of readFileSync(file, "utf8").matchAll(specifier)) {
+        if (match[1]!.startsWith("@fulcrumaxe/runner-protocol/")) {
+          expect(match[1], path.relative(PACKAGE_DIR, file)).toBe(PLANE_PUSH_SUBPATH);
+          importers.add(path.relative(PACKAGE_DIR, file).split(path.sep).join("/"));
+        }
+      }
+    }
+    expect([...importers].sort()).toEqual(PLANE_PUSH_IMPORTERS);
+  });
+
+  const GIT_RUNNING = ["routeAndPush", "createGitTransport", "planePushGit", "assertSafeLocalConfig", "gitCommitSource"];
+  const rootGitImports = (text: string): string[] =>
+    [...text.matchAll(/\bimport\b[^;]*?\bfrom\s*["']@fulcrumaxe\/runner-protocol["']/g)].flatMap((m) => GIT_RUNNING.filter((name) => new RegExp(`\\b${name}\\b`).test(m[0])));
+
+  it("no src file names a git-running export of the protocol package in an import of its root", () => {
+    for (const file of sourceFiles) expect(rootGitImports(readFileSync(file, "utf8")), path.relative(PACKAGE_DIR, file)).toEqual([]);
+  });
+
+  it("control: the root-import check fires on a git-running name from the root, and not on the subpath or an ordinary import", () => {
+    expect(rootGitImports('import { routeAndPush, type X } from "@fulcrumaxe/runner-protocol";')).toEqual(["routeAndPush"]);
+    expect(rootGitImports('import {\n  createGitTransport,\n} from "@fulcrumaxe/runner-protocol";')).toEqual(["createGitTransport"]);
+    expect(rootGitImports(`import { routeAndPush } from "${PLANE_PUSH_SUBPATH}";`)).toEqual([]);
+    expect(rootGitImports('import { PlanePushTokenReply } from "@fulcrumaxe/runner-protocol";')).toEqual([]);
   });
 
   it("every workspace package a file imports is in package.json: src in dependencies, tests in either list", () => {
