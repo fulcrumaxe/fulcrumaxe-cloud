@@ -16,16 +16,9 @@ export interface RepoPairingCtx {
   principal: { accountId: string; userId: string };
 }
 
-export interface RepoPairing {
-  enabled: boolean;
-  /** `owner/name` of the paired public repo, or null when off. */
-  codeRepo: string | null;
-  /** The paths that stay private; empty when off. */
-  overlayGlobs: string[];
-  /** A rule file committed in the private repo, or null (only the always-on refusals then run). */
-  identifierRulesPath: string | null;
-  planDataRulesPath: string | null;
-}
+/** Defined once, beside the push route that reads it, in the runner protocol package. */
+import type { RepoPairing } from '@fulcrumaxe/runner-protocol/repoPairing';
+export type { RepoPairing };
 
 export interface SetRepoPairingInput {
   codeRepo: string;
