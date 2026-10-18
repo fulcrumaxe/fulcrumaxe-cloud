@@ -155,7 +155,7 @@ still a fail. That `run` verdict alone can be fooled: a tmpfs mounted at the hom
 the file reaches the disk. `verify` is the gate for item 5, because it looks at the host afterwards (`absent_home`, `absent_system`); the item is met
 only when both steps pass.
 
-Item 8 is the account-wide diff, not a per-run tag. The decoy has a fixed name (`postgres: fx-probe-sentinel`) and `verify` checks that no process of that
+Item 8 is the account-wide diff, not a per-run tag. The decoy is named `postgres: fx-decoy-` plus the probe's state directory with every character other than a letter or digit turned into `_`, so two probes with different state directories never see or end each other's decoy, and `verify` checks that no process of that
 name is alive and that no `postgres` or Chromium process of the user is new since `plant`. That diff errs towards false fails, not false passes (a
 false pass would need a reused process id). On a host where other sessions start test clusters at the same time it can report `new_processes_alive`
 for processes that are not the job's (seen once here; the immediate re-run was clean), so run the probe on a quiet account. The harness used for these
