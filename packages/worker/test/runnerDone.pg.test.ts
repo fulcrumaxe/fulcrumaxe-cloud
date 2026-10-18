@@ -186,6 +186,20 @@ describe("runner done [pg]", () => {
       expect(await withTenant(writerPool, A.accountId, (c) => readRecordedRunnerBranch(c, { accountId: A.accountId, runId: id }))).toBe(branch);
     });
 
+    it("records the head the cloud read for the branch (D#598 P1f-5c) on the same event, and a replay gives it back; a verdict without one records none", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const branch = `fx/${id}-g${g}`;
+      const verdict: RunnerDoneVerdict = { outcome: "succeeded", failureReason: null, prNumber: 5, branch, headOid: "e".repeat(40) };
+      expect(await facade.finishRunnerDone({ ...lease(id, g), verdict })).toEqual({ kind: "recorded", verdict });
+      expect((await statusEvents(id)).at(-1)).toEqual({ from: "running", to: "succeeded", viaRunnerDone: true, prNumber: 5, branch, headOid: "e".repeat(40) });
+      expect(await facade.beginRunnerDone(lease(id, g))).toEqual({ kind: "replay", verdict });
+      const plain = await pending();
+      const g2 = await claimed(plain);
+      await facade.finishRunnerDone({ ...lease(plain, g2), verdict: { outcome: "succeeded", failureReason: null, prNumber: 6, branch: `fx/${plain}-g${g2}` } });
+      expect((await statusEvents(plain)).at(-1)).not.toHaveProperty("headOid");
+    });
+
     it("a failed verdict with a pull request records its branch too; one without a pull request records none", async () => {
       const id = await pending();
       const g = await claimed(id);
@@ -427,6 +441,10 @@ describe("runner done [pg]", () => {
         // The cloud-only detail is for scope_unknown alone (D#6 R4d-5a, C34 section 2.2).
         { verdict: { outcome: "failed", failureReason: "scope_violation", prNumber: 4, detail: "no_file_list" } },
         { verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null, detail: "no_file_list" } },
+        // A head is a full sha, and only rides with a pull request (D#598 P1f-5c).
+        { verdict: { ...ok, headOid: "main" } },
+        { verdict: { ...ok, headOid: "E".repeat(40) } },
+        { verdict: { outcome: "failed", failureReason: "no_commit", prNumber: null, headOid: "e".repeat(40) } as never },
         { verdict: ok, sessionId: "bad session" },
         { verdict: null as never },
         { ...lease(id, -1), verdict: ok },

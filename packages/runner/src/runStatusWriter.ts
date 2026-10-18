@@ -192,7 +192,7 @@ async function nextRunEventSeq(client: PoolClient, runId: string): Promise<numbe
  * `insertAgentOutputLine` after it, and each must call `redactEventPayload`
  * itself; tests pin both. (The discussions package has its own writer.)
  */
-async function insertRunEvent(
+export async function insertRunEvent(
   client: PoolClient,
   accountId: string,
   runId: string,
@@ -747,7 +747,7 @@ export interface WriteRunStatusParams {
    * transaction as the status write, so a repeat `done` for the same run and generation can replay it (no column, no migration). `prNumber` is
    * the pull request the verdict is about (null when none exists); `prHttpStatus` is the status GitHub refused the pull request with (a number
    * only: never a GitHub message). */
-  runnerDone?: { prNumber: number | null; branch?: string; prHttpStatus?: number; detail?: "renamed" | "unknown_change_type" | "no_file_list" };
+  runnerDone?: { prNumber: number | null; branch?: string; headOid?: string; prHttpStatus?: number; detail?: "renamed" | "unknown_change_type" | "no_file_list" };
   /** D#2 H14c-5b-2a (C48 LIMIT-END): a limit ended this run resumably. Only
    * `running -> timed_out` with `run_time`/`model_calls`/`turns`/`silence`, or
    * `running -> killed_spend` with `per_run_usd`; anything else throws before
@@ -853,6 +853,7 @@ async function recordRunStatusChanged(client: PoolClient, params: Pick<WriteRunS
           viaRunnerDone: true,
           prNumber: params.runnerDone.prNumber,
           ...(params.runnerDone.branch === undefined ? {} : { branch: params.runnerDone.branch }),
+          ...(params.runnerDone.headOid === undefined ? {} : { headOid: params.runnerDone.headOid }),
           ...(params.runnerDone.prHttpStatus === undefined ? {} : { prHttpStatus: params.runnerDone.prHttpStatus }),
           ...(params.runnerDone.detail === undefined ? {} : { detail: params.runnerDone.detail }),
         }

@@ -183,6 +183,9 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
 /** The `fx/<run>-g<generation>` branch a fresh run pushes, or a continuation's own branch (C25 section 1.2). */
 export const branchOf = (job: Job, i: { runId: string; leaseGeneration: number }): string => (job.continues ? job.continues.branch : `${job.branch_prefix}${i.runId}-g${i.leaseGeneration}`);
 
+/** The head the cloud read for the branch (a full sha), for the verdict; nothing when it is not one. */
+const headOf = (s: { headOid: string | null } | null): { headOid?: string } => (s !== null && s.headOid !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s.headOid) ? { headOid: s.headOid } : {});
+
 /** Records the judged branch next to the pull request number, and only there: a verdict with no pull request names no branch. */
 async function judgeRun(port: RunPullRequestPort, ctx: DoneContext, repo: PullRequestRepo, job: Job, i: { runId: string; leaseGeneration: number }, write: (line: string) => void): Promise<Decision> {
   const decision = await judgeCommit(port, ctx, repo, job, i, write);
@@ -236,6 +239,7 @@ async function judgeCommit(
   if (continuation && ctx.dispatchBase === null) return failed("internal_error");
 
   let stage: "read" | "create" | "files" | "ready" = "read";
+  let branchHead: { headOid: string | null } | null = null;
   let pr: PullRequestRef | null = null;
   /** Closes the pull request (A5). Unreachable GitHub means retry; a permanent refusal does not change the verdict, which is already failed. */
   const close = async (): Promise<"closed" | "retry"> => {
@@ -253,6 +257,7 @@ async function judgeCommit(
   try {
     const base = await port.defaultBranch(repo);
     const state = await port.branchState({ repo, branch, base });
+    branchHead = state;
     // The first test: no commit. A missing ref, no comparison (`aheadBy` null: the port never turns it into a number), zero commits ahead, or a
     // continuation whose head is the one recorded at its dispatch. It comes BEFORE the scope test, so a run with no commit never reports a scope
     // problem. A docs-writer that made no commit succeeded with nothing to show: no pull request, no branch (C25 section 3.1).
@@ -283,7 +288,7 @@ async function judgeCommit(
       stage = "ready";
       await port.markReady({ repo, pullRequest: pr });
     }
-    return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number });
+    return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number, ...headOf(state) });
   } catch (error) {
     if (!(error instanceof RunPullRequestError)) throw error;
     if (error.retryable) return { kind: "retry" };
@@ -295,7 +300,7 @@ async function judgeCommit(
     // C37: a permanent refusal to mark ready happens after the scope check passed, so the pull request is already known to be in scope. The
     // runner's token may not make that mutation, and closing a checked pull request for it would throw away good work. It stays open as a
     // draft (nothing is closed), the run succeeded, and the log line above is the only trace.
-    if (stage === "ready" && pr) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number });
+    if (stage === "ready" && pr) return verdictOf({ outcome: "succeeded", failureReason: null, prNumber: pr.number, ...headOf(branchHead) });
     if (pr && (await close()) === "retry") return { kind: "retry" };
     return failed("internal_error", { prNumber: pr?.number ?? null });
   }

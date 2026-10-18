@@ -32,6 +32,11 @@ export interface HostedPlanePush {
    * address is `https://github.com/<code_repo>/pull/<number>`; null otherwise.
    */
   verifyPullRequest(input: { codeRepo: string; branch: string; number: number }): Promise<{ url: string } | null>;
+  /**
+   * D#598 P1f-5c: opens the pull request on a branch the platform already pushed (base `main`), with a fresh token revoked before this returns. Nothing is pushed. A refusal throws a
+   * `PlanePushApiError` (`pr_failed`, or `public_unavailable` when GitHub could not be reached).
+   */
+  openPullRequest(input: { codeRepo: string; branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   /** Revokes a token `mintToken` handed out and the caller could not use. True when it is gone; never throws. */
   revokeToken(token: string): Promise<boolean>;
 }
@@ -59,6 +64,8 @@ export function createHostedPlanePush(api: PlanePushApi, deps: { now?: () => num
     revokeToken: (token) => api.revokeToken(token),
 
     branchHead: ({ codeRepo, branch }) => withFreshToken(codeRepo, (token) => api.branchHead({ codeRepo, branch, token })),
+
+    openPullRequest: ({ codeRepo, branch, title, body }) => withFreshToken(codeRepo, (token) => api.openPullRequest({ codeRepo, branch, base: "main", title, body, token })),
 
     verifyPushed: ({ codeRepo, branch, headSha, tipSha }) =>
       withFreshToken(codeRepo, async (token) => {

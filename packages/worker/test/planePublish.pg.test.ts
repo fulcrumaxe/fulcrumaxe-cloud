@@ -74,6 +74,7 @@ describe("the paired publish step [pg]", () => {
       hosted: {
         verifyPushed: async () => (github.asked.push("pushed"), github.pushed),
         verifyPullRequest: async () => (github.asked.push("pr"), github.pr),
+        openPullRequest: async () => Promise.reject(new Error("not used here")),
       },
       now: () => clock,
     };
@@ -353,10 +354,10 @@ describe("the paired publish step [pg]", () => {
       expect(github.asked).toEqual([]);
     });
 
-    it("attempts are numbered past a later pr_open row (any kind), the limit counting push attempts only", async () => {
+    it("attempts are numbered per kind (0882): a pr_open row does not move the push number, and the limit counts push attempts only", async () => {
       const row = await planeRow();
       await admin.query(`INSERT INTO plane_push_attempts (account_id, plane_push_id, runtime, kind, attempt_no, finished_at) VALUES ($1, $2, 'hosted', 'pr_open', 1, now())`, [A.accountId, row.id]);
-      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "published", state: "pr_opened", attemptNo: 2 });
+      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "published", state: "pr_opened", attemptNo: 1 });
     });
 
     it("a cancel that ends the run mid-flight does not roll back the outcome or the attempt's finished_at; the run stays cancelled", async () => {
@@ -492,7 +493,7 @@ describe("through the Worker surface [pg]", () => {
       hook: () => "x",
       identity: () => ({ name: "B", email: "b@example.com" }),
       privateHead: async () => (asked++, null),
-      hosted: { verifyPushed: async () => (asked++, false), verifyPullRequest: async () => (asked++, null) },
+      hosted: { verifyPushed: async () => (asked++, false), verifyPullRequest: async () => (asked++, null), openPullRequest: async () => (asked++, Promise.reject(new Error("unused"))) },
     });
     const a = await seedAccount(admin, randomUUID());
     const run = randomUUID();

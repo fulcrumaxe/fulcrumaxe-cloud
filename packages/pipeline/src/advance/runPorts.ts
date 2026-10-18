@@ -31,6 +31,11 @@ export interface AdvanceRunRequest {
    * version it was started from. Absent: the run pins no version.
    */
   specVersionId?: string;
+  /**
+   * D#598 P1f-5c: the commit a paired sandbox build starts from, recorded on the run (`head_sha`, fixed at insert). The publish step reads it as the
+   * private base and refuses when it is missing. Set only for a paired sandbox executor run.
+   */
+  headSha?: string;
   /** D#600 CX-2: the prompt's sections (code, bytes, hash, trimmed bytes) from the assembler, stored on the run's context ledger. Absent: none recorded. */
   contextSections?: readonly ContextSection[];
   /** D#600 CX-4a: the files holding text the prompt cut (written to `/fx/context/<code>.md` before the agent starts) and the uncut prompt to use if one cannot be written. Sandbox runs only. */

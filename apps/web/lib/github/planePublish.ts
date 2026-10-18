@@ -3,7 +3,9 @@ import type { WorkerPorts } from "@fx/worker";
 import { readPlanePushIdentity } from "@fulcrumaxe/runner-protocol/planePushIdentity";
 import { PLANE_PUBLISH_HOOK_SHA256, PLANE_PUBLISH_HOOK_SOURCE } from "../../app/_generated/plane-publish-hook";
 import { createLivePlanePushPort } from "./planePushHosted";
-import { createAppContinuationBase } from "./runnerPullRequest";
+import { createStackBasePort } from "@fx/pipeline";
+import { createAppContinuationBase, createAppRunPullRequestPort } from "./runnerPullRequest";
+import { openInstallationHttp } from "./installationHttp";
 
 /**
  * D#598 P1f-5b: the live side of the worker's paired-publish step. Four things come from outside the worker:
@@ -27,6 +29,9 @@ export function createPlanePublishPorts(env: NodeJS.ProcessEnv = process.env): N
       return r.ok ? r.identity : null;
     },
     privateHead: ({ repo, branch }) => base.headOid({ repo, branch }),
-    hosted: { verifyPushed: (i) => hosted.verifyPushed(i), verifyPullRequest: (i) => hosted.verifyPullRequest(i) },
+    hosted: { verifyPushed: (i) => hosted.verifyPushed(i), verifyPullRequest: (i) => hosted.verifyPullRequest(i), openPullRequest: (i) => hosted.openPullRequest(i) },
+    // D#598 P1f-5c: the private pull request is opened the way a runner run's `done` opens it (the same port and token kind), and a stacked item's goes against its parent's branch.
+    pullRequests: createAppRunPullRequestPort(),
+    stackBase: createStackBasePort({ open: (kind, r) => openInstallationHttp(kind, { repoId: r.repoId, owner: r.owner, name: r.name }) }),
   };
 }

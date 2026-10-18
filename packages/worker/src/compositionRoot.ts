@@ -127,7 +127,7 @@ export interface WorkerPorts {
   /** D#6 R2b criterion 12: the runner tier's limits. Absent, they are read from the plan data (`runnerLimitsFor`), and unavailable plan data refuses every runner run. */
   runnerLimits?: RunnerLimitsPort;
   /** D#598 P1f-5b: what the paired-publish step needs from outside the worker (the built hook, the commit identity, the GitHub reads). Absent, the step answers `not_configured` and starts nothing. */
-  planePublish?: Pick<PlanePublishDeps, "hook" | "identity" | "privateHead" | "hosted">;
+  planePublish?: Pick<PlanePublishDeps, "hook" | "identity" | "privateHead" | "hosted" | "pullRequests" | "stackBase">;
 }
 
 export interface CreateWorkerOptions {
@@ -405,7 +405,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -434,6 +434,8 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         planePushReportContext,
         publishPairedChange,
         retryPublish,
+        settlePairedBuild,
+        openPublicPullRequest,
         planePushRecordReport,
         sweepRunnerLeases,
         sweepRunHandoffs,
