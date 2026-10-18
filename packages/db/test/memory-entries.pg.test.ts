@@ -15,7 +15,7 @@ import { guardPoolTeardown, type PoolTeardownGuard } from './support/pool-teardo
 const MIGRATION = '0793_memory_entries.sql';
 const ROLE = 'memory_definer';
 const REPO_REF = 'R_kgDOAbCdEf@424242';
-const ENTRY_POINTS = ['memory_propose', 'memory_write', 'memory_decide', 'memory_edit', 'memory_delete', 'memory_mark_opened', 'memory_decide_batch'];
+const ENTRY_POINTS = ['memory_propose', 'memory_write', 'memory_decide', 'memory_edit', 'memory_delete', 'memory_mark_opened', 'memory_decide_batch', 'memory_promote_receipt'];
 const HELPERS = ['memory_assert_room', 'memory_session', 'memory_validate'];
 
 /** D#601 MEM-1 (migration 0793): the memory store, its five definers, tenant isolation, the audit rows and the grants. */
@@ -364,7 +364,7 @@ describe('memory_entries (D#601 MEM-1)', () => {
 
   describe('grants', () => {
     const q = async (sql: string) => (await admin.query<{ can: boolean }>(sql)).rows[0]!.can;
-    it('the role is NOLOGIN and unprivileged, has no member, is a member of nothing, and owns exactly the ten functions it has had since 0835', async () => {
+    it('the role is NOLOGIN and unprivileged, has no member, is a member of nothing, and owns exactly the eleven functions it has had since 0880', async () => {
       const { rows } = await admin.query(`SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = $1`, [ROLE]);
       expect(rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false });
       expect((await admin.query(`SELECT 1 FROM pg_auth_members WHERE roleid = $1::regrole OR member = $1::regrole`, [ROLE])).rowCount).toBe(0);

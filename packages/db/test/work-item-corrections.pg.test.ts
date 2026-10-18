@@ -219,7 +219,8 @@ describe('work_item_corrections (D#597 CC-1)', () => {
       await decide(a.accountId, aAdmin, used, 'accepted');
       const run = await runFor(a, itemA);
       expect(await markApplied(a.accountId, used, run)).toBe('applied');
-      for (const to of ['accepted', 'rejected', 'superseded']) expect(await decide(a.accountId, aAdmin, used, to)).toBe('already_decided');
+      // 0880 (D#601 MEM-8a): an applied note can be superseded (an edit is a superseding correction); every other step stays refused.
+      for (const to of ['accepted', 'rejected']) expect(await decide(a.accountId, aAdmin, used, to)).toBe('already_decided');
       const final = await row(used);
       expect(final.status).toBe('applied');
       expect(final.applied_run_id).toBe(run);
