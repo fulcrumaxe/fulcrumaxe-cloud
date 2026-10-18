@@ -32,6 +32,10 @@ describe("apps/web/vercel.json", () => {
     expect(config.crons.filter((c) => c.path === "/api/cron/stage-resume-sweep")).toEqual([{ path: "/api/cron/stage-resume-sweep", schedule: "*/15 * * * *" }]);
   });
 
+  it("the setup-request check (D#598 P8b) fires every minute behind its own pending-work marker, so a request with a check is looked at at the interval its copy states while an idle platform opens no connection", () => {
+    expect(config.crons.filter((c) => c.path === "/api/cron/setup-request-check")).toEqual([{ path: "/api/cron/setup-request-check", schedule: "* * * * *" }]);
+  });
+
   it("changes nothing else: a crons list (each entry just a path and a schedule, no sweep at every minute) and the workflow step's function limit (pinned in stepMaxDuration.test.ts)", () => {
     expect(Object.keys(config)).toEqual(["functions", "crons"]);
     for (const cron of config.crons) expect(Object.keys(cron).sort()).toEqual(["path", "schedule"]);

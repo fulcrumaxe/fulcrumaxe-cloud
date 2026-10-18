@@ -1,6 +1,10 @@
+import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { redactShapes } from '@fx/runtime/src/redact.js';
+import { markWorkPending } from '../pendingWork.js';
 import { NotFoundError } from '../tenancy/errors.js';
+import type { CheckOutcome } from './checks.js';
+import type { CheckReasonCode } from './copy.js';
 import {
   ENV_NAME_RE,
   isAgentProposableKind,
@@ -163,11 +167,18 @@ export async function proposeSetupRequest(client: PoolClient, input: ProposeSetu
        RETURNING ${COLUMNS}`,
       [input.repoId, workItemId, input.kind, input.target, envName, input.reason, providerUrl, check, input.userId],
     );
+    // A request with an automatic check is looked at by the check sweep; tell it there is work (an idle platform opens no connection).
+    if (check !== null) markSetupRequestCheckPending();
     return map(rows[0]!);
   } catch (error) {
     if ((error as { code?: string } | null)?.code === PG_UNIQUE) throw new SetupRequestError('already_open', 'this step is already requested');
     throw error;
   }
+}
+
+/** Tells the check sweep there is a request to look at. Never throws and never waits on the store (the row is the durable signal; the backstop finds it). */
+export function markSetupRequestCheckPending(): void {
+  void markWorkPending('setup-request-check');
 }
 
 export interface ListSetupRequestsInput {
@@ -290,4 +301,102 @@ export async function setupHoldFor(client: PoolClient, workItemId: string): Prom
     [workItemId],
   );
   return rows[0]?.hold ?? null;
+}
+
+export type CheckApplied =
+  | { result: 'skipped' }
+  | { result: 'stamped'; request: SetupRequest }
+  | { result: 'resolved'; request: SetupRequest; advance: { actionId: string; replayed: boolean } | null };
+
+/**
+ * What a check found, written once on the request's own tenant transaction (the caller opens it with a member of the account as the
+ * session user: the table's update policy and the run-action definer both want a person on the transaction, and the sweep uses the one who
+ * proposed the request). Locks the request first; one that is no longer open (withdrawn or marked done meanwhile) is `skipped`, nothing
+ * written.
+ *  - pass: the request closes as `check_passed` (no person is named as the resolver) and, when it names a work item, ONE `advance_work_item`
+ *    run-action request is filed in the same transaction (the existing run action restarts the held workflow, or answers `already_running`; a
+ *    repeat by the same request returns the first). A failure to file it rolls the whole thing back, so a pass is never recorded without the wake-up.
+ *  - not yet: only the check's stamp moves (`check_ran_at` from the database clock, `check_reason` the fixed reason code). The request stays
+ *    open and the item stays paused.
+ */
+export async function applyCheckOutcome(client: PoolClient, input: { id: string; outcome: CheckOutcome }): Promise<CheckApplied> {
+  if (!UUID_RE.test(input.id)) throw new NotFoundError('setup request not found');
+  const locked = await client.query<Row>(`SELECT ${COLUMNS} FROM setup_requests WHERE id = $1::uuid FOR UPDATE`, [input.id]);
+  const current = locked.rows[0];
+  if (current === undefined) throw new NotFoundError('setup request not found');
+  if (current.state !== 'open' || current.check_kind === null) return { result: 'skipped' };
+  if (!input.outcome.pass) {
+    const { rows } = await client.query<Row>(
+      `UPDATE setup_requests SET check_reason = $2, check_ran_at = now() WHERE id = $1::uuid AND state = 'open' RETURNING ${COLUMNS}`,
+      [input.id, input.outcome.reason],
+    );
+    return { result: 'stamped', request: map(rows[0]!) };
+  }
+  const { rows } = await client.query<Row>(
+    `UPDATE setup_requests SET state = 'done', resolution = 'check_passed', check_ran_at = now() WHERE id = $1::uuid AND state = 'open' RETURNING ${COLUMNS}`,
+    [input.id],
+  );
+  const request = map(rows[0]!);
+  let advance: { actionId: string; replayed: boolean } | null = null;
+  if (request.workItemId !== null) {
+    const key = `setup_request_check_passed:${request.id}`;
+    const filed = await client.query<{ action_id: string; replayed: boolean }>(
+      'SELECT action_id, replayed FROM run_action_request($1, $2::uuid, $3, $4)',
+      ['advance_work_item', request.workItemId, key, createHash('sha256').update(key).digest('hex')],
+    );
+    advance = { actionId: filed.rows[0]!.action_id, replayed: filed.rows[0]!.replayed };
+  }
+  return { result: 'resolved', request, advance };
+}
+
+const SAVEPOINT_REOPEN = 'setup_request_reopen';
+
+/**
+ * A request marked done whose check now says "not yet" goes back to waiting, with the check's reason (the one transition the table allows
+ * from `done`). The unique index allows one open request per step, so a newer open request for the same item, kind and target (someone asked
+ * again while this one was done) is the request that waits: the old one stays done, the reason lands on the newer one, and no second open
+ * row is made. A twin that appears between the look and the write (two callers at once) is the unique violation; the look is repeated.
+ * Run it on a tenant transaction whose session user is a member of the account. Returns the request that is open afterwards.
+ */
+export async function reopenSetupRequest(client: PoolClient, input: { id: string; reason: CheckReasonCode }): Promise<{ request: SetupRequest; folded: boolean }> {
+  if (!UUID_RE.test(input.id)) throw new NotFoundError('setup request not found');
+  const locked = await client.query<Row>(`SELECT ${COLUMNS} FROM setup_requests WHERE id = $1::uuid FOR UPDATE`, [input.id]);
+  const old = locked.rows[0];
+  if (old === undefined) throw new NotFoundError('setup request not found');
+  if (old.state === 'withdrawn') throw new SetupRequestError('not_open', 'the request was withdrawn');
+  if (old.check_kind === null) throw new SetupRequestError('invalid_input', 'only a request with an automatic check can be put back', 'check');
+  const stamp = (id: string) =>
+    client.query<Row>(`UPDATE setup_requests SET check_reason = $2, check_ran_at = now() WHERE id = $1::uuid RETURNING ${COLUMNS}`, [id, input.reason]);
+  if (old.state === 'open') return { request: map((await stamp(old.id)).rows[0]!), folded: false };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const twin = await client.query<{ id: string }>(
+      `SELECT id FROM setup_requests
+        WHERE state = 'open' AND id <> $1::uuid AND repo_id = $2::uuid AND kind = $3 AND target = $4
+          AND COALESCE(env_name, '') = COALESCE($5, '') AND work_item_id IS NOT DISTINCT FROM $6::uuid
+        FOR UPDATE`,
+      [old.id, old.repo_id, old.kind, old.target, old.env_name, old.work_item_id],
+    );
+    if (twin.rows[0] !== undefined) {
+      const request = map((await stamp(twin.rows[0].id)).rows[0]!);
+      if (request.checkKind !== null) markSetupRequestCheckPending();
+      return { request, folded: true };
+    }
+    await client.query(`SAVEPOINT ${SAVEPOINT_REOPEN}`);
+    try {
+      const { rows } = await client.query<Row>(
+        `UPDATE setup_requests
+            SET state = 'open', resolution = NULL, resolved_by = NULL, resolved_at = NULL, check_reason = $2, check_ran_at = now()
+          WHERE id = $1::uuid AND state = 'done' RETURNING ${COLUMNS}`,
+        [old.id, input.reason],
+      );
+      await client.query(`RELEASE SAVEPOINT ${SAVEPOINT_REOPEN}`);
+      markSetupRequestCheckPending();
+      return { request: map(rows[0]!), folded: false };
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code !== PG_UNIQUE) throw error;
+      await client.query(`ROLLBACK TO SAVEPOINT ${SAVEPOINT_REOPEN}`);
+    }
+  }
+  throw new SetupRequestError('already_open', 'this step is already requested');
 }

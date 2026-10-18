@@ -70,6 +70,8 @@ import { createRunnerDoneFacade, type RunnerDoneFacade } from "./runnerDone.js";
 import { createRunnerLeaseSweeper, type RunnerLeaseSweeper } from "./runnerLeaseSweep.js";
 import { createRunHandoffs, type RunHandoffs } from "./runHandoffs.js";
 import { createStageResume, type StageResume } from "./stageResume.js";
+import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCounts } from "@fx/core/src/setup-requests/checkSweep.js";
+import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
 import { createFollowUpPorts } from "./runnerFollowUp.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
@@ -175,6 +177,12 @@ export interface Worker extends RunActionFacade, RunnerLeaseFacade, RunnerClaimF
    * The reconcile cron calls it (REAPER-1b); the kill switch (`FX_SANDBOX_REAP_MODE`) is read there.
    */
   sweepSandboxReap(input: SweepSandboxReapInput): Promise<SweepSandboxReapResult>;
+  /**
+   * D#598 P8b: one pass of the setup-request check sweep (the once-a-minute cron). Works across tenants like the other sweeps and is for
+   * the cron only: the list is one definer (migration 0874) and the rest runs per request under its own tenant. `envSource` is where a
+   * provider's variable names come from; the caller binds it.
+   */
+  sweepSetupRequestChecks(input: { envSource: VercelEnvSource }): Promise<CheckSweepCounts>;
   /** D#2 SANDBOX-REAPER-1b (C82): the per-account inventory, rebuilt from the provider's list and the run rows. Plain data in and out; for the cron only. */
   sandboxInventory(input: SandboxInventoryInput): Promise<SandboxInventoryResult>;
   close(): Promise<void>;
@@ -368,7 +376,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -388,7 +396,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -424,6 +432,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         sweepRunnerNotices,
         sweepInvariants: runInvariants,
         sweepParkedStages,
+        sweepSetupRequestChecks,
         performStartPreview,
         previewReady,
         performRetryRun,

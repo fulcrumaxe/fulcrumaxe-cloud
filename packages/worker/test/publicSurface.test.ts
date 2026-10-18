@@ -116,6 +116,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepRunnerNotices",
       "sweepRunnerQueue",
       "sweepSandboxReap",
+      "sweepSetupRequestChecks",
     ]);
     // With no follower and no prompt builder given, a request is refused up front.
     expect(worker.previewReady()).toBe(false);

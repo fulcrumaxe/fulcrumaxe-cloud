@@ -81,17 +81,18 @@ describe("GET /api/health", () => {
     try {
       const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
       resetPlanDataCache();
-      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: [] });
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["vercel_env_source_unconfigured"] });
       const data = JSON.parse(process.env.FX_PLAN_DATA!);
       delete data.envelope;
       process.env.FX_PLAN_DATA = JSON.stringify(data);
       resetPlanDataCache();
       const operator = await call(env, bearer(OPERATOR_SECRET));
       expect(operator.status).toBe(200);
-      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured"] });
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "vercel_env_source_unconfigured"] });
       const anonymous = await call(env);
       expect(anonymous.status).toBe(200);
       expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
+      expect(JSON.stringify(anonymous.body)).not.toContain("vercel_env_source");
     } finally {
       if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
       resetPlanDataCache();
