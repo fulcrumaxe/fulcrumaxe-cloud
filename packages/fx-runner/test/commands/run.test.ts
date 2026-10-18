@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-protocol";
+import { MEMORY_JOB_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HelloMessage } from "@fulcrumaxe/runner-protocol";
 import { CliError } from "../../src/cliError.js";
 import { readHostFacts } from "../../src/hostFacts.js";
 import { RUNNER_VERSION } from "../../src/version.js";
@@ -166,7 +166,7 @@ describe("1-hello. the machine's facts are sent once on start (D#605 FL-2)", () 
     expect(cloud.seen.findIndex((s) => s.path === "/api/runner/hello")).toBeLessThan(cloud.seen.findIndex((s) => s.path === "/api/runner/claim"));
     const sent = HelloMessage.parse(hellos()[0]!.body);
     expect(sent).toMatchObject({ protocol_version: CURRENT_PROTOCOL_VERSION, isolation: "host_sandbox", binary_version: RUNNER_VERSION });
-    expect(sent.protocol_version).toBe(CONTINUES_CROSS_SIDE_MIN_PROTOCOL);
+    expect(sent.protocol_version).toBe(MEMORY_JOB_MIN_PROTOCOL);
     expect(sent.facts).toEqual(readHostFacts());
     expect(sent.facts).toMatchObject({ os: "linux", sandbox_engine: "os_sandbox" });
     expect(await stop(run)).toMatchObject({ code: 0 });

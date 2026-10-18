@@ -24,7 +24,7 @@ import { defaultResolvePayer, type RunFunding } from "./funding.js";
 import { insertAgentRun, writeRunStatus, type InsertAgentRunParams } from "./runStatusWriter.js";
 import type { RunStatus } from "./statusTransitions.js";
 import type { Product, Role } from "./types.js";
-import type { ContextSection, ContextSpill } from "@fulcrumaxe/runner-protocol";
+import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
 
 /**
  * D#2 H09b, correction C10: `startAgentRun` owns "resolving the run;
@@ -82,6 +82,8 @@ export interface StartAgentRunInput {
   contextSections?: readonly ContextSection[];
   /** D#601 MEM-3: see `ExecutionRun.memoryTokens`. */
   memoryTokens?: number;
+  /** D#601 MEM-3b: see `ExecutionRun.jobMemory`. */
+  jobMemory?: JobMemory;
   /** D#600 CX-2: see `ExecutionRun.fallbackPrompt`. */
   fallbackPrompt?: string;
   fallbackContextSections?: readonly ContextSection[];
@@ -194,6 +196,7 @@ export function buildExecutionRun(id: string, input: StartAgentRunInput): Execut
     cloneRepo: input.cloneRepo,
     contextSections: input.contextSections,
     memoryTokens: input.memoryTokens,
+    jobMemory: input.jobMemory,
     fallbackPrompt: input.fallbackPrompt,
     fallbackContextSections: input.fallbackContextSections,
     contextSpill: input.contextSpill,

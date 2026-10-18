@@ -8,7 +8,7 @@ import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
 
 /** The job fields `runJob` reads. The daemon passes a job it has already verified (signature, expiry, repo visibility). */
-export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & { expires_at?: Job["expires_at"] };
+export type RunnableJob = HashCheckedJob & Pick<Job, "job_id" | "run_id" | "continues" | "model_hint"> & Partial<Pick<Job, "memory">> & { expires_at?: Job["expires_at"] };
 
 /** Resume a session this machine still holds, in its workspace, or start fresh in a new workspace on `branch`. */
 export type SessionPlan = { kind: "resume"; sessionId: string; workspace: string } | { kind: "fresh"; branch: string | null };

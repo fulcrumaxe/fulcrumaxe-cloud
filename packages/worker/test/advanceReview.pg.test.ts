@@ -421,6 +421,23 @@ describe("advance: reviews, fix rounds and the merge gate [pg]", { timeout: 60_0
       for (const i of [2, 3, 4, 5]) expect(t.inputs[i]).not.toHaveProperty("memoryTokens");
     });
 
+    it("D#601 MEM-3b: the job memory reaches the run's input when it is exactly the protocol's shape, and anything else refuses the start", async () => {
+      const a = await seedAccount(admin, randomUUID());
+      const w = await item(a);
+      const t = build();
+      const base = { accountId: a.accountId, workItemId: w, haltEpoch: 0, role: "code-reviewer", prompt: "p", clone: true, headSha: HEAD };
+      const ok = { person: "a person's line", fenced: "an agent's line" };
+      expect(await t.module.advanceStartRun({ ...base, step: `review:${HEAD}:jm-ok`, jobMemory: ok } as never)).toMatchObject({ ok: true });
+      expect(t.inputs[0]).toMatchObject({ jobMemory: ok });
+      expect(await t.module.advanceStartRun({ ...base, step: `review:${HEAD}:jm-none` } as never)).toMatchObject({ ok: true });
+      expect(t.inputs[1]).not.toHaveProperty("jobMemory");
+      const before = t.inputs.length;
+      for (const [i, bad] of [{ person: "a", fenced: "b", extra: 1 }, { person: "a" }, { person: "a".repeat(8193), fenced: "" }, "text", null].entries()) {
+        expect(await t.module.advanceStartRun({ ...base, step: `review:${HEAD}:jm-bad-${i}`, jobMemory: bad } as never)).toEqual({ ok: false, reason: "invalid_input" });
+      }
+      expect(t.inputs.length).toBe(before);
+    });
+
     it("two starts racing for one executor lose to the database's one-live-executor index: the loser is told already_running, nothing is left behind", async () => {
       const a = await seedAccount(admin, randomUUID());
       const w = await item(a, { stage: "spec_ready" });

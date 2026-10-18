@@ -59,6 +59,11 @@ export interface RenderedMemory {
   text: string;
   trimmedBytes: number;
   recalled: ReadonlyArray<{ name: string; ref: string }>;
+  /**
+   * The slot's sanitised entry lines, split by who wrote them and without the labels: `person` holds the lines a person wrote, `other` those an agent, an import or a runner wrote.
+   * `text` is the labelled join of the two. A runner run carries these two strings in its job (D#601 MEM-3b).
+   */
+  lines?: { person: string; other: string };
   /** What the slot would hold with room for everything (set only when something was cut). The assembler spills it. */
   full?: string;
   /** The same slot cut with `reserveBytes` less room (set only when something was cut). The assembler uses it so the marker it adds stays inside the slot's cap. */
@@ -108,11 +113,14 @@ function renderWithin(entries: readonly MemoryEntry[], budgetBytes: number): Ren
   const budget = Math.min(Math.max(0, Math.floor(budgetBytes)), MEMORY_SLOT_MAX_BYTES);
   type Kept = { e: MemoryEntry; text: string };
   const line = (k: Kept): string => (k.e.head === undefined ? `${cleanName(k.e.name)} (${k.e.id}@v${k.e.version}): ${k.text}` : `${k.e.head} ${k.text}`);
+  // One author per sanitize call: each entry is fenced on its own, so text that opens a comment and never closes it
+  // removes that entry only and cannot reach the entries after it.
+  const linesOf = (kept: readonly Kept[]): { person: string[]; other: string[] } => ({
+    person: kept.filter((k) => k.e.origin === "person").map((k) => sanitize(line(k))),
+    other: kept.filter((k) => k.e.origin !== "person").map((k) => sanitize(line(k))),
+  });
   const render = (kept: readonly Kept[]): string => {
-    // One author per sanitize call: each entry is fenced on its own, so text that opens a comment and never closes it
-    // removes that entry only and cannot reach the entries after it.
-    const person = kept.filter((k) => k.e.origin === "person").map((k) => sanitize(line(k)));
-    const other = kept.filter((k) => k.e.origin !== "person").map((k) => sanitize(line(k)));
+    const { person, other } = linesOf(kept);
     const parts: string[] = [];
     if (person.length > 0) parts.push(`${PERSON_LABEL}\n${person.join("\n")}`);
     if (other.length > 0) parts.push(`${OTHER_LABEL}\n${other.join("\n")}`);
@@ -138,7 +146,14 @@ function renderWithin(entries: readonly MemoryEntry[], budgetBytes: number): Ren
   }
   const text = kept.length === 0 ? "" : render(kept);
   const trimmedBytes = Math.max(0, bytesOf(full) - bytesOf(text));
-  return { text, trimmedBytes, recalled: kept.map((k) => ({ name: cleanName(k.e.name), ref: `${k.e.id}@v${k.e.version}` })), ...(trimmedBytes > 0 ? { full } : {}) };
+  const lines = linesOf(kept);
+  return {
+    text,
+    trimmedBytes,
+    recalled: kept.map((k) => ({ name: cleanName(k.e.name), ref: `${k.e.id}@v${k.e.version}` })),
+    lines: { person: lines.person.join("\n"), other: lines.other.join("\n") },
+    ...(trimmedBytes > 0 ? { full } : {}),
+  };
 }
 
 /** The Spec as the prompt carries it. `held` is the Spec the resumed session already has: when it is this very version and body, only a line is sent. */
@@ -191,9 +206,17 @@ export interface AssembledPrompt {
   sections: ContextSection[];
   /** Present only when text was cut and a file holds it: the files to write before the agent starts, and the uncut prompt to use if one cannot be written. */
   spill?: ContextSpill;
+  /** Present only with `memoryAside` and recalled memory: the two strings a runner job carries in place of the memory sections of the prompt (D#601 MEM-3b). */
+  memoryAside?: { person: string; fenced: string };
 }
 
 export interface AssembleOptions {
+  /**
+   * A runner prompt (D#601 MEM-3b): the recalled memory is not written into `prompt`. It comes back in `memoryAside`, split by author, for the job to carry, and the runner renders it
+   * (the person's lines after the role card, the rest inside its own untrusted block). The section list still holds the memory sections, so the ledger shows what the agent was given.
+   * Nothing is spilled to a file for such a prompt.
+   */
+  memoryAside?: boolean;
   /** The most bytes the prompt may hold. Absent: no budget cut. Acted on only with `spill`. */
   budgetBytes?: number;
   /** The run can read `/fx/context/<code>.md` (a sandbox run). Without it nothing is cut for the budget and no marker is written: a cut never happens without a readable file. */
@@ -298,7 +321,9 @@ function groupsOf(slots: readonly Slot[]): Slot[][] {
   return groups;
 }
 
-function finish(slots: readonly Slot[]): { prompt: string; sections: ContextSection[] } {
+const MEMORY_CODES: readonly string[] = ["memory_stable", "memory_item"];
+
+function finish(slots: readonly Slot[], aside = false): { prompt: string; sections: ContextSection[] } {
   const groups = groupsOf(slots);
   const sections: ContextSection[] = groups.map((g) => {
     const text = textOf(g);
@@ -306,11 +331,20 @@ function finish(slots: readonly Slot[]): { prompt: string; sections: ContextSect
     const reason = g.find((s) => s.reason !== undefined)?.reason;
     return { code: g[0]!.code, bytes: bytesOf(text), sha256: sha256Of(text), trimmed_bytes: trimmed, ...(trimmed > 0 && reason !== undefined ? { trimmed_reason: reason } : {}) };
   });
-  return { prompt: promptOf(groups), sections };
+  return { prompt: promptOf(aside ? groups.filter((g) => !MEMORY_CODES.includes(g[0]!.code)) : groups), sections };
+}
+
+/** The two strings of a runner job: stable part then this item's part, a person's lines in one and the others in the other. Absent when there are none. */
+function asideOf(parts: PromptParts): AssembledPrompt["memoryAside"] {
+  const join = (pick: (m: RenderedMemory) => string | undefined): string => [parts.memoryStable, parts.memoryItem].flatMap((m) => (m === undefined ? [] : [pick(m) ?? ""])).filter((t) => t !== "").join("\n");
+  const person = join((m) => m.lines?.person);
+  const fenced = join((m) => m.lines?.other);
+  return person === "" && fenced === "" ? undefined : { person, fenced };
 }
 
 export function assemblePrompt(parts: PromptParts, options: AssembleOptions = {}): AssembledPrompt {
-  const spill = options.spill === true;
+  const aside = options.memoryAside === true;
+  const spill = options.spill === true && !aside;
   const slots = slotsOf(parts, spill, false);
   const spilled = (s: Slot): number => (s.spillText === undefined ? 0 : bytesOf(s.spillText));
   if (spill && options.budgetBytes !== undefined) {
@@ -329,7 +363,9 @@ export function assemblePrompt(parts: PromptParts, options: AssembleOptions = {}
       }
     }
   }
-  const cut = finish(slots);
+  const cut: AssembledPrompt = finish(slots, aside);
+  const memoryAside = aside ? asideOf(parts) : undefined;
+  if (memoryAside) cut.memoryAside = memoryAside;
   const files = CONTEXT_SPILL_CODES.flatMap((code) => {
     const texts = slots.filter((s) => s.code === code && s.spillText !== undefined).map((s) => s.spillText!);
     return texts.length === 0 ? [] : [{ code, text: texts.join("\n\n") }];

@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { MEMORY_JOB_MIN_PROTOCOL, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -166,6 +166,39 @@ describe("JobIssuer [pg]", () => {
       const run = await runnerRun(w, "code-reviewer", null, { headSha: head, prompt: `Earlier ${"e".repeat(40)} and now ${head}.\n` });
       await issuer().issuer.issue({ run });
       expect(verifyJob((await rows(run.id)).job_signed, { "job-key-1": publicKey }, { now: NOW }).review).toEqual({ head_sha: head });
+    });
+  });
+
+  describe("a job carries the run's recalled memory (D#601 MEM-3b)", () => {
+    const MEMORY = { person: "<<UNTRUSTED EXTERNAL CONTENT>>\n[repo/command p1@v1] use pnpm\n<<END UNTRUSTED>>", fenced: "<<UNTRUSTED EXTERNAL CONTENT>>\n[repo/fact a1@v1] node 24\n<<END UNTRUSTED>>" };
+    const rowOf = async (id: string) => (await db.admin.query<{ job_signed: unknown; min_protocol_version: number | null }>("SELECT job_signed, min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!;
+
+    it("signs the memory into the job and gates the job to a runner that can read it", async () => {
+      const w = await world();
+      const run = { ...(await runnerRun(w, "executor")), jobMemory: MEMORY };
+      await issuer().issuer.issue({ run });
+      const row = await rowOf(run.id);
+      const job = verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW });
+      expect(job.memory).toEqual(MEMORY);
+      expect(row.min_protocol_version).toBe(MEMORY_JOB_MIN_PROTOCOL);
+    });
+
+    it("a run that recalled nothing gets a job with no memory key and no protocol gate, exactly as before", async () => {
+      const w = await world();
+      for (const jobMemory of [undefined, { person: "", fenced: "" }]) {
+        const run = { ...(await runnerRun(w, "executor")), ...(jobMemory ? { jobMemory } : {}) };
+        await issuer().issuer.issue({ run });
+        const row = await rowOf(run.id);
+        expect("memory" in (row.job_signed as { job: object }).job).toBe(false);
+        expect(row.min_protocol_version).toBeNull();
+      }
+    });
+
+    it("a string over the slot is refused as job_invalid and nothing is recorded", async () => {
+      const w = await world();
+      const run = { ...(await runnerRun(w, "executor")), jobMemory: { person: "a".repeat(8193), fenced: "" } };
+      expect(await codeOf(issuer().issuer.issue({ run }))).toBe("job_invalid");
+      expect((await rowOf(run.id)).job_signed).toBeNull();
     });
   });
 

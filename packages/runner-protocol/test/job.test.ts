@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION } from "../src/messages.js";
-import { SESSION_ID_PATTERN } from "../src/job.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
 import { ITEM_PR_BRANCH, JOB_CLASS_BY_ROLE, JOB_MODES, REVIEW_JOB_ROLES, jobClassOfRole, JobSchema, MAX_ROLE_CARD_CHARS, RUNNER_ELIGIBLE_ROLES, SignedJobSchema, TASK_KINDS, jobDigestMismatches, sha256Text } from "../src/job.js";
 import { sampleJob } from "./helpers/sampleJob.js";
 
@@ -15,7 +15,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -42,7 +42,7 @@ describe("job schema", () => {
     for (const key of ["command", "cmd", "url", "image", "binary", "env", "settings", "args", "script", "path"]) {
       expect(JobSchema.safeParse(sampleJob({ [key]: key === "env" || key === "settings" ? { A: "b" } : "x" })).success, key).toBe(false);
     }
-    // Structurally: the only free-form strings are spec.text, task.prompt and role_card.text, and no field is an open record, a union or an unknown.
+    // Structurally: the only free-form strings are spec.text, task.prompt, role_card.text and (D#601 MEM-3b) the two memory strings, and no field is an open record, a union or an unknown.
     const freeText: string[] = [];
     const walk = (schema: z.ZodTypeAny, path: string): void => {
       if (schema instanceof z.ZodObject) {
@@ -56,7 +56,7 @@ describe("job schema", () => {
       if (schema instanceof z.ZodString && !schema._def.checks.some((c) => c.kind === "regex" || c.kind === "uuid" || c.kind === "datetime")) freeText.push(path);
     };
     walk(JobSchema, "job");
-    expect(freeText).toEqual(["job.spec.text", "job.task.prompt", "job.role_card.text"]);
+    expect(freeText).toEqual(["job.spec.text", "job.task.prompt", "job.role_card.text", "job.memory.person", "job.memory.fenced"]);
   });
 
   it("refuses a URL, a path or a command where a bounded identifier is expected", () => {
@@ -180,8 +180,8 @@ describe("job schema", () => {
 
     it("sets the cross-side protocol floor one above the handoff version, and leaves the hello floor alone", () => {
       expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBe(HANDOFF_MIN_PROTOCOL_VERSION + 1);
-      // Until the runner release (PL-2b-3) raises the current version, no runner can claim a gated job, and none is cut off for it.
-      expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBeGreaterThanOrEqual(CURRENT_PROTOCOL_VERSION);
+      // The current version is at least the floor, so a current runner can claim a gated job; no older runner is cut off for it.
+      expect(CONTINUES_CROSS_SIDE_MIN_PROTOCOL).toBeLessThanOrEqual(CURRENT_PROTOCOL_VERSION);
     });
   });
 
@@ -283,5 +283,42 @@ describe("job.requires_engine (D#605 FL-4)", () => {
 
   it("refuses any other value, including os_sandbox: a job can require a VM, never forbid one", () => {
     for (const bad of ["os_sandbox", "docker", "", 1, true]) expect(JobSchema.safeParse(sampleJob({ requires_engine: bad })).success, String(bad)).toBe(false);
+  });
+});
+
+describe("job.memory (D#601 MEM-3b)", () => {
+  it("accepts person and fenced strings, and the parsed job carries them", () => {
+    const memory = { person: "[repo/convention id@v1] use pnpm", fenced: "[repo/fact id@v2] an agent note" };
+    expect(JobSchema.parse(sampleJob({ memory })).memory).toEqual(memory);
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "", fenced: "only this" } })).success).toBe(true);
+  });
+
+  it("refuses a memory object with an extra key, a missing key or a wrong type", () => {
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "a", fenced: "b", extra: "c" } })).success).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "a" } })).success).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "a", fenced: 1 } })).success).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "a", fenced: null } })).success).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: "text" })).success).toBe(false);
+  });
+
+  it("holds each string to 8192 bytes, counting bytes and not characters", () => {
+    expect(MAX_JOB_MEMORY_BYTES).toBe(8192);
+    const ok = (value: string): boolean => JobSchema.safeParse(sampleJob({ memory: { person: value, fenced: "" } })).success;
+    expect(ok("a".repeat(8192))).toBe(true);
+    expect(ok("a".repeat(8193))).toBe(false);
+    // 4096 two-byte characters are 8192 bytes; one more is over, though the string is far shorter than 8192 characters.
+    expect(ok("é".repeat(4096))).toBe(true);
+    expect(ok("é".repeat(4097))).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: { person: "", fenced: "a".repeat(8193) } })).success).toBe(false);
+  });
+
+  it("is omitted, never null, on a job that recalled nothing, so every other job's canonical JSON is unchanged", () => {
+    expect("memory" in JobSchema.parse(sampleJob())).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ memory: null })).success).toBe(false);
+  });
+
+  it("has a protocol floor that a current runner meets and that cuts no older runner off from hello", () => {
+    expect(MEMORY_JOB_MIN_PROTOCOL).toBe(CONTINUES_CROSS_SIDE_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(MEMORY_JOB_MIN_PROTOCOL);
   });
 });

@@ -389,7 +389,7 @@ export function readContext(raw) {
 
 /**
  * Everything the panel draws, from a read context: its state (`none`, `live`, `partial`, `ready`) and the words. A run on the person's
- * machine is shown as sizes and counts only: no memory names and no map version, whatever the body holds.
+ * machine is shown as sizes and counts only, plus the memory entries its job carried (the cloud's own rows, D#601 MEM-3b); never a map version, whatever the body holds.
  */
 export function contextModel(ctx) {
   if (!ctx.recorded || ctx.basis === null) {
@@ -422,7 +422,7 @@ export function contextModel(ctx) {
       ["Largest context", figure(tokenText(ctx.peak_context_tokens), est)],
       ["Compacted", comp === null ? CONTEXT_WORDS.notRecorded : comp === 0 ? "Not compacted" : comp === 1 ? "Once" : comp + " times"],
     ],
-    memory: runner ? null : { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })) },
+    memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })) },
     mapVersion: runner ? null : ctx.repo_map_version,
   };
 }

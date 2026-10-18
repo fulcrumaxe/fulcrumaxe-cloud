@@ -1,6 +1,6 @@
 /**
  * The job the cloud hands a runner. Every field is a bounded identifier, an enum, a digest, a number or a timestamp,
- * apart from three pieces of prose for the agent: `spec.text`, `task.prompt` and `role_card.text`. No field can carry a
+ * apart from three pieces of prose for the agent: `spec.text`, `task.prompt` and `role_card.text` (and, since D#601 MEM-3b, the two bounded `memory` strings). No field can carry a
  * command, a URL, an image or binary reference, an environment map or a settings object, and strict parsing refuses any
  * unlisted key. The one list of values is `sandbox_allowances` (D#6 R7a): entries of a closed kind, each a path, a plain host or the
  * loopback address, which the cloud signs only after an admin approved them and the runner refuses if they cross the floor. The job travels signed (jobSignature.ts); the runner trusts nothing in it unsigned.
@@ -19,6 +19,11 @@ export const MAX_SPEC_TEXT_CHARS = 256 * 1024;
 /** Largest `task.prompt` and `role_card.text`, in characters. */
 export const MAX_TASK_PROMPT_CHARS = 128 * 1024;
 export const MAX_ROLE_CARD_CHARS = 64 * 1024;
+/**
+ * D#601 MEM-3b: the most bytes either memory string of a job may hold. It is the largest memory slot a repository may choose (the pipeline's
+ * `MEMORY_SLOT_MAX_BYTES`, checked equal by a test), and the person and fenced parts together are one slot, so each is within it.
+ */
+export const MAX_JOB_MEMORY_BYTES = 8192;
 
 /**
  * The roles a runner may run: the executor and its fix loop, spec drafting, the panel seats, docs, the advisory
@@ -74,6 +79,7 @@ export const TASK_KINDS = ["implement", "fix", "review", "advise"] as const;
 export const TaskKind = z.enum(TASK_KINDS);
 
 const uuid = z.string().uuid();
+const memoryText = z.string().refine((value) => Buffer.byteLength(value, "utf8") <= MAX_JOB_MEMORY_BYTES, { message: `a memory string is at most ${MAX_JOB_MEMORY_BYTES} bytes` });
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 /** A Claude Code session id: a bounded identifier. */
@@ -129,6 +135,10 @@ export function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+/** D#601 MEM-3b: the memory a job carries, both strings within `MAX_JOB_MEMORY_BYTES`, no other key. */
+export const JobMemorySchema = z.object({ person: memoryText, fenced: memoryText }).strict();
+export type JobMemory = z.infer<typeof JobMemorySchema>;
+
 export const JobSchema = z
   .object({
     schema_version: z.literal(1),
@@ -162,6 +172,11 @@ export const JobSchema = z
     // other job, so their canonical JSON and signature are unchanged. The cloud's claim hands such a job only to a runner whose reported engine
     // is `microvm`, whatever the person's routing says. Set by the cloud when it signs the job; no person-set rule can write or clear it.
     requires_engine: z.literal("microvm").optional(),
+    // D#601 MEM-3b: the memory the cloud recalled for this run, split by who wrote it. `person` holds approved entries a person wrote (the runner places them after the
+    // role card, sanitised and labelled); `fenced` holds the ones an agent, an import or a runner wrote (the runner puts them in their own untrusted block). Present only on a
+    // job that recalled something and omitted (never null) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it
+    // only for a runner of `MEMORY_JOB_MIN_PROTOCOL` or later (an older runner's strict parse would refuse it). The runner writes none of it to disk.
+    memory: JobMemorySchema.optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

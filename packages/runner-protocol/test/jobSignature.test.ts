@@ -38,6 +38,23 @@ describe("canonicalJson", () => {
   });
 });
 
+describe("job signature over memory (D#601 MEM-3b)", () => {
+  const withMemory = { ...job, memory: { person: "[repo/convention id@v1] use pnpm", fenced: "[repo/fact id@v2] agent note" } } as Job;
+
+  it("signs the memory: it verifies as signed, and a changed string, a swapped pair or an added key fails", () => {
+    const signed = signJob(withMemory, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW })).toEqual(withMemory);
+    const edit = (memory: Record<string, unknown>) => ({ ...signed, job: { ...signed.job, memory } });
+    expect(codeOf(() => verifyJob(edit({ ...withMemory.memory, person: "[repo/convention id@v1] use npm" }), keyring, { now: NOW }))).not.toBe("returned");
+    expect(codeOf(() => verifyJob(edit({ person: withMemory.memory!.fenced, fenced: withMemory.memory!.person }), keyring, { now: NOW }))).not.toBe("returned");
+    expect(codeOf(() => verifyJob(edit({ ...withMemory.memory, extra: "x" }), keyring, { now: NOW }))).not.toBe("returned");
+  });
+
+  it("a job without memory signs to the same bytes as before the field existed", () => {
+    expect(canonicalJson(job)).not.toContain("memory");
+  });
+});
+
 describe("job signature", () => {
   it("verifies a signed job and returns it", () => {
     expect(verifyJob(signJob(job, privateKey), keyring, { now: NOW })).toEqual(job);

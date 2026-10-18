@@ -150,6 +150,8 @@ export function assembleExecutorPrompt(input: ExecutorPromptInput, options?: Ass
  * commit the empty placeholder files the Claude CLI's shell sandbox leaves in the checkout, so it stages by name. The result block
  * keeps `verdict`, `tests` and `summary`; `branch` and `pr_number` are gone because the agent no longer creates either (nothing
  * downstream reads them: the cloud takes the branch and the pull request number from its own rows).
+ * D#601 MEM-3b: the recalled memory is not in this text. It comes back as `memoryAside` and travels in the signed job, where the runner places it (the person's lines after the
+ * role card, the rest inside its own untrusted block).
  */
 function buildRunnerExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt {
   const { owner, name, number, version } = input;
@@ -181,7 +183,7 @@ function buildRunnerExecutorPrompt(input: ExecutorPromptInput): AssembledPrompt 
       "Your final block must include a `summary`: a plain-text account of the session for the repository owner, no markup needed. Say what you changed and why, the files you touched, the commands you ran to test it and their result, and anything you were unsure about or left out.",
       ...agentOutputBlock('{"verdict":"done","tests":"passed","summary":"<plain-text summary for the repository owner>"}'),
     ].join("\n"),
-  });
+  }, { memoryAside: true });
 }
 
 interface BuildFacts {
@@ -327,7 +329,7 @@ export async function startBuildForItem(
   // D#600 CX-4a: a sandbox prompt over its budget spills what it cuts to /fx/context. The budget is the repository's setting, else the role's default, derived now and never stored.
   const sandboxPrompt = promptRuntimeOf(executionMode) === "sandbox";
   const budgetBytes = sandboxPrompt && facts.repo_id !== null && !prior ? effectiveContextBudget("executor", await readContextBudgetBytes(pool, accountId, facts.repo_id)) : undefined;
-  const { prompt, sections, spill } = assembleExecutorPrompt(
+  const { prompt, sections, spill, memoryAside } = assembleExecutorPrompt(
     { owner: facts.gh_owner, name: facts.gh_name, number, version: facts.version, spec: facts.body, rebuild: facts.stage === "needs_human", runtime: promptRuntimeOf(executionMode), runNotes: renderRunNotes(notes), ...(map ? { map } : {}), ...(memory ? { memory } : {}), ...(stackBase ? { stackBase } : {}) },
     { spill: sandboxPrompt, ...(budgetBytes === undefined ? {} : { budgetBytes }) },
   );
@@ -343,7 +345,7 @@ export async function startBuildForItem(
       accountId,
       workItemId,
       async (client): Promise<BuildStartResult> => {
-        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
+        const started = await ports.startRun({ step, role: "executor", prompt, contextSections: sections, ...(spill ? { contextSpill: spill } : {}), ...(memoryAside ? { jobMemory: memoryAside } : {}), memoryTokens: memoryTokensOf(memory?.stable, memory?.item), clone: true, pr: number, exclusive: true, expectedExecutionMode: executionMode, ...(facts.spec_version_id === null ? {} : { specVersionId: facts.spec_version_id }) });
         // A halt refuses the start itself (the database, not the stage): say so plainly so the workflow ends instead of retrying.
         // D#483 S5-k1: a spend denial is a named pause, not a failure: the item stays where it is and the workflow asks again.
         const pause = started.ok ? null : pauseForDenial(started.reason);

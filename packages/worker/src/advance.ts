@@ -9,7 +9,7 @@ import { MAX_WAITING_ATTEMPT, assertDriverEvent, recordDriverEvent, type DriverE
 import { markWorkPending } from "@fx/core/src/pendingWork.js";
 import { setupHoldFor } from "@fx/core/src/setup-requests/store.js";
 import { markCorrectionApplied } from "@fx/core/src/corrections/index.js";
-import { ITEM_PR_BRANCH } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, JobMemorySchema, type JobMemory } from "@fulcrumaxe/runner-protocol";
 import { attachRunNotes, correctionReasonCode, listRunNoteIds, readPendingRunNotes, renderRunNotes, runNotesStepSuffix } from "@fx/core/src/corrections/driver.js";
 import { cancelRun, DuplicateExecutorRunError, ExecutionModeChangedError, IdempotencyKeyTakenError, RunPrecheckRefusedError, NoSpecVersionError, SandboxReapingError, WorkItemHaltedError, acceptQueuedRunnerRun, PREVIEW_WORKDIR, readRecordedRunnerPullRequest, readSandboxBoundPullRequest, recordSandboxContinuesBound, DispatchFailedError, JobIssueError, RUNNER_RUN_BRANCH, readExecutionMode, effectiveModeSql, sideOfMode, isRunnerMode, type ExecutionTargetRegistry, type StartAgentRunInput } from "@fx/runner";
 import { reportError } from "@fx/telemetry";
@@ -378,6 +378,8 @@ export interface AdvanceRunRequest {
   contextSpill?: ContextSpill;
   /** D#601 MEM-3: the token estimate of the memory in the prompt, stored on the run's context ledger. Absent: not recorded. */
   memoryTokens?: number;
+  /** D#601 MEM-3b: a runner run's recalled memory (person and fenced strings), signed into its job instead of sitting in the prompt. Anything that is not exactly the protocol's shape refuses the start. */
+  jobMemory?: JobMemory;
   /** D#7 DP11c: the run this one continues the work of (a resume's parked run). Linked on the new run's row; the parked run is not touched. The run must belong to this item. */
   parentRunId?: string;
 }
@@ -815,6 +817,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     if (req.parentRunId !== undefined && !UUID_RE.test(req.parentRunId)) return { ok: false, reason: "invalid_input" };
     // A prompt that was cut needs its files: a spill that is not exactly the closed shape refuses the start rather than send a cut prompt with nothing to read.
     if (req.contextSpill !== undefined && !isContextSpill(req.contextSpill)) return { ok: false, reason: "invalid_input" };
+    if (req.jobMemory !== undefined && !JobMemorySchema.safeParse(req.jobMemory).success) return { ok: false, reason: "invalid_input" };
     const baseKey = `advance:${req.workItemId}:${req.step}`;
     let key = baseKey;
     const found = await withTenant(runnerPool, req.accountId, async (client) => {
@@ -876,6 +879,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
       ...(sectionsOf(req.contextSections) ? { contextSections: sectionsOf(req.contextSections) } : {}),
       ...(req.contextSpill ? { contextSpill: req.contextSpill } : {}),
       ...(Number.isSafeInteger(req.memoryTokens) && req.memoryTokens! >= 0 ? { memoryTokens: req.memoryTokens } : {}),
+      ...(req.jobMemory ? { jobMemory: req.jobMemory } : {}),
       ...(req.pr !== undefined ? { pr: req.pr } : {}),
       ...(req.headSha !== undefined ? { headSha: req.headSha } : {}),
       // The runner clones this repository (shallow, default branch) into the workdir before the agent starts.

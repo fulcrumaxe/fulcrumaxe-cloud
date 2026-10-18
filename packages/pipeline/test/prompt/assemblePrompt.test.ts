@@ -112,6 +112,55 @@ describe("every builder calls it and returns the section list", () => {
   });
 });
 
+describe("a runner prompt keeps memory out of the text and hands it back split by author (D#601 MEM-3b)", () => {
+  const PERSON = entry({ id: "p1", name: "Person", text: "PERSON-LINE use pnpm", head: "[repo/command p1@v1]" });
+  const AGENT = entry({ id: "a1", name: "Agent", origin: "agent", text: "AGENT-LINE node 24", head: "[repo/fact a1@v1]" });
+  const IMPORTED = entry({ id: "i1", name: "Import", origin: "import", text: "IMPORT-LINE from CLAUDE.md", head: "[repo/convention i1@v1]" });
+  const memory = { stable: renderMemorySlot([PERSON, AGENT], 4096), item: renderMemorySlot([entry({ id: "p2", name: "Item", text: "ITEM-PERSON", head: "[item/fact p2@v1]" }), IMPORTED], 4096) };
+
+  it("the prompt holds no memory text and no memory label, the section list still holds both memory sections, and the other sections are as with memory in the text", () => {
+    const aside = assembleExecutorPrompt({ ...EXEC, runtime: "runner", memory });
+    for (const needle of ["PERSON-LINE", "AGENT-LINE", "ITEM-PERSON", "IMPORT-LINE", "MEMORY FROM THE PERSON", "MEMORY RECORDED BY AN AGENT"]) expect(aside.prompt).not.toContain(needle);
+    expect(codes(aside)).toEqual(["boundary", "memory_stable", "spec", "memory_item", "output"]);
+    const none = assembleExecutorPrompt({ ...EXEC, runtime: "runner" });
+    expect(aside.prompt).toBe(none.prompt);
+    // The memory sections record the bytes of the memory the agent was given (the labelled text), unchanged from before.
+    expect(aside.sections.find((x) => x.code === "memory_stable")!.bytes).toBe(Buffer.byteLength(memory.stable.text, "utf8"));
+  });
+
+  it("returns the person's lines and the others' lines apart, stable part first then the item's, each line fenced on its own and no label in either string", () => {
+    const r = assembleExecutorPrompt({ ...EXEC, runtime: "runner", memory });
+    expect(r.memoryAside).toBeDefined();
+    const { person, fenced } = r.memoryAside!;
+    expect(person.indexOf("PERSON-LINE")).toBeLessThan(person.indexOf("ITEM-PERSON"));
+    expect(person).not.toMatch(/AGENT-LINE|IMPORT-LINE/);
+    expect(fenced.indexOf("AGENT-LINE")).toBeLessThan(fenced.indexOf("IMPORT-LINE"));
+    expect(fenced).not.toMatch(/PERSON-LINE|ITEM-PERSON/);
+    expect(person.split(UNTRUSTED_DELIMITER_START)).toHaveLength(3);
+    expect(fenced.split(UNTRUSTED_DELIMITER_START)).toHaveLength(3);
+    expect(person + fenced).not.toMatch(/MEMORY FROM THE PERSON|MEMORY RECORDED BY/);
+  });
+
+  it("is absent when nothing was recalled, and for a sandbox prompt, whose text is unchanged", () => {
+    expect(assembleExecutorPrompt({ ...EXEC, runtime: "runner" }).memoryAside).toBeUndefined();
+    const sandbox = assembleExecutorPrompt({ ...EXEC, memory });
+    expect(sandbox.memoryAside).toBeUndefined();
+    expect(sandbox.prompt).toContain("PERSON-LINE");
+    expect(sandbox.prompt).toContain("MEMORY RECORDED BY AN AGENT");
+  });
+
+  it("stays within the slot: the two strings together are no larger than the labelled slot text, whatever the budget cut", () => {
+    const many = Array.from({ length: 200 }, (_, i) => entry({ id: `m${String(i).padStart(3, "0")}`, name: `E${i}`, origin: i % 2 === 0 ? "person" : "agent", text: `fact number ${i} ${"word ".repeat(10)}`, head: `[repo/fact m${i}@v1]` }));
+    const slot = renderMemorySlot(many, MEMORY_SLOT_MAX_BYTES);
+    expect(slot.trimmedBytes).toBeGreaterThan(0);
+    const r = assembleExecutorPrompt({ ...EXEC, runtime: "runner", memory: { stable: slot } });
+    const total = Buffer.byteLength(r.memoryAside!.person, "utf8") + Buffer.byteLength(r.memoryAside!.fenced, "utf8");
+    expect(Buffer.byteLength(r.memoryAside!.person, "utf8")).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(r.memoryAside!.fenced, "utf8")).toBeLessThanOrEqual(8192);
+    expect(total).toBeLessThanOrEqual(Buffer.byteLength(slot.text, "utf8"));
+  });
+});
+
 describe("a resumed fix round and the Spec", () => {
   it("an unchanged Spec version sends the line with the stored hash and no body", () => {
     const r = assembleFixPrompt({ ...FIX, heldSpec: { version: 3, sha256: sha(SPEC) } });

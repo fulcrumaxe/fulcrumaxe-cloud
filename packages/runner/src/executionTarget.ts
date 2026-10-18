@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import type { Product, Role } from "./types.js";
-import type { ContextSection, ContextSpill } from "@fulcrumaxe/runner-protocol";
+import type { ContextSection, ContextSpill, JobMemory } from "@fulcrumaxe/runner-protocol";
 import type { DenyReason, ReserveParams } from "@fx/spend";
 import type { RunFunding } from "./funding.js";
 import type { ModelFailureCode } from "./modelFailure.js";
@@ -276,6 +276,11 @@ export interface ExecutionRun {
   contextSections?: readonly ContextSection[];
   /** D#601 MEM-3: the token estimate of the memory the prompt carries, recorded on the run's context ledger. Absent: not recorded (a run that did not recall, such as a fix round). */
   memoryTokens?: number;
+  /**
+   * D#601 MEM-3b: the recalled memory of a RUNNER run, split by who wrote it (`person`: approved entries a person wrote; `fenced`: the rest), which the job issuer signs into
+   * the job so the runner renders it. The prompt then holds none of it. Absent: the run recalled nothing, or is not a runner run. A sandbox target ignores it.
+   */
+  jobMemory?: JobMemory;
   /**
    * D#600 CX-2: a fix round's resume may send a short prompt (the Spec "unchanged") because the session it continues holds the Spec. When that session's
    * snapshot has expired, `SandboxTarget.resume` starts a fresh session instead, which holds nothing: it is given this prompt (the same round with the

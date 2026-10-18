@@ -10,6 +10,8 @@ import { seedAccount, seedRepo } from "./build/helpers/seed.js";
 import { discussingItem, expectOneGenuineEnvelope } from "./plan/helpers/panelFixtures.js";
 import { publishRespec } from "../src/advance/respec.js";
 import { BUILD_FAILURE_CODES, buildExecutorPrompt, markBuildNeedsHuman, startBuildForItem } from "../src/advance/build.js";
+import { JobMemorySchema, MAX_JOB_MEMORY_BYTES } from "@fulcrumaxe/runner-protocol";
+import { MEMORY_SLOT_MAX_BYTES } from "../src/prompt/assemblePrompt.js";
 import { createPgRepoMapCache, createRepoMapPort, type RepoMapSource } from "../src/prompt/repoMap.js";
 import { runPanelForItem, runSpecForItem, STEP_LIMIT_MS, SEAT_ROUND_TIMEOUT_MS, PM_TIMEOUT_MS, REPLAY_PANEL_TIMEOUT_MS } from "../src/advance/specFlow.js";
 import type { AdvanceRunOutcome, AdvanceRunPorts, AdvanceRunRequest, AdvanceRunStart } from "../src/advance/runPorts.js";
@@ -571,7 +573,7 @@ describe("the build", () => {
     const ledger = (accountId: string, runId: string) =>
       h.admin.query(`INSERT INTO run_context_ledger (account_id, run_id, basis) VALUES ($1, $2, 'partial')`, [accountId, runId]);
 
-    it("a sandbox run that recalled two entries and loaded a cached map shows both; a deleted entry reads Deleted entry; a runner run shows neither", async () => {
+    it("a sandbox run that recalled two entries and loaded a cached map shows both; a deleted entry reads Deleted entry; a runner run lists the memory but no map", async () => {
       const { t, repo, ids, repoMap } = await seeded();
       const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
       expect(out).toMatchObject({ status: "started" });
@@ -591,7 +593,7 @@ describe("the build", () => {
       expect(after.recalled_memory.map((m) => m.name).sort()).toEqual(["Deleted entry", "run pnpm test before you push"]);
       expect(JSON.stringify(after)).not.toContain("loader");
 
-      // A runner run shows neither a name nor a map, whatever is recorded.
+      // A runner run lists the memory its job carried (D#601 MEM-3b: the cloud's own rows) and never a map, whatever is recorded.
       // (runtime is immutable, so a second run on the runner gets a copy of the same record.)
       const runnerRun = randomUUID();
       await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded')`, [runnerRun, t.accountId, t.workItemId]);
@@ -602,8 +604,70 @@ describe("the build", () => {
       await ledger(t.accountId, runnerRun);
       const onMachine = await panel(t.accountId, runnerRun);
       expect(onMachine.runtime).toBe("runner");
-      expect(onMachine.recalled_memory).toEqual([]);
+      expect(onMachine.recalled_memory.map((m) => m.name).sort()).toEqual(["Deleted entry", "run pnpm test before you push"]);
       expect(onMachine.repo_map_version).toBeNull();
+    });
+
+    it("D#601 MEM-3b: a runner build carries its recalled memory in the job, split by author, and not in the prompt; it records the same row as a cloud run (map columns null) and its panel lists the entries", async () => {
+      const { t, repo, ids, repoMap } = await seeded();
+      await h.admin.query("UPDATE repos SET execution_mode = 'runner_local' WHERE id = $1", [repo]);
+      const node = (await h.admin.query<{ gh_node_id: string; gh_installation_id: string }>("SELECT r.gh_node_id, i.gh_installation_id FROM repos r JOIN installations i ON i.id = r.installation_id WHERE r.id = $1", [repo])).rows[0]!;
+      const agentBody = "an agent noticed the build needs node 24";
+      const agent = (
+        await h.admin.query<{ id: string }>(
+          `INSERT INTO memory_entries (account_id, scope, scope_ref, kind, body, author_kind, status, version, content_sha256) VALUES ($1, 'repo', $2, 'fact', $3, 'agent', 'approved', 1, $4) RETURNING id`,
+          [t.accountId, `${node.gh_node_id}@${node.gh_installation_id}`, agentBody, createHash("sha256").update(agentBody).digest("hex")],
+        )
+      ).rows[0]!.id;
+      const out = await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap });
+      expect(out).toMatchObject({ status: "started" });
+      const runId = (out as { runId: string }).runId;
+      const req = t.world.requests[0]!;
+
+      // The job's memory: the person's lines in one string, the agent's in the other, each within the slot and each line fenced on its own.
+      expect(req.jobMemory).toBeDefined();
+      expect(req.jobMemory!.person).toContain("run pnpm test before you push");
+      expect(req.jobMemory!.person).toContain("keep the loader's public name");
+      expect(req.jobMemory!.person).not.toContain(agentBody);
+      expect(req.jobMemory!.fenced).toContain(agentBody);
+      expect(req.jobMemory!.fenced).not.toContain("run pnpm test");
+      expect(req.jobMemory!.fenced).toMatch(/^<<UNTRUSTED EXTERNAL CONTENT>>/);
+      for (const part of [req.jobMemory!.person, req.jobMemory!.fenced]) expect(Buffer.byteLength(part, "utf8")).toBeLessThanOrEqual(8192);
+      expect(JobMemorySchema.safeParse(req.jobMemory).success).toBe(true);
+      expect(MAX_JOB_MEMORY_BYTES).toBe(MEMORY_SLOT_MAX_BYTES);
+      // The prompt holds none of it, while the ledger's section list still shows the memory the agent was given.
+      for (const needle of ["run pnpm test", "loader's public name", agentBody, "MEMORY FROM THE PERSON", "MEMORY RECORDED BY AN AGENT"]) expect(req.prompt).not.toContain(needle);
+      expect(req.contextSections!.map((s) => s.code)).toEqual(["boundary", "memory_stable", "spec", "output"]);
+      expect(req.memoryTokens).toBeGreaterThan(0);
+
+      // The same row a cloud run writes: arrays filled, map columns null, through the same writer.
+      const row = (await h.admin.query<{ recalled_entry_ids: string[]; recalled_entry_versions: number[]; map_version: string | null; map_sha256: string | null }>("SELECT recalled_entry_ids, recalled_entry_versions, map_version, map_sha256 FROM run_context_inputs WHERE run_id = $1", [runId])).rows[0]!;
+      expect([...row.recalled_entry_ids].sort()).toEqual([...ids.values(), agent].sort());
+      expect(row.recalled_entry_versions).toEqual(row.recalled_entry_ids.map(() => 1));
+      expect(row.map_version).toBeNull();
+      expect(row.map_sha256).toBeNull();
+
+      // The run's panel lists the entries. (The test world starts every run as a sandbox run and runtime is immutable, so a runner run gets a copy of the same record.)
+      const runnerRun = randomUUID();
+      await h.admin.query(`INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status) VALUES ($1, $2, $3, 'executor', 'runner', 'succeeded')`, [runnerRun, t.accountId, t.workItemId]);
+      await h.admin.query(
+        `INSERT INTO run_context_inputs (account_id, run_id, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256) SELECT account_id, $2::uuid, recalled_entry_ids, recalled_entry_versions, map_version, map_sha256 FROM run_context_inputs WHERE run_id = $1`,
+        [runId, runnerRun],
+      );
+      await ledger(t.accountId, runnerRun);
+      const shown = await panel(t.accountId, runnerRun);
+      expect(shown.runtime).toBe("runner");
+      expect(shown.recalled_memory.map((m) => m.id).sort()).toEqual([...ids.values(), agent].sort());
+      expect(shown.recalled_memory.every((m) => m.name !== "" && m.version === 1)).toBe(true);
+      expect(shown.repo_map_version).toBeNull();
+    });
+
+    it("D#601 MEM-3b: a sandbox build keeps its memory in the prompt and sends no job memory", async () => {
+      const { t, repoMap } = await seeded();
+      expect(await startBuildForItem(h.runWriterPool, t.accountId, t.workItemId, randomUUID(), t.world, { repoMap })).toMatchObject({ status: "started" });
+      const req = t.world.requests[0]!;
+      expect(req.jobMemory).toBeUndefined();
+      expect(req.prompt).toContain("run pnpm test before you push");
     });
 
     it("another account's session reads nothing of this run's record (404)", async () => {

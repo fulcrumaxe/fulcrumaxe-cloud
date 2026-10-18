@@ -10,8 +10,9 @@ import type { RunsReadCtx } from './read.js';
  * account's rows, so another account's run is a plain 404 here.
  *
  * Integers and closed enums only (the section hashes are not returned). The ledger stores no prompt text and no path, and this reader adds none: a run that
- * ran on the person's machine reaches the cloud as sizes and counts, and is returned as the same (its recalled memory names, which the
- * cloud holds, are left out for it: "Contents stayed on your machine").
+ * ran on the person's machine reaches the cloud as sizes and counts, and is returned as the same ("Contents stayed on your machine"). The one
+ * addition is the memory the CLOUD handed that run in its job (D#601 MEM-3b): its entries are the cloud's own rows, so they are listed by name
+ * and id@version like any run's. Nothing the machine holds (a path, the repo map's identity) is returned for it.
  *
  * A figure the run did not measure is null ("Not recorded" on screen), never 0. A run with no ledger row at all is `recorded: false`
  * with empty lists: a run that predates the ledger, a runner older than the protocol addition, or a run still going.
@@ -44,7 +45,7 @@ export interface RunContextPanel {
   /**
    * The memory entries the run's prompt held, in prompt order, by display name and id@version (D#601; recorded when the build starts, migration
    * 0833). The name is derived from the entry's row now, never stored: a deleted entry reads "Deleted entry". Empty for a run that recalled nothing,
-   * for a run that predates the record, and always for a run on the person's machine (its memory names stay off the runner side).
+   * for a run that predates the record. A run on the person's machine lists the memory its job carried, the same way (D#601 MEM-3b).
    */
   recalled_memory: { id: string; name: string; version: number }[];
   /**
@@ -154,9 +155,10 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       .map(([tool, bytes]) => ({ tool, bytes: count(bytes) }))
       .sort((a, b) => b.bytes - a.bytes || a.tool.localeCompare(b.tool))
       .slice(0, 32);
-    // A run on the person's machine is sizes and counts only: no memory names and no map identity, whatever the tables hold.
+    // A run on the person's machine is sizes and counts only, with one exception that is the cloud's own data: the memory entries its job carried (D#601 MEM-3b),
+    // named from the cloud's rows. Its map identity is not returned, whatever the tables hold: the runner reads the map on the machine.
     const hosted = r.runtime !== 'runner';
-    const recalled_memory = hosted ? await recalledMemoryOf(client, accountId, r.recalled_ids, r.recalled_versions) : [];
+    const recalled_memory = await recalledMemoryOf(client, accountId, r.recalled_ids, r.recalled_versions);
     const repo_map_version = hosted && r.map_version !== null && r.map_sha256 !== null ? `v${r.map_version} · ${r.map_sha256.slice(0, 12)}` : null;
     return {
       ...base,
