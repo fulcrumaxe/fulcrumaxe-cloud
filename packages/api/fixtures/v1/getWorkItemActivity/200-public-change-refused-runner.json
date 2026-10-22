@@ -1,0 +1,32 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 595,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [],
+  "close_on_github": false,
+  "public_change": {
+    "state": "refused",
+    "code": "public_unavailable",
+    "sentence": "Refused: the public repository could not be reached. Use Build again to try once more.",
+    "repo": "acme/docs-public",
+    "branch": "fx/p-0598a6a0-0000-4000-8000-300000000011",
+    "pr_number": null,
+    "pr_url": null,
+    "head_sha": null,
+    "actions": []
+  }
+}
