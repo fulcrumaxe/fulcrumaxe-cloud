@@ -91,3 +91,22 @@ export function envelopeDefaultMarginPct(): number | null {
     throw error;
   }
 }
+
+export type DiscoverySettings =
+  | { on: true; perRepoDailyUsd: number; verifyPerProposalUsd: number; externalVerifiesPerRepoPerDay: number }
+  | { on: false; code: 'discovery_unconfigured' };
+
+/**
+ * D#483 S4-b: the `discovery.*` limits, read fail-closed. Plan data that is unavailable, or carries no `discovery` block, gives
+ * `{ on: false, code: 'discovery_unconfigured' }`: discovery and verification are off for every repo and the health check reports the code.
+ * There is no default figure. Never throws.
+ */
+export function discoverySettings(): DiscoverySettings {
+  try {
+    const d = loadPlanData().discovery;
+    return d === undefined ? { on: false, code: 'discovery_unconfigured' } : { on: true, ...d };
+  } catch (error) {
+    if (error instanceof PlanDataMissingError) return { on: false, code: 'discovery_unconfigured' };
+    throw error;
+  }
+}

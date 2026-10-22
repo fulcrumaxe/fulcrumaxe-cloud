@@ -44,3 +44,7 @@ export * from "./prompt/pinContent.js";
 export * from "./prompt/memoryRecall.js";
 export * from "./prompt/contextRulesSave.js";
 export * as mergeQueue from "./mergeQueue/index.js";
+export * from "./discovery/verifierOutput.js";
+export * from "./discovery/verifierCites.js";
+export * from "./discovery/verifierPrompt.js";
+export * from "./discovery/verifierResult.js";
