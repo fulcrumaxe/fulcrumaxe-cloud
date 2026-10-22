@@ -9,7 +9,7 @@
  */
 import type { Job } from "@fulcrumaxe/runner-protocol";
 import path from "node:path";
-import { assertGitVersion, createGit, GitPathError, type GitCapture, type GitDeps } from "./git.js";
+import { assertGitVersion, createGit, GitPathError, type Git, type GitCapture, type GitDeps } from "./git.js";
 import { createMirrors, type Mirrors, type MirrorDeps } from "./mirror.js";
 import type { NixFromDefault, NixSource } from "./nixShell.js";
 import { LISTING_CAP, readRepoMap } from "./repoMap.js";
@@ -50,7 +50,8 @@ export interface GitPath {
   nixSource?(job: GitJob, sha: string): Promise<NixSource>;
   /**
    * D#6 R-CHK-2: the commit the job's check files are pinned to: the merge-base of the branch tip `sha` with the mirror's HEAD (the default branch as the runner fetched it), so
-   * no commit of the branch, an earlier fix round's included, can be it. Null when it cannot be computed; the check then fails. Optional: a path without a mirror gives none.
+   * no commit of the branch, an earlier fix round's included, can be it. Null when it cannot be computed; the check then fails. Both paths give it (`mirrorCheckBase`); a
+   * path without one makes every check fail.
    */
   checkBase?(job: GitJob, sha: string): Promise<string | null>;
   /**
@@ -63,6 +64,21 @@ export interface GitPath {
 export interface GitPathDeps extends GitDeps, Pick<MirrorDeps, "mirrorsRoot" | "stateDir" | "keepClear" | "remoteUrl" | "signal"> {
   /** Like `capture` with a large output limit (8 MB), for the tree listing behind the repository map. Absent: the map is read through `capture` and a big tree is cut. */
   captureLarge?: GitCapture;
+}
+
+/**
+ * D#6 R-CHK-2 / R-CHK-2b: `GitPath.checkBase` for both paths. The merge-base of `sha` with the HEAD of the bare mirror `dir` (the default branch as the runner last fetched
+ * it), read locally: no network, and so no ticket on path A. Null for a malformed sha, no common ancestor, or a mirror that cannot answer: the check then fails closed.
+ */
+export async function mirrorCheckBase(git: Git, dir: string, sha: string): Promise<string | null> {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return null;
+  try {
+    const base = (await git.run("mirror_failed", ["-C", dir, "merge-base", sha, "HEAD"])).trim();
+    return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ? base : null;
+  } catch {
+    // fx-swallow-ok: no common ancestor, or a mirror that cannot answer: the check fails closed
+    return null;
+  }
 }
 
 /** What the ordinary capture keeps of an output (the engine's `runCapture` default, 64 K). */
@@ -100,16 +116,7 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     readGrants: (job) => [mirrors.objects(job.repo)],
     mirrorDir: (job) => mirrors.dir(job.repo),
     repoMap: (job, sha) => readRepoMap({ listing: listingGit, small: git, listingCap: deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP }, mirrors.dir(job.repo), sha),
-    async checkBase(job, sha) {
-      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return null;
-      try {
-        const base = (await git.run("mirror_failed", ["-C", mirrors.dir(job.repo), "merge-base", sha, "HEAD"])).trim();
-        return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ? base : null;
-      } catch {
-        // fx-swallow-ok: no common ancestor, or a mirror that cannot answer: the check fails closed
-        return null;
-      }
-    },
+    checkBase: (job, sha) => mirrorCheckBase(git, mirrors.dir(job.repo), sha),
     async nixSource(job, sha) {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return { kind: "not_default_branch" };
       const dir = mirrors.dir(job.repo);

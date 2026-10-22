@@ -479,3 +479,49 @@ describe("a chunk's refspec is the plan's branch and a commit between the run's 
     expect(calls.slice(before).some((args) => args.includes("push"))).toBe(false);
   });
 });
+
+describe("checkBase on path A (D#6 R-CHK-2b): the same pin as path B, read from the mirror alone", () => {
+  /** Commits `file` on `branch` of the upstream (cut from `from` when given) and returns the new tip. */
+  function upstreamCommit(branch: string, file: string, from?: string): string {
+    const clone = path.join(root, `clone-${randomUUID()}`);
+    sh("clone", "-q", upstream, clone);
+    if (from !== undefined) sh("-C", clone, "checkout", "-q", "-b", branch, from);
+    else sh("-C", clone, "checkout", "-q", branch);
+    writeFileSync(path.join(clone, file), `${file}\n`);
+    sh("-C", clone, "add", file);
+    sh("-C", clone, "commit", "-q", "-m", file);
+    sh("-C", clone, "push", "-q", upstream, branch);
+    return tip(clone, "HEAD");
+  }
+
+  it("a fresh run pins to its start commit; a fix round's tip pins to the merge-base with the default branch, never to a branch commit; no ticket, no request", async () => {
+    const forkPoint = tip(upstream, "main");
+    const prior = "fx/7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f-g1";
+    const priorTip = upstreamCommit(prior, "round1.txt", forkPoint);
+    upstreamCommit("main", "later.txt"); // the default branch moves on after the branch was cut
+    const { gitPath, mints } = makePathA();
+    const fresh = jobFor();
+    const { base } = await gitPath.prepare(fresh, lease, newWorkspace("fresh"));
+    expect(base).toBe(tip(upstream, "main"));
+    const fix = jobFor({ repo: fresh.repo, continues: { parent_run_id: "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f", session_id: null, branch: prior } as never });
+    const fixed = await gitPath.prepare(fix, lease, newWorkspace("fix"));
+    expect(fixed.base).toBe(priorTip);
+    const requests = relay.requests.length;
+    const minted = mints.length;
+    expect(await gitPath.checkBase!(fresh, base)).toBe(base);
+    expect(await gitPath.checkBase!(fix, fixed.base)).toBe(forkPoint);
+    // The pin is a local read of the mirror: the relay saw nothing more and no ticket was asked for.
+    expect(relay.requests.length).toBe(requests);
+    expect(mints.length).toBe(minted);
+  });
+
+  it("a malformed sha, a commit the mirror lacks, and a repo with no mirror give null", async () => {
+    const { gitPath } = makePathA();
+    const job = jobFor();
+    await gitPath.prepare(job, lease, newWorkspace());
+    expect(await gitPath.checkBase!(job, "HEAD; rm -rf")).toBeNull();
+    expect(await gitPath.checkBase!(job, "HEAD")).toBeNull();
+    expect(await gitPath.checkBase!(job, "e".repeat(40))).toBeNull();
+    expect(await gitPath.checkBase!(jobFor(), tip(upstream, "main"))).toBeNull();
+  });
+});
