@@ -21,7 +21,7 @@ import { readMemorySlotBytes } from "../prompt/memorySlotSetting.js";
 import { effectiveContextBudget, readContextBudgetBytes } from "../prompt/contextBudget.js";
 import type { RepoMapPort } from "../prompt/repoMap.js";
 import { excludeCovers, type PinContentPort } from "../prompt/pinContent.js";
-import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs } from "../prompt/runContextInputs.js";
+import { mapIdentityOf, recalledEntriesOf, recordRunContextInputs, recordRunItemSources, type ItemSourceRecord } from "../prompt/runContextInputs.js";
 import type { AdvanceRunPorts } from "./runPorts.js";
 
 /**
@@ -263,15 +263,19 @@ async function readFacts(pool: Pool, accountId: string, workItemId: string): Pro
  * The recalled memory for a build, rendered into the slot. The setting is read only when the port returned something, so a repository with no
  * memory costs no extra query. The stable part is rendered first; this item's part gets the bytes it left.
  */
-async function recallMemory(pool: Pool, accountId: string, repoId: string | null, workItemId: string, port: MemoryPort): Promise<{ stable?: RenderedMemory; item?: RenderedMemory } | undefined> {
+async function recallMemory(pool: Pool, accountId: string, repoId: string | null, workItemId: string, port: MemoryPort, runId?: string): Promise<{ stable?: RenderedMemory; item?: RenderedMemory; sources?: ItemSourceRecord[] } | undefined> {
   if (repoId === null) return undefined;
-  const [stable, item] = await Promise.all([port.recall({ accountId, repoId, workItemId, role: "executor", slot: "stable" }), port.recall({ accountId, repoId, workItemId, role: "executor", slot: "item" })]);
+  const ask = { accountId, repoId, workItemId, role: "executor", ...(runId ? { runId } : {}) };
+  const [stable, item] = await Promise.all([port.recall({ ...ask, slot: "stable" }), port.recall({ ...ask, slot: "item" })]);
   if (stable.length === 0 && item.length === 0) return undefined;
   const budget = await readMemorySlotBytes(pool, accountId, repoId);
   const first = renderMemorySlot(stable, budget);
   // A cut stable part may gain a marker line (inside its own cap), so the item part leaves room for it: the two together stay within the slot.
   const second = renderMemorySlot(item, budget - Buffer.byteLength(first.text, "utf8") - (first.trimmedBytes > 0 ? MEMORY_MARKER_ROOM : 0));
-  return { ...(first.text ? { stable: first } : {}), ...(second.text ? { item: second } : {}) };
+  // D#601 MEM-8b: the item's own records (applied notes, a handoff note) that the rendered slot really holds, for the item-source record (not the entry record).
+  const held = new Set(second.recalled.map((r) => r.ref));
+  const sources = item.filter((e) => e.source !== undefined && held.has(`${e.id}@v${e.version}`)).map((e) => ({ kind: e.source!.kind, id: e.id.slice(e.id.indexOf(":") + 1), sha256: e.source!.sha256, cut: e.source!.cut }));
+  return { ...(first.text ? { stable: first } : {}), ...(second.text ? { item: second } : {}), ...(sources.length > 0 ? { sources } : {}) };
 }
 
 /** The pinned files for a run. A port that is absent, or that fails, leaves every pin missing: a pin never blocks a run. */
@@ -381,7 +385,7 @@ export async function startBuildForItem(
   // (the latest unerased version, the one the run will pin), through the same parser the done check uses. Hosted (sandbox) builds are not checked and still start.
   if (isRunnerMode(executionMode) && parseAcceptanceScope(facts.acceptance_files).kind !== "known") return { status: "refused", reason: "spec_has_no_file_list" };
   // D#600 CX-2: recalled memory goes through the port (D#601 MEM-3: the approved entries in Postgres), cut to the repository's slot size.
-  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? createMemoryPort(pool));
+  // D#601 MEM-8b: the recall is made once the step's earlier run (a replay) is known, so that run is not given the notes it applied itself.
   // D#597 CC-3: the accepted run notes ride on this run. Their ids are pinned into the step key, so a replay of this step names the same run. A replay whose
   // step already started a run finds it first (the notes accepted since would otherwise give another key and a second run) and keeps that run's pin.
   // D#483 S5-k1: a start denied by a spend limit leaves a keyed `refused_spend` run, and a replay of the same key finds that run. So each later ask of the same
@@ -391,6 +395,7 @@ export async function startBuildForItem(
   // A replay whose earlier run was cancelled (a failed record cancels the run it just started; a person may cancel one) must not move the item to in_progress
   // pointing at that cancelled run: it is refused, and a fresh approval starts a fresh run.
   if (prior && (facts.stage === "spec_ready" || facts.stage === "needs_human") && (await ports.outcome(prior.runId)).status === "cancelled") return { status: "refused", reason: "prior_run_cancelled" };
+  const memory = await recallMemory(pool, accountId, facts.repo_id, workItemId, options.memory ?? createMemoryPort(pool), prior?.runId);
   const notes = prior ? [] : await withTenant(pool, accountId, (client) => readPendingRunNotes(client, workItemId));
   const step = prior ? prior.step : `${baseStep}${runNotesStepSuffix(notes.map((n) => n.id))}`;
   // D#600 CX-3a: the repository map, built on the cloud side at the repository's current head. A replay that finds its run does not build one; no map is not a reason to refuse.
@@ -478,7 +483,11 @@ export async function startBuildForItem(
 
         // D#600 CX-8b: which memory entries and which map this prompt carried, for the context panel. A replay of a started step keeps the first record
         // (it built no map this time and may have recalled something else). Fails closed: a failed insert rolls the start back (D#601 C2).
-        if (!prior) await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null });
+        if (!prior) {
+          await recordRunContextInputs(client, accountId, started.runId, { entries: recalledEntriesOf(memory?.stable, memory?.item), map: map ? { version: map.version, sha256: mapIdentityOf(map.text) } : null });
+          // D#601 MEM-8b: the item's own records the prompt carried (applied notes, a handoff note): ids, the hash of the text as rendered and whether it was cut. No text.
+          await recordRunItemSources(client, accountId, started.runId, memory?.sources ?? []);
+        }
 
         // Stamp the notes the run carries: a fresh start stamps its pinned ids, a replay the notes that hash to the pin in its key. Before the stage move, so a replay
         // that died in between finds the stamp missing and makes it.

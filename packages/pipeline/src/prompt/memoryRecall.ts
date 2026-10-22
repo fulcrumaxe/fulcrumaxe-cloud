@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { repoScopeRef } from "@fx/core/src/memory/index.js";
 import { withTenant } from "@fx/core/src/tenancy/withTenant.js";
@@ -27,6 +28,20 @@ const PRECEDENCE: Readonly<Record<string, number>> = { item: 0, repo: 1, role: 2
 /** The most words of the item's title and Spec that go into the ranking query. */
 const QUERY_WORDS_MAX = 120;
 const bytesOf = (s: string): number => Buffer.byteLength(s, "utf8");
+/** D#601 MEM-8b: how much of an item's own records one run is given, and where each is cut. */
+export const CORRECTION_NOTES_MAX = 5;
+export const NOTE_CUT_BYTES = 1024;
+export const RECEIPT_CUT_BYTES = 512;
+export const CUT_MARKER = " [cut]";
+
+/** Cuts `text` to at most `max` bytes at a character boundary and adds the visible marker; text that fits is returned as it is. */
+export function cutWithMarker(text: string, max: number): { text: string; cut: boolean } {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return { text, cut: false };
+  let end = max;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
+  return { text: buf.subarray(0, end).toString("utf8") + CUT_MARKER, cut: true };
+}
 
 /** Characters that look like a delimiter character but are not one, mapped to the one they imitate. NFKC handles the fullwidth forms. */
 const LOOKALIKES: Readonly<Record<string, string>> = {
@@ -84,11 +99,16 @@ interface Row {
   author_kind: string;
   version: number;
   rank: number;
+  /** A promoted receipt (MEM-8b): the receipt's text as it stands now, already cut. Its line is fenced whoever "wrote" the entry: a receipt's text is not a person's own. */
+  receiptText?: string;
 }
 
 /** A stored entry as the assembler takes it. The trust class follows who wrote the bytes: a person's own text only, everything else is fenced data. */
 function toEntry(r: Row): MemoryEntry {
   const body = escapeFenceLookalikes(r.body);
+  if (r.receiptText !== undefined) {
+    return { id: r.id, version: Number(r.version), name: body.slice(0, 60), origin: "agent", text: `${body} ${escapeFenceLookalikes(r.receiptText)}`, head: `[${r.scope}/${r.kind} ${r.id}@v${Number(r.version)}]` };
+  }
   const why = r.why === null ? "" : ` (${escapeFenceLookalikes(r.why)})`;
   const name = body.split("\n", 1)[0]!.replace(/\s+/g, " ").trim().slice(0, 60);
   return {
@@ -141,11 +161,24 @@ const CONTEXT_SQL = `SELECT r.gh_node_id, i.gh_installation_id, s.memory_slot_by
 const CANDIDATE_SQL = `SELECT id, scope, kind, body, why, author_kind, version,
        CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(body_tsv, to_tsquery('english', $5)) END AS rank
     FROM memory_entries
-   WHERE account_id = $1 AND status = 'approved'
+   WHERE account_id = $1 AND status = 'approved' AND NOT (provenance ? 'receipt_id')
      AND (scope = 'account'
           OR (scope = 'repo' AND scope_ref = $2::text)
           OR (scope = 'role' AND scope_ref = $3::text)
           OR (scope = 'item' AND scope_ref = $4::text))`;
+
+/** The account's approved promoted-receipt entries with the receipt's text as it stands now (D#601 MEM-8b, through the `memory_item_sources` view, migration 0884). */
+const RECEIPT_SQL = `SELECT source_id AS id, version, author_kind, body, chosen, receipt_missing
+    FROM memory_item_sources WHERE account_id = $1 AND source_kind = 'receipt'`;
+/** The item's applied run notes, newest first, without the note the run itself applied. */
+const CORRECTION_SQL = `SELECT source_id AS id, author_kind, body
+    FROM memory_item_sources
+   WHERE account_id = $1 AND work_item_id = $2 AND source_kind = 'correction' AND ($3::uuid IS NULL OR exclude_run_id IS DISTINCT FROM $3::uuid)
+   ORDER BY at DESC NULLS LAST, source_id LIMIT ${CORRECTION_NOTES_MAX}`;
+/** The item's latest completed cloud handoff note. The child run is excluded AFTER choosing the latest, so a newer handoff is never passed over for an older one. */
+const HANDOFF_SQL = `SELECT source_id AS id, body, exclude_run_id
+    FROM memory_item_sources WHERE account_id = $1 AND work_item_id = $2 AND source_kind = 'handoff'
+   ORDER BY at DESC, source_id LIMIT 1`;
 
 /** Best first: scope precedence, then the entry's rank against the item, then id. */
 function rankedBy(rows: readonly Row[]): MemoryEntry[] {
@@ -154,15 +187,60 @@ function rankedBy(rows: readonly Row[]): MemoryEntry[] {
     .map(toEntry);
 }
 
+/** One of the item's own records as a line: cut at NOTE_CUT_BYTES with a visible marker, its hash taken of the text as handed over. A person's correction is the person's line; everything else is fenced. */
+function sourceEntry(kind: "correction" | "handoff", id: string, body: string, authorKind: string): MemoryEntry {
+  const { text, cut } = cutWithMarker(body, NOTE_CUT_BYTES);
+  const safe = escapeFenceLookalikes(text);
+  return {
+    id: `${kind}:${id}`,
+    version: 1,
+    name: kind === "correction" ? `Correction ${id.slice(0, 8)}` : `Handoff note ${id.slice(0, 8)}`,
+    origin: kind === "correction" && authorKind === "person" ? "person" : "agent",
+    text: safe,
+    head: `[item/${kind} ${id}@v1]`,
+    source: { kind, sha256: createHash("sha256").update(safe, "utf8").digest("hex"), cut },
+  };
+}
+
+interface ReceiptRow {
+  id: string;
+  version: number;
+  author_kind: string;
+  body: string;
+  chosen: string | null;
+  receipt_missing: boolean;
+}
+
+/** An entry the port left out on purpose, and why. */
+export interface RecallSkip {
+  id: string;
+  reason: "receipt_missing";
+}
+
+/** The promoted-receipt rows that still have their receipt, as account-scope rows carrying the receipt's text cut for the prompt. A row whose receipt is gone is reported and left out. */
+function receiptRows(rows: readonly ReceiptRow[], onSkip: (s: RecallSkip) => void): Row[] {
+  const out: Row[] = [];
+  for (const r of rows) {
+    if (r.receipt_missing || r.chosen === null) {
+      onSkip({ id: r.id, reason: "receipt_missing" });
+      continue;
+    }
+    out.push({ id: r.id, scope: "account", kind: "decision", body: r.body, why: null, author_kind: r.author_kind, version: Number(r.version), rank: 0, receiptText: cutWithMarker(r.chosen, RECEIPT_CUT_BYTES).text });
+  }
+  return out;
+}
+
 /**
  * The memory port over Postgres. One tenant transaction per call (no user in the session: this is the pipeline's own read), then the
- * returned entries get `last_recalled_at` through `memory_mark_recalled` (migration 0806).
+ * returned entries get `last_recalled_at` through `memory_mark_recalled` (migration 0806). The item part also carries the item's own records
+ * (D#601 MEM-8b): its applied run notes (at most 5, newest first) and its latest completed cloud handoff note, after the item's approved entries.
  */
-export function createMemoryPort(pool: Pool): MemoryPort {
+export function createMemoryPort(pool: Pool, options: { onSkip?: (s: RecallSkip) => void } = {}): MemoryPort {
+  const onSkip = options.onSkip ?? ((): void => undefined);
   return {
-    recall: async ({ accountId, repoId, workItemId, role, slot }) => {
+    recall: async ({ accountId, repoId, workItemId, role, runId, slot }) => {
       if (slot !== "stable" && slot !== "item") return [];
-      if (!UUID_RE.test(accountId) || !UUID_RE.test(repoId) || (workItemId !== undefined && !UUID_RE.test(workItemId))) return [];
+      if (!UUID_RE.test(accountId) || !UUID_RE.test(repoId) || (workItemId !== undefined && !UUID_RE.test(workItemId)) || (runId !== undefined && !UUID_RE.test(runId))) return [];
       if (slot === "item" && workItemId === undefined) return [];
       return withTenant(pool, accountId, async (client) => {
         const ctx = (
@@ -183,12 +261,23 @@ export function createMemoryPort(pool: Pool): MemoryPort {
           itemOpen ? workItemId : null,
           itemOpen ? rankingQueryOf(ctx.title, ctx.spec_body) : null,
         ]);
-        const itemChosen = selectWithinBudget(rankedBy(rows.filter((r) => r.scope === "item")), budget);
+        const receipts = receiptRows((await client.query<ReceiptRow>(RECEIPT_SQL, [accountId])).rows, onSkip);
+        // The item's own records, only while the item is open (closing it stops them, reopening brings them back: nothing is stored about that).
+        const sources: MemoryEntry[] = [];
+        if (itemOpen) {
+          const notes = (await client.query<{ id: string; author_kind: string; body: string }>(CORRECTION_SQL, [accountId, workItemId, runId ?? null])).rows;
+          for (const n of notes) sources.push(sourceEntry("correction", n.id, n.body, n.author_kind));
+          const handoff = (await client.query<{ id: string; body: string; exclude_run_id: string | null }>(HANDOFF_SQL, [accountId, workItemId])).rows[0];
+          if (handoff !== undefined && (runId === undefined || handoff.exclude_run_id !== runId)) sources.push(sourceEntry("handoff", handoff.id, handoff.body, "agent"));
+        }
+        const itemChosen = selectWithinBudget([...rankedBy(rows.filter((r) => r.scope === "item")), ...sources], budget);
         const chosen =
           slot === "item"
             ? itemChosen
-            : selectWithinBudget(rankedBy(rows.filter((r) => r.scope !== "item")), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
-        if (chosen.length > 0) await client.query("SELECT memory_mark_recalled($1::uuid[])", [chosen.map((e) => e.id)]);
+            : selectWithinBudget(rankedBy([...rows.filter((r) => r.scope !== "item"), ...receipts]), budget - (itemChosen.length === 0 ? 0 : bytesOf(renderMemorySlot(itemChosen, budget).text)));
+        // Only real entries are stamped: the item's own records are not rows of memory_entries.
+        const stamped = chosen.filter((e) => e.source === undefined).map((e) => e.id);
+        if (stamped.length > 0) await client.query("SELECT memory_mark_recalled($1::uuid[])", [stamped]);
         return chosen;
       });
     },

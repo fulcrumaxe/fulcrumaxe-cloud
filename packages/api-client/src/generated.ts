@@ -703,6 +703,12 @@ export interface Operations {
         name: string;
         version: number;
       }>;
+      item_sources: Array<{
+        kind: "correction" | "handoff";
+        id: string;
+        label: string;
+        cut: boolean;
+      }>;
       repo_map_version: (string) | (null);
     };
   };

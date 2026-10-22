@@ -31,5 +31,9 @@
     { "id": "0d2a41c7-7a0e-4a63-8d6b-4f4c0a1b2c33", "name": "Run the pg tests with the local harness", "version": 3 },
     { "id": "a91e5b08-1f7d-4c52-9a3e-6b7d8e9f0a12", "name": "Migrations are numbered in order", "version": 1 }
   ],
+  "item_sources": [
+    { "kind": "correction", "id": "5b3c7a10-2e4f-4d68-8a91-0c7e1f2a3b44", "label": "Correction 5b3c7a10", "cut": false },
+    { "kind": "handoff", "id": "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e21", "label": "Handoff note from run 8f1e2d3c", "cut": true }
+  ],
   "repo_map_version": "v1 · 3f9a1c07b2d4"
 }
