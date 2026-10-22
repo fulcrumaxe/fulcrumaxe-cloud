@@ -89,6 +89,21 @@ export interface BuildRunOutcome {
   failureReason?: string | null;
 }
 
+/** D#6 R-CHK-3: what the driver keeps of a check fix round: fixed words and a run id. `escalated` is the plan's fix-round limit (the item goes to Needs human). */
+export interface CheckFixOut {
+  status: "started" | "escalated" | "refused";
+  runId: string | null;
+  reason: string | null;
+}
+
+/** Starts the fix round that follows a build run whose approved check failed (`failureReason: check_failed`). */
+export async function checkFixBody(worker: Pick<AdvanceFacade, "advanceStartCheckFix"> | null, who: StepWho, failedRunId: string): Promise<CheckFixOut> {
+  if (!worker) return { status: "refused", runId: null, reason: "worker_unavailable" };
+  const out = await worker.advanceStartCheckFix(who, failedRunId);
+  if (out.ok) return { status: "started", runId: out.runId, reason: null };
+  return { status: out.reason === "check_rounds_used" ? "escalated" : "refused", runId: null, reason: out.reason };
+}
+
 /** D#598 P1f-5c: the worker's settle for a paired sandbox build. Optional, so a worker built without it (or a test double) leaves the outcome as it always was. */
 export type BuildSettler = Partial<Pick<PlanePublish, "settlePairedBuild">>;
 

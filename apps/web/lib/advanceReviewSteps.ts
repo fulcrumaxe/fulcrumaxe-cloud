@@ -48,6 +48,7 @@ export type ReviewWorker = Pick<
   | "advanceRecordRound"
   | "advanceRecordMergeOnly"
   | "advanceStartFix"
+  | "advanceStartCheckFix"
   | "advanceMergeGate"
   | "advanceVerifiedReviewGate"
   | "advanceRecordEvent"

@@ -1,6 +1,6 @@
-import { DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type Job } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, DoneMessage, DoneReply, DoneRetryReply, SignedJobSchema, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { isRunnerMode } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, isRunnerMode } from "@fx/runner";
 import {
   RunnerHttpError,
   MAX_BODY_BYTES,
@@ -16,6 +16,7 @@ import {
 import { stopReply } from "./heartbeat.js";
 import { loadAcceptanceScope, pathInScope, type AcceptanceScope, type TenantQueryable } from "./acceptanceScope.js";
 import { RunPullRequestError, loadRunPullRequestText, type PullRequestRef, type PullRequestRepo, type RunPullRequestPort, type RunPullRequestText } from "./runPullRequest.js";
+import { normaliseCheck } from "./checkResult.js";
 import { verifyRunnerRequest } from "./verifyRunnerRequest.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -80,7 +81,7 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
     if (handed.kind === "completed") return doneReply({ outcome: "succeeded", failureReason: null, prNumber: null });
   }
 
-  const decided = await decide(deps, lease);
+  const decided = await decide(deps, lease, message.check);
   if (decided.kind === "retry") return retryReply();
 
   const finished = await asRunner(() =>
@@ -91,6 +92,8 @@ export async function doneRun(deps: RunnerCloudDeps, req: RunnerHttpRequest, run
       ...(message.agentOutput === undefined ? {} : { agentOutput: message.agentOutput }),
       // D#600 CX-1b: checked by the strict schema above; absent from an older runner, which the store records as `partial`.
       ...(message.context_ledger === undefined ? {} : { contextLedger: message.context_ledger }),
+      // D#6 R-CHK-3: recorded only when `decide` accepted it, that is when the run's own signed job carried a check.
+      ...(decided.check === undefined ? {} : { check: decided.check }),
     }),
   );
   if (finished.kind === "fenced") return stopReply(finished.reason);
@@ -108,7 +111,7 @@ const retryReply = (): RunnerHttpResponse => ({
   headers: { "retry-after": String(DONE_RETRY_AFTER_SECONDS) },
 });
 
-type Decision = { kind: "verdict"; verdict: RunnerDoneStored } | { kind: "retry" };
+type Decision = { kind: "verdict"; verdict: RunnerDoneStored; check?: DoneCheck } | { kind: "retry" };
 const verdictOf = (verdict: RunnerDoneStored): Decision => ({ kind: "verdict", verdict });
 const failed = (failureReason: NonNullable<RunnerDoneStored["failureReason"]>, extra: Partial<RunnerDoneStored> = {}): Decision =>
   verdictOf({ outcome: "failed", failureReason, prNumber: null, ...extra });
@@ -162,7 +165,10 @@ async function loadContext(client: TenantQueryable, i: { accountId: string; runI
 /** The change types that pass when the path is in scope (C23 section 3). A copy deletes nothing and a deletion reports its own path. */
 const PASSING_CHANGE_TYPES: ReadonlySet<string> = new Set(["ADDED", "MODIFIED", "CHANGED", "DELETED", "COPIED"]);
 
-async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: string; leaseGeneration: number }): Promise<Decision> {
+/** D#6 R-CHK-3: a check passes only on exit 0 inside its cap. No exit status (never started) and a kill at the cap both fail. */
+export const checkPassed = (check: DoneCheck): boolean => check.exit_code === 0 && !check.timed_out;
+
+async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: string; leaseGeneration: number }, runnerReported: DoneCheck | undefined): Promise<Decision> {
   const ctx = await withTenant(deps.appUserPool, i.accountId, (client) => loadContext(client, { accountId: i.accountId, runId: i.runId }));
   // A run that passed the fence has a row; if it vanished since, nothing here can be trusted.
   if (!ctx) return failed("internal_error");
@@ -177,7 +183,24 @@ async function decide(deps: RunnerCloudDeps, i: { accountId: string; runId: stri
   if (ctx.runtime !== "runner" || !isRunnerMode(ctx.executionMode) || !ctx.repo || !ctx.job) return failed("internal_error");
   const port = deps.pullRequests;
   if (!port) throw new RunnerHttpError(503, "not_configured", "the runner API has no GitHub access configured");
-  return judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)));
+  // D#6 R-CHK-3 (C47): the check is judged first, from the run's own signed job and the runner's report, never from `agentOutput`. A job that carried a check and a `done` with no
+  // result cannot be told from a check nobody ran, so it is not judged either way (`internal_error`: no fix round is spent on a runner that skipped the step). A result for a job that
+  // carried no check is not the cloud's to record. A failed check ends the run `check_failed` BEFORE GitHub is asked anything: no commit test, no scope test, no pull request.
+  let reported = runnerReported;
+  if (ctx.job.check !== undefined) {
+    if (reported === undefined) return failed("internal_error");
+    // What is stored is the normalised result; a field outside the contract fails the check whatever the exit status said (it is never a pass).
+    const norm = normaliseCheck(reported);
+    if (norm.outOfContract !== null || !checkPassed(norm.check)) {
+      // The runner pushed the work to the run branch before reporting; recording it (with no pull request) is what lets the fix round continue from its tip.
+      const branch = branchOf(ctx.job, i);
+      return { ...(failed("check_failed", RUNNER_RUN_BRANCH.test(branch) ? { branch } : {}) as Extract<Decision, { kind: "verdict" }>), check: norm.check };
+    }
+    reported = norm.check;
+  }
+  const judged = await judgeRun(port, ctx, ctx.repo, ctx.job, i, deps.log ?? ((line) => console.warn(line)));
+  // A check that passed is recorded beside whatever the commit and scope tests decided.
+  return judged.kind === "verdict" && ctx.job.check !== undefined && reported !== undefined ? { ...judged, check: reported } : judged;
 }
 
 /** The `fx/<run>-g<generation>` branch a fresh run pushes, or a continuation's own branch (C25 section 1.2). */

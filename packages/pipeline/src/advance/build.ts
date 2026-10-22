@@ -536,7 +536,7 @@ export async function readStage(pool: Pool, accountId: string, workItemId: strin
  * HO-2b) are the two ways a move of a running run to the other side can end with nothing to continue: the item already had ten continuations,
  * or the new run could not start. In both the work is saved on the run's branch.
  */
-export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached"] as const;
+export const BUILD_FAILURE_CODES = ["run_failed", "run_timed_out", "run_cancelled", "run_killed_spend", "run_refused_spend", "run_missing", "no_pull_request", "wait_timeout", "runner_lost", "runner_usage_limit", "work_item_ceiling", "handoff_failed", "push_cap_reached", "check_rounds_used"] as const;
 export type BuildFailureCode = (typeof BUILD_FAILURE_CODES)[number];
 
 export type BuildFailureResult = { status: "recorded"; stage: "needs_human" } | { status: "unchanged"; stage: string | null };

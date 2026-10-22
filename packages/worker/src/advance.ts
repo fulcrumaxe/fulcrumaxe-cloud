@@ -23,6 +23,7 @@ import { isContextSpill, type ContextAssembly, type ContextSection, type Context
 import type { RunStarter } from "./preview.js";
 import { readVerifiedReviewGate, type VerifiedReviewGate } from "./verifiedReviewGate.js";
 import type { SeatRequest, SeatResult } from "./seat.js";
+import { startCheckFixRound } from "./checkFix.js";
 import { RunActionInputError, type PerformResult } from "./runActions.js";
 
 /**
@@ -557,6 +558,12 @@ export interface AdvanceFacade {
    * records `fix_round_started` or `fix_round_refused`. A replay of the same approval and head returns the run it started.
    */
   advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart>;
+  /**
+   * D#6 R-CHK-3 (C47): the fix round that follows a build run whose approved check failed (`failed check_failed`, no pull request). Resumes that run's session on its recorded run branch.
+   * Refuses `check_rounds_used` once the plan's `maxFixRounds()` rounds have been spent in this run's `parent_run_id` chain (a count per chain, not per item: a later "Build again" starts a new chain; the driver then ends the item in Needs human), `already_running`, `not_check_failed`.
+   * A replay returns the run it started.
+   */
+  advanceStartCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart>;
   /**
    * D#483 S5-k1d: the reviewer runs of one head and re-review round that really started (every run but a `refused_spend` one), newest per role. A restarted review
    * uses these runs and asks only for the roles that have none, because the key of a denied ask finds its own refused run again and must never be replayed.
@@ -1332,6 +1339,16 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     });
   }
 
+  async function advanceStartCheckFix(who: AdvanceStepWho, failedRunId: string): Promise<AdvanceRunStart> {
+    const review = deps.review;
+    if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
+    const bad = await guardStep(who);
+    if (bad) return { ok: false, reason: bad.reason ?? "refused" };
+    const out = await startCheckFixRound({ pool: runnerPool, registry: deps.registry, resume: review.resume, resolveRunSeat: deps.resolveRunSeat }, who, failedRunId);
+    console.info(JSON.stringify({ event: "advance.check_fix", work_item_id: who.workItemId, failed_run_id: failedRunId, started: out.ok, reason: out.ok ? null : out.reason }));
+    return out;
+  }
+
   async function advanceStartFix(who: AdvanceStepWho, req: AdvanceFixRequest): Promise<AdvanceRunStart> {
     const review = deps.review;
     if (!review || !deps.registry) return { ok: false, reason: "resume_unavailable" };
@@ -1717,6 +1734,7 @@ export function createAdvanceModule(runnerPool: Pool, deps: AdvanceModuleDeps): 
     advanceRecordRound,
     advanceRecordMergeOnly,
     advanceStartFix,
+    advanceStartCheckFix,
     advanceReviewRuns,
     advanceMergeGate,
     advanceVerifiedReviewGate,

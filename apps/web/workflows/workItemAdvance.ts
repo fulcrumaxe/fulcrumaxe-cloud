@@ -6,7 +6,7 @@ import { openInstallationHttp } from "../lib/github/installationHttp";
 import { publishLightSpecBody, startLightSpecBody, type LightPublished } from "../lib/advanceLightSteps";
 import { publishRespecBody, startRespecBody, type RespecPublished } from "../lib/advanceRespecSteps";
 import { loadBody, runOutcomeBody, startClassifyBody, triageBody, type ClassifyOutcome, type LoadedAdvance, type TriageLoaded } from "../lib/advanceSteps";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, checkFixBody, type CheckFixOut, decisionBody, panelBody, specBody, stageBody, type BuildRunOutcome, type StepOutcome } from "../lib/advanceStageSteps";
 import {
   cancelBody,
   eventBody,
@@ -114,6 +114,8 @@ const CLASSIFY_WAIT_MS = 15 * 60_000;
 const BUILD_POLL_MS = 60_000;
 /** The run's own ceiling is 240 minutes and its watchdog adds five; the workflow gives up a little after that. */
 const BUILD_WAIT_MS = 250 * 60_000;
+/** D#6 R-CHK-3: a hard stop on check fix rounds in one driver run, above any `maxFixRounds()` the plan sets. The worker is what enforces the plan's limit. */
+const CHECK_FIX_ROUNDS_CEILING = 20;
 /** After a run that succeeded, how long to wait for the pull request to reach the item (the webhook is a moment behind). */
 const PR_GRACE_POLL_MS = 20_000;
 const PR_GRACE_POLLS = 9;
@@ -205,6 +207,12 @@ export async function advanceBuildStep(accountId: string, userId: string, workIt
 export async function advanceBuildOutcomeStep(accountId: string, runId: string): Promise<BuildRunOutcome> {
   "use step";
   return buildOutcomeBody(await getWorker(), accountId, runId);
+}
+
+/** D#6 R-CHK-3: the fix round after a build run whose approved check failed. */
+export async function advanceCheckFixStep(accountId: string, userId: string, workItemId: string, haltEpoch: number, failedRunId: string): Promise<CheckFixOut> {
+  "use step";
+  return checkFixBody(await getWorker(), { accountId, userId, workItemId, haltEpoch }, failedRunId);
 }
 
 export async function advanceStageStep(accountId: string, workItemId: string): Promise<string | null> {
@@ -774,6 +782,30 @@ async function buildPhase(args: AdvanceStartArgs, pinned: number | null): Promis
       }
     }
     break;
+  }
+  // D#6 R-CHK-3 (C47): a run whose approved check failed has no pull request, and its work is on the run branch. Each fix round resumes it and is waited for like the build;
+  // the worker refuses a round past the plan's `maxFixRounds()` (`escalated`), and the item then goes to Needs human. Bounded here as well, so the loop cannot run on.
+  for (let round = 1; round <= CHECK_FIX_ROUNDS_CEILING && outcome.done && outcome.status === "failed" && outcome.failureReason === "check_failed"; round++) {
+    const fix = await advanceCheckFixStep(accountId, userId, workItemId, args.haltEpoch, outcome.tailRunId);
+    if (fix.status === "escalated") {
+      const recorded = await advanceBuildFailedStep(accountId, workItemId, outcome.tailRunId, "check_rounds_used");
+      await buildStopped(args, outcome.tailRunId, "build_check_rounds_used");
+      await advanceLogStep("advance.failed", { work_item_id: workItemId, run_id: runId, at: "check_fix", reason: "check_rounds_used", recorded: recorded.status });
+      return { status: "failed", detail: "build_check_rounds_used" };
+    }
+    if (fix.runId === null) break;
+    runId = fix.runId;
+    await advanceLogStep("advance.check_fix_started", { work_item_id: workItemId, run_id: runId, round });
+    waited = 0;
+    pendingWaited = 0;
+    outcome = await advanceBuildOutcomeStep(accountId, runId);
+    while (!outcome.done && waited < BUILD_WAIT_MS && pendingWaited < RUNNER_PENDING_CEILING_MS) {
+      const queued = outcome.queuedOnRunner;
+      await sleep(BUILD_POLL_MS);
+      if (queued) pendingWaited += BUILD_POLL_MS;
+      else waited += BUILD_POLL_MS;
+      outcome = await advanceBuildOutcomeStep(accountId, runId);
+    }
   }
   if (!outcome.done) {
     // The wait ran out. The run must not keep going (and spending) behind a card that says Needs human.
