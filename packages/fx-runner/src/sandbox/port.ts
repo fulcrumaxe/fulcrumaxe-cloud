@@ -45,6 +45,8 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   excludes?: readonly string[];
   /** D#600 CX-4b: this run's spill directory. The agent's file tools may read it (and nothing else outside the workspace); it is also passed in `extraReadPaths` for the shell sandbox. */
   spillDir?: string;
+  /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: the runner computes no context percentage for the run and delivers no note. */
+  contextWindowTokens?: number;
   limits?: Partial<{ maxTurns: number; maxModelCalls: number; maxRunMs: number; meteringSilenceMs: number }>;
   onEvent: (event: NormalizedEvent) => void | Promise<void>;
 }

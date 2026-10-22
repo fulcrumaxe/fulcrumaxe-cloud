@@ -20,7 +20,7 @@ const SANDBOX_MARGIN_MS = 60_000;
 export const CHECKPOINT_MAX_TURN_MS = 300_000;
 
 export interface CheckpointTurnInput {
-  job: Pick<Job, "run_id" | "role" | "role_card" | "model_hint">;
+  job: Pick<Job, "run_id" | "role" | "role_card" | "model_hint"> & Partial<Pick<Job, "context_window">>;
   /** The port the run itself used (with the job's read grants and allowances), so the resume sees what the first turn saw. */
   sandbox: SandboxPort;
   credentials: CredentialMode;
@@ -51,6 +51,7 @@ export async function runCheckpointTurn(input: CheckpointTurnInput): Promise<Che
     prompt: CHECKPOINT_PROMPT,
     model,
     workdir: input.workspace,
+    ...(job.context_window === undefined ? {} : { contextWindowTokens: job.context_window }),
     capUsd: 0, // the runner settles no money
     networkPolicy: [{ host: MODEL_HOST, purpose: "model" }],
     env: cleanEnv(input.credentials, input.envOptions),

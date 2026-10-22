@@ -1,3 +1,4 @@
+import { CURRENT_PROTOCOL_VERSION } from "@fulcrumaxe/runner-protocol";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -73,7 +74,7 @@ describe("a runner run's running time as the workflow reads it [pg]", { timeout:
     const pending = await m.advanceRunOutcome(a.accountId, started.runId);
     expect(pending).toMatchObject({ status: "pending", done: false, runtime: "runner", runningMs: null });
 
-    const runnerId = await insertRunner(admin, a.accountId, a.userId, { credentialMode: "api_key" });
+    const runnerId = await insertRunner(admin, a.accountId, a.userId, { credentialMode: "api_key", protocolVersion: CURRENT_PROTOCOL_VERSION });
     await admin.query("UPDATE runners SET allowed_repo_ids = $2::uuid[], allowed_roles = '{}' WHERE id = $1", [runnerId, [a.repoId]]);
     const claims = createRunnerClaimFacade(writerPool, { visibility, randomBetween: (min) => min });
     const claimed = await claims.claimRunnerRun({ accountId: a.accountId, runnerId });

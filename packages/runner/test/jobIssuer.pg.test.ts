@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WINDOW_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, trimmedMarker, REVIEW_JOB_ROLES, RUNNER_ELIGIBLE_ROLES, canonicalJson, jobDigestMismatches, sha256Text, verifyJob, type Job } from "@fulcrumaxe/runner-protocol";
 import type { ExecutionRun } from "../src/executionTarget.js";
 import { toolsForRole } from "../src/agentConfig.js";
 import { JobIssueError, createJobIssuer, createJobSigner, createPgJobContext, roleToolsDigest, type ContinuationBasePort, type JobContextPort } from "../src/targets/jobIssuer.js";
@@ -9,6 +9,10 @@ import { RUNNER_DISPATCH_BASE_KIND, insertAgentRun } from "../src/runStatusWrite
 import { seedAccount, seedMember, seedRepo, seedWorkItem } from "./helpers/seed.js";
 import { createFakeRunnerLimits, createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { pgHarness } from "./helpers/pgHarness.js";
+import { contextWindowTokensFor } from "@fx/spend";
+
+/** A model with no price-table entry, so no window figure: these jobs carry no `context_window` and keep only the floors each test is about (D#600 CX-6b). */
+const NO_WINDOW_MODEL = "windowless-model";
 
 /** D#6 R3b: the real JobIssuer, over a real database and the real definer. */
 describe("JobIssuer [pg]", () => {
@@ -54,15 +58,15 @@ describe("JobIssuer [pg]", () => {
     // executor child of an unpinned run is refused. The fixture's root runs are pinned the way a new build is.
     const pin = parentRunId ? undefined : (await db.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 ORDER BY version DESC LIMIT 1", [w.workItemId])).rows[0]?.id;
     await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, ...(pin ? { specVersionId: pin } : {}), role: role as never, runtime: "runner", executionMode: over.executionMode ?? "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId, ...(headSha ? { headSha } : {}) });
-    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
+    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: role as never, product: "team", repoId: w.repoId, headSha, roleCard: CARD, prompt, model: NO_WINDOW_MODEL, capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
-  function issuer(over: { visibility?: "private" | "public" | "unknown" | "throw"; context?: JobContextPort; base?: ContinuationBasePort | null } = {}) {
+  function issuer(over: { visibility?: "private" | "public" | "unknown" | "throw"; context?: JobContextPort; base?: ContinuationBasePort | null; window?: ((model: string) => number | undefined) | null } = {}) {
     const visibility = createFakeVisibility(over.visibility ?? "private");
     const base = over.base === undefined ? { headOid: async () => "a".repeat(40) } : over.base;
     return {
       visibility,
-      issuer: createJobIssuer({ pool: db.runWriterPool, signer, visibility, context: over.context ?? createPgJobContext(db.runWriterPool), ...(base ? { continuationBase: base } : {}), now: () => NOW, newId: () => "7b9d1c6e-4f0a-4c53-9a58-2f0d5b6c3a11" }),
+      issuer: createJobIssuer({ pool: db.runWriterPool, signer, visibility, context: over.context ?? createPgJobContext(db.runWriterPool), ...(over.window === null ? {} : { contextWindowTokensFor: over.window ?? contextWindowTokensFor }), ...(base ? { continuationBase: base } : {}), now: () => NOW, newId: () => "7b9d1c6e-4f0a-4c53-9a58-2f0d5b6c3a11" }),
     };
   }
 
@@ -105,7 +109,7 @@ describe("JobIssuer [pg]", () => {
       continues: null,
       review: { head_sha: run.headSha },
       branch_prefix: "fx/",
-      model_hint: "haiku-4.5",
+      model_hint: NO_WINDOW_MODEL,
       issued_at: NOW.toISOString(),
       expires_at: new Date(NOW.getTime() + 72 * 3600_000).toISOString(),
       key_id: "job-key-1",
@@ -747,6 +751,40 @@ describe("JobIssuer [pg]", () => {
       const context: JobContextPort = { load: async (r, o) => ({ ...(await real.load(r, o)), sandboxAllowances: { entries: [{ kind: "domain", value: "*.example.com", access: "connect", reason: "x" }], command_timeout_s: 60 } }) };
       expect(await codeOf(issuer({ context }).issuer.issue({ run }))).toBe("sandbox_allowances_invalid");
       expect(await stored(run.id)).toBeNull();
+    });
+  });
+
+  describe("a job carries the model's context window (D#600 CX-6b)", () => {
+    const rowOf = async (id: string) => (await db.admin.query<{ job_signed: unknown; min_protocol_version: number | null }>("SELECT job_signed, min_protocol_version FROM agent_runs WHERE id = $1", [id])).rows[0]!;
+
+    it("signs the price table's window into the job and gates the job to a runner that reads it", async () => {
+      const w = await world();
+      const run = { ...(await runnerRun(w, "executor")), model: "haiku-4.5" };
+      await issuer().issuer.issue({ run });
+      const row = await rowOf(run.id);
+      const job = verifyJob(row.job_signed, { "job-key-1": publicKey }, { now: NOW });
+      expect(job.context_window).toBe(200_000);
+      expect(row.min_protocol_version).toBe(CONTEXT_WINDOW_JOB_MIN_PROTOCOL);
+    });
+
+    it("a lookup that throws, or no lookup wired, gives a job with no window and does not fail the issue", async () => {
+      const w = await world();
+      for (const window of [() => { throw new Error("plan data missing"); }, null]) {
+        const run = { ...(await runnerRun(w, "executor")), model: "haiku-4.5" };
+        await issuer({ window }).issuer.issue({ run });
+        const row = await rowOf(run.id);
+        expect("context_window" in (row.job_signed as { job: object }).job).toBe(false);
+        expect(row.min_protocol_version).toBeNull();
+      }
+    });
+
+    it("a model with no window figure gets no key and no gate: no default window is invented", async () => {
+      const w = await world();
+      const run = await runnerRun(w, "executor");
+      await issuer().issuer.issue({ run });
+      const row = await rowOf(run.id);
+      expect("context_window" in (row.job_signed as { job: object }).job).toBe(false);
+      expect(row.min_protocol_version).toBeNull();
     });
   });
 });

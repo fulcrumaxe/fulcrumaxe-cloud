@@ -1,7 +1,7 @@
 import { NotAPlainSegment, segmentUnder } from "../../job/plainSegment.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { ContextLedgerCapture, SESSION_ID_PATTERN, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARN_PCT, ContextLedgerCapture, SESSION_ID_PATTERN, contextNoteLine, contextPct, disabledToolsFor, normalizeMessage, type AgentHandle, type AgentRuntime, type LocalOnlyEvent, type StartOptions } from "@fulcrumaxe/runner-protocol";
 import { assertEnabledSandbox, type ProtectedPaths } from "../../sandbox/sandboxSettings.js";
 import { SUBSCRIPTION_TOKEN_VAR, cleanEnv, type CleanEnvOptions, type CredentialMode } from "../../job/cleanEnv.js";
 import { UnknownRoleError, roleToolsFor } from "../../job/roleTools.js";
@@ -14,7 +14,7 @@ import { initCredentialMatches, isInitLine } from "./credentialCheck.js";
 import { MIN_CLAUDE_VERSION, versionSupported, type BinarySource } from "./pin.js";
 import { EngineRefusal } from "./refusal.js";
 import { DEFAULT_KILL_GRACE_MS, OWN_PROCESS_GROUP, terminateGroup } from "./processGroup.js";
-import { recordSession } from "./session.js";
+import { readSessionIndex, recordSession } from "./session.js";
 import { writeJobFiles } from "./settingsFile.js";
 import { LineBuffer, createRunLog, nearLimitOf, projectLocalOnly, type StageMarks } from "./stream.js";
 
@@ -72,7 +72,7 @@ export interface RunOutcome {
 }
 
 /** The start options this engine reads. `resumeSessionId` is set by the session planner when a workspace and session are both still there. */
-export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string };
+export type EngineStartOptions = StartOptions & { resumeSessionId?: string; /** D#600 CX-5c: paths and globs kept out of context; written as deny entries on every start and resume of the job. */ excludes?: readonly string[]; /** D#600 CX-4b: the run's spill directory; the file tools may read it. */ spillDir?: string; /** D#600 CX-6b: the model's context window in tokens, from the job. Absent: no context percentage is computed and no note is ever delivered. */ contextWindowTokens?: number };
 
 /** How a run ended: the promise every handle this engine returns carries. */
 export function outcomeOf(handle: AgentHandle): Promise<RunOutcome> {
@@ -152,7 +152,11 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
     child.stdin?.on("error", () => {
       // fx-swallow-ok: the agent exiting before it read its prompt is reported through its exit, not here
     });
-    child.stdin?.end(opts.prompt);
+    // D#600 CX-6b: a command that resumes a session starts with one line when that session's last command ended at or above CONTEXT_WARN_PCT of the window, once per value. The figure is the
+    // runner's own (computed from the stream's usage, kept in the session index it already writes); no hook runs, and nothing is sent anywhere.
+    const known = resumeSessionId === undefined ? undefined : readSessionIndex(config.sessionsFile)[resumeSessionId];
+    const notePct = known?.contextPct !== undefined && known.contextPct >= CONTEXT_WARN_PCT && known.notedPct !== known.contextPct ? known.contextPct : undefined;
+    child.stdin?.end(notePct === undefined ? opts.prompt : `${contextNoteLine(notePct)}\n\n${opts.prompt}`);
 
     const handle: AgentHandle = { runId: opts.runId, child, options: opts };
     handle.done = new Promise<RunOutcome>((resolve) => {
@@ -242,7 +246,9 @@ export function createClaudeEngine(config: EngineConfig): AgentRuntime & { inter
           const limited = config.limits !== undefined && code !== 0 && !mismatch && !noInit && !modeForced ? await config.limits.exceeded(opts.runId).catch(() => false) : false;
           if (sessionId !== undefined && !mismatch && !noInit && !modeForced) {
             try {
-              await recordSession(config.sessionsFile, sessionId, workdir);
+              const windowTokens = (opts as EngineStartOptions).contextWindowTokens;
+              const pctNow = windowTokens === undefined ? undefined : contextPct(ledger.lastContextTokens(), windowTokens);
+              await recordSession(config.sessionsFile, sessionId, workdir, { contextPct: pctNow, notedPct: pctNow !== undefined && pctNow < CONTEXT_WARN_PCT ? undefined : notePct ?? known?.notedPct });
             } catch {
               // fx-swallow-ok: a session that could not be indexed is only not resumable later; the outcome is unchanged
             }
