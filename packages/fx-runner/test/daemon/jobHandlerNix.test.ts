@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -71,7 +71,7 @@ const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise
 const capture = (command: string, args: readonly string[], env: Record<string, string>, timeoutMs: number) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048);
 const nixCalls = (): string[] => (existsSync(path.join(root, "calls.log")) ? readFileSync(path.join(root, "calls.log"), "utf8").trim().split("\n") : []);
 
-function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; details?: NixDetail[]; sources?: string[] } = {}) {
+function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; details?: NixDetail[]; sources?: string[]; kept?: string } = {}) {
   const key = generateRunnerKey();
   cloud.trust(key.publicJwk);
   const client = createRunnerClient({ origin: cloud.origin, key, now: () => new Date(), fetchFn: fetch });
@@ -83,11 +83,15 @@ function rig(over: { source?: NixSource | (() => never); skips?: NixSkip[]; deta
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
       return { handle, hookFired: Promise.resolve(event) };
     },
-    resume: () => { throw new Error("not used"); },
+    resume: (handle, _sessionId, prompt, opts) => {
+      starts.push({ ...opts, prompt } as StartDetachedOptions);
+      const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
+      return { handle, hookFired: Promise.resolve(event) };
+    },
     async extendTimeout() {}, async stop() {}, async deleteSandbox() {}, async measure() { return []; }, async readCounters() { return undefined; }, async writeFiles() {}, async runCommand(): Promise<never> { throw new Error("not used"); }, async sandboxExists() { return true; },
   };
-  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => ({ kind: "fresh", branch: null }), defaultModel: "sonnet" };
-  const git = fakeGitPath({ prepare: async () => ({ base: BASE }) });
+  const run: Omit<RunJobDeps, "sandbox" | "ledger"> = { workspaces: createWorkspaceStore(path.join(root, "work")), credentials: { mode: "subscription" }, planSession: () => (over.kept === undefined ? { kind: "fresh", branch: null } : { kind: "resume", sessionId: "s1", workspace: over.kept }), defaultModel: "sonnet" };
+  const git = fakeGitPath({ resume: async () => ({ base: BASE }), prepare: async () => ({ base: BASE }) });
   const sources: string[] = over.sources ?? [];
   git.nixSource = async (_job, sha) => {
     sources.push(sha);
@@ -210,6 +214,53 @@ describe("D#6 R7c: the dev shell step in the job handler", () => {
     expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never })))).status).toBe("completed");
     expect(skips).toEqual(["nix_failed"]);
     expect(nixCalls()).toEqual([]);
+  });
+  describe("a fix round that resumes its kept session", () => {
+    const continues = { parent_run_id: "33333333-3333-4333-8333-333333333333", session_id: "s1", branch: RUN_BRANCH };
+    const keptDir = (): string => {
+      const kept = path.join(root, "work", "kept");
+      mkdirSync(kept, { recursive: true });
+      return kept;
+    };
+
+    it("with signed allowances gets the same filtered shell as a fresh start, built at the resumed head", async () => {
+      const r = rig({ kept: keptDir() });
+      const result = await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never, continues })));
+      expect(result.status).toBe("completed");
+      expect(r.sources).toEqual([BASE]);
+      expect(r.starts).toHaveLength(1);
+      expect(r.starts[0]!.allowances?.nixEnv).toEqual({ PATH: `${STORE}-node/bin`, CC: "gcc" });
+      expect(nixCalls().filter((line) => line.includes("print-dev-env"))).toHaveLength(1);
+    });
+
+    it("without signed allowances still never starts nix", async () => {
+      const r = rig({ kept: keptDir() });
+      expect((await r.handle(await r.claim(jobFor({ continues })))).status).toBe("completed");
+      expect(nixCalls()).toEqual([]);
+      expect(r.sources).toEqual([]);
+      expect(r.starts[0]!.allowances).toBeUndefined();
+    });
+
+    it("reports a skip the way a fresh start does and still runs with its allowances", async () => {
+      const skips: NixSkip[] = [];
+      const r = rig({ kept: keptDir(), source: { kind: "not_default_branch" }, skips });
+      expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never, continues })))).status).toBe("completed");
+      expect(skips).toEqual(["nix_not_default_branch"]);
+      expect(nixCalls()).toEqual([]);
+      expect(r.starts[0]!.allowances).toMatchObject({ entries: ENTRIES, commandTimeoutS: 600 });
+      expect(r.starts[0]!.allowances?.nixEnv).toBeUndefined();
+    });
+
+    it("builds a head off the default branch from its merge-base and names the detail", async () => {
+      const details: NixDetail[] = [];
+      const r = rig({ kept: keptDir(), details, source: { kind: "flake", mirrorDir: "/cache/mirrors/m.git", lock: LOCK, fromDefault: { rev: MERGE_BASE, flakeChanged: true } } });
+      expect((await r.handle(await r.claim(jobFor({ sandbox_allowances: { entries: ENTRIES, command_timeout_s: 600 } as never, continues })))).status).toBe("completed");
+      const argv = nixCalls().filter((line) => line.includes("print-dev-env"));
+      expect(argv[0]).toContain(`?rev=${MERGE_BASE}`);
+      expect(argv[0]).not.toContain(BASE);
+      expect(details).toEqual(["nix_from_default_branch", "nix_flake_changed"]);
+      expect(r.starts[0]!.prompt).toContain(NIX_FLAKE_CHANGED_NOTE);
+    });
   });
 });
 
