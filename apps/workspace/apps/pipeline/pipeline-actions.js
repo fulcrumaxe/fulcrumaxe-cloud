@@ -671,6 +671,17 @@ export const BEING_CHECKED_SENTENCE = "You can approve this once it's been check
 export const RETRY_SENTENCE = "The check didn't finish. We'll try again at the next check.";
 export const NO_EVIDENCE_SENTENCE = "No evidence was found for this proposal.";
 export const NO_CLAIMS_SENTENCE = "There was nothing to check in this proposal.";
+// The two sentences above are for a check that finished. While there is no finished check, the detail says so instead.
+export const DETAIL_PENDING_SENTENCE = "Not checked yet. Claims and evidence show here once the check is done.";
+export const DETAIL_FAILED_SENTENCE = "The check didn't finish, so there are no claims or evidence to show.";
+
+/** The line for a proposal whose check has not produced a result (pending, check failed, not checked); "" once a check has finished. */
+export function unfinishedCheckLine(p) {
+  if (p.verification === "pending") return DETAIL_PENDING_SENTENCE;
+  if (p.verification === "check_failed") return DETAIL_FAILED_SENTENCE;
+  if (p.verification === "not_checked") return NOT_CHECKED_SENTENCE;
+  return "";
+}
 export const CLAIM_VERDICTS = {
   supported: "Confirmed in the repository.",
   unverifiable: "Couldn't be checked against the repository.",
@@ -1222,9 +1233,12 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     if (!d || d.status === "loading") return wrap(h("p", { class: "pl-inbox-line", role: "status", "data-testid": "pl-inbox-detail-loading" }, "Loading…"));
     if (d.status === "error")
       return wrap(h("p", { role: "alert", "data-testid": "pl-inbox-detail-error" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": p.id + ":retry", onClick: () => void fetchDetail(p) }, "Try again"));
+    const unfinished = unfinishedCheckLine(p);
+    // Nothing to list and no finished check: one line about the check, not "nothing to check" / "no evidence". Rows that do exist are still shown.
+    if (unfinished && !d.claims.length && !d.evidence.length) return wrap(h("p", { class: "pl-inbox-line", "data-testid": "pl-check-status", "data-verification": str(p.verification) }, unfinished));
     const claims = d.claims.length
       ? h("ul", { class: "pl-claims", "data-testid": "pl-claims" }, d.claims.map((c) => h("li", { class: "pl-claim", "data-testid": "pl-claim", "data-verdict": str(c.verdict) }, h("span", { class: "pl-claim-text" }, c.text), claimVerdict(c) ? h("span", { class: "pl-claim-verdict", "data-testid": "pl-claim-verdict" }, claimVerdict(c)) : null)))
-      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-claims" }, NO_CLAIMS_SENTENCE);
+      : unfinished ? null : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-claims" }, NO_CLAIMS_SENTENCE);
     const evidence = d.evidence.length
       ? h("ul", { class: "pl-evidence", "data-testid": "pl-evidence" }, d.evidence.map((e) => {
           const w = evidenceLabel(e);
@@ -1235,7 +1249,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
             w.commit ? [" ", h("span", { "data-testid": "pl-evi-commit" }, w.commit)] : null,
             str(e.excerpt) ? h("p", { class: "pl-ins-text pl-evi-excerpt", "data-testid": "pl-evi-excerpt" }, e.excerpt) : null);
         }))
-      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-evidence" }, NO_EVIDENCE_SENTENCE);
+      : unfinished ? null : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-evidence" }, NO_EVIDENCE_SENTENCE);
     return wrap(claims, evidence);
   }
 
