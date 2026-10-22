@@ -126,6 +126,23 @@ describe("buildWorker (C15 / C26 / C59 §5)", () => {
     expect(worker.targetDeps.githubForward).toBe(worker.githubForward);
   });
 
+  it("D#598 P8c-2a: answerDecisionAsk connects on the receipt pool and no other, and a token principal is refused before any connection", async () => {
+    const connected: string[] = [];
+    const pools = fakePools();
+    for (const key of ["runnerPool", "platformOpsPool", "receiptPool"] as const) {
+      (pools[key] as unknown as { connect: () => Promise<never> }).connect = async () => {
+        connected.push(key);
+        throw new Error("stop here");
+      };
+    }
+    const worker = await buildWorker(options({ createPools: async () => pools }));
+    const principal = { accountId: "11111111-1111-4111-8111-111111111111", userId: "22222222-2222-4222-8222-222222222222" };
+    await expect(worker.answerDecisionAsk({ principal, askId: "x", choice: "deny" })).rejects.toThrow("stop here");
+    expect(connected).toEqual(["receiptPool"]);
+    await expect(worker.answerDecisionAsk({ principal: { ...principal, tokenId: "t1" }, askId: "x", choice: "deny" })).rejects.toMatchObject({ name: "AskAnswerError", status: 403, code: "session_required" });
+    expect(connected).toEqual(["receiptPool"]);
+  });
+
   it("the operator exception: the target is handed a decision over the worker's own env, and only an admitted account gets the token", async () => {
     const OPERATOR = "11111111-1111-4111-8111-111111111111";
     const CUSTOMER = "22222222-2222-4222-8222-222222222222";

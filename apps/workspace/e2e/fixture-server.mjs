@@ -312,6 +312,15 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#598 P8c-2a: opening the Needs you app also lists the decision asks (GET only, the contract fixture; needs-you.spec.ts mocks the answers).
+    if (urlPath === "/api/v1/decision-asks" && req.method === "GET") {
+      readFile(join(V1_FIXTURES_DIR, "listDecisionAsks", "200-ok.json")).then(
+        (body) => res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(body),
+        () => res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }))
+      );
+      return;
+    }
+
     // D#598 P0a: the real API refuses ANY body on the setup-request done and withdraw routes (packages/api/src/handler.ts: 400
     // invalid_request, "this route does not accept a request body"). This fake does the same, so a client that sends "{}" fails here as it
     // does on the real API. Without a body it answers with the contract fixture.

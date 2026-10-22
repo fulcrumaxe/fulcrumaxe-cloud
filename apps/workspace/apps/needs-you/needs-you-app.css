@@ -26,6 +26,9 @@
 .ny-state { font-weight: 600; }
 /* Agent text: plain text, line breaks kept, long words and addresses wrap instead of widening the page. */
 .ny-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ny-proposed { font-weight: 600; overflow-wrap: anywhere; }
+/* The agent's reason, quoted: a bar and an indent carry the quotation, the text keeps the theme's own colour. */
+.ny-quote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border, rgba(26, 255, 128, 0.3)); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ny-sentence { overflow-wrap: anywhere; font-weight: 600; }
 .ny-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .ny-btn {

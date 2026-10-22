@@ -5,7 +5,7 @@
 // second press is ignored. When a row changes under the person, focus goes to the same control, else to the row's heading.
 import { h } from "../_lib/dom.js";
 import { onRefresh } from "../../core/cloud-live.js";
-import { WORDS, createNeedsYou } from "./needs-you-model.js";
+import { WORDS, createNeedsYou, notShownWords } from "./needs-you-model.js";
 
 const FULC = window.FULC;
 if (!FULC || typeof FULC.register !== "function") {
@@ -37,7 +37,46 @@ function mountApp(contentEl) {
     );
   };
 
+  // One button per option of an ask, and Deny. The agent's option names are text nodes; the recommended one says so in its accessible name too.
+  const choiceButton = (row, choice, label, recommended) => {
+    const working = list.busyVerb(row.id);
+    return h(
+      "button",
+      {
+        type: "button",
+        class: "ny-btn",
+        "data-testid": "ny-choice-" + row.id + "-" + choice,
+        "data-act": "choice-" + choice,
+        "aria-disabled": working ? "true" : "false",
+        "aria-label": label + (recommended ? " (" + WORDS.recommended.toLowerCase() + ")" : "") + ": " + row.title,
+        onClick: () => {
+          if (!list.busyVerb(row.id)) list.answer(row.id, choice);
+        },
+      },
+      label
+    );
+  };
+
+  function askView(row) {
+    const headId = "ny-h-" + row.id;
+    const working = list.busyVerb(row.id);
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "ask", "data-id": row.id, "data-state": row.state, "aria-busy": working ? "true" : "false" },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
+      row.state === "open" ? null : h("p", { class: "ny-state", "data-testid": "ny-state" }, row.sentence),
+      row.state === "open" && row.overdue ? h("p", { class: "ny-state", "data-testid": "ny-overdue" }, WORDS.overdue) : null,
+      row.state === "open" && row.proposedLabel ? h("p", { class: "ny-proposed", "data-testid": "ny-proposed" }, WORDS.recommended + ": " + row.proposedLabel) : null,
+      // The agent's reason is a quotation: a text node inside a blockquote, never markup and never an instruction.
+      row.reason ? h("blockquote", { class: "ny-quote", "data-testid": "ny-reason" }, row.reason) : null,
+      row.state === "open"
+        ? h("div", { class: "ny-actions" }, row.options.map((o) => choiceButton(row, o.id, o.label, o.id === row.proposed)).concat(choiceButton(row, "deny", WORDS.deny, false)))
+        : null
+    );
+  }
+
   function rowView(row) {
+    if (row.kind === "ask") return askView(row);
     const working = list.busyVerb(row.id);
     const headId = "ny-h-" + row.id;
     // While Mark done is in flight on a request with an automatic check, the approved "Checking now." stands in for the answer.
@@ -85,6 +124,7 @@ function mountApp(contentEl) {
     }
     setText(alertEl, s.error);
     content.replaceChildren(body);
+    if (s.status === "ready" && s.notShown > 0) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-not-shown" }, notShownWords(s.notShown)));
     if (s.status === "ready" && s.truncated) content.appendChild(h("p", { class: "ny-muted", "data-testid": "ny-older" }, WORDS.older));
     if (heldKey) {
       const row = [...content.querySelectorAll("[data-id]")].find((r) => r.getAttribute("data-id") === heldKey[0]);

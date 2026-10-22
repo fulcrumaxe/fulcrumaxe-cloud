@@ -76,6 +76,8 @@ import { createStageResume, type StageResume } from "./stageResume.js";
 import { sweepSetupRequestChecks as runSetupRequestCheckSweep, type CheckSweepCounts } from "@fx/core/src/setup-requests/checkSweep.js";
 import { sweepBranchCleanups as runBranchCleanupSweep, type BranchCleanupCounts, type BranchCleanupGithub } from "./branchCleanup.js";
 import type { VercelEnvSource } from "@fx/core/src/setup-requests/checks.js";
+import { answerAsk, type AskAnswerResult } from "@fx/core/src/decisions/answer.js";
+import type { RunActionSignal } from "@fx/core/src/runActions/index.js";
 import { createFollowUpPorts } from "./runnerFollowUp.js";
 import { PREVIEW_ROLE, createPreviewModule, type PreviewFacade, type PreviewSeatSource } from "./preview.js";
 import { createRetryModule, type RetryFacade, type RetrySeatSource } from "./retry.js";
@@ -194,6 +196,12 @@ export interface Worker extends PlanePublish, RunActionFacade, RunnerLeaseFacade
    * merged paired items whose head still is the recorded one. `github` is the GitHub client opener (apps/web binds it); the signing key is read here. For the cron only.
    */
   sweepBranchCleanups(input: { github: BranchCleanupGithub }): Promise<BranchCleanupCounts>;
+  /**
+   * D#598 P8c-2a: a person's answer to a decision ask. It runs on the worker's RECEIPT pool (the only login that can call the receipt and ask
+   * definers), which is never handed out: the caller passes the session principal and the choice, and gets the result or a thrown `AskAnswerError`.
+   * `signal` kicks the resume request the answer files; without it the run-action sweep finds the request anyway.
+   */
+  answerDecisionAsk(input: { principal: { accountId: string; userId: string; tokenId?: string }; askId: string; choice: string; signal?: RunActionSignal }): Promise<AskAnswerResult>;
   /** D#2 SANDBOX-REAPER-1b (C82): the per-account inventory, rebuilt from the provider's list and the run rows. Plain data in and out; for the cron only. */
   sandboxInventory(input: SandboxInventoryInput): Promise<SandboxInventoryResult>;
   close(): Promise<void>;
@@ -392,7 +400,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
       return result;
     };
     const runSandboxInventory = (input: SandboxInventoryInput): Promise<SandboxInventoryResult> => sandboxInventory({ pool: pools.runnerPool, port: sandboxPort }, input);
-    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github }), completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
+    return { ...planePublish, ...runActions, ...runnerLeases, ...runnerClaims, ...runnerDone, ...runnerGitTickets, ...runnerPlanePush, ...runnerLeaseSweep, sweepRunHandoffs: runHandoffs.sweepRunHandoffs, sweepParkedStages: stageResume.sweepParkedStages, sweepSetupRequestChecks: (input) => runSetupRequestCheckSweep({ pool: pools.runnerPool, envSource: input.envSource }), answerDecisionAsk: (input) => answerAsk({ pool: pools.receiptPool, principal: input.principal, ...(input.signal ? { signal: input.signal } : {}) }, { askId: input.askId, choice: input.choice }), sweepBranchCleanups: (input) => runBranchCleanupSweep({ pool: pools.runnerPool, signer: gitTicketSigner, github: input.github }), completeRunHandoff: runHandoffs.completeRunHandoff, completeHandoffOnDone: runHandoffs.completeHandoffOnDone, ...runnerQueue, ...runnerNotices, sweepInvariants: runInvariantTick, ...preview, ...retry, ...advance, ...resume, resolveRunSeat, sweepComputeSettle: runSweepComputeSettle, sweepSandboxReap: runSweepSandboxReap, sandboxInventory: runSandboxInventory, registry, pools, sandboxPort, githubForward, targetDeps, authorCheck, close: () => pools.close() };
   } catch (err) {
     await pools.close();
     throw err;
@@ -412,7 +420,7 @@ let instance: Promise<Worker> | undefined;
 export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
   if (instance) return instance;
   const mine: Promise<Worker> = buildWorker(options).then(
-    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, sweepBranchCleanups, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
+    ({ registry, resolveRunSeat, sweepComputeSettle, sweepSandboxReap, sandboxInventory: inventory, close, claimRunAction, settleRunAction, listDueRunActions, purgeRunActions, cancelRun, performCancelRun, performCancelWorkItem, failRunnerLeases, claimRunnerRun, heartbeatRunnerRun, ingestRunnerEvents, beginRunnerDone, finishRunnerDone, gitTicketContext, signGitTicket, planePushGrant, planePushPairing, planePushSettleGrant, planePushReportContext, planePushRecordReport, sweepRunnerLeases, sweepRunHandoffs, completeRunHandoff, completeHandoffOnDone, publishPairedChange, retryPublish, settlePairedBuild, openPublicPullRequest, sweepRunnerQueue, sweepRunnerNotices, sweepInvariants: runInvariants, sweepParkedStages, sweepSetupRequestChecks, answerDecisionAsk, sweepBranchCleanups, performStartPreview, previewReady, performRetryRun, performAdvanceWorkItem, performRespecWorkItem, performAmendSpec, performResumeDecision, advanceLoadItem, advanceStartRun, advanceRunOutcome, advanceTriage, advancePanel, advanceSpec, advanceBuild, advanceBuildFailed, advanceDecision, advancePrFound, advanceLightSpec, advanceRespec, advanceLoadReview, advanceLoadSpecText, advanceRecordRound, advanceRecordMergeOnly, advanceStartFix, advanceReviewRuns, advanceMergeGate, advanceVerifiedReviewGate, advanceRecordEvent, advanceCancel }) => {
       let closing: Promise<void> | undefined;
       return {
         registry,
@@ -453,6 +461,7 @@ export function createWorker(options: CreateWorkerOptions): Promise<Worker> {
         sweepInvariants: runInvariants,
         sweepParkedStages,
         sweepSetupRequestChecks,
+        answerDecisionAsk,
         sweepBranchCleanups,
         performStartPreview,
         previewReady,
