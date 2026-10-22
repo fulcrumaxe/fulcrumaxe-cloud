@@ -394,6 +394,7 @@ export const CLIENT_WINDOW_IDS: readonly string[] = [
   "runs",
   "site-review",
   "themes",
+  "vercel",
 ];
 
 const LITERAL_CODES: ReadonlySet<string> = new Set([...OWN_ERROR_CODES, ...STRIPE_ERROR_CODES, ...CLIENT_ERROR_CODES, CLIENT_ANONYMOUS_CODE]);

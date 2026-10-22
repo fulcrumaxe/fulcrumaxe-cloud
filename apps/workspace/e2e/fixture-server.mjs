@@ -219,6 +219,20 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#598 P8d-3b: opening the Vercel app reads the connection details; the other states are mocked in vercel.spec.ts.
+    if (urlPath === "/api/v1/vercel-connection/details" && req.method === "GET") {
+      readFile(join(V1_FIXTURES_DIR, "getVercelConnectionDetails", "200-not-connected.json")).then(
+        (body) => {
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(body);
+        },
+        () => {
+          res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }));
+        }
+      );
+      return;
+    }
+
     // D#37 WS-F3: opening the Repos app lists repos (same pattern as tokens; the rest is mocked in repos.spec.ts).
     if (urlPath === "/api/v1/repos" && req.method === "GET") {
       readFile(join(V1_FIXTURES_DIR, "listRepos", "200-page.json")).then(

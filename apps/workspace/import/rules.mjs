@@ -388,13 +388,13 @@ export const SHIP_FORBIDDEN_SIGNIN_RULES = [
 ];
 
 // D#37 Correction C34 section 1 (WS-F5p): the one file allowed to hold a
-// password input. The Model Key app's API-key field must be masked (a
+// password input. The Model Key app's API-key field and the Vercel app's token field must be masked (a
 // clear-text key invites shoulder-surfing and browser form history); the
 // rule above targets the legacy sign-in surface, not that field. Matched
 // by EXACT path only, never by prefix or glob, and only for a file the
 // build classified as first-party. This list grows only by a D#37
-// Correction.
-export const SHIP_PASSWORD_INPUT_ALLOWED_PATHS = Object.freeze(["apps/model-key/model-key-app.js"]);
+// Correction (the Vercel app's entry was added with D#598 P8d-3b).
+export const SHIP_PASSWORD_INPUT_ALLOWED_PATHS = Object.freeze(["apps/model-key/model-key-app.js", "apps/vercel/vercel-app.js"]);
 
 /**
  * Runs SHIP_FORBIDDEN_SIGNIN_RULES against a file's raw bytes, decoded

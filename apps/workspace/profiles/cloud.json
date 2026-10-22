@@ -1,6 +1,6 @@
 {
   "name": "cloud",
-  "app_modules": ["themes", "heritage", "developer", "repos", "runners", "model-key", "pipeline", "needs-you", "runs", "memory", "roles", "site-review", "budget-billing", "onboarding"],
+  "app_modules": ["themes", "heritage", "developer", "repos", "runners", "model-key", "pipeline", "needs-you", "runs", "memory", "roles", "site-review", "budget-billing", "vercel", "onboarding"],
   "excluded_themes": ["windows-aero", "ubuntu-gnome"],
   "default_theme": "classic-crt",
   "dock_order": [
@@ -14,6 +14,7 @@
     "roles",
     "site-review",
     "model-key",
+    "vercel",
     "budget-billing",
     "compute",
     "developer",
