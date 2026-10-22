@@ -286,6 +286,22 @@ export function stateFlags(data) {
   return out;
 }
 
+/**
+ * D#598 P8c-3: the pause line for an item a setup request holds. The server sends `setup_pause` only while a request holds the item, with the
+ * request's own status sentence; the line shows that sentence as text. A request with no sentence (a withdrawn one) gets a generic line, and a
+ * malformed `setup_pause` draws nothing: the line is never blank. The generic wording is recommended copy under the 10-17 delegation.
+ */
+export const SETUP_PAUSE_WORDS = {
+  open: "Paused: this item is waiting for a setup step from a person.",
+  withdrawn: "Paused: the setup request was withdrawn. The item starts again when a person advances it.",
+};
+export function setupPauseLine(data) {
+  const p = data && data.setup_pause;
+  if (!p || (p.state !== "open" && p.state !== "withdrawn")) return null;
+  const sentence = typeof p.sentence === "string" ? p.sentence.trim() : "";
+  return { state: p.state, text: sentence !== "" ? sentence : SETUP_PAUSE_WORDS[p.state] };
+}
+
 /** The "Ready to merge" banner, only at review_passed, with the repo's real auto-merge setting. */
 export function readyBanner(data) {
   if (!data || data.stage !== "review_passed") return null;
@@ -316,6 +332,7 @@ export function buildInsight(data) {
   return {
     flags: stateFlags(data),
     notice: noticeBanner(data),
+    setupPause: setupPauseLine(data),
     banner: readyBanner(data),
     runningText: running.length ? "Running now: " + running.map((r) => r.role).join(", ") : "Nothing is running right now.",
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
@@ -527,6 +544,7 @@ export function createInsightPanel(deps) {
     const restKids = [
       state.stale ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-live-state" }, SENTENCES.stale) : [],
       m.notice ? noticeView(m.notice) : [],
+      m.setupPause ? h("p", { class: "pl-ins-notice", role: "status", "data-testid": "pl-setup-pause", "data-state": m.setupPause.state }, m.setupPause.text) : [],
       m.banner ? banner(m.banner) : [],
       h("p", { "data-testid": "pl-running" }, m.runningText),
       h("p", { class: "pl-muted", "data-testid": "pl-totals" }, m.totalsText),

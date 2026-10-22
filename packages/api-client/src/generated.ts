@@ -508,6 +508,10 @@ export interface Operations {
         head_sha: string | null;
         actions: Array<"retry_push" | "open_pr" | "build_again">;
       }) | (null);
+      setup_pause?: ({
+        state: "open" | "withdrawn";
+        sentence: string | null;
+      }) | (null);
       actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
     };

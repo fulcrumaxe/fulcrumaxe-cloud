@@ -199,7 +199,8 @@ minting for an inactive account; `stats/read.ts` reads
 `setup-requests/` (D#598 P8a) reads and writes `setup_requests` (migration 0856): `kinds.ts` is the closed list of six step kinds, the
 plain-text limits, the provider-link host list (github.com, vercel.com) and the fixed title templates; `store.ts` proposes, lists,
 withdraws and marks done a request, keeps the derived public/private drift request in step with current state, and answers `setupHoldFor`
-(whether a request holds a work item: open holds it, withdrawn holds it until a person's next advance, done releases it). A request has
+(whether a request holds a work item: open holds it, withdrawn holds it until a person's next advance, done releases it) and `setupPauseFor`
+(that hold plus the open request behind it, which the work-item activity read carries so the Pipeline card shows its status sentence). A request has
 no value field; text shaped like a credential is refused before the write.
 
 The same folder carries the check (D#598 P8b). What resumes an item, and when:

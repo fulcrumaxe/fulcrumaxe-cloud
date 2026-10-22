@@ -1,0 +1,27 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 42,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [
+    "close"
+  ],
+  "close_on_github": false,
+  "setup_pause": {
+    "state": "open",
+    "sentence": "We check for this every 60 seconds. The item continues by itself once it's done, or press Mark done."
+  }
+}

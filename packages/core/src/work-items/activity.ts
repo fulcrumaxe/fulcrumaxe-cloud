@@ -6,6 +6,7 @@ import { HANDOFF_KIND, PROGRESS_EVENT_KINDS, RUNNER_EVENT_KIND, RUNNER_STATE_TYP
 import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from '../runs/runnerUsage.js';
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
 import { redactText } from '@fx/runtime/src/redact.js';
+import { setupPauseFor, type SetupHold, type SetupRequest } from '../setup-requests/store.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, closeOnGithub, operatorActionsFor, readOperatorFacts, type OperatorAction } from './operatorActions.js';
@@ -171,6 +172,8 @@ export interface WorkItemActivity {
   review_recheck: { kind: 'merge_only' } | null;
   /** D#598 P1f-6a: the item's change to its paired public repository, or null for an item with none. */
   public_change: PublicChange | null;
+  /** D#598 P8c-3: the setup request the item is paused on, read in this same call (no extra request). Null when no request holds it; the API words it. */
+  setup_pause: { hold: SetupHold; request: SetupRequest | null } | null;
   /**
    * What the CALLER may do to this item now, from the one table in operatorActions.ts (the routes ask the same table): Build
    * again, Re-spec, Back to discussion, Treat as a feature, Close. Empty for a member, an external item, a live run or a stage none applies to.
@@ -643,6 +646,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
       notice,
       review_recheck: reviewRecheck,
       public_change: await readPublicChange(client, accountId, workItemId, facts),
+      setup_pause: await setupPauseFor(client, workItemId),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
     };

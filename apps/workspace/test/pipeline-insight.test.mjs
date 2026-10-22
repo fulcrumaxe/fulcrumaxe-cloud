@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FLAG_WORDS, NEEDS_YOU_APP, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
+  FLAG_WORDS, NEEDS_YOU_APP, SETUP_PAUSE_WORDS, PHASES, REFRESH_MS, SENTENCES, stateFlags, buildInsight, createInsightPanel, firstLine, groupRounds, noticeBanner, phaseOf, pullUrl, readyBanner, reasonWord, roleWord, runView, statusWord, stepView, usdText,
 } from "../apps/pipeline/pipeline-insight.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
@@ -419,6 +419,75 @@ describe("the view", () => {
     await flush();
     expect(byId(panel.el, "pl-not-feasible")).toHaveLength(0);
     expect(byId(panel.el, "pl-needs-human")).toHaveLength(0);
+  });
+
+  describe("D#598 P8c-3: the pause line for an item a setup request holds", () => {
+    const OPEN_UNCHECKED = fx("200-setup-pause-open-unchecked.json");
+    const OPEN_CHECKED = fx("200-setup-pause-open-checked.json");
+    const WITHDRAWN = fx("200-setup-pause-withdrawn.json");
+    const lineOf = (panel) => byId(panel.el, "pl-setup-pause").map((e) => e.textContent);
+
+    it("shows the request's own status sentence for an open request, from the activity read alone", async () => {
+      for (const data of [OPEN_UNCHECKED, OPEN_CHECKED]) {
+        const { panel, calls } = make(data);
+        panel.start("item-sp");
+        await flush();
+        expect(lineOf(panel)).toEqual([data.setup_pause.sentence]);
+        expect(byId(panel.el, "pl-setup-pause")[0].getAttribute("data-state")).toBe("open");
+        expect(calls.map((c) => c.url)).toEqual(["/api/v1/work-items/item-sp/activity"]); // no extra request
+      }
+    });
+
+    it("a request with no sentence shows the generic line, never blank or null", async () => {
+      const { panel } = make(WITHDRAWN);
+      panel.start("item-sp");
+      await flush();
+      expect(lineOf(panel)).toEqual([SETUP_PAUSE_WORDS.withdrawn]);
+      const open = make({ ...OPEN_CHECKED, setup_pause: { state: "open", sentence: null } });
+      open.panel.start("item-sp2");
+      await flush();
+      expect(lineOf(open.panel)).toEqual([SETUP_PAUSE_WORDS.open]);
+      for (const sentence of [undefined, "", "   ", 5]) {
+        const m = buildInsight({ ...OK, setup_pause: { state: "open", sentence } });
+        expect(m.setupPause.text).toBe(SETUP_PAUSE_WORDS.open);
+      }
+      for (const text of Object.values(SETUP_PAUSE_WORDS)) expect(text).not.toMatch(/null|undefined|NaN/);
+    });
+
+    it("draws nothing without a pause, or with a malformed one", async () => {
+      for (const sp of [undefined, null, {}, { state: "done", sentence: "x" }, "open", 3]) {
+        const { panel } = make({ ...OK, setup_pause: sp });
+        panel.start("item-none");
+        await flush();
+        expect(lineOf(panel)).toEqual([]);
+      }
+    });
+
+    it("follows the request on the next refresh, with one activity read per refresh and no other request", async () => {
+      const answers = [OPEN_UNCHECKED, OPEN_CHECKED, WITHDRAWN, OK];
+      let n = 0;
+      const { panel, calls } = make(() => answers[Math.min(n++, answers.length - 1)]);
+      panel.start("item-follow");
+      await flush();
+      const seen = [lineOf(panel)];
+      for (let i = 0; i < 3; i++) {
+        timers[0].fn();
+        await flush();
+        seen.push(lineOf(panel));
+      }
+      expect(seen).toEqual([[OPEN_UNCHECKED.setup_pause.sentence], [OPEN_CHECKED.setup_pause.sentence], [SETUP_PAUSE_WORDS.withdrawn], []]);
+      expect(calls).toHaveLength(4);
+      expect(new Set(calls.map((c) => c.url))).toEqual(new Set(["/api/v1/work-items/item-follow/activity"]));
+    });
+
+    it("shows hostile sentence text as text only", async () => {
+      const hostile = "<img src=x onerror=alert(1)>";
+      const { panel } = make({ ...OPEN_CHECKED, setup_pause: { state: "open", sentence: hostile } });
+      panel.start("item-xss");
+      await flush();
+      expect(lineOf(panel)).toEqual([hostile]);
+      expect(findAll(panel.el, (e) => e.tag === "img")).toHaveLength(0);
+    });
   });
 
   describe("D#7 DP8-f1: the state flags", () => {
