@@ -219,7 +219,9 @@ describe("capture in real Chromium: only the app cookie leaves the profile", () 
   }
 
   it("the default launcher signs in, sends the bypass header to the target origin, returns the cookie value, and the profile is gone", async () => {
-    const good = mk(0, 0);
+    // captureSession judges the cookie against the real clock, so this one is minted at the real time (the fixed NOW above went idle-lapsed 24 h after it).
+    const real = Date.now();
+    const good = signSession({ sid: "s1", sessionStart: real, lastSeenAt: real });
     const { origin, headers } = await app(good);
     const root = mkdtempSync(join(tmpdir(), "t3_sessions_"));
     const before = 0;
