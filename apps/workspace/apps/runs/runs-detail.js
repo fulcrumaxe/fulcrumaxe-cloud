@@ -369,6 +369,10 @@ export function readContext(raw) {
   const memory = (Array.isArray(b.recalled_memory) ? b.recalled_memory : [])
     .filter((x) => isObj(x) && typeof x.id === "string" && typeof x.name === "string" && x.name.trim() !== "" && Number.isInteger(x.version) && x.version >= 1)
     .slice(0, 50);
+  // D#601 MEM-8b: the item's own records (applied notes, a handoff note) the prompt held; a label and an id, never text.
+  const itemSources = (Array.isArray(b.item_sources) ? b.item_sources : [])
+    .filter((x) => isObj(x) && typeof x.id === "string" && typeof x.label === "string" && x.label.trim() !== "")
+    .slice(0, 6);
   return {
     run_id: b.run_id,
     runtime: typeof b.runtime === "string" ? b.runtime : "",
@@ -385,6 +389,7 @@ export function readContext(raw) {
     compactions: countOrNull(b.compactions),
     denied_tool_calls: countOrNull(b.denied_tool_calls),
     recalled_memory: memory,
+    item_sources: itemSources,
     repo_map_version: typeof b.repo_map_version === "string" && b.repo_map_version !== "" ? b.repo_map_version : null,
   };
 }
@@ -442,7 +447,7 @@ export function contextModel(ctx) {
       // D#600 CX-5b: reads and searches refused because a path is kept out of context. Not recorded for a runner run and for a run from before the count; 0 is a measured "none".
       ["Calls refused (kept out of context)", ctx.denied_tool_calls === null ? CONTEXT_WORDS.notRecorded : ctx.denied_tool_calls === 0 ? "None" : ctx.denied_tool_calls === 1 ? "1 tool call" : ctx.denied_tool_calls + " tool calls"],
     ],
-    memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })) },
+    memory: { tokens: ctx.memory_tokens === null ? null : tokenText(ctx.memory_tokens), items: [...ctx.recalled_memory.map((m) => ({ name: m.name, ref: m.id.slice(0, 8) + "@" + m.version, title: m.id + "@" + m.version })), ...(ctx.item_sources ?? []).map((x) => ({ name: x.label + (x.cut === true ? " (cut)" : ""), ref: x.id.slice(0, 8), title: x.id }))] },
     mapVersion: runner ? null : ctx.repo_map_version,
   };
 }

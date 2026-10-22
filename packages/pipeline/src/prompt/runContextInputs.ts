@@ -51,3 +51,28 @@ export async function recordRunContextInputs(client: PoolClient, accountId: stri
   );
   return true;
 }
+
+/** One of the item's own records a prompt carried (D#601 MEM-8b): an applied correction note or a completed handoff note. Ids and a hash only; no text. */
+export interface ItemSourceRecord {
+  kind: "correction" | "handoff";
+  /** The correction's id, or the `run_events` id of the handoff note. */
+  id: string;
+  /** The sha256 of the text as it was rendered (cut and marker included). */
+  sha256: string;
+  cut: boolean;
+}
+
+/**
+ * Writes what `recordRunContextInputs` does not hold: the item's own records the prompt carried, into `run_context_item_sources` (migration 0880), on the same
+ * slot-transaction client and failing closed the same way. Resolves to the number of rows written. The table holds at most 6 rows a run (5 notes and 1 handoff note).
+ */
+export async function recordRunItemSources(client: PoolClient, accountId: string, runId: string, sources: readonly ItemSourceRecord[]): Promise<number> {
+  for (const s of sources) {
+    await client.query(
+      `INSERT INTO run_context_item_sources (account_id, run_id, source_kind, source_id, content_sha256, cut)
+       VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6) ON CONFLICT (account_id, run_id, source_kind, source_id) DO NOTHING`,
+      [accountId, runId, s.kind, s.id, s.sha256, s.cut],
+    );
+  }
+  return sources.length;
+}

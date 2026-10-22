@@ -107,6 +107,7 @@ interface ListRow {
   gh_name: string | null;
   item_number: string | null;
   item_title: string | null;
+  receipt_missing: boolean;
 }
 
 const SCOPE_ORDER: Readonly<Record<MemoryScope, number>> = { repo: 0, item: 1, role: 2, account: 3 };
@@ -141,7 +142,12 @@ const LABEL_JOINS = `
      LIMIT 1
   ) rp ON true
   LEFT JOIN work_items w ON m.scope = 'item' AND w.account_id = m.account_id AND w.id = (CASE WHEN m.scope = 'item' THEN m.scope_ref::uuid END)`;
-const LABEL_COLUMNS = `rp.id AS repo_id, rp.gh_owner, rp.gh_name, w.gh_number::text AS item_number, w.title AS item_title`;
+// D#601 MEM-8b: an entry that names a decision receipt whose row is gone (only the case where the receipt cannot be read; the entry itself is untouched).
+const RECEIPT_ID_SQL = `CASE WHEN (m.provenance ->> 'receipt_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (m.provenance ->> 'receipt_id')::uuid END`;
+const LABEL_COLUMNS = `rp.id AS repo_id, rp.gh_owner, rp.gh_name, w.gh_number::text AS item_number, w.title AS item_title,
+  (m.provenance ? 'receipt_id' AND NOT EXISTS (SELECT 1 FROM decision_receipts dr WHERE dr.account_id = m.account_id AND dr.id = ${RECEIPT_ID_SQL})) AS receipt_missing`;
+/** What the Memory tab calls an entry whose receipt can no longer be read. */
+export const RECEIPT_MISSING_TITLE = 'Receipt no longer available';
 
 function groupLabel(r: ListRow): { label: string; targetId: string | null } {
   switch (r.scope) {
@@ -229,7 +235,7 @@ export async function listMemory(ctx: ReadCtx, filter: MemoryScopeFilter = {}, n
       kindLabel: formatMemoryKind(r.kind),
       status: r.status,
       statusDisplay: formatMemoryStatus(r.status),
-      title: formatMemoryTitle(r.body, r.scope, r.kind),
+      title: r.receipt_missing ? RECEIPT_MISSING_TITLE : formatMemoryTitle(r.body, r.scope, r.kind),
       authorKind: r.author_kind,
       source: formatMemorySource(r.author_kind, r.provenance),
       version: Number(r.version),

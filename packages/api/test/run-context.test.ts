@@ -172,6 +172,7 @@ describe('GET /api/v1/runs/{id}/context (D#600 CX-8)', { timeout: 60_000 }, () =
       memory_tokens: 900,
       compactions: 2,
       recalled_memory: [],
+      item_sources: [],
       repo_map_version: null,
     });
     expect(body.sections).toEqual([

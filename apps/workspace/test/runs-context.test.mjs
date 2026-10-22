@@ -214,6 +214,23 @@ describe("the model, per state", () => {
     expect(text).toContain("run pnpm test");
     expect(text).not.toContain("v9");
   });
+
+  it("lists the item's own records beside the recalled entries by label, and drops a row with no label (D#601 MEM-8b)", () => {
+    const body = {
+      ...MEASURED,
+      item_sources: [
+        { kind: "correction", id: "5b3c7a10-2e4f-4d68-8a91-0c7e1f2a3b44", label: "Correction 5b3c7a10", cut: false },
+        { kind: "handoff", id: "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e21", label: "Handoff note from run 8f1e2d3c", cut: true },
+        { kind: "handoff", id: "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e22", label: "  ", cut: false },
+      ],
+    };
+    const items = contextModel(readContext(body)).memory.items;
+    expect(items.slice(-2)).toEqual([
+      { name: "Correction 5b3c7a10", ref: "5b3c7a10", title: "5b3c7a10-2e4f-4d68-8a91-0c7e1f2a3b44" },
+      { name: "Handoff note from run 8f1e2d3c (cut)", ref: "c4d8e2f6", title: "c4d8e2f6-9a1b-4c3d-8e5f-7a6b5c4d3e21" },
+    ]);
+    expect(contextModel(readContext({ ...MEASURED, item_sources: undefined })).memory.items.every((i) => i.name !== "undefined")).toBe(true);
+  });
 });
 
 describe("the view, one test per state: no cell shows null, undefined or NaN", () => {
