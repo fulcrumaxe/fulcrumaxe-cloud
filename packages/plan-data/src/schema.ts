@@ -113,6 +113,20 @@ export const planDataSchema = z
      * Optional: data that predates it loads, and a missing figure means the pre-fill is the bare estimate (fail closed, never a made-up margin).
      */
     envelope: z.object({ defaultMarginPct: z.number().finite().min(0).max(500) }).strict().optional(),
+    /**
+     * D#483 S4-b: the discovery and verification limits. Optional, and a missing block means discovery and verification are OFF for every
+     * repo (fail closed, reported as `discovery_unconfigured`); no figure has a default. `perRepoDailyUsd` caps one repo's discovery and
+     * verifier spend per day, `verifyPerProposalUsd` is the most one verification may reserve, and `externalVerifiesPerRepoPerDay` is how
+     * many proposals from outside authors one repo may have checked in a day (0 checks none).
+     */
+    discovery: z
+      .object({
+        perRepoDailyUsd: z.number().finite().positive(),
+        verifyPerProposalUsd: z.number().finite().positive(),
+        externalVerifiesPerRepoPerDay: count,
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
