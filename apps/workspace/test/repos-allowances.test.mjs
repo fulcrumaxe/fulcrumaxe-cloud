@@ -118,13 +118,13 @@ describe("the picked file", () => {
   it("a good file becomes a clean set with only the four fields", () => {
     const r = ok({ entries: [{ ...A, extra: 1 }], command_timeout_s: 60 });
     expect(r.ok).toBe(false); // an extra key is refused, never passed through
-    expect(ok({ entries: [A], command_timeout_s: 60 })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 } });
-    expect(ok({ entries: [] })).toEqual({ ok: true, set: { entries: [] } });
+    expect(ok({ entries: [A], command_timeout_s: 60 })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: false });
+    expect(ok({ entries: [] })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: false });
   });
-  it("a declared check is tolerated and dropped: the panel shows none, so it sends none (D#6 R-CHK-1)", () => {
+  it("a declared check is never sent from the file, and the panel is told it was there (D#6 R-CHK-3c)", () => {
     const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
-    expect(ok({ entries: [A], command_timeout_s: 60, check })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 } });
-    expect(ok({ entries: [], check })).toEqual({ ok: true, set: { entries: [] } });
+    expect(ok({ entries: [A], command_timeout_s: 60, check })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 }, declaresCheck: true });
+    expect(ok({ entries: [], check })).toEqual({ ok: true, set: { entries: [] }, declaresCheck: true });
     // Only an object is a check; anything else in that place is still a malformed file.
     for (const bad of ["bash", 7, [], true]) expect(ok({ entries: [A], command_timeout_s: 60, check: bad })).toEqual({ ok: false, code: "malformed" });
   });
@@ -137,6 +137,30 @@ describe("the picked file", () => {
       { entries: Array.from({ length: 65 }, () => A) }]) {
       expect(ok(bad)).toEqual({ ok: false, code: "malformed" });
     }
+  });
+});
+
+describe("an upload over an approved check (D#6 R-CHK-3c)", () => {
+  const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+  const withCheck = () => view({ approved: { version: 1, entries: [A], command_timeout_s: 600, check, set_sha256: "ab".repeat(32), approved_at: "2026-10-09T00:00:00.000Z" } });
+  it("an upload would remove it, so the panel says so and asks for the name even for an empty set", () => {
+    const m = panelModel(state({ view: withCheck(), upload: { set: set([]), declaresCheck: false } }));
+    expect(m.dropsCheck).toBe(true);
+    expect(m.widening).toBe(false);
+    expect(m.needsName).toBe(true);
+    expect(m.approveDisabled).toBe(true);
+    expect(panelModel(state({ view: withCheck(), upload: { set: set([]) }, typed: NAME })).approveDisabled).toBe(false);
+  });
+  it("an identical file still changes the set when it would remove a check", () => {
+    const m = panelModel(state({ view: withCheck(), upload: { set: set([A]) }, typed: NAME }));
+    expect(m.diff.same).toBe(true);
+    expect(m.approveDisabled).toBe(false);
+    expect(m.restores).toBe(false);
+  });
+  it("no approved check, nothing to remove: the old rules hold", () => {
+    const m = panelModel(state({ upload: { set: set([]) } }));
+    expect(m.dropsCheck).toBe(false);
+    expect(m.needsName).toBe(false);
   });
 });
 

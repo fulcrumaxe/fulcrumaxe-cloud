@@ -34,8 +34,9 @@ export function parseUpload(text, limits = LIMITS) {
   if (typeof text !== "string" || text.length > MAX_FILE_BYTES) return { ok: false, code: "too_big" };
   let data;
   try { data = JSON.parse(text); } catch { return { ok: false, code: "not_json" }; }
-  // D#6 R-CHK-1: the file may now declare a `check`. It is tolerated and NOT sent: this panel does not show a check, so it does not approve one unseen (the form that does is a later change).
-  if (data && typeof data === "object" && !Array.isArray(data) && data.check !== null && typeof data.check === "object" && !Array.isArray(data.check)) { data = { ...data }; delete data.check; }
+  // D#6 R-CHK-3c: a check in the file is never sent from here (the check form is where one is reviewed and approved), but the panel is told it was there.
+  let declaresCheck = false;
+  if (data && typeof data === "object" && !Array.isArray(data) && data.check !== null && typeof data.check === "object" && !Array.isArray(data.check)) { declaresCheck = true; data = { ...data }; delete data.check; }
   const keys = data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).sort().join() : "";
   if (keys !== "entries" && keys !== "command_timeout_s,entries") return { ok: false, code: "malformed" };
   const t = data.command_timeout_s;
@@ -47,7 +48,7 @@ export function parseUpload(text, limits = LIMITS) {
     if (!ok) return { ok: false, code: "malformed" };
     entries.push({ kind: e.kind, value: e.value, access: e.access, reason: e.reason });
   }
-  return { ok: true, set: t === undefined ? { entries } : { entries, command_timeout_s: t } };
+  return { ok: true, set: t === undefined ? { entries } : { entries, command_timeout_s: t }, declaresCheck };
 }
 
 const keyOf = (e) => [e.kind, e.value, e.access].join("\n");
@@ -74,21 +75,24 @@ export function panelModel(s) {
   if (s.load === "loading" || (s.load === "ok" && !v)) return { kind: "loading" };
   if (s.load !== "ok") return { kind: "error" };
   const approved = v.approved ? { entries: v.approved.entries, command_timeout_s: v.approved.command_timeout_s } : null;
+  const hasCheck = !!v.approved && !!v.approved.check; // the check form owns it; an upload replaces the whole set, so it would remove it
   const pending = s.upload ? s.upload.set : null;
   const diff = pending ? diffSets(approved, pending) : null;
   const canChange = v.can_change === true;
   const widening = !!pending && pending.entries.length > 0;
+  const dropsCheck = !!pending && hasCheck;
   const name = typeof s.repoName === "string" ? s.repoName : "";
-  const nameOk = !widening || (name !== "" && s.typed === name);
+  const needsName = widening || dropsCheck; // removing an approved check is confirmed the same way as widening
+  const nameOk = !needsName || (name !== "" && s.typed === name);
   const notRunner = widening && v.execution_mode !== "runner_local";
   const setAside = v.set_aside === true;
   // A set-aside set still reads as approved, but the server treats approving it again as a new version, so an identical file is a change then.
-  const restores = !!diff && diff.same && setAside;
+  const restores = !!diff && diff.same && setAside && !dropsCheck;
   return {
-    kind: "ready", canChange, approved, pending, diff, widening, notRunner, setAside, restores, inUse: v.in_use === true,
+    kind: "ready", canChange, approved, pending, diff, widening, dropsCheck, declaresCheck: !!(s.upload && s.upload.declaresCheck), notRunner, setAside, restores, inUse: v.in_use === true,
     approvedRows: approved ? entryRows(approved.entries) : null, pendingRows: pending ? entryRows(pending.entries) : null,
-    needsName: widening, nameKnown: name !== "",
-    approveDisabled: !canChange || !pending || (diff.same && !setAside) || s.phase === "saving" || !nameOk || notRunner,
+    needsName, nameKnown: name !== "",
+    approveDisabled: !canChange || !pending || (diff.same && !setAside && !dropsCheck) || s.phase === "saving" || !nameOk || notRunner,
   };
 }
 
@@ -118,13 +122,17 @@ const rowList = (rows, testid) =>
 
 /**
  * `call(method, repoId, body)` runs the request. show(repo) loads that repo's allowances.
- * Returns { el, show, clear }.
+ * `runnerOutdated(repoFullName)` says whether every runner covering the repo needs an update (for the check form). Returns { el, show, clear }.
  */
-export function createAllowancePanel({ call, isCancelled }) {
+export function createAllowancePanel({ call, isCancelled, runnerOutdated = () => false }) {
   const el = h("section", { class: "repos-allow", "aria-label": "Sandbox allowances", "data-testid": "repos-allow" });
   let s = { load: "idle", view: null, upload: null, uploadError: "", typed: "", phase: "idle", notice: "", repoId: null, repoName: "", changed: false };
   let gen = 0;
   const line = (text, testid, cls, role) => h("p", { class: cls, role, "data-testid": testid }, text);
+  const check = createCheckSection({
+    call, isCancelled, errorText: approveError,
+    onView(res) { const next = pickView(res); if (next) { s.view = next; s.upload = null; s.typed = ""; s.notice = ""; render(); } },
+  });
 
   async function onFile(input) {
     const file = input.files && input.files[0];
@@ -136,7 +144,7 @@ export function createAllowancePanel({ call, isCancelled }) {
       try { result = parseUpload(await file.text(), (s.view && s.view.limits) || LIMITS); } catch { result = { ok: false, code: "unreadable" }; }
     }
     input.value = "";
-    s.upload = result.ok ? { set: result.set } : null;
+    s.upload = result.ok ? { set: result.set, declaresCheck: result.declaresCheck } : null;
     s.uploadError = result.ok ? "" : UPLOAD_ERRORS[result.code];
     s.typed = "";
     render();
@@ -149,7 +157,7 @@ export function createAllowancePanel({ call, isCancelled }) {
     s.phase = "saving"; s.notice = "";
     render();
     try {
-      const res = await call("PUT", id, m.widening ? { set: s.upload.set, confirm_repo: s.typed } : { set: s.upload.set });
+      const res = await call("PUT", id, m.needsName ? { set: s.upload.set, confirm_repo: s.typed } : { set: s.upload.set });
       if (mine !== gen || isCancelled()) return;
       const next = pickView(res);
       if (next) s.view = next;
@@ -168,7 +176,8 @@ export function createAllowancePanel({ call, isCancelled }) {
     if (b) b.disabled = panelModel(s).approveDisabled;
   }
 
-  function render() {
+  function render() { keepFocus(el, drawPanel); }
+  function drawPanel() {
     const m = panelModel(s);
     if (m.kind === "idle") return el.replaceChildren();
     const title = h("h4", { class: "repos-subtitle" }, "Sandbox allowances");
@@ -185,6 +194,9 @@ export function createAllowancePanel({ call, isCancelled }) {
       parts.push(rowList(m.approvedRows, "repos-allow-approved"));
       parts.push(line("Command timeout: " + (Number.isInteger(m.approved.command_timeout_s) ? plural(m.approved.command_timeout_s, "second") : NOT_GIVEN) + ".", "repos-allow-timeout", "repos-muted"));
     }
+    check.update({ view: s.view, repoId: s.repoId, repoName: s.repoName, runnerOutdated: runnerOutdated(s.repoName) });
+    // dom-insert-ok: check.el is the element createCheckSection built with h(); it keeps its own draft across this rebuild
+    parts.push(check.el);
     if (!m.canChange) parts.push(line(ADMIN_ONLY, "repos-allow-admin-only", "repos-muted"));
     else {
       const input = h("input", { type: "file", accept: ".json,application/json", class: "repos-allow-file", "aria-label": "Choose the reviewed runner-sandbox.json", "data-testid": "repos-allow-file", disabled: s.phase === "saving" });
@@ -206,8 +218,10 @@ export function createAllowancePanel({ call, isCancelled }) {
     if (d.removed.length) bits.push(plural(d.removed.length, "entry") + " removed");
     if (d.changed.length) bits.push(plural(d.changed.length, "reason") + " changed");
     if (d.timeout) bits.push("timeout " + (d.timeout.from ?? NOT_GIVEN) + " to " + (d.timeout.to ?? NOT_GIVEN));
-    out.push(line(m.restores ? "This set was set aside. Approving it again restores it." : d.same ? "No change from the approved set." : "Changes: " + bits.join(", ") + ".", "repos-allow-diff", "repos-muted"));
+    if (m.dropsCheck) bits.push("the approved check removed");
+    out.push(line(m.restores ? "This set was set aside. Approving it again restores it." : d.same && !m.dropsCheck ? "No change from the approved set." : "Changes: " + bits.join(", ") + ".", "repos-allow-diff", "repos-muted"));
     if (d.removed.length) out.push(rowList(entryRows(d.removed), "repos-allow-removed"));
+    if (m.dropsCheck) out.push(line((m.declaresCheck ? "This file declares a check, but a check is only approved in the form above. " : "This file declares no check. ") + "Approving it removes the approved check, so runs stop being checked. Type the repo's name to confirm.", "repos-allow-drops-check", "repos-error", "alert"));
     if (m.notRunner) out.push(line("This repo doesn't run on a runner, so a set with entries can't be approved.", "repos-allow-not-runner", "repos-error", "alert"));
     if (m.needsName) {
       const name = h("input", {
@@ -237,5 +251,185 @@ export function createAllowancePanel({ call, isCancelled }) {
   }
 
   render();
-  return { el, show, clear() { gen++; s = { ...s, load: "idle", view: null }; el.replaceChildren(); } };
+  return { el, show, repaint: render, clear() { gen++; s = { ...s, load: "idle", view: null }; check.clear(); el.replaceChildren(); } };
+}
+
+// ── D#6 R-CHK-3c: the Repos app's check command form. The check is the one command a runner runs after the agent; an owner or admin approves, edits or
+// removes it here. It is part of the same approved set the allowance panel sends (PUT sandbox-allowances replaces the whole set), so every send below
+// carries the approved entries and timeout along. A suggestion read from the repo's branch is only ever shown; nothing is approved until the person has
+// opened it for review, seen every argument and typed the repo's name. Every node comes from h() (text, never markup); every sentence is this file's own.
+
+export const DEFAULT_LIMITS = { max_argv: 16, max_arg_chars: 256, min_timeout_s: 60, max_timeout_s: 10800 };
+export const SPACE = "␣"; // the open-box mark shown in place of each space
+export const SOURCE_LINE = "Suggested from .fulcrumaxe/runner-sandbox.json on the default branch tip, which an agent can edit. Nobody has approved it.";
+export const COPY = {
+  none: "No check is approved. A runner won't run a check after the agent.",
+  approved: "Approved. A runner runs it after the agent finishes.",
+  setAside: "The approved check is set aside because this repo left the runner. Approve it again before it applies.",
+  runnerOld: "Update your runner to run this repository's check.",
+  unreadable: "The check in .fulcrumaxe/runner-sandbox.json could not be read.",
+  unavailable: "The repo's suggested check isn't available right now.",
+  review: "Review every argument below, exactly as a runner will run it. " + SPACE + " marks a space.",
+  notRunner: "This repo doesn't run on a runner, so a check can't be approved.",
+};
+const isArg = (a) => typeof a === "string" && a.length >= 1 && a.length <= DEFAULT_LIMITS.max_arg_chars && /^[\x20-\x7e]+$/.test(a);
+
+/** One argument as the person must see it: quoted, each space marked, so leading, trailing and only-space arguments cannot pass for empty or tidy. */
+export const showArg = (a) => '"' + String(a).replace(/ /g, SPACE) + '"';
+
+/** The sentence for a draft the server would refuse, or "" when it is fine. The same bounds as the server's schema. */
+export function draftProblem(d, limits = DEFAULT_LIMITS) {
+  if (!d.argv.length) return "Add at least one argument.";
+  if (d.argv.length > limits.max_argv) return "A check takes at most " + limits.max_argv + " arguments.";
+  if (!d.argv.every(isArg)) return "Each argument must be 1 to " + limits.max_arg_chars + " printable characters.";
+  const t = d.timeout_s;
+  return Number.isInteger(t) && t >= limits.min_timeout_s && t <= limits.max_timeout_s ? "" : "The time limit must be " + limits.min_timeout_s + " to " + limits.max_timeout_s + " seconds.";
+}
+const sameCheck = (a, b) => !!a && !!b && a.dev_shell === b.dev_shell && a.timeout_s === b.timeout_s && a.argv.length === b.argv.length && a.argv.every((x, i) => x === b.argv[i]);
+const readCheck = (c) => (c && Array.isArray(c.argv) && c.argv.every((a) => typeof a === "string") ? { argv: c.argv, dev_shell: c.dev_shell === true, timeout_s: c.timeout_s } : null);
+
+/** What the section shows, reduced from the view (GET) and the draft. `kind` is none | suggested | approved | set_aside; runnerOld is a flag beside it. */
+export function checkModel({ view, draft, typed, repoName, phase, runnerOutdated }) {
+  const approved = readCheck(view.approved && view.approved.check);
+  const sug = view.suggested_check && typeof view.suggested_check === "object" ? view.suggested_check : null;
+  const suggested = !approved && sug && sug.status === "ok" ? readCheck(sug.check) : null;
+  const canChange = view.can_change === true, setAside = view.set_aside === true;
+  const problem = draft ? draftProblem(draft, view.limits && view.limits.max_check_timeout_s ? { ...DEFAULT_LIMITS, max_timeout_s: view.limits.max_check_timeout_s } : DEFAULT_LIMITS) : "";
+  const onRunner = view.execution_mode === "runner_local";
+  const unchanged = !!draft && sameCheck(draft, approved) && !setAside;
+  return {
+    kind: approved ? (setAside ? "set_aside" : "approved") : suggested ? "suggested" : "none",
+    approved, suggested, canChange, problem, onRunner, unchanged, drafting: !!draft,
+    runnerOld: !!approved && !setAside && runnerOutdated === true,
+    note: !approved && sug && sug.status === "unreadable" ? COPY.unreadable : !approved && sug && sug.status === "unavailable" ? COPY.unavailable : "",
+    approveDisabled: !canChange || !draft || problem !== "" || unchanged || !onRunner || phase === "saving" || !(repoName !== "" && typed === repoName),
+  };
+}
+
+/** The PUT body: the approved entries and timeout stay as they are, the check is the only thing that moves. `check` null removes it. */
+export function checkBody(view, check, typed) {
+  const a = view.approved, entries = a && Array.isArray(a.entries) ? a.entries.map((e) => ({ kind: e.kind, value: e.value, access: e.access, reason: e.reason })) : [];
+  const set = { entries, ...(entries.length && Number.isInteger(a.command_timeout_s) ? { command_timeout_s: a.command_timeout_s } : {}), ...(check ? { check } : {}) };
+  // Entries or a check make the server ask for the repo's name, so a removal from a set with entries sends the name the person already confirmed.
+  return check || entries.length ? { set, confirm_repo: typed } : { set };
+}
+
+/** Rebuilds `root` with `draw`, then puts focus (and the caret) back on the same control, found by its test id and place among those, so a repaint never drops it mid-draft. */
+export function keepFocus(root, draw) {
+  const a = document.activeElement, id = a && root.contains(a) ? a.getAttribute("data-testid") : null;
+  const at = id ? [...root.querySelectorAll('[data-testid="' + id + '"]')].indexOf(a) : -1;
+  const start = at >= 0 && typeof a.selectionStart === "number" ? [a.selectionStart, a.selectionEnd] : null;
+  draw();
+  if (at < 0) return;
+  const next = root.querySelectorAll('[data-testid="' + id + '"]')[at];
+  if (!next || next.disabled) return;
+  next.focus();
+  if (start) try { next.setSelectionRange(start[0], start[1]); } catch { /* number inputs have no caret */ }
+}
+
+const argList = (argv, testid) =>
+  h("ol", { class: "repos-check-argv", "data-testid": testid }, argv.map((a) => h("li", null, h("code", { class: "repos-check-arg", "data-testid": "repos-check-arg" }, showArg(a)))));
+const facts = (c) => h("p", { class: "repos-muted", "data-testid": "repos-check-facts" }, (c.dev_shell ? "Runs in the repo's dev shell." : "Runs outside the dev shell.") + " Time limit: " + c.timeout_s + " seconds.");
+
+/** `call(method, repoId, body)` runs the request; `errorText(e)` is the sentence for a failed one; `onView(next)` hands a successful answer back to the panel. */
+export function createCheckSection({ call, isCancelled, errorText, onView }) {
+  const el = h("div", { class: "repos-check", "data-testid": "repos-check" });
+  let ctx = null, draft = null, typed = "", phase = "idle", notice = "", confirmRemove = false, gen = 0;
+  const line = (text, testid, cls, role) => h("p", { class: cls, role, "data-testid": testid }, text);
+  const btn = (text, testid, onClick, disabled = false, label) => h("button", { type: "button", class: "repos-btn", "data-testid": testid, disabled, onClick, ...(label ? { "aria-label": label } : {}) }, text);
+  const model = () => checkModel({ view: ctx.view, draft, typed, repoName: ctx.repoName, phase, runnerOutdated: ctx.runnerOutdated });
+  const open = (c, source) => { draft = { argv: [...c.argv], dev_shell: c.dev_shell, timeout_s: c.timeout_s, source }; typed = ""; notice = ""; confirmRemove = false; paint(); };
+
+  async function send(check) {
+    const id = ctx.repoId, mine = ++gen;
+    phase = "saving"; notice = "";
+    paint();
+    try {
+      const res = await call("PUT", id, checkBody(ctx.view, check, check ? typed : ctx.repoName));
+      if (mine !== gen || isCancelled()) return;
+      draft = null; typed = ""; confirmRemove = false; phase = "done";
+      notice = check ? (res && res.changed === false ? "That check was already approved. Nothing changed." : "Approved. It applies from the next job.") : "The check is removed. It applies from the next job.";
+      onView(res);
+    } catch (e) {
+      if (mine !== gen || isCancelled() || (e && e.name === "AbortError")) return;
+      phase = "error"; notice = errorText(e);
+    }
+    paint();
+  }
+
+  function draftParts(m) {
+    const rows = draft.argv.map((a, i) => {
+      const code = h("code", { class: "repos-check-arg", "data-testid": "repos-check-arg" }, showArg(a));
+      const input = h("input", { type: "text", class: "repos-check-input", value: a, autocomplete: "off", spellcheck: false, "aria-label": "Argument " + (i + 1), "data-testid": "repos-check-input", disabled: phase === "saving" });
+      input.addEventListener("input", () => { draft.argv[i] = input.value; code.textContent = showArg(input.value); sync(); });
+      return h("li", { class: "repos-check-row" }, input, code, btn("Remove", "repos-check-drop-arg", () => { draft.argv.splice(i, 1); paint(); }, draft.argv.length < 2 || phase === "saving", "Remove argument " + (i + 1)));
+    });
+    const dev = h("input", { type: "checkbox", checked: draft.dev_shell, "data-testid": "repos-check-devshell", disabled: phase === "saving" });
+    dev.addEventListener("change", () => { draft.dev_shell = dev.checked; sync(); });
+    const time = h("input", { type: "number", value: String(draft.timeout_s ?? ""), min: 60, "data-testid": "repos-check-timeout", "aria-label": "Time limit in seconds", disabled: phase === "saving" });
+    time.addEventListener("input", () => { draft.timeout_s = time.value === "" ? NaN : Number(time.value); sync(); });
+    const name = h("input", { type: "text", class: "repos-allow-name", autocomplete: "off", spellcheck: false, value: typed, "data-testid": "repos-check-name", "aria-label": "Type the repo's full name to approve the check", disabled: phase === "saving" || ctx.repoName === "" });
+    name.addEventListener("input", () => { typed = name.value; sync(); });
+    return [
+      ...(draft.source === "suggested" ? [line(SOURCE_LINE, "repos-check-source", "repos-muted")] : []),
+      line(COPY.review, "repos-check-review", "repos-muted"),
+      h("ol", { class: "repos-check-argv", "data-testid": "repos-check-draft" }, rows),
+      btn("Add argument", "repos-check-add-arg", () => { draft.argv.push(""); paint(); }, draft.argv.length >= DEFAULT_LIMITS.max_argv || phase === "saving"),
+      h("label", { class: "repos-check-line" }, dev, h("span", null, " Run it in the repo's dev shell")),
+      h("label", { class: "repos-check-line" }, h("span", null, "Time limit (seconds) "), time),
+      h("p", { class: "repos-error", role: "alert", "data-testid": "repos-check-problem" }, m.problem),
+      ...(m.onRunner ? [] : [line(COPY.notRunner, "repos-check-not-runner", "repos-error", "alert")]),
+      h("label", { class: "repos-allow-confirm" }, h("span", null, "Type ", h("bdi", null, ctx.repoName || "the repo's name"), " to approve"), name),
+      h("div", { class: "repos-actions" },
+        btn(phase === "saving" ? "Approving..." : "Approve", "repos-check-approve", () => !model().approveDisabled && send({ argv: [...draft.argv], dev_shell: draft.dev_shell, timeout_s: draft.timeout_s }), m.approveDisabled),
+        btn("Cancel", "repos-check-cancel", () => { draft = null; typed = ""; notice = ""; paint(); }, phase === "saving")),
+    ];
+  }
+
+  function sync() {
+    const m = model(), b = el.querySelector('[data-testid="repos-check-approve"]'), p = el.querySelector('[data-testid="repos-check-problem"]');
+    if (b) b.disabled = m.approveDisabled;
+    if (p) p.textContent = m.problem;
+  }
+
+  function paint() { keepFocus(el, drawCheck); }
+  function drawCheck() {
+    if (!ctx) return el.replaceChildren();
+    const m = model(), a = m.approved;
+    const parts = [h("h5", { class: "repos-allow-head" }, "Check command")];
+    if (!a) parts.push(line(COPY.none, "repos-check-none", "repos-muted"));
+    else {
+      parts.push(line(m.kind === "set_aside" ? COPY.setAside : COPY.approved, "repos-check-state", "repos-muted"), argList(a.argv, "repos-check-approved"), facts(a));
+      if (m.runnerOld) parts.push(line(COPY.runnerOld, "repos-check-runner-old", "repos-error", "alert"));
+    }
+    if (!m.canChange) parts.push(line("Only owners and admins can change this.", "repos-check-admin-only", "repos-muted"));
+    else if (draft) parts.push(...draftParts(m));
+    else {
+      if (m.note) parts.push(line(m.note, "repos-check-note", "repos-muted"));
+      const acts = [];
+      if (m.suggested) {
+        parts.push(line(SOURCE_LINE, "repos-check-source", "repos-muted"));
+        acts.push(btn("Review the suggested check", "repos-check-review-btn", () => open(m.suggested, "suggested")));
+      }
+      if (a) acts.push(btn("Edit", "repos-check-edit", () => open(a, "edit")), btn("Remove", "repos-check-remove", () => { confirmRemove = true; notice = ""; paint(); }));
+      else if (!m.suggested) acts.push(btn("Add a check", "repos-check-add", () => open({ argv: [""], dev_shell: true, timeout_s: 5400 }, "new")));
+      if (confirmRemove) {
+        parts.push(line("Remove this check? Runs will stop checking after the agent.", "repos-check-remove-ask", "repos-muted"),
+          h("div", { class: "repos-actions" }, btn(phase === "saving" ? "Removing..." : "Remove the check", "repos-check-remove-yes", () => send(null), phase === "saving"), btn("Keep it", "repos-check-remove-no", () => { confirmRemove = false; paint(); }, phase === "saving")));
+      } else parts.push(h("div", { class: "repos-actions" }, acts));
+    }
+    if (notice) parts.push(line(notice, phase === "error" ? "repos-check-save-error" : "repos-check-done", phase === "error" ? "repos-error" : "repos-note", phase === "error" ? "alert" : "status"));
+    el.replaceChildren(...parts);
+  }
+
+  return {
+    el,
+    /** The panel's view of the repo changed (a load, or an approval of either kind). A different repo drops any draft. */
+    update(next) {
+      if (!ctx || ctx.repoId !== next.repoId) { draft = null; typed = ""; phase = "idle"; notice = ""; confirmRemove = false; gen++; }
+      ctx = next;
+      paint();
+    },
+    clear() { ctx = null; draft = null; gen++; paint(); },
+  };
 }

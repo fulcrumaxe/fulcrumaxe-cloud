@@ -94,3 +94,12 @@
 .repos-mode input[type="radio"]:focus-visible, .repos-mode .repos-allow-name:focus-visible, .repos-mode [tabindex="-1"]:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
 .repos-mode .repos-confirm { overflow-wrap: anywhere; }
 .repos-mode .repos-btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+
+/* D#6 R-CHK-3c: the check command form. Each argument is its own row; the quoted text with the marked spaces is what the person reads. */
+.repos-check-argv { margin: 0 0 8px; padding: 0 0 0 1.6em; display: flex; flex-direction: column; gap: 4px; }
+.repos-check-arg { overflow-wrap: anywhere; white-space: pre-wrap; }
+.repos-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.repos-check-input, .repos-check input[type="number"] { box-sizing: border-box; min-height: 32px; max-width: 100%; padding: 4px 8px; background: var(--bg-surface, #0a0a0a); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); color: inherit; font: inherit; }
+.repos-check-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; }
+.repos-check [data-testid="repos-check-problem"]:empty { display: none; }
+.repos-check input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
