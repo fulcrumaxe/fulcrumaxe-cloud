@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CHECK_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -109,14 +109,12 @@ describe("the claim's protocol gate [pg]", () => {
   // D#6 R-CHK-1: a job that carries the repo's approved check is refused to a runner below protocol 8 and claimed by one at it.
   it("a job with the repo's check is not given to a runner below the check floor, and is claimed at it", async () => {
     const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
-    const before = await runnerAt(CHECK_JOB_MIN_PROTOCOL - 1);
-    // A runner built from this tree declares the current version, which is below the floor: until the check step exists, no runner can take a job with a check.
-    const shipped = await runnerAt(CURRENT_PROTOCOL_VERSION);
-    const job = await pending(CHECK_JOB_MIN_PROTOCOL, { check });
+    // Explicit versions, not the shipped constant: a runner at 7 (before the check step existed) is refused, one at 8 claims.
+    const before = await runnerAt(7);
+    const job = await pending(8, { check });
     expect((await claim(before)).kind).toBe("idle");
-    expect((await claim(shipped)).kind).toBe("idle");
     expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
-    const current = await runnerAt(CHECK_JOB_MIN_PROTOCOL);
+    const current = await runnerAt(8);
     expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
   });
 

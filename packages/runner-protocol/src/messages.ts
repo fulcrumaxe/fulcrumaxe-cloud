@@ -63,7 +63,7 @@ export type RunnerStage = z.infer<typeof RunnerStage>;
  * closed set, and the only thing a `run_ended` event says: no job content, no error text. Each reason has a closed `detail` set
  * where C24 gives one, and none otherwise (`DETAILS_OF_RUN_ENDED` maps a reason to its set; an empty set means "no detail").
  */
-export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected", "handed_off"] as const;
+export const RUN_ENDED_REASONS = ["job_refused", "repo_not_private", "agent_failed", "wall_clock", "runner_setup", "runner_shutdown", "push_rejected", "handed_off", "check_failed"] as const;
 export const RunEndedReason = z.enum(RUN_ENDED_REASONS);
 export type RunEndedReason = z.infer<typeof RunEndedReason>;
 
@@ -116,7 +116,10 @@ export const RUNNER_SETUP_DETAILS = [
  */
 export const HANDED_OFF_DETAILS = ["pushed", "push_failed", "deadline"] as const;
 // `push_failed` is already a runner_setup code; the event's detail enum lists each word once.
-export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS, "pushed", "deadline"] as const;
+// D#6 R-CHK-2 (C47): the run ended because its repository's approved check did not pass. The one detail, `check_no_dev_shell`, says the check needs the dev shell and none was built; the
+// check was not run. The result itself (exit code, duration, timed-out flag, summary) travels on `done` as `check`, never on this event.
+export const CHECK_FAILED_DETAILS = ["check_no_dev_shell"] as const;
+export const RUN_ENDED_DETAILS = [...JOB_REFUSED_DETAILS, ...RUNNER_SETUP_DETAILS, "pushed", "deadline", ...CHECK_FAILED_DETAILS] as const;
 export type RunEndedDetail = (typeof RUN_ENDED_DETAILS)[number];
 
 /** D#6 R5a-2b (C27 section 4.5): the size of the largest commit, in whole MB, rounded up. Over the proxy's 4 MB push limit, so it starts at 5. */
@@ -133,6 +136,7 @@ export const DETAILS_OF_RUN_ENDED: Record<RunEndedReason, readonly RunEndedDetai
   push_rejected: [],
   // D#599 HO-1: the run stopped at a checkpoint so the other side can continue it. See `HANDED_OFF_DETAILS`.
   handed_off: HANDED_OFF_DETAILS,
+  check_failed: CHECK_FAILED_DETAILS,
 };
 
 const TAKEN_OVER_FORBIDDEN = ["tool_name", "file_path", "exit_code", "duration_ms", "engine_version", "usage", "reset_at", "reason", "detail", "size_mb", "activity", "stage"] as const;
@@ -210,9 +214,9 @@ export type LocalOnlyEvent = z.infer<typeof LocalOnlyEvent>;
  * The protocol version both sides speak: the cloud's current version, and the one a runner sends on `hello`. One constant, so a bump cannot move only one.
  * Version 2 is the first whose runner acts on the heartbeat's `handoff` (the checkpoint turn). Version 3 is the first whose runner accepts a cross-side
  * `continues` (a null session id, the item's pull request branch and `pr_number`; `CONTINUES_CROSS_SIDE_MIN_PROTOCOL`). Version 4 is the first whose runner accepts a job's
- * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 (`CHECK_JOB_MIN_PROTOCOL`) is reserved for the runner that runs a job's approved `check`; no runner declares it until that step exists, so a job with a check fails closed and waits (7 belongs to the context-window note). A bump never cuts an older runner off, see below.
+ * `memory` object (`MEMORY_JOB_MIN_PROTOCOL`). Version 5 is the first whose runner applies a job's `excludes` (`EXCLUDES_JOB_MIN_PROTOCOL`). Version 6 is the first whose runner writes a job's `spill` files (`SPILL_JOB_MIN_PROTOCOL`). Version 7 is the first whose runner reads a job's `context_window` (`CONTEXT_WINDOW_JOB_MIN_PROTOCOL`). Version 8 is the first whose runner runs a job's approved `check` and reports it on `done` (`CHECK_JOB_MIN_PROTOCOL`). A bump never cuts an older runner off, see below.
  */
-export const CURRENT_PROTOCOL_VERSION = 7;
+export const CURRENT_PROTOCOL_VERSION = 8;
 /**
  * The oldest version `hello` still accepts. It is fixed and moves only on purpose: a bump of the current version gates a capability for the runners
  * that declare it and never refuses the ones that do not (D#599 R-599-HO1, owner question R-599-PL2b-1). A runner below it gets 426.
@@ -470,6 +474,29 @@ export const ContextLedgerBody = z
   .refine((v) => v.first_turn_input === undefined || v.peak_context === undefined || v.peak_context >= v.first_turn_input, { message: "the peak is at least the first turn" });
 export type ContextLedgerBody = z.infer<typeof ContextLedgerBody>;
 
+/**
+ * D#6 R-CHK-2 (C47): what the runner says about running the repository's approved check. `exit_code` is null when the check did not exit (killed at its cap, or not run); `summary` is
+ * the last 4096 bytes of its combined output after redaction; `skipped_tests` is read from the test runner's summary line when there is one. Integers, a flag and redacted text only.
+ */
+export const CHECK_SUMMARY_MAX_BYTES = 4096;
+export const CHECK_EXIT_CODE_MAX = 1_000_000;
+export const CHECK_DURATION_MS_MAX = 604_800_000;
+export const CHECK_SKIPPED_MAX = 100_000_000;
+// The bounds are the cloud's `run_checks` table's (migration 0888): a body this schema accepts must also be storable, or a crafted `done` could pass here and fail the finish.
+export const DoneCheck = z
+  .object({
+    exit_code: safeInt.min(-CHECK_EXIT_CODE_MAX).max(CHECK_EXIT_CODE_MAX).nullable(),
+    duration_ms: safeInt.min(0).max(CHECK_DURATION_MS_MAX),
+    timed_out: z.boolean(),
+    skipped_tests: safeInt.min(0).max(CHECK_SKIPPED_MAX).nullable(),
+    // No NUL: the cloud's text column refuses it and the finish would abort.
+    summary: z.string().max(CHECK_SUMMARY_MAX_BYTES).refine((text) => !text.includes("\u0000"), { message: "the summary holds no NUL" }),
+  })
+  .strict()
+  // A check stopped at its cap did not exit.
+  .refine((check) => !check.timed_out || check.exit_code === null, { message: "a timed-out check has no exit code", path: ["exit_code"] });
+export type DoneCheck = z.infer<typeof DoneCheck>;
+
 /** `done` is a hint. The cloud checks GitHub itself; `agentOutput` is stored as advisory only. */
 export const DoneMessage = z
   .object({
@@ -482,6 +509,7 @@ export const DoneMessage = z
       .refine((value) => isBoundedJson(value, MAX_AGENT_OUTPUT_DEPTH, MAX_ENVELOPE_INPUT_BYTES), { message: "agentOutput is too large or too deeply nested" })
       .optional(),
     context_ledger: ContextLedgerBody.optional(),
+    check: DoneCheck.optional(),
   })
   .strict();
 

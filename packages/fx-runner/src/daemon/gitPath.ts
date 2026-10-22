@@ -49,6 +49,11 @@ export interface GitPath {
    */
   nixSource?(job: GitJob, sha: string): Promise<NixSource>;
   /**
+   * D#6 R-CHK-2: the commit the job's check files are pinned to: the merge-base of the branch tip `sha` with the mirror's HEAD (the default branch as the runner fetched it), so
+   * no commit of the branch, an earlier fix round's included, can be it. Null when it cannot be computed; the check then fails. Optional: a path without a mirror gives none.
+   */
+  checkBase?(job: GitJob, sha: string): Promise<string | null>;
+  /**
    * D#600 CX-3b: the repository map of the commit `sha`, built from the repo's mirror (nothing leaves the machine). Null when it cannot be built; a run
    * never waits on, or fails for, its map. Optional: a path without a mirror (path A) gives none.
    */
@@ -95,6 +100,16 @@ export function createGitPath(deps: GitPathDeps): GitPath {
     readGrants: (job) => [mirrors.objects(job.repo)],
     mirrorDir: (job) => mirrors.dir(job.repo),
     repoMap: (job, sha) => readRepoMap({ listing: listingGit, small: git, listingCap: deps.captureLarge === undefined ? SMALL_CAPTURE_CHARS : LISTING_CAP }, mirrors.dir(job.repo), sha),
+    async checkBase(job, sha) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return null;
+      try {
+        const base = (await git.run("mirror_failed", ["-C", mirrors.dir(job.repo), "merge-base", sha, "HEAD"])).trim();
+        return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ? base : null;
+      } catch {
+        // fx-swallow-ok: no common ancestor, or a mirror that cannot answer: the check fails closed
+        return null;
+      }
+    },
     async nixSource(job, sha) {
       if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return { kind: "not_default_branch" };
       const dir = mirrors.dir(job.repo);

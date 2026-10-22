@@ -428,7 +428,7 @@ describe("a job's context window (D#600 CX-6b)", () => {
 
   it("has a protocol floor the current version meets, and a runner that predates the key refuses the job (the reason the cloud gates it)", () => {
     expect(CONTEXT_WINDOW_JOB_MIN_PROTOCOL).toBe(SPILL_JOB_MIN_PROTOCOL + 1);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(CONTEXT_WINDOW_JOB_MIN_PROTOCOL);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(CONTEXT_WINDOW_JOB_MIN_PROTOCOL);
     const before = JobSchema.omit({ context_window: true });
     expect(before.safeParse(sampleJob({ context_window: 200_000 } as never)).success).toBe(false);
     expect(before.safeParse(sampleJob()).success).toBe(true);

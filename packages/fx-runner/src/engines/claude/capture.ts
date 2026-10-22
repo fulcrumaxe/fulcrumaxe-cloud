@@ -94,7 +94,7 @@ export interface InstallCaptured {
  * passes or `signal` aborts, the whole group is ended (SIGTERM, then SIGKILL), and the group is cleared when the program exits too, so nothing the
  * install started outlives it. Only the end of the output is kept.
  */
-export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal): Promise<InstallCaptured> {
+export function runInstall(spawnFn: SpawnFn, command: string, args: readonly string[], env: Record<string, string>, cwd: string, timeoutMs: number, tailChars: number, signal?: AbortSignal, feed?: Buffer): Promise<InstallCaptured> {
   return new Promise((resolve) => {
     let tail = "";
     let timedOut = false;
@@ -107,7 +107,13 @@ export function runInstall(spawnFn: SpawnFn, command: string, args: readonly str
       signal?.removeEventListener("abort", onAbort);
       resolve({ code, tail, timedOut, aborted });
     };
-    const child = spawnFn(command, [...args], { cwd, env, shell: false, detached: OWN_PROCESS_GROUP, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnFn(command, [...args], { cwd, env, shell: false, detached: OWN_PROCESS_GROUP, stdio: feed === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"] });
+    // D#6 R-CHK-2: bytes for the program's descriptor 3 (a seccomp filter for bubblewrap), written whole and closed.
+    if (feed !== undefined) {
+      const pipe = child.stdio[3];
+      pipe?.on("error", () => undefined);
+      (pipe as NodeJS.WritableStream | null | undefined)?.end(feed);
+    }
     const stop = (): void => {
       void terminateGroup(child, 2000).then(() => finish(null));
     };

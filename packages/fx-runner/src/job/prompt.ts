@@ -167,3 +167,8 @@ export function buildPrompt(job: PromptJob, notes: readonly string[] = [], repoM
     "",
   ].join("\n");
 }
+
+/** D#6 R-CHK-2: the one fixed line a job with an approved check gets. The command is the signed one, shown as the Repos app shows it; nothing comes from the agent. */
+export function checkNote(check: { argv: readonly string[]; dev_shell: boolean }): string {
+  return `After you finish, the runner runs this repository's check (\`${check.argv.join(" ")}\`)${check.dev_shell ? " with the repository's dev shell environment applied" : ""}; a failure starts a fix round.`;
+}

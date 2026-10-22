@@ -7,6 +7,14 @@ import { claimScratch, releaseScratch, WriteScratchRefused, type ScratchDirs } f
 import { JobEnvFileRefused, makeJobEnvDir, writeJobEnvFile } from "./jobEnvFile.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { applyNixView } from "./nixView.js";
+import { sandboxLaunch } from "./probe.js";
+import { unixSocketFilter } from "./checkSeccomp.js";
+import { checkProtected } from "./checkProtected.js";
+
+/** Where a Linux session keeps per-user sockets (the session bus among them). */
+const USER_RUNTIME_ROOT = ["", "run", "user"].join("/");
+import { createSandboxHost } from "./probeHost.js";
+import { SUBSCRIPTION_TOKEN_VAR } from "../job/cleanEnv.js";
 import {
   SandboxNotFoundError,
   type CreateSandboxOptions,
@@ -57,6 +65,8 @@ export interface HostSandboxConfig {
    * that carries allowances, hidden from every other job). Without it a job with allowances gets no store.
    */
   packageStoreRoot?: string;
+  /** D#6 R-CHK-2: the platform whose sandbox tool the job's check is started under (bubblewrap or Seatbelt). Default linux. */
+  platform?: NodeJS.Platform;
 }
 
 /** Why a sandbox start was refused. Closed set. The message never carries a value from a job. */
@@ -91,6 +101,8 @@ interface Entry {
   /** The write directories of this job's allowances that the runner made (removed with the sandbox). */
   scratch: ScratchDirs;
   timeoutMs: number;
+  /** D#6 R-CHK-2: what the last agent start was given, so the job's check runs under the very same rules. */
+  launched?: { sandbox: Record<string, unknown>; plainEnv: Record<string, string>; nixEnv: Record<string, string> | undefined; workdir: string };
   runtime?: InterruptibleRuntime;
   agent?: AgentHandle;
   /** Settles when the agent process exists (or its start failed). A stop waits on this, never on the run's end. */
@@ -105,6 +117,12 @@ export interface HostSandbox extends SandboxPort {
   timeoutMsOf(handle: SandboxHandle): number | undefined;
   /** Sends the sandbox's agent SIGINT once it exists. Does nothing for a name that is gone or an agent already ended. */
   interrupt(handle: SandboxHandle): Promise<void>;
+  /**
+   * D#6 R-CHK-2: how to start `argv` under this sandbox's rules (the settings the agent was started with, the Nix store view included), as a tool, arguments and a
+   * clean environment: no model credential, no env file, no network. With `devShell` the dev shell's variables are added. Undefined: nothing was started in it yet, or the
+   * platform's tool is missing. The caller starts the process (`checkStep.ts`).
+   */
+  checkLaunch(handle: SandboxHandle, argv: readonly string[], devShell: boolean): { tool: string; args: string[]; env: Record<string, string>; feed?: Buffer } | { refused: string } | undefined;
 }
 
 function sameEnv(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -124,6 +142,8 @@ function sameEnv(a: Record<string, string>, b: Record<string, string>): boolean 
  */
 export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
   const sandboxes = new Map<string, Entry>();
+  // Only the file-system questions of the launch are asked of this host; it starts nothing.
+  const fsHost = createSandboxHost(() => Promise.resolve({ code: null, stdout: "", stderr: "", timedOut: false }));
 
   const noop = (): void => {
     // fx-swallow-ok: this only marks a promise as handled; whoever awaits it still sees the rejection
@@ -206,10 +226,12 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       // Every job (D#6 C44-1) gets TMPDIR = its own temp directory, the only temp place the sandbox lets it write, and an env file that restores
       // PATH and TMPDIR inside the Bash tool's login shell. An allowance job adds its own names below.
       jobEnv = { TMPDIR: entry.tempDir.replace(/\/+$/, "") };
+      let plainEnv: Record<string, string> = { ...jobEnv };
       if (allowances !== undefined && grants !== undefined) {
         claimScratch(entry.scratch, grants.writePaths);
         // The dev shell's variables (D#6 R7c) come first, so the job's own per-job names can never be replaced by them.
-        jobEnv = { ...(allowances.nixEnv ?? {}), ...jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS }), ...jobEnv };
+        plainEnv = { ...jobEnvFor({ tempDir: entry.tempDir, ...(storeDir === undefined ? {} : { store: storeDir }), commandTimeoutS: allowances.commandTimeoutS }), ...jobEnv };
+        jobEnv = { ...(allowances.nixEnv ?? {}), ...plainEnv };
         mkdirSync(jobEnv.XDG_CACHE_HOME!, { recursive: true, mode: 0o700 });
         if (storeDir !== undefined && config.packageStoreRoot !== undefined) {
           mkdirSync(config.packageStoreRoot, { recursive: true, mode: 0o700 });
@@ -227,6 +249,7 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
         if (error instanceof JobEnvFileRefused || error instanceof TypeError) throw new HostSandboxRefused("job_env_unsafe");
         throw error;
       }
+      entry.launched = { sandbox, plainEnv, nixEnv: allowances?.nixEnv, workdir };
       runtime = config.makeRuntime(sandbox, protectedPaths({ home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir }), jobEnv, opts.runId);
     } catch (error) {
       try {
@@ -358,6 +381,33 @@ export function createHostSandbox(config: HostSandboxConfig): HostSandbox {
       return entry === undefined ? "gone" : entry.running ? "running" : "stopped";
     },
     timeoutMsOf: (handle) => entryOf(handle)?.timeoutMs,
+    checkLaunch(handle, argv, devShell) {
+      const launched = entryOf(handle)?.launched;
+      if (launched === undefined || argv.length === 0) return undefined;
+      const platform = config.platform ?? "linux";
+      const jobEnv = { ...(devShell ? launched.nixEnv ?? {} : {}), ...launched.plainEnv };
+      // Subscription mode on purpose: it never needs an API key, and the one token it may copy is removed below.
+      const env = cleanEnv({ mode: "subscription" }, { ...config.envOptions, jobEnv });
+      delete env[SUBSCRIPTION_TOKEN_VAR];
+      delete env.CLAUDE_ENV_FILE;
+      // The agent's own shell sandbox is Claude Code's, started by the CLI on a model turn; the check is started by the runner, so it is built from the very same settings with
+      // the same effect: a read-only view with the denied directories hidden, no network, its own process table and a seccomp filter that refuses Unix-domain sockets.
+      // Where that cannot all be applied it is refused: a check never runs under weaker rules than the agent.
+      if (platform !== "linux") return { refused: "the check was not run: its sandbox is not available on this platform yet, so it cannot run under the agent's rules" };
+      const filter = unixSocketFilter();
+      if (filter === undefined) return { refused: "the check was not run: the Unix-socket filter is not available for this machine's architecture" };
+      const input = { platform, home: config.home, stateDir: config.stateDir, binaryDir: config.binaryDir };
+      const launch = sandboxLaunch(input, launched.sandbox, env.PATH ?? "", argv, fsHost, [], true);
+      if (!launch.ok || launch.kind !== "bubblewrap") return undefined;
+      const split = launch.args.indexOf("--");
+      if (split < 0) return undefined;
+      // The user's runtime directory holds the session bus and other sockets that start programs as the person; it is hidden whole.
+      const hide = fsHost.isDir(USER_RUNTIME_ROOT) ? ["--tmpfs", USER_RUNTIME_ROOT] : [];
+      // The agent cannot write the version-control folder or the files its sandbox protects (lock files, package-manager and shell settings, `.env*`); the check is bound
+      // read-only on those too, so a write fails at once. `checkStep.ts` also compares them before and after, which catches a protected file the check created.
+      const guarded = checkProtected(launched.workdir, fsHost).flatMap((target) => ["--ro-bind", target, target]);
+      return { tool: launch.tool, args: ["--seccomp", "3", ...launch.args.slice(0, split), ...hide, ...guarded, ...launch.args.slice(split)], env, feed: filter };
+    },
     async interrupt(handle) {
       const entry = entryOf(handle);
       await entry?.agentUp?.catch(noop);

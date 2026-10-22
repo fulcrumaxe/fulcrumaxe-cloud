@@ -3,7 +3,7 @@ import { cleanEnv } from "./cleanEnv.js";
 import { buildPrompt } from "./prompt.js";
 import { jobHashRefusals, type HashCheckedJob, type HashRefusal } from "./verifyHashes.js";
 import { cliModelNameFor, type ContextLedgerMeasure, type Job, type NormalizedEvent } from "@fulcrumaxe/runner-protocol";
-import type { SandboxPort } from "../sandbox/port.js";
+import type { SandboxHandle, SandboxPort } from "../sandbox/port.js";
 import { MODEL_HOST } from "../sandbox/sandboxSettings.js";
 import type { WorkspaceStore } from "./workspace.js";
 
@@ -61,6 +61,11 @@ export interface RunJobDeps {
   repoMap?: () => { version: string; text: string } | undefined;
   /** D#600 CX-4b: points the task prompt's trimmed markers at this run's spill files. Applied after the hashes were checked on the signed text. */
   taskPrompt?: (signed: string) => string;
+  /**
+   * D#6 R-CHK-2: called once when the agent ended cleanly, while its sandbox still exists (it is deleted on the way out), so the job's check can run under the same rules.
+   * It must not throw; a throw ends the run like any failure.
+   */
+  afterAgent?: (handle: SandboxHandle, workspace: string) => Promise<void>;
 }
 
 export const DEFAULT_WALL_CLOCK_MS = 2 * 60 * 60_000;
@@ -149,6 +154,7 @@ export async function runJob(job: RunnableJob, deps: RunJobDeps): Promise<RunJob
     if (ended === "wall_clock") return { status: "failed", reason: "wall_clock", workspace };
     if (ended === undefined) return { status: "failed", reason: "no_result", workspace };
     if (ended.type !== "result") return { status: "failed", reason: "agent_error", workspace };
+    await deps.afterAgent?.(handle, workspace);
     return { status: "done", workspace, ...(ended.sessionId === undefined ? {} : { sessionId: ended.sessionId }), ...(ended.agentOutput === undefined ? {} : { agentOutput: ended.agentOutput }), ...(ended.contextLedger === undefined ? {} : { contextLedger: ended.contextLedger }) };
   } catch (error) {
     // fx-swallow-ok: the failure is returned as a closed reason code; the error text could hold job content

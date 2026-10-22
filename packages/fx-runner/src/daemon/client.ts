@@ -6,7 +6,7 @@
 import {
   ClaimMessage, ClaimRateLimitedReply, HelloMessage, ClaimReply, DoneMessage, DoneReply, DoneRetryReply, EventsMessage, EventsReply, HeartbeatMessage,
   GitTicketMessage, GitTicketReply, GIT_TICKET_PATH, HeartbeatReply, SeqNotIncreasingReply, StopReply,
-  PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
+  PLANE_PUSH_PAIRING_PATH, PLANE_PUSH_REPORT_PATH, PLANE_PUSH_TOKEN_PATH, PlanePushPairingMessage, PlanePushPairingReply, PlanePushReportMessage, PlanePushReportReply, PlanePushTokenMessage, PlanePushTokenReply, type ClaimCapacity, type ContextLedgerWire, type DoneCheck, type LocalOnlyEvent, type SandboxUnavailableReason, type SignedJob, type StopReason,
 } from "@fulcrumaxe/runner-protocol";
 import { errorCodeOf, signedPost, type CloudReply } from "../cloud.js";
 import type { RunnerKey } from "../keys.js";
@@ -69,6 +69,8 @@ export interface DoneInput {
   agentOutput?: Record<string, unknown> | undefined;
   /** D#600 CX-1b: the wire form of the run's context ledger. Left out when an older cloud has refused it. */
   contextLedger?: ContextLedgerWire | undefined;
+  /** D#6 R-CHK-2: how the repository's approved check ended. Present only for a job that carried a check. */
+  check?: DoneCheck | undefined;
 }
 
 export interface RunnerClient {
@@ -228,7 +230,7 @@ export function createRunnerClient(config: RunnerClientConfig): RunnerClient {
     },
 
     async done(input) {
-      const base = { run_id: input.runId, lease_generation: input.leaseGeneration, ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }) };
+      const base = { run_id: input.runId, lease_generation: input.leaseGeneration, ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }), ...(input.check === undefined ? {} : { check: input.check }) };
       // The ledger is advisory too: one the protocol refuses is left out, and so is it once an older cloud has refused the field.
       const ledger = input.contextLedger !== undefined && !cloudRefusesLedger ? { context_ledger: input.contextLedger } : {};
       const build = (extra: Record<string, unknown>) => {

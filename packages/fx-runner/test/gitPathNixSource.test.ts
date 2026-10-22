@@ -108,4 +108,18 @@ describe.skipIf(!gitUsable)("nixSource against a plain git repo", () => {
     expect(await gitPath.nixSource!(job, sha["submodules"]!)).toEqual({ kind: "submodules" });
     expect(await gitPath.nixSource!(job, sha["tip"]!)).toEqual({ kind: "submodules" });
   });
+
+  // D#6 R-CHK-2: where the check's named files are pinned.
+  it("checkBase: a run branch's tip, and a fix round's tip on top of it, pin to the merge-base with the default branch, never to a branch commit", async () => {
+    expect(await gitPath.checkBase!(job, sha["side"]!)).toBe(sha["flake"]);
+    expect(await gitPath.checkBase!(job, sha["sideFlake"]!)).toBe(sha["flake"]);
+    expect(await gitPath.checkBase!(job, sha["sideLock"]!)).toBe(sha["flake"]);
+  });
+
+  it("checkBase: a default-branch commit pins to itself; unrelated history, a missing commit and a malformed one give null", async () => {
+    expect(await gitPath.checkBase!(job, sha["tip"]!)).toBe(sha["tip"]);
+    expect(await gitPath.checkBase!(job, sha["orphan"]!)).toBeNull();
+    expect(await gitPath.checkBase!(job, "e".repeat(40))).toBeNull();
+    expect(await gitPath.checkBase!(job, "HEAD; rm -rf")).toBeNull();
+  });
 });

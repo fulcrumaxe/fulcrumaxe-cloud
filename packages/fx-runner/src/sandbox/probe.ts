@@ -93,7 +93,7 @@ function deniedCredentialFiles(settings: Record<string, unknown>): string[] {
  * every denied-read directory that exists, then the allowed reads and writes laid back over it. A path that is not there is skipped
  * (`-try`), so the probe creates nothing on the machine. Ends before the command.
  */
-export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: string) => boolean, isFile?: (target: string) => boolean): string[] {
+export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: string) => boolean, isFile?: (target: string) => boolean, coverEveryDeniedFile = false): string[] {
   const fs = fsBlock(settings);
   const hidden = [...new Set(stringList(fs.denyRead))].filter((dir) => isDir(dir));
   // A directory under another hidden one is already hidden with it.
@@ -110,7 +110,7 @@ export function bwrapArgs(settings: Record<string, unknown>, isDir: (target: str
   if (isFile !== undefined) {
     const allowed = [...stringList(fs.allowRead), ...stringList(fs.allowWrite)];
     const denied = new Set([...stringList(fs.denyRead), ...deniedCredentialFiles(settings)]);
-    for (const file of denied) if (allowed.some((dir) => file.startsWith(`${dir}${path.sep}`)) && isFile(file)) args.push("--ro-bind", "/dev/null", file);
+    for (const file of denied) if ((coverEveryDeniedFile || allowed.some((dir) => file.startsWith(`${dir}${path.sep}`))) && isFile(file)) args.push("--ro-bind", "/dev/null", file);
   }
   return args;
 }
@@ -188,7 +188,7 @@ export type SandboxLaunch = { ok: true; tool: string; args: string[]; kind: "bub
  * The tool and arguments that run `command` under the rules `probeSettings` builds. `readFiles` are single files laid back read-only over the hidden
  * home directory (the shell start-up files, D#6 C44-2), nothing else. Starts no process.
  */
-export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string, unknown>, searchPath: string, command: readonly string[], host: SandboxHost, readFiles: readonly string[] = []): SandboxLaunch {
+export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string, unknown>, searchPath: string, command: readonly string[], host: SandboxHost, readFiles: readonly string[] = [], coverDeniedFiles = false): SandboxLaunch {
   if (input.platform === "darwin") {
     const tool = "/usr/bin/sandbox-exec";
     if (!host.isFile(tool)) return { ok: false, result: failure("probe_failed_other", "sandbox-exec is not at /usr/bin/sandbox-exec") };
@@ -200,7 +200,7 @@ export function sandboxLaunch(input: SandboxProbeInput, settings: Record<string,
     const tools = resolveSandboxTools(searchPath, { platform: input.platform });
     if (tools === undefined) return { ok: false, result: failure("probe_failed_other", "no sandbox tool is needed here") };
     const binds = readFiles.flatMap((file) => ["--ro-bind-try", file, file]);
-    return { ok: true, tool: tools.bwrap, kind: "bubblewrap", args: [...bwrapArgs(settings, (target) => host.isDir(target)), ...binds, "--", ...command] };
+    return { ok: true, tool: tools.bwrap, kind: "bubblewrap", args: [...bwrapArgs(settings, (target) => host.isDir(target), coverDeniedFiles ? (target) => host.isFile(target) : undefined, coverDeniedFiles), ...binds, "--", ...command] };
   } catch (error) {
     if (!(error instanceof SandboxRefused)) throw error;
     if (error.code === "bubblewrap_missing") return { ok: false, result: failure("bwrap_missing") };
