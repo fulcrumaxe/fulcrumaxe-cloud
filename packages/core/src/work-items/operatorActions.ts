@@ -13,6 +13,7 @@
  * Pure: facts in, a verdict out.
  */
 import type { PoolClient } from 'pg';
+import { mayOpenPublicPullRequest, mayRetryPublish, readRetryFacts, type RetryFacts } from '../repos/planePushRecord.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
 import { ADVANCE_PANEL_KINDS, advanceActionFor, type AdvanceFacts } from './advance.js';
 import { isLegalStageTransition } from './stages.js';
@@ -24,7 +25,7 @@ import { isLegalStageTransition } from './stages.js';
  */
 export const BACK_TO_DISCUSSION_REF_PREFIX = 'back_to_discussion:';
 
-export const OPERATOR_ACTIONS = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen'] as const;
+export const OPERATOR_ACTIONS = ['build_again', 'respec', 'back_to_discussion', 'treat_as_feature', 'close', 'reopen', 'retry_push', 'open_pr'] as const;
 export type OperatorAction = (typeof OPERATOR_ACTIONS)[number];
 
 /**
@@ -60,6 +61,8 @@ export interface OperatorFacts extends AdvanceFacts {
    * while this is false. False too when the item has no Spec (the table then refuses for that reason first).
    */
   spec_file_list_known: boolean;
+  /** D#598 P1f-6b: the item's change to its paired public repository (absent or null: it has none). Asked by Try the push again and Open the pull request again. */
+  push?: RetryFacts | null;
 }
 
 export type OperatorRefusal = 'role' | 'external' | 'no_repo' | 'no_issue' | 'live' | 'stage' | 'state';
@@ -110,6 +113,11 @@ export function operatorVerdict(action: OperatorAction, f: OperatorFacts): Opera
     case 'close':
       if (!CLOSABLE_STAGES.includes(f.stage) || !isLegalStageTransition(f.stage, 'closed')) return no('stage', `work item is ${f.stage}`);
       return { ok: true };
+    // D#598 P1f-6b: both ask the one predicate in planePushRecord.ts that the worker's own retry asks, so the page never offers what the worker would refuse.
+    case 'retry_push':
+      return f.push && mayRetryPublish(f.push) ? { ok: true } : no('state', 'there is no refused push to try again');
+    case 'open_pr':
+      return f.push && mayOpenPublicPullRequest(f.push) ? { ok: true } : no('state', 'there is no pushed branch waiting for a pull request');
     case 'reopen':
       if (!REOPENABLE_STAGES.includes(f.stage) || !isLegalStageTransition(f.stage, 'triaged')) return no('stage', `work item is ${f.stage}`);
       return { ok: true };
@@ -144,5 +152,5 @@ export async function readOperatorFacts(client: PoolClient, workItemId: string, 
   const r = rows[0];
   if (!r) return null;
   const { acceptance_files: acceptanceFiles, ...rest } = r;
-  return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known' };
+  return { ...rest, role, spec_file_list_known: parseAcceptanceScope(acceptanceFiles).kind === 'known', push: await readRetryFacts(client, workItemId) };
 }

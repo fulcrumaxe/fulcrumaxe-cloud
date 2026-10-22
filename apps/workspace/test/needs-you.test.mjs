@@ -32,6 +32,8 @@ function fakeCall(routes) {
   const log = [];
   const call = vi.fn(async (method, path, body) => {
     log.push([method, path, body]);
+    // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
+    if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = routes[method + " " + path];
     if (r === undefined) throw fail(404, "not_found");
     const v = typeof r === "function" ? r(body) : r;
@@ -166,10 +168,16 @@ describe("loading the list", () => {
 });
 
 describe("Mark done", () => {
+  it("a client that sends a body is refused like the real API, so it ends in the failed sentence", async () => {
+    const f = fakeCall({ [DONE]: closed("done") });
+    await expect(f.call("POST", actionUrl(BASE.id, "done"), {})).rejects.toMatchObject({ status: 400, code: "invalid_request" });
+    await expect(f.call("POST", actionUrl(BASE.id, "done"), undefined)).resolves.toMatchObject({ state: "done" });
+  });
+
   it("posts once, and a request whose check passed leaves the open part showing Done", async () => {
     const { list, log } = await loaded({ [GET]: listOf([req()]), [DONE]: closed("done") });
     await list.act(BASE.id, "done");
-    expect(log.filter((l) => l[0] === "POST")).toEqual([["POST", actionUrl(BASE.id, "done"), {}]]);
+    expect(log.filter((l) => l[0] === "POST")).toEqual([["POST", actionUrl(BASE.id, "done"), undefined]]);
     expect(list.state.rows).toHaveLength(1);
     expect(list.state.rows[0]).toMatchObject({ state: "done", sentence: "" });
     expect(list.busyVerb(BASE.id)).toBe("");

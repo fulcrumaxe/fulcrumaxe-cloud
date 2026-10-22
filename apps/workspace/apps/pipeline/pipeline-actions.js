@@ -671,6 +671,17 @@ export const BEING_CHECKED_SENTENCE = "You can approve this once it's been check
 export const RETRY_SENTENCE = "The check didn't finish. We'll try again at the next check.";
 export const NO_EVIDENCE_SENTENCE = "No evidence was found for this proposal.";
 export const NO_CLAIMS_SENTENCE = "There was nothing to check in this proposal.";
+// The two sentences above are for a check that finished. While there is no finished check, the detail says so instead.
+export const DETAIL_PENDING_SENTENCE = "Not checked yet. Claims and evidence show here once the check is done.";
+export const DETAIL_FAILED_SENTENCE = "The check didn't finish, so there are no claims or evidence to show.";
+
+/** The line for a proposal whose check has not produced a result (pending, check failed, not checked); "" once a check has finished. */
+export function unfinishedCheckLine(p) {
+  if (p.verification === "pending") return DETAIL_PENDING_SENTENCE;
+  if (p.verification === "check_failed") return DETAIL_FAILED_SENTENCE;
+  if (p.verification === "not_checked") return NOT_CHECKED_SENTENCE;
+  return "";
+}
 export const CLAIM_VERDICTS = {
   supported: "Confirmed in the repository.",
   unverifiable: "Couldn't be checked against the repository.",
@@ -1222,9 +1233,12 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
     if (!d || d.status === "loading") return wrap(h("p", { class: "pl-inbox-line", role: "status", "data-testid": "pl-inbox-detail-loading" }, "Loading…"));
     if (d.status === "error")
       return wrap(h("p", { role: "alert", "data-testid": "pl-inbox-detail-error" }, "The proposals couldn't be loaded."), h("button", { type: "button", class: "pl-btn", "data-focus": p.id + ":retry", onClick: () => void fetchDetail(p) }, "Try again"));
+    const unfinished = unfinishedCheckLine(p);
+    // Nothing to list and no finished check: one line about the check, not "nothing to check" / "no evidence". Rows that do exist are still shown.
+    if (unfinished && !d.claims.length && !d.evidence.length) return wrap(h("p", { class: "pl-inbox-line", "data-testid": "pl-check-status", "data-verification": str(p.verification) }, unfinished));
     const claims = d.claims.length
       ? h("ul", { class: "pl-claims", "data-testid": "pl-claims" }, d.claims.map((c) => h("li", { class: "pl-claim", "data-testid": "pl-claim", "data-verdict": str(c.verdict) }, h("span", { class: "pl-claim-text" }, c.text), claimVerdict(c) ? h("span", { class: "pl-claim-verdict", "data-testid": "pl-claim-verdict" }, claimVerdict(c)) : null)))
-      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-claims" }, NO_CLAIMS_SENTENCE);
+      : unfinished ? null : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-claims" }, NO_CLAIMS_SENTENCE);
     const evidence = d.evidence.length
       ? h("ul", { class: "pl-evidence", "data-testid": "pl-evidence" }, d.evidence.map((e) => {
           const w = evidenceLabel(e);
@@ -1235,7 +1249,7 @@ export function createInbox({ call = api, getRepo, onOpenWorkItem = () => {} }) 
             w.commit ? [" ", h("span", { "data-testid": "pl-evi-commit" }, w.commit)] : null,
             str(e.excerpt) ? h("p", { class: "pl-ins-text pl-evi-excerpt", "data-testid": "pl-evi-excerpt" }, e.excerpt) : null);
         }))
-      : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-evidence" }, NO_EVIDENCE_SENTENCE);
+      : unfinished ? null : h("p", { class: "pl-inbox-line", "data-testid": "pl-no-evidence" }, NO_EVIDENCE_SENTENCE);
     return wrap(claims, evidence);
   }
 
@@ -1618,10 +1632,10 @@ export function approveView(item, approver, liveRun = false, waiting = null) {
 // for a few moments so a refusal that costs nothing reaches the sentence. An open pull request has no Close: the server says
 // so (`close_on_github`), and the card tells the person to close the pull request on GitHub.
 
-export const OPERATOR_LABELS = { build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" };
+export const OPERATOR_LABELS = { build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" };
 /** The order buttons are drawn in. An action the server lists that is not here is not drawn. */
-export const OPERATOR_ORDER = ["build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen"];
-const OPERATOR_TESTIDS = { build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen" };
+export const OPERATOR_ORDER = ["build_again", "respec", "back_to_discussion", "treat_as_feature", "close", "reopen", "retry_push", "open_pr"];
+const OPERATOR_TESTIDS = { build_again: "pl-op-build", respec: "pl-op-respec", back_to_discussion: "pl-op-back", treat_as_feature: "pl-op-feature", close: "pl-op-close", reopen: "pl-op-reopen", retry_push: "pl-op-retry-push", open_pr: "pl-op-open-pr" };
 
 const itemPath = (id) => "/api/v1/work-items/" + encodeURIComponent(id);
 export const OPERATOR_PATHS = {
@@ -1631,6 +1645,8 @@ export const OPERATOR_PATHS = {
   treat_as_feature: (id) => itemPath(id) + "/treat-as-feature",
   close: (id) => itemPath(id) + "/close",
   reopen: (id) => itemPath(id) + "/reopen",
+  retry_push: (id) => itemPath(id) + "/retry-push",
+  open_pr: (id) => itemPath(id) + "/open-pr",
 };
 
 /** Under the buttons, before the click: what each one does. */
@@ -1641,6 +1657,8 @@ export const OPERATOR_NOTES = {
   treat_as_feature: "A project has no panel, so it stops here. Treat as a feature changes it to a feature and runs the panel and the Spec as for any feature.",
   close: "Close ends the work item. No agent will work on it any more.",
   reopen: "Reopen puts a closed work item back in Triaged, where it can be approved again.",
+  retry_push: "Try the push again sends the change to the public repository once more. It is tried at most three times in all.",
+  open_pr: "Open the pull request again opens the pull request for the branch that was already pushed. Nothing is pushed again.",
 };
 export const CLOSE_ON_GITHUB_NOTE = "To close this, close its pull request on GitHub. The card then moves to Closed without a merge.";
 
@@ -1652,7 +1670,11 @@ export const OPERATOR_STARTED = {
   treat_as_feature: "Changed to a feature. The agents are discussing it now, and a Spec follows when they are done.",
   close: "Closed.",
   reopen: "Reopened. The card is back in Triaged.",
+  retry_push: "Started. The push is being tried again, and the Public change line shows how it ended. This can take a minute.",
+  open_pr: "The pull request is open. The Public change line has its link.",
 };
+/** Open the pull request again answers with its outcome at once; a refusal leaves the pushed branch as it was. */
+export const OPEN_PR_REFUSED = "The pull request could not be opened. The pushed branch is unchanged; the Public change line says what is known. You can try again.";
 
 export const CLOSE_DIALOG = { title: "Close this work item?", lines: ["The card moves to Closed and no agent will work on it any more."], confirm: "Yes, close it", dismiss: "Keep it open" };
 export const REOPEN_DIALOG = { title: "Reopen this work item?", lines: ["The card moves back to Triaged. Nothing starts until someone approves it."], confirm: "Yes, reopen it", dismiss: "Keep it closed" };
@@ -1685,6 +1707,7 @@ export function createOperator({ call = api, onChange = () => {}, onDone = () =>
       // Close answers at once (no agent is involved); every other action is a run action that is followed.
       const { refusal, waiting } = action in CONFIRMED ? { refusal: null, waiting: false } : await followAcceptedOutcome(call, sleep, accepted);
       if (st.itemId !== item.id) return;
+      if (action === "open_pr" && accepted && accepted.result === "refused") return set({ itemId: item.id, phase: "error", action, text: OPEN_PR_REFUSED, confirm: false });
       if (refusal !== null) return set({ itemId: item.id, phase: "error", action, text: approveSentenceFor(refusal), confirm: keepDialog });
       set({ itemId: item.id, phase: "started", action, text: waiting ? APPROVE_SENTENCES.waiting_for_slot : OPERATOR_STARTED[action], confirm: false });
       onDone(item.id, action);

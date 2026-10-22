@@ -4,6 +4,7 @@ import { appUserPool, platformOpsPool } from "@fx/api/src/sse/pools.js";
 import { runActionDeps } from "@fx/api/src/routes/run-actions.js";
 import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
+import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
@@ -14,6 +15,7 @@ import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
 import { previewEnabled, workerConfigured } from "../../../../lib/worker";
+import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
 
 /**
@@ -45,6 +47,9 @@ export const maxDuration = 30;
 runActionDeps.getRunActionSignal = () => (workerConfigured() ? httpRunActionSignalFromEnv() : null);
 // D#31 AUTHOR-CHECK-WIRE: the retry author check, the same function the worker is handed (lib/worker.ts).
 runActionDeps.getAuthorCheck = getAuthorCheck;
+// D#598 P1f-6b: Try the push again starts a durable job; Open the pull request again is one call to the worker. Both answer 503 until a worker can be built.
+publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRetryPush()(args) : Promise.reject(new Error("worker not configured")));
+publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 // D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.

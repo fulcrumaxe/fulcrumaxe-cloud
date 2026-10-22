@@ -1,5 +1,5 @@
 import { waitUntil } from "@vercel/functions";
-import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerPlanePushFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunHandoffs, type InvariantSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type Worker } from "@fx/worker";
+import { createVercelKeepAlive, createWorker, productionVercelCredentials, type CreateWorkerOptions, type RunnerClaimFacade, type RunnerDoneFacade, type RunnerGitTicketFacade, type RunnerPlanePushFacade, type RunnerLeaseFacade, type RunnerLeaseSweeper, type RunHandoffs, type InvariantSweeper, type RunnerNoticeSweeper, type RunnerQueueSweeper, type PlanePublish, type Worker } from "@fx/worker";
 import type { SandboxReapWorker } from "@fx/reconcile";
 import { buildPreviewPrompt, markBuildNeedsHuman, readBuildWaitReason, publishLightSpec, publishAmendment, publishRespec, runPanelForItem, runSpecForItem, triageIssueItem, type RunActionsWorker } from "@fx/pipeline";
 import { getAuthorCheck } from "./github/authorCheck";
@@ -56,7 +56,7 @@ export type StageResumeSweepWorker = Pick<Worker, "sweepParkedStages">;
 export type SetupRequestCheckWorker = Pick<Worker, "sweepSetupRequestChecks">;
 
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

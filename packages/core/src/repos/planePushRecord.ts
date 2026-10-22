@@ -40,6 +40,39 @@ const SETTLED: readonly PlanePushState[] = ['pr_opened', 'updating', 'updated', 
 /** The states a new build may re-stamp (a fresh attempt at the same item). */
 const RESTAMPABLE: readonly PlanePushState[] = ['building', 'scanning', 'refused', 'no_public_change'];
 
+/** A push has at most this many attempts per row (the schema checks the same number). */
+export const PUBLISH_ATTEMPT_LIMIT = 3;
+
+/** What the retry predicate needs: the push row's state, the runtime of its latest push attempt, and how many push attempts it has. */
+export interface RetryFacts {
+  state: PlanePushState;
+  lastPushRuntime: 'runner' | 'sandbox' | 'hosted' | null;
+  pushAttempts: number;
+  managedByPerson: boolean;
+}
+
+/**
+ * THE one predicate for "may this item try the push again now": a refused push of a sandbox build with fewer than three push attempts. The worker's
+ * `retryPublish` enforces it, and the `retry_push` operator action and the item view's `actions` list themselves from it, so the page never offers a retry that
+ * would be refused. (A `pushed_pr_not_opened` item is not here: that retry opens the PR with no sandbox, and its action is `open_pr`.)
+ */
+export function mayRetryPublish(f: RetryFacts): boolean {
+  return f.state === 'refused' && f.lastPushRuntime === 'sandbox' && f.pushAttempts < PUBLISH_ATTEMPT_LIMIT && !f.managedByPerson;
+}
+
+/** Whether "Open the pull request again" applies: the branch is pushed, no pull request exists, and nobody has taken the branch over. */
+export function mayOpenPublicPullRequest(f: RetryFacts): boolean {
+  return f.state === 'pushed_pr_not_opened' && !f.managedByPerson;
+}
+
+/**
+ * The one address a pull request of the paired repository has: `https://github.com/<code_repo>/pull/<number>`. A recorded or reported address must be exactly this
+ * (the repository's case is GitHub's and is not compared), so a link on the page can never lead to another repository or another pull request.
+ */
+export function publicPullRequestUrlMatches(codeRepo: string, prNumber: number, url: unknown): boolean {
+  return typeof url === 'string' && Number.isSafeInteger(prNumber) && prNumber > 0 && url.toLowerCase() === `https://github.com/${codeRepo}/pull/${prNumber}`.toLowerCase();
+}
+
 export interface PlanePushRow {
   id: string;
   accountId: string;
@@ -235,6 +268,12 @@ export async function recordVerifiedOutcome(client: Queryable, input: { accountI
   if (o.state !== 'refused' && o.code !== undefined) bad('only a refusal carries a code');
   if (o.state !== 'pr_opened' && (o.prNumber !== undefined || o.prUrl !== undefined)) bad('only an opened pull request carries a number and url');
 
+  if (o.state === 'pr_opened') {
+    const { rows: repo } = await client.query<{ code_repo: string }>('SELECT code_repo FROM plane_pushes WHERE id = $1 AND account_id = $2', [input.id, input.accountId]);
+    if (!repo[0]) return null;
+    if (!publicPullRequestUrlMatches(repo[0].code_repo, o.prNumber!, o.prUrl)) bad('the pull request url is not this pull request in the paired repository');
+  }
+
   const { rows } = await client.query<Row>(
     `UPDATE plane_pushes
         SET state = $3,
@@ -287,4 +326,23 @@ export async function derivePlanePush(client: Queryable, input: { accountId: str
   const row = toRow(rows[0]);
   const headSha = await port.branchHead({ codeRepo: row.codeRepo, branch: row.branch });
   return { row, headSha, stale: headSha !== row.headSha };
+}
+
+/**
+ * The facts the two retry predicates need for an item's latest push row (the row `readPublicChange` shows). An item refused before any sandbox was started
+ * has no attempt yet; its executor ran in the sandbox, so the retry is a sandbox retry (the worker's reader makes the same reading). Null for an item with no row.
+ */
+export async function readRetryFacts(client: Queryable, workItemId: string): Promise<RetryFacts | null> {
+  const { rows } = await client.query<{ state: PlanePushState; managed: boolean; n: number; last: RetryFacts['lastPushRuntime']; sandbox_side: boolean | null }>(
+    `SELECT p.state, p.managed_by_person_at IS NOT NULL AS managed,
+            (SELECT count(*)::int FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS n,
+            (SELECT (array_agg(a.runtime ORDER BY a.attempt_no DESC))[1] FROM plane_push_attempts a WHERE a.account_id = p.account_id AND a.plane_push_id = p.id AND a.kind = 'push') AS last,
+            (SELECT r.job_signed IS NULL AND r.runtime = 'production' FROM agent_runs r WHERE r.account_id = p.account_id AND r.work_item_id = p.work_item_id AND r.role = 'executor'
+              ORDER BY r.created_at DESC, r.id LIMIT 1) AS sandbox_side
+       FROM plane_pushes p WHERE p.work_item_id = $1 ORDER BY p.created_at DESC, p.id LIMIT 1`,
+    [workItemId],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return { state: r.state, managedByPerson: r.managed === true, pushAttempts: r.n, lastPushRuntime: r.last ?? (r.sandbox_side === true ? 'sandbox' : null) };
 }

@@ -46,11 +46,26 @@ export interface MemoryEntry {
   text: string;
   /** The bracketed head of the line (D#601 MEM-3: `[scope/kind id@vN]`). When present the line is `head text`; otherwise `name (id@vN): text`. It is sanitised with the rest of the line. */
   head?: string;
+  /**
+   * D#601 MEM-8b: set when this line is not a memory entry but one of the item's own records (an applied correction note, or a completed handoff note). Its `id` is then
+   * `correction:<uuid>` or `handoff:<uuid>`, which is not an entry ref, so it never reaches the entry record; the build writes it to the item-source record instead.
+   * `sha256` is of `text` as handed over (cut and marker included), `cut` says the marker was added.
+   */
+  source?: { kind: "correction" | "handoff"; sha256: string; cut: boolean };
 }
 
 /** What the assembler asks of the memory store. Until D#601 implements it, `emptyMemoryPort` answers. Returns best first. */
 export interface MemoryPort {
-  recall(request: { accountId: string; repoId: string; workItemId?: string; /** The run's role, for role-scope entries. Absent: none. */ role?: string; slot: "stable" | "item" }): Promise<readonly MemoryEntry[]>;
+  recall(request: {
+    accountId: string;
+    repoId: string;
+    workItemId?: string;
+    /** The run's role, for role-scope entries. Absent: none. */
+    role?: string;
+    /** The run this prompt is for, when it already exists (a replay of a started step). A note that run applied, and the handoff that made it, are not recalled into it. */
+    runId?: string;
+    slot: "stable" | "item";
+  }): Promise<readonly MemoryEntry[]>;
 }
 export const emptyMemoryPort: MemoryPort = { recall: async () => [] };
 

@@ -183,3 +183,37 @@ describe('closeOnGithub', () => {
     expect(closeOnGithub(at({ stage: 'needs_human' }))).toBe(false);
   });
 });
+
+describe('retry_push and open_pr (D#598 P1f-6b)', () => {
+  const push = (over: Partial<NonNullable<OperatorFacts['push']>> = {}) => at({ push: { state: 'refused', lastPushRuntime: 'sandbox', pushAttempts: 1, managedByPerson: false, ...over } });
+
+  it('retry_push is offered for a refused push of a sandbox build with fewer than three attempts, and only then', () => {
+    expect(operatorVerdict('retry_push', push())).toEqual({ ok: true });
+    expect(operatorVerdict('retry_push', push({ pushAttempts: 2 }))).toEqual({ ok: true });
+    for (const over of [{ pushAttempts: 3 }, { lastPushRuntime: 'runner' as const }, { state: 'pr_opened' as const }, { state: 'pushed_pr_not_opened' as const }, { managedByPerson: true }]) {
+      expect(operatorVerdict('retry_push', push(over)), JSON.stringify(over)).toMatchObject({ ok: false, reason: 'state' });
+    }
+    expect(operatorVerdict('retry_push', at({}))).toMatchObject({ ok: false, reason: 'state' });
+    expect(operatorVerdict('retry_push', at({ push: null }))).toMatchObject({ ok: false, reason: 'state' });
+  });
+
+  it('open_pr is offered only for a pushed branch with no pull request that nobody has taken over', () => {
+    expect(operatorVerdict('open_pr', push({ state: 'pushed_pr_not_opened' }))).toEqual({ ok: true });
+    for (const over of [{ state: 'refused' as const }, { state: 'pushed' as const }, { state: 'pr_opened' as const }, { state: 'pushed_pr_not_opened' as const, managedByPerson: true }]) {
+      expect(operatorVerdict('open_pr', push(over)), JSON.stringify(over)).toMatchObject({ ok: false, reason: 'state' });
+    }
+  });
+
+  it('owner or admin only; a live run (a publish run included) answers live, so a second press is already_running', () => {
+    expect(operatorVerdict('retry_push', { ...push(), role: 'member' })).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('open_pr', { ...push({ state: 'pushed_pr_not_opened' }), role: 'member' })).toMatchObject({ ok: false, reason: 'role' });
+    expect(operatorVerdict('retry_push', { ...push(), role: 'owner' })).toEqual({ ok: true });
+    expect(operatorVerdict('retry_push', { ...push(), live_run: true })).toMatchObject({ ok: false, reason: 'live' });
+    expect(operatorVerdict('open_pr', { ...push({ state: 'pushed_pr_not_opened' }), live_run: true })).toMatchObject({ ok: false, reason: 'live' });
+  });
+
+  it('they come last in the list, after the stuck-item actions', () => {
+    expect(OPERATOR_ACTIONS.slice(-2)).toEqual(['retry_push', 'open_pr']);
+    expect(operatorActionsFor(push())).toEqual(['build_again', 'back_to_discussion', 'close', 'retry_push']);
+  });
+});

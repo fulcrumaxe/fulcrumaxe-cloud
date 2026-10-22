@@ -14,6 +14,7 @@ import {
   APPROVE_SENTENCES,
   CLOSE_DIALOG,
   CLOSE_ON_GITHUB_NOTE,
+  OPEN_PR_REFUSED,
   OPERATOR_LABELS,
   OPERATOR_NOTES,
   OPERATOR_ORDER,
@@ -71,7 +72,7 @@ describe("one rule source: the app draws what the server lists, in a fixed order
   });
 
   it("the labels are exactly the words the owner approved", () => {
-    expect(OPERATOR_LABELS).toEqual({ build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen" });
+    expect(OPERATOR_LABELS).toEqual({ build_again: "Build again", respec: "Re-spec", back_to_discussion: "Back to discussion", treat_as_feature: "Treat as a feature", close: "Close", reopen: "Reopen", retry_push: "Try the push again", open_pr: "Open the pull request again" });
   });
 
   it("Re-spec (D#6 R4d-5b): drawn only when the server lists it, labelled exactly Re-spec, after Build again, on its own route", () => {
@@ -313,5 +314,55 @@ describe("the whole stack of words", () => {
   it("flush helper is not needed: the logic awaits its own requests", async () => {
     await flush();
     expect(true).toBe(true);
+  });
+});
+
+describe("Try the push again and Open the pull request again (D#598 P1f-6b)", () => {
+  it("are drawn only when the server lists them, after the stuck-item actions, labelled in the owner's words", () => {
+    expect(operatorActions({ actions: ["open_pr", "close", "retry_push"] })).toEqual(["close", "retry_push", "open_pr"]);
+    expect(operatorActions({ actions: [] })).toEqual([]);
+    expect(OPERATOR_LABELS.retry_push).toBe("Try the push again");
+    expect(OPERATOR_LABELS.open_pr).toBe("Open the pull request again");
+    expect(OPERATOR_PATHS.retry_push(ID)).toBe("/api/v1/work-items/" + ID + "/retry-push");
+    expect(OPERATOR_PATHS.open_pr(ID)).toBe("/api/v1/work-items/" + ID + "/open-pr");
+  });
+
+  it("Try the push again sends at once with no body and tells the person the push is in flight (the refusal, if any, is the Public change line on the next read)", async () => {
+    const call = fakeCall({ work_item_id: ID, state: "started" });
+    const { op, done } = make(call);
+    await op.press(ITEM, "retry_push");
+    expect(posts(call)).toEqual([["POST", "/api/v1/work-items/" + ID + "/retry-push", undefined]]);
+    expect(gets(call)).toEqual([]);
+    expect(op.state).toMatchObject({ phase: "started", text: OPERATOR_STARTED.retry_push });
+    expect(done).toEqual([[ID, "retry_push"]]);
+    expect(OPERATOR_STARTED.retry_push).not.toMatch(/null|undefined/);
+  });
+
+  it("a second press while it is in flight sends nothing", async () => {
+    const call = fakeCall({ work_item_id: ID, state: "started" });
+    const { op } = make(call);
+    await op.press(ITEM, "retry_push");
+    await op.press(ITEM, "retry_push");
+    expect(posts(call)).toHaveLength(1);
+  });
+
+  it("a 409 already_running and a 409 action_not_available each read as their fixed sentence, never the server's text", async () => {
+    for (const code of ["already_running", "action_not_available"]) {
+      const { op } = make(fakeCall(fail(409, code)));
+      await op.press(ITEM, "retry_push");
+      expect(op.state).toMatchObject({ phase: "error", text: approveSentenceFor(code) });
+      expect(op.state.text).not.toContain("server text");
+    }
+  });
+
+  it("Open the pull request again: an opened answer says so; a refused answer shows the fixed sentence and keeps the button", async () => {
+    const opened = make(fakeCall({ work_item_id: ID, result: "opened", code: null, pr_number: 9 }));
+    await opened.op.press(ITEM, "open_pr");
+    expect(opened.op.state).toMatchObject({ phase: "started", text: OPERATOR_STARTED.open_pr });
+    const refused = make(fakeCall({ work_item_id: ID, result: "refused", code: "pr_failed", pr_number: null }));
+    await refused.op.press(ITEM, "open_pr");
+    expect(refused.op.state).toMatchObject({ phase: "error", text: OPEN_PR_REFUSED });
+    expect(refused.op.state.text).not.toContain("pr_failed");
+    expect(refused.done).toEqual([]);
   });
 });

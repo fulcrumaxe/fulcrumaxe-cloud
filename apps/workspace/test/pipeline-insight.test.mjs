@@ -652,3 +652,89 @@ describe("D#600 CX-8b: the context button's accessible name is unique per run", 
     expect(labels[1]).toBe("What this run loaded: " + m.runs[1].role);
   });
 });
+
+// ── D#598 P1f-6a: the "Public change" block, one page test per state, over the fixtures the real route produced ──────────────────
+describe("the Public change block", () => {
+  const CASES = [
+    ["building", "Building the public change"],
+    ["scanning", "Scanning"],
+    ["pushed", "Pushed"],
+    ["pr_opened", "PR opened"],
+    ["refused", "Refused: the scan found something that must not be public"],
+    ["pushed_pr_not_opened", "Pushed, PR not opened"],
+    ["no_public_change", "No public change"],
+    ["refused-retry_limit", "Refused: the push has already been tried three times"],
+    ["refused-pairing_off", "Refused: the pairing is off"],
+    ["refused-unknown_code", "Refused: the change was not sent"],
+    ["refused-runner", "Refused: the public repository could not be reached. Use Build again to try once more."],
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("Node", FakeNode);
+    vi.stubGlobal("document", { hidden: false, activeElement: null, createElement: (t) => new FakeEl(t), createTextNode: (text) => ({ text }) });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  async function show(data) {
+    const panel = createInsightPanel({ call: vi.fn(async () => structuredClone(data)), setInterval: () => 1, clearInterval: () => {} });
+    panel.start("item-1");
+    await flush();
+    return panel;
+  }
+
+  for (const [name, sentence] of CASES) {
+    it(name + ": shows the sentence, the full repo name and the branch, with no null or undefined text", async () => {
+      const data = fx("200-public-change-" + name + ".json");
+      const panel = await show(data);
+      const block = byId(panel.el, "pl-public-change");
+      expect(block).toHaveLength(1);
+      expect(byId(panel.el, "pl-public-change-sentence")[0].textContent).toBe(sentence);
+      const where = byId(panel.el, "pl-public-change-where")[0].textContent;
+      expect(where).toContain("acme/docs-public");
+      expect(where).toContain(data.public_change.branch);
+      expect(block[0].textContent).not.toMatch(/null|undefined/);
+      // The raw code is never what the person reads for a refusal the copy does not know.
+      expect(block[0].textContent).not.toContain("a_code_from_the_future");
+    });
+  }
+
+  it("a pull request shows as text and one anchor to github.com; a state with none has no anchor", async () => {
+    const withPr = await show(fx("200-public-change-pr_opened.json"));
+    expect(byId(withPr.el, "pl-public-change-where")[0].textContent).toContain("Pull request #88");
+    const links = byId(withPr.el, "pl-public-change-link");
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute("href")).toBe("https://github.com/acme/docs-public/pull/88");
+    const without = await show(fx("200-public-change-pushed.json"));
+    expect(byId(without.el, "pl-public-change-link")).toHaveLength(0);
+  });
+
+  it("an address that is not a github.com pull request gets no anchor", () => {
+    const data = fx("200-public-change-pr_opened.json");
+    data.public_change.pr_url = "https://evil.example/acme/docs-public/pull/88";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "javascript:alert(1)";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+  });
+
+  it("the anchor leads to exactly this pull request of this repository: another pull request, another repository or another host gets none", () => {
+    const data = fx("200-public-change-pr_opened.json");
+    data.public_change.pr_url = "https://github.com/acme/docs-public/pull/89";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/evil/other/pull/88";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/acme/docs-public/pull/88/files";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/Acme/Docs-Public/pull/88";
+    expect(buildInsight(data).publicChange.prUrl).toBe("https://github.com/Acme/Docs-Public/pull/88");
+  });
+
+  it("an item with no public change draws no block", async () => {
+    expect(buildInsight(OK).publicChange).toBeNull();
+    const panel = await show(OK);
+    expect(byId(panel.el, "pl-public-change")).toHaveLength(0);
+  });
+});

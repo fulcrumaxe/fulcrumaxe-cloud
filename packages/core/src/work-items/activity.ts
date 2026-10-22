@@ -7,6 +7,7 @@ import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsag
 import { commandIsClean } from '@fx/runtime/src/toolActivity.js';
 import { redactText } from '@fx/runtime/src/redact.js';
 import { parseAcceptanceScope } from '../specs/acceptanceScope.js';
+import { readPublicChange, type PublicChange } from '../repos/publicChange.js';
 import { BACK_TO_DISCUSSION_REF_PREFIX, closeOnGithub, operatorActionsFor, readOperatorFacts, type OperatorAction } from './operatorActions.js';
 
 /**
@@ -168,6 +169,8 @@ export interface WorkItemActivity {
    * The API route puts the approved sentence in; there is never a second full review row for such a head.
    */
   review_recheck: { kind: 'merge_only' } | null;
+  /** D#598 P1f-6a: the item's change to its paired public repository, or null for an item with none. */
+  public_change: PublicChange | null;
   /**
    * What the CALLER may do to this item now, from the one table in operatorActions.ts (the routes ask the same table): Build
    * again, Re-spec, Back to discussion, Treat as a feature, Close. Empty for a member, an external item, a live run or a stage none applies to.
@@ -639,6 +642,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         .reverse(),
       notice,
       review_recheck: reviewRecheck,
+      public_change: await readPublicChange(client, accountId, workItemId, facts),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
     };

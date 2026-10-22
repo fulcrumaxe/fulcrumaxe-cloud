@@ -28,3 +28,19 @@ test("the fixture server keeps idle sockets open past the longest test, and tell
     await stop();
   }
 });
+
+test("the setup-request done and withdraw routes refuse a body like the real API, and accept none", async () => {
+  const { url, stop } = await startFixtureServer({ port: 0, features: {} });
+  try {
+    for (const verb of ["done", "withdraw"]) {
+      const target = `${url}/api/v1/setup-requests/3a1f6c52-7a0e-4c1a-9a53-0b1d2e3f4a55/${verb}`;
+      const withBody = await fetch(target, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      expect(withBody.status).toBe(400);
+      expect(await withBody.json()).toEqual({ error: { code: "invalid_request", message: "this route does not accept a request body", request_id: "fixture" } });
+      const bare = await fetch(target, { method: "POST", headers: { "Content-Type": "application/json" } });
+      expect(bare.status).toBe(200);
+    }
+  } finally {
+    await stop();
+  }
+});

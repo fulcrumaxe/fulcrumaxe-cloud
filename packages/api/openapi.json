@@ -3436,7 +3436,7 @@
       "get": {
         "operationId": "getWorkItemActivity",
         "summary": "What the pipeline is doing for one work item",
-        "description": "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
+        "description": "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `public_change` is present only for an item with a change to a paired public repository: its `state`, the stored refusal `code`, a fixed `sentence` (a code the app does not know reads \"Refused: the change was not sent\"), the public `repo`, `branch`, pull request and `head_sha`, and `actions` (empty for now). `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
         "security": [
           {
             "session": []
@@ -3867,6 +3867,92 @@
                         }
                       ]
                     },
+                    "public_change": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "building",
+                                "scanning",
+                                "pushed",
+                                "pr_opened",
+                                "refused",
+                                "pushed_pr_not_opened",
+                                "no_public_change"
+                              ]
+                            },
+                            "code": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "sentence": {
+                              "type": "string"
+                            },
+                            "repo": {
+                              "type": "string"
+                            },
+                            "branch": {
+                              "type": "string"
+                            },
+                            "pr_number": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "pr_url": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "head_sha": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "actions": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "retry_push",
+                                  "open_pr",
+                                  "build_again"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "state",
+                            "code",
+                            "sentence",
+                            "repo",
+                            "branch",
+                            "pr_number",
+                            "pr_url",
+                            "head_sha",
+                            "actions"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "actions": {
                       "type": "array",
                       "items": {
@@ -3877,7 +3963,9 @@
                           "back_to_discussion",
                           "treat_as_feature",
                           "close",
-                          "reopen"
+                          "reopen",
+                          "retry_push",
+                          "open_pr"
                         ]
                       }
                     },
@@ -4653,6 +4741,311 @@
           },
           "500": {
             "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/retry-push": {
+      "post": {
+        "operationId": "retryPushWorkItem",
+        "summary": "Try the push to the public repository again",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a work item whose push to its paired public repository was refused on a build the platform ran: records an audit row and starts one more push attempt (at most three per item). Answers 202 `{ work_item_id, state: 'started' }` before the attempt has run; how it ended is the item's `public_change` on the next activity read, where a refusal shows as its fixed sentence. Allowed only while `public_change.actions` lists `retry_push` (the same rule): the push is `refused`, its latest attempt ran in the platform's sandbox, fewer than three attempts were made, nobody has taken the branch over, and no agent run of the item is live. A repository that is no longer paired ends the attempt with the stored refusal `pairing_off`, with nothing pushed.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Try the push to the public repository again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "work_item_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "state": {
+                      "type": "string",
+                      "const": "started"
+                    }
+                  },
+                  "required": [
+                    "work_item_id",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `action_not_available` (the item has no refused push that may be tried again) or `already_running` (an agent run of the item is live, a publish attempt included).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/work-items/{id}/open-pr": {
+      "post": {
+        "operationId": "openPrWorkItem",
+        "summary": "Open the public pull request again",
+        "description": "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a work item whose branch was pushed to its paired public repository but whose pull request was not opened: records an audit row, checks that the branch still holds exactly what was pushed, and opens the pull request, with no sandbox and no push. Answers 200 `{ work_item_id, result, code, pr_number }`: `opened` with the number, or `refused` with a fixed `code` and the branch left as it is. Allowed only while `public_change.actions` lists `open_pr`: the state is `pushed_pr_not_opened`, nobody has taken the branch over, and no agent run of the item is live.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "x-fx-idempotency": "optional",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Open the public pull request again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "work_item_id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "result": {
+                      "type": "string",
+                      "enum": [
+                        "opened",
+                        "refused"
+                      ]
+                    },
+                    "code": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "pr_number": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "work_item_id",
+                    "result",
+                    "code",
+                    "pr_number"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error `session_required` or `insufficient_role` (owner or admin only), or `external_requires_human` (only an internal work item can be moved from here; there is no override).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error `action_not_available` (the item has no pushed branch waiting for a pull request) or `already_running` (an agent run of the item is live).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Error `rate_limited`: this account or user made too many calls to this operation in a short time. Carries an integer `Retry-After` in seconds; nothing was done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before trying again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error `run_actions_unavailable`: no worker is registered to process run actions yet.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5598,6 +5991,41 @@
                         "additionalProperties": false
                       }
                     },
+                    "item_sources": {
+                      "maxItems": 6,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "correction",
+                              "handoff"
+                            ]
+                          },
+                          "id": {
+                            "type": "string",
+                            "format": "uuid",
+                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                          },
+                          "label": {
+                            "type": "string",
+                            "maxLength": 120
+                          },
+                          "cut": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "label",
+                          "cut"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
                     "repo_map_version": {
                       "anyOf": [
                         {
@@ -5626,6 +6054,7 @@
                     "compactions",
                     "denied_tool_calls",
                     "recalled_memory",
+                    "item_sources",
                     "repo_map_version"
                   ],
                   "additionalProperties": false

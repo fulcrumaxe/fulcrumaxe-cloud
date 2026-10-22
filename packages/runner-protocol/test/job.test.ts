@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL } from "../src/messages.js";
+import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, HANDOFF_MIN_PROTOCOL_VERSION, MEMORY_JOB_MIN_PROTOCOL, SPILL_JOB_MIN_PROTOCOL, CONTEXT_WINDOW_JOB_MIN_PROTOCOL } from "../src/messages.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "../src/contextSpill.js";
 import { MAX_EXCLUDE_RULES } from "../src/excludeRules.js";
 import { MAX_JOB_MEMORY_BYTES, SESSION_ID_PATTERN } from "../src/job.js";
@@ -17,7 +17,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill", "context_window",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);
@@ -404,12 +404,33 @@ describe("spill (D#600 CX-4b)", () => {
 
   it("has a protocol floor above the excludes floor that the current version meets", () => {
     expect(SPILL_JOB_MIN_PROTOCOL).toBe(EXCLUDES_JOB_MIN_PROTOCOL + 1);
-    expect(CURRENT_PROTOCOL_VERSION).toBe(SPILL_JOB_MIN_PROTOCOL);
+    expect(CURRENT_PROTOCOL_VERSION).toBeGreaterThanOrEqual(SPILL_JOB_MIN_PROTOCOL);
   });
 
   it("is refused by the parse of a runner that predates the field (the reason the cloud gates the job)", () => {
     const before = JobSchema.omit({ spill: true });
     expect(before.safeParse(sampleJob({ spill: [{ code: "note", text: "x" }] })).success).toBe(false);
+    expect(before.safeParse(sampleJob()).success).toBe(true);
+  });
+});
+
+describe("a job's context window (D#600 CX-6b)", () => {
+  const ok = (v: unknown): boolean => JobSchema.safeParse(sampleJob({ context_window: v } as never)).success;
+
+  it("accepts a whole number of tokens from 1 to the price table's bound, and a job without the key stays as it was", () => {
+    for (const v of [1, 200_000, 10_000_000]) expect(ok(v), String(v)).toBe(true);
+    expect("context_window" in (JobSchema.parse(sampleJob()) as object)).toBe(false);
+  });
+
+  it("refuses zero, a fraction, a negative, a string, null and a figure above the bound", () => {
+    for (const v of [0, 1.5, -200_000, "200000", null, 10_000_001, Number.NaN]) expect(ok(v), String(v)).toBe(false);
+  });
+
+  it("has a protocol floor the current version meets, and a runner that predates the key refuses the job (the reason the cloud gates it)", () => {
+    expect(CONTEXT_WINDOW_JOB_MIN_PROTOCOL).toBe(SPILL_JOB_MIN_PROTOCOL + 1);
+    expect(CURRENT_PROTOCOL_VERSION).toBe(CONTEXT_WINDOW_JOB_MIN_PROTOCOL);
+    const before = JobSchema.omit({ context_window: true });
+    expect(before.safeParse(sampleJob({ context_window: 200_000 } as never)).success).toBe(false);
     expect(before.safeParse(sampleJob()).success).toBe(true);
   });
 });

@@ -12,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpill.js";
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
 import { JobAllowancesSchema } from "./sandboxAllowances.js";
@@ -213,6 +214,10 @@ export const JobSchema = z
     // (never null, never empty) on every other job, so their canonical JSON and signature are unchanged; the signature covers it. The cloud signs it only for a runner of `SPILL_JOB_MIN_PROTOCOL` or later. It is
     // text for the agent to read, never a path: the runner builds every path itself from the closed code.
     spill: JobSpillSchema.optional(),
+    // D#600 CX-6b: the model's context window in tokens, from the price table, so the local runner can tell how full the agent's context is (the figure is private plan data, so it comes down from
+    // the cloud). Omitted (never null) when the model has no figure: the runner then says nothing about context. The signature covers it. The cloud signs it only for a runner of
+    // `CONTEXT_WINDOW_JOB_MIN_PROTOCOL` or later: an older runner's strict parse would refuse the key.
+    context_window: z.number().int().min(1).max(CONTEXT_WINDOW_MAX_TOKENS).optional(),
     // A branch-name prefix such as "fx/". No URL, no "..".
     branch_prefix: z.string().regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\/$/).max(100).refine((value) => !value.includes("..")),
     model_hint: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).nullable(),

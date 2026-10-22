@@ -419,6 +419,17 @@ describe("plane-push routes [pg]", () => {
       expect(record()).toMatchObject({ outcome: { state: "pr_opened", prNumber: 9, prUrl: "https://github.com/acme/widgets-public/pull/9" }, terminal: true, label: "pr_opened" });
     });
 
+    it.each([
+      ["another pull request number", "https://github.com/acme/widgets-public/pull/10"],
+      ["another repository", "https://github.com/evil/widgets-public/pull/9"],
+      ["a page of the pull request", "https://github.com/acme/widgets-public/pull/9/files"],
+    ])("an address GitHub's read gave for %s is a report_mismatch and is never stored", async (_name, url) => {
+      prAnswer = { url };
+      await askReport({ phase: "pr_opened", head_sha: HEAD, tip_sha: TIP, pr_number: 9 });
+      expect(record()).toMatchObject({ outcome: { state: "refused", code: "report_mismatch" }, terminal: true, label: "report_mismatch" });
+      expect(JSON.stringify(record())).not.toContain(url);
+    });
+
     it("pr_failed is recorded as pushed_pr_not_opened after the same check of the push", async () => {
       await askReport({ phase: "pr_failed", head_sha: HEAD, tip_sha: TIP });
       expect(names()).toEqual(["context", "verifyPushed", "record"]);

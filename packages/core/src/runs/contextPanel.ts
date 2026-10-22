@@ -54,6 +54,11 @@ export interface RunContextPanel {
    */
   recalled_memory: { id: string; name: string; version: number }[];
   /**
+   * D#601 MEM-8b: the item's own records the prompt held beside those entries (an applied correction note, a completed handoff note), from `run_context_item_sources`
+   * (migration 0880): an id, a label ("Correction <id>", "Handoff note from run <id>") and whether the text was cut. No text and no hash. Empty for a run that carried none.
+   */
+  item_sources: { kind: 'correction' | 'handoff'; id: string; label: string; cut: boolean }[];
+  /**
    * The repo map the run's prompt held (CX-3a), as `v<format version> · <first 12 of the sha256 of the raw map text>` (R-600-CX3b-1: the raw-text
    * hash is the map's identity). Null when the run carried no map or predates the record, and always for a run on the person's machine.
    */
@@ -143,6 +148,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
         compactions: null,
         denied_tool_calls: null,
         recalled_memory: [],
+        item_sources: [],
         repo_map_version: null,
       };
     }
@@ -166,6 +172,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
     // named from the cloud's rows. Its map identity is not returned, whatever the tables hold: the runner reads the map on the machine.
     const hosted = r.runtime !== 'runner';
     const recalled_memory = await recalledMemoryOf(client, accountId, r.recalled_ids, r.recalled_versions);
+    const item_sources = await itemSourcesOf(client, accountId, id);
     const repo_map_version = hosted && r.map_version !== null && r.map_sha256 !== null ? `v${r.map_version} · ${r.map_sha256.slice(0, 12)}` : null;
     return {
       ...base,
@@ -181,6 +188,7 @@ export async function getRunContext(ctx: RunsReadCtx, id: string): Promise<RunCo
       compactions: r.compactions,
       denied_tool_calls: r.denied_tool_calls,
       recalled_memory,
+      item_sources,
       repo_map_version,
     };
   });
@@ -195,4 +203,23 @@ async function recalledMemoryOf(client: PoolClient, accountId: string, ids: stri
   ).rows;
   const byId = new Map(rows.map((e) => [e.id, e]));
   return capped.map((id, i) => ({ id, name: entryName(byId.get(id) ?? { id, status: null, scope: null, kind: null, body: null }), version: Math.max(1, Math.trunc(versions[i] ?? 1)) }));
+}
+
+/** The item records the run's prompt carried, labelled by their ids (a handoff note by the run that wrote it); at most 6 rows exist per run. */
+async function itemSourcesOf(client: PoolClient, accountId: string, runId: string): Promise<RunContextPanel['item_sources']> {
+  const rows = (
+    await client.query<{ source_kind: string; source_id: string; cut: boolean; from_run: string | null }>(
+      `SELECT s.source_kind, s.source_id, s.cut, e.run_id AS from_run
+         FROM run_context_item_sources s
+         LEFT JOIN run_events e ON e.account_id = s.account_id AND e.id = s.source_id AND s.source_kind = 'handoff'
+        WHERE s.account_id = $1::uuid AND s.run_id = $2::uuid
+        ORDER BY s.recorded_at, s.source_kind, s.source_id LIMIT 6`,
+      [accountId, runId],
+    )
+  ).rows;
+  return rows.map((r) =>
+    r.source_kind === 'handoff'
+      ? { kind: 'handoff', id: r.source_id, label: r.from_run === null ? 'Handoff note' : `Handoff note from run ${r.from_run.slice(0, 8)}`, cut: r.cut }
+      : { kind: 'correction', id: r.source_id, label: `Correction ${r.source_id.slice(0, 8)}`, cut: r.cut },
+  );
 }

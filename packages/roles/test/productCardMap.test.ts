@@ -22,6 +22,7 @@ const EXPECTED_ROLES = [
   "performance-expert",
   "product-owner",
   "project-manager",
+  "proposal-verifier",
   "researcher",
   "security-expert",
   "security-reviewer",

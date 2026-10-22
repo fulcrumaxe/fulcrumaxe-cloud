@@ -26,6 +26,7 @@ export const runContextResponseSchema = z.object({
   compactions: count.nullable(),
   denied_tool_calls: count.nullable(),
   recalled_memory: z.array(z.object({ id: z.string().uuid(), name: z.string().max(120), version: z.number().int().min(1) })).max(50),
+  item_sources: z.array(z.object({ kind: z.enum(["correction", "handoff"]), id: z.string().uuid(), label: z.string().max(120), cut: z.boolean() })).max(6),
   repo_map_version: z.string().max(64).nullable(),
 });
 

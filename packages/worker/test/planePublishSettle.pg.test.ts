@@ -435,6 +435,15 @@ describe("settling a paired sandbox build, and opening the public pull request a
       expect((await planeRow()).state).toBe("pushed_pr_not_opened");
     });
 
+    it("an address GitHub gives for another pull request or another repository is report_mismatch and nothing is recorded", async () => {
+      await stuck();
+      for (const url of ["https://github.com/acme/widgets-public/pull/10", "https://github.com/evil/widgets-public/pull/9"]) {
+        gh.pr = { url };
+        expect(await reopen()).toMatchObject({ kind: "refused", code: "report_mismatch" });
+        expect(await planeRow()).toMatchObject({ state: "pushed_pr_not_opened", pr_number: null, pr_url: null });
+      }
+    });
+
     it("the pairing now off: pairing_off, nothing asked of GitHub, nothing recorded (no attempt row, the pushed branch kept)", async () => {
       await stuck();
       await admin.query("DELETE FROM repo_pairing WHERE repo_id = $1", [A.repoId]);

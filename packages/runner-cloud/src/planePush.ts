@@ -1,3 +1,4 @@
+import { publicPullRequestUrlMatches } from "@fx/core/src/repos/planePushRecord.js";
 import { buildPlanePushText } from "@fx/core/src/repos/planePushText.js";
 import {
   PLANE_PUSH_PAIRING_PATH,
@@ -243,7 +244,8 @@ async function decide(m: PlanePushReportMessage, plane: { codeRepo: string; bran
       if (m.phase === "pushed") return { outcome: { state: "pushed", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: false, label: "pushed" };
       if (m.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: m.head_sha, tipSha: m.tip_sha }, terminal: true, label: "pr_failed" };
       const pr = await port.verifyPullRequest({ codeRepo: plane.codeRepo, branch: plane.branch, number: m.pr_number! });
-      if (!pr) return MISMATCH;
+      // The address stored is the paired repository's pull request of the reported number, whatever the read returned.
+      if (!pr || !publicPullRequestUrlMatches(plane.codeRepo, m.pr_number!, pr.url)) return MISMATCH;
       return { outcome: { state: "pr_opened", headSha: m.head_sha, tipSha: m.tip_sha, prNumber: m.pr_number!, prUrl: pr.url }, terminal: true, label: "pr_opened" };
     }
   }

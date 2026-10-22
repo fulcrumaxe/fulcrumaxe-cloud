@@ -497,7 +497,18 @@ export interface Operations {
         kind: "merge_only";
         sentence: string;
       }) | (null);
-      actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen">;
+      public_change?: ({
+        state: "building" | "scanning" | "pushed" | "pr_opened" | "refused" | "pushed_pr_not_opened" | "no_public_change";
+        code: string | null;
+        sentence: string;
+        repo: string;
+        branch: string;
+        pr_number: (number) | (null);
+        pr_url: string | null;
+        head_sha: string | null;
+        actions: Array<"retry_push" | "open_pr" | "build_again">;
+      }) | (null);
+      actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
     };
   };
@@ -554,6 +565,30 @@ export interface Operations {
     response: {
       work_item_id: string;
       stage: "triaged";
+    };
+  };
+  retryPushWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      state: "started";
+    };
+  };
+  openPrWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      result: "opened" | "refused";
+      code: string | null;
+      pr_number: (number) | (null);
     };
   };
   getRunInsight: {
@@ -691,6 +726,12 @@ export interface Operations {
         id: string;
         name: string;
         version: number;
+      }>;
+      item_sources: Array<{
+        kind: "correction" | "handoff";
+        id: string;
+        label: string;
+        cut: boolean;
       }>;
       repo_map_version: (string) | (null);
     };
@@ -3999,6 +4040,28 @@ export const operations = {
   reopenWorkItem: {
     method: "POST",
     path: "/api/v1/work-items/{id}/reopen",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  retryPushWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/retry-push",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  openPrWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/open-pr",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

@@ -233,6 +233,27 @@ export function pullUrl(data) {
   return null;
 }
 
+const PUBLIC_REPO = /^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/;
+const PUBLIC_BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
+
+/**
+ * D#598 P1f-6a: the "Public change" block, from the activity's `public_change`. The server writes the sentence (fixed words);
+ * the repo, branch and pull request are shown only when they have the shape of a GitHub name, and the one anchor only when its
+ * address is exactly https://github.com/{repo}/pull/{pr_number}. A missing part is left out, never printed as a word for nothing.
+ */
+export function publicChangeView(data) {
+  const p = data && data.public_change;
+  if (!p || typeof p.sentence !== "string" || !p.sentence || typeof p.repo !== "string" || !PUBLIC_REPO.test(p.repo)) return null;
+  return {
+    sentence: p.sentence,
+    repo: p.repo,
+    branch: typeof p.branch === "string" && PUBLIC_BRANCH.test(p.branch) ? p.branch : null,
+    prText: Number.isInteger(p.pr_number) && p.pr_number >= 1 ? "Pull request #" + p.pr_number : null,
+    // The one anchor leads to exactly this pull request of the paired repository, and to nothing else a record might hold.
+    prUrl: Number.isInteger(p.pr_number) && p.pr_number >= 1 && typeof p.pr_url === "string" && p.pr_url.toLowerCase() === ("https://github.com/" + p.repo + "/pull/" + p.pr_number).toLowerCase() ? p.pr_url : null,
+  };
+}
+
 /**
  * The notice banner: why the pipeline stopped and wants a person. `reason` is model text, returned as plain text and drawn
  * as a text node or a <pre> only, never markup. Any other kind, or a malformed notice, draws nothing.
@@ -300,6 +321,7 @@ export function buildInsight(data) {
     totalsText: finished.length + " agent run" + (finished.length === 1 ? "" : "s") + " finished" + (finished.length ? " · $" + spent.toFixed(2) + " so far" : ""),
     runs,
     runsTruncated: data.runs_truncated === true,
+    publicChange: publicChangeView(data),
     // D#598 P7c: the review section's line for a head that is only a merge of the base branch. The server writes the sentence; no reviewer run exists for it.
     recheck: data.review_recheck && data.review_recheck.kind === "merge_only" && typeof data.review_recheck.sentence === "string" ? data.review_recheck.sentence : null,
     rounds: groupRounds(data.comments),
@@ -369,6 +391,17 @@ export function createInsightPanel(deps) {
     );
     return node;
   };
+
+  function publicChangeBlock(c) {
+    return h(
+      "section",
+      { class: "pl-ins-public", "data-testid": "pl-public-change" },
+      h("h3", { class: "pl-detail-sub" }, "Public change"),
+      h("p", { role: "status", "data-testid": "pl-public-change-sentence" }, c.sentence),
+      h("p", { class: "pl-muted", "data-testid": "pl-public-change-where" }, c.repo, c.branch ? " · " + c.branch : "", c.prText ? " · " + c.prText : ""),
+      c.prUrl ? h("a", { href: c.prUrl, target: "_blank", rel: "noopener noreferrer", "data-testid": "pl-public-change-link" }, "Open the public pull request on GitHub") : null
+    );
+  }
 
   function banner(b) {
     return h(
@@ -501,6 +534,7 @@ export function createInsightPanel(deps) {
       m.runs.length ? m.runs.map(runSection) : h("p", { class: "pl-muted", "data-testid": "pl-no-runs" }, SENTENCES.noRuns),
       m.runsTruncated ? h("p", { class: "pl-muted" }, SENTENCES.olderRuns) : [],
       m.recheck ? h("p", { class: "pl-muted", role: "status", "data-testid": "pl-review-recheck" }, m.recheck) : [],
+      m.publicChange ? publicChangeBlock(m.publicChange) : [],
       m.steps.length
         ? [
             h("h3", { class: "pl-detail-sub" }, "Pipeline steps"),
