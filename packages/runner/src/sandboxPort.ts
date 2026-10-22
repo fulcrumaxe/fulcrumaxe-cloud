@@ -101,8 +101,9 @@ export interface StartDetachedOptions extends Omit<StartOptions, "onEvent" | "sa
   /**
    * D#2 PREVIEW-RUNNER-EVENTS: clone this GitHub repository (shallow, default branch) into `workdir` before the agent
    * starts, through the GitHub proxy forward rule. A failed clone fails the launch with a `CloneError`. Ignored on resume.
+   * With `sha` (D#483 S4-b2a), that commit is fetched and checked out instead, and HEAD must equal it (repoClone.ts).
    */
-  clone?: { owner: string; name: string };
+  clone?: { owner: string; name: string; sha?: string };
   networkPolicy: NetworkPolicyRule[];
   /**
    * D#221 R1a: which agent backend runs this start or resume, by registered name. Absent = "claude-code". A name that

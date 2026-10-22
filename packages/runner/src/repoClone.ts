@@ -71,6 +71,11 @@ export function redactedCloneTail(raw: string, truncated: boolean, secrets: read
 export interface CloneTarget {
   owner: string;
   name: string;
+  /**
+   * D#483 S4-b2a: check out exactly this commit (40 hex) instead of the default branch's tip. The proposal verifier's run reads the tree its
+   * cites are re-read at; other callers leave it unset and keep the default-branch clone.
+   */
+  sha?: string;
 }
 
 /** GitHub owner and repository names: letters, digits, dot, dash and underscore only. */
@@ -78,6 +83,7 @@ const GITHUB_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const WORKDIR_RE = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 
 const validName = (value: unknown): value is string => typeof value === "string" && GITHUB_NAME_RE.test(value) && value !== "." && value !== "..";
+const SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * The script. Every value arrives as `$1` (url), `$2` (directory) or `$3` (limit in KiB) and is always quoted.
@@ -101,13 +107,52 @@ export const CLONE_SCRIPT = [
   `if [ "\${kb:-0}" -gt "$3" ]; then rm -rf "$2"; exit ${CLONE_EXIT_TOO_LARGE}; fi`,
 ].join("\n");
 
-/** The command to run in the sandbox, as a program and an argument array. Throws on a name or directory that is not plain. */
+/** The script's exit code for "the checkout is not the pinned commit". */
+export const CLONE_EXIT_NOT_PINNED = 88;
+
+/** The size watch over a background git command (`$pid`), shared by both scripts. */
+const SIZE_WATCH = [
+  "pid=$!",
+  'while kill -0 "$pid" 2>/dev/null; do',
+  '  kb=$(du -sk "$2" 2>/dev/null | cut -f1)',
+  `  if [ "\${kb:-0}" -gt "$3" ]; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$2"; exit ${CLONE_EXIT_TOO_LARGE}; fi`,
+  "  sleep 1",
+  "done",
+  'wait "$pid" || exit $?',
+];
+const SIZE_CHECK = ['kb=$(du -sk "$2" 2>/dev/null | cut -f1)', `if [ "\${kb:-0}" -gt "$3" ]; then rm -rf "$2"; exit ${CLONE_EXIT_TOO_LARGE}; fi`];
+
+/**
+ * D#483 S4-b2a: the pinned clone. `$4` is the commit (40 hex, validated first). An empty repository is made, that one commit is fetched by
+ * sha (depth 1, no tags, links as plain files: `core.symlinks=false` is set in the repository and on every command) and checked out
+ * detached, and `HEAD` must then equal it, or the script exits `CLONE_EXIT_NOT_PINNED`. A commit the remote does not serve fails the fetch,
+ * so the launch fails: the run never falls back to another tree. Same leftover-checkout rule and size bounds as `CLONE_SCRIPT`.
+ */
+export const CLONE_PINNED_SCRIPT = [
+  'if [ -d "$2/.git" ]; then rm -rf "$2"; fi',
+  'git -c init.defaultBranch=fx init --quiet "$2" || exit $?',
+  'git -C "$2" config core.symlinks false || exit $?',
+  'git -C "$2" -c core.symlinks=false fetch --depth 1 --no-tags --quiet "$1" "$4" &',
+  ...SIZE_WATCH,
+  'git -C "$2" -c core.symlinks=false -c advice.detachedHead=false checkout --quiet --detach "$4" || exit $?',
+  `[ "$(git -C "$2" rev-parse --verify HEAD)" = "$4" ] || exit ${CLONE_EXIT_NOT_PINNED}`,
+  ...SIZE_CHECK,
+].join("\n");
+
+/** The command to run in the sandbox, as a program and an argument array. Throws on a name, directory or commit that is not plain. */
 export function buildCloneCommand(target: CloneTarget, workdir: string, maxKb: number = MAX_CLONE_KB): { cmd: string; args: string[] } {
   if (!validName(target.owner) || !validName(target.name)) throw new Error("repository clone: not a GitHub repository name");
   if (typeof workdir !== "string" || !WORKDIR_RE.test(workdir) || workdir.split("/").some((s) => s === "." || s === "..")) {
     throw new Error("repository clone: the directory must be a plain absolute path");
   }
   if (!Number.isSafeInteger(maxKb) || maxKb <= 0) throw new Error("repository clone: the size limit must be a positive integer");
+  if (target.sha !== undefined) {
+    if (typeof target.sha !== "string" || !SHA_RE.test(target.sha)) throw new Error("repository clone: the commit must be a full sha");
+    return {
+      cmd: "sh",
+      args: ["-c", CLONE_PINNED_SCRIPT, "fx-clone", `https://github.com/${target.owner}/${target.name}.git`, workdir, String(maxKb), target.sha],
+    };
+  }
   return {
     cmd: "sh",
     args: ["-c", CLONE_SCRIPT, "fx-clone", `https://github.com/${target.owner}/${target.name}.git`, workdir, String(maxKb)],

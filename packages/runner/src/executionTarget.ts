@@ -300,8 +300,11 @@ export interface ExecutionRun {
    */
   contextSpill?: ContextSpill;
   fallbackContextSpill?: ContextSpill;
-  /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only. The repository to clone into `workdir` before the agent starts. */
-  cloneRepo?: { owner: string; name: string };
+  /**
+   * D#2 PREVIEW-RUNNER-EVENTS: the repository to clone into `workdir` before the agent starts. D#483 S4-b2a: with `sha` (the proposal verifier only),
+   * exactly that commit is fetched and checked out, and a commit that cannot be fetched fails the launch (`CloneError`); without it, the default branch.
+   */
+  cloneRepo?: { owner: string; name: string; sha?: string };
   capUsd: number;
   /** Milliseconds. Spec: "2 h default". */
   timeoutMs?: number;

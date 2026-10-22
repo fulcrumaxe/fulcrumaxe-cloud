@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CLONE_EXIT_TOO_LARGE, CLONE_SCRIPT, MAX_CLONE_KB, PREVIEW_WORKDIR, buildCloneCommand } from "../src/repoClone.js";
+import { CLONE_EXIT_TOO_LARGE, CLONE_PINNED_SCRIPT, CLONE_SCRIPT, MAX_CLONE_KB, PREVIEW_WORKDIR, buildCloneCommand } from "../src/repoClone.js";
 import { overlapsAgentConfigDir } from "../src/agentConfig.js";
 
 /** D#2 PREVIEW-RUNNER-EVENTS: the clone command is built safely, and the script it runs does what it says on a real shell. */
@@ -39,6 +39,21 @@ describe("buildCloneCommand", () => {
     for (const bad of [0, -1, 1.5, Number.NaN]) expect(() => buildCloneCommand({ owner: "ok", name: "ok" }, PREVIEW_WORKDIR, bad)).toThrow();
   });
 
+  it("a pinned commit uses the pinned script with the sha as its own argument; no sha keeps the default-branch command byte for byte", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const { cmd, args } = buildCloneCommand({ owner: "acme", name: "widgets", sha }, PREVIEW_WORKDIR);
+    expect(cmd).toBe("sh");
+    expect(args).toEqual(["-c", CLONE_PINNED_SCRIPT, "fx-clone", "https://github.com/acme/widgets.git", PREVIEW_WORKDIR, String(MAX_CLONE_KB), sha]);
+    expect(CLONE_PINNED_SCRIPT).not.toMatch(/acme|widgets|github\.com|\/vercel|[0-9a-f]{40}/);
+    expect(CLONE_PINNED_SCRIPT).toContain("fetch --depth 1 --no-tags");
+    expect(CLONE_PINNED_SCRIPT).toContain("core.symlinks=false");
+    expect(CLONE_PINNED_SCRIPT).toContain("config core.symlinks false");
+    expect(buildCloneCommand({ owner: "acme", name: "widgets" }, PREVIEW_WORKDIR).args).toEqual(["-c", CLONE_SCRIPT, "fx-clone", "https://github.com/acme/widgets.git", PREVIEW_WORKDIR, String(MAX_CLONE_KB)]);
+    for (const bad of ["", "HEAD", "main", "0123456", sha.toUpperCase(), `${sha}0`, `${sha.slice(1)};`, "$(id)"]) {
+      expect(() => buildCloneCommand({ owner: "acme", name: "widgets", sha: bad }, PREVIEW_WORKDIR), `sha ${bad}`).toThrow();
+    }
+  });
+
   it("the fixed directory is allowed as a run workdir", () => {
     expect(overlapsAgentConfigDir(PREVIEW_WORKDIR)).toBe(false);
   });
@@ -47,7 +62,12 @@ describe("buildCloneCommand", () => {
 describe("the clone script on a real shell (local repository standing in for the proxy)", () => {
   let base: string;
   let origin: string;
+  let first: string;
+  let tip: string;
   const run = (url: string, dir: string, limitKb: number) => spawnSync("sh", ["-c", CLONE_SCRIPT, "fx-clone", url, dir, String(limitKb)], { encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout: 60_000 });
+  const pinned = (url: string, dir: string, limitKb: number, sha: string) =>
+    spawnSync("sh", ["-c", CLONE_PINNED_SCRIPT, "fx-clone", url, dir, String(limitKb), sha], { encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout: 60_000 });
+  const head = (dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
   beforeAll(() => {
     base = mkdtempSync(path.join(tmpdir(), "fx-clone-"));
@@ -56,8 +76,11 @@ describe("the clone script on a real shell (local repository standing in for the
     const git = (...a: string[]) => execFileSync("git", ["-C", origin, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { stdio: "pipe" });
     git("init", "-q", "-b", "trunk");
     writeFileSync(path.join(origin, "README.md"), "hello\n");
-    git("add", "README.md");
+    // A committed link out of the tree: the clone must write it as a plain file holding the link text.
+    symlinkSync("../../etc/passwd", path.join(origin, "up"));
+    git("add", "README.md", "up");
     git("commit", "-q", "-m", "one");
+    first = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     git("checkout", "-q", "-b", "side");
     writeFileSync(path.join(origin, "side.txt"), "side\n");
     git("add", "side.txt");
@@ -66,6 +89,7 @@ describe("the clone script on a real shell (local repository standing in for the
     writeFileSync(path.join(origin, "big.bin"), Buffer.alloc(600 * 1024, 7));
     git("add", "big.bin");
     git("commit", "-q", "-m", "three");
+    tip = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   });
   afterAll(() => rmSync(base, { recursive: true, force: true }));
 
@@ -77,6 +101,47 @@ describe("the clone script on a real shell (local repository standing in for the
     expect(existsSync(path.join(dir, "side.txt"))).toBe(false); // the other branch is not there
     const count = execFileSync("git", ["-C", dir, "rev-list", "--count", "--all"], { encoding: "utf8" }).trim();
     expect(count).toBe("1"); // depth 1
+  });
+
+  it("a committed symlink arrives as a regular file, in the default-branch clone and in the pinned one", () => {
+    for (const [dir, r] of [
+      [path.join(base, "links"), (d: string) => run(`file://${origin}`, d, MAX_CLONE_KB)],
+      [path.join(base, "links-pinned"), (d: string) => pinned(`file://${origin}`, d, MAX_CLONE_KB, first)],
+    ] as const) {
+      expect(r(dir).status).toBe(0);
+      const st = lstatSync(path.join(dir, "up"));
+      expect(st.isSymbolicLink()).toBe(false);
+      expect(st.isFile()).toBe(true);
+      expect(readFileSync(path.join(dir, "up"), "utf8")).toBe("../../etc/passwd");
+    }
+  });
+
+  it("pinned: checks out exactly the pinned commit (not the branch tip), shallow, and HEAD is that commit", () => {
+    const dir = path.join(base, "pinned");
+    const r = pinned(`file://${origin}`, dir, MAX_CLONE_KB, first);
+    expect(r.status).toBe(0);
+    expect(head(dir)).toBe(first);
+    expect(first).not.toBe(tip);
+    expect(existsSync(path.join(dir, "big.bin"))).toBe(false); // the tip's file is not in the pinned tree
+    expect(readFileSync(path.join(dir, "README.md"), "utf8")).toBe("hello\n");
+    expect(execFileSync("git", ["-C", dir, "rev-list", "--count", "--all"], { encoding: "utf8" }).trim()).toBe("1");
+    // A second pinned clone into the same checkout (Build again) replaces it.
+    expect(pinned(`file://${origin}`, dir, MAX_CLONE_KB, tip).status).toBe(0);
+    expect(head(dir)).toBe(tip);
+  });
+
+  it("pinned: a commit the remote does not have fails the clone (non-zero, not the size exit), and no checkout is left to read", () => {
+    const dir = path.join(base, "pinned-missing");
+    const r = pinned(`file://${origin}`, dir, MAX_CLONE_KB, "f".repeat(40));
+    expect(r.status).not.toBe(0);
+    expect(r.status).not.toBe(CLONE_EXIT_TOO_LARGE);
+    expect(existsSync(path.join(dir, "README.md"))).toBe(false);
+  });
+
+  it("pinned: over the size limit exits with the size code and leaves no directory behind", () => {
+    const dir = path.join(base, "pinned-big");
+    expect(pinned(`file://${origin}`, dir, 100, tip).status).toBe(CLONE_EXIT_TOO_LARGE);
+    expect(existsSync(dir)).toBe(false);
   });
 
   it("a leftover CHECKOUT from an earlier attempt (Build again, in the executor's persistent sandbox) is replaced by a fresh clone", () => {

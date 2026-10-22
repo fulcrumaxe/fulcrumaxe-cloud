@@ -4,7 +4,7 @@ import { resolveRunLimits } from "@fx/core/src/run-limits/resolve.js";
 import { InstallationNotWritableError, assertWriteInstallation } from "@fx/github";
 import { loadLiveRoutingTable, route, type Size } from "@fx/model-router";
 import { getRoleEntry } from "@fx/roles";
-import { loadProductCard, type CardRuntime } from "@fx/roles/cards";
+import { loadPlatformCard, loadProductCard, type CardRuntime } from "@fx/roles/cards";
 import { PREVIEW_COMPUTE_CAP_USD, PREVIEW_MAX_RUN_MS, PREVIEW_MODEL_CAP_USD } from "./preview.js";
 import type { RetrySeatSource } from "./retry.js";
 import { effectiveModeSql, runsInOurSandbox, RUN_TIME_CEILING_MS, SANDBOX_MAX_TIMEOUT_MS, boundedLimit, runnerLimitsFrom, sandboxComputeUsdFor, sandboxTimeFor, type Product, type RunLimitsInput, type StartAgentRunInput } from "@fx/runner";
@@ -29,7 +29,15 @@ export type SeatRequest =
        */
       expectedExecutionMode?: string;
     }
-  | { accountId: string; role: string; repoId: string; purpose: "preview" };
+  | { accountId: string; role: string; repoId: string; purpose: "preview" }
+  /**
+   * D#483 S4-b2a: the claim verifier (`role` is its run role, proposal-verifier). It borrows VERIFY_LIMITS_ROLE's limits and model, as a
+   * preview borrows the project manager's, and runs on its own platform card; `capUsd` is the per-proposal figure, its cap and its reservation.
+   */
+  | { accountId: string; role: string; repoId: string; purpose: "verify"; capUsd: number };
+
+/** The manifest role a verifier run takes its limits and model from (TL ruling 1, 10-22). Customer role settings are unchanged. */
+export const VERIFY_LIMITS_ROLE = "project-manager";
 
 export type SeatRefusal =
   | "unknown_role"
@@ -99,15 +107,19 @@ async function modelFor(client: PoolClient, deps: SeatDeps, q: { accountId: stri
 
 export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Promise<SeatResult> {
   return async function resolveRunSeat(request) {
-    const { accountId, role } = request;
+    const { accountId } = request;
+    const repoScoped = "purpose" in request;
+    const preview = repoScoped && request.purpose === "preview";
+    const verify = repoScoped && request.purpose === "verify";
+    // A verifier run is billed, limited and routed as the role it borrows; only its card and its run row are its own.
+    const role = verify ? VERIFY_LIMITS_ROLE : request.role;
     const entry = getRoleEntry(role);
     if (entry === undefined) return refuse("unknown_role");
-    const loadCard = deps.loadCard ?? loadProductCard;
+    const loadCard = verify ? (_r: string, o?: { runtime: CardRuntime }) => (o?.runtime === "runner" ? undefined : loadPlatformCard(request.role)) : (deps.loadCard ?? loadProductCard);
     // A role with no card is refused before anything is read. The card for the run's runtime is picked once the repository is read.
     if (loadCard(role) === undefined) return refuse("no_card");
     if (typeof accountId !== "string" || !UUID_RE.test(accountId)) return refuse("account_not_found");
-    const preview = "purpose" in request;
-    const ownerId = preview ? request.repoId : request.workItemId;
+    const ownerId = repoScoped ? request.repoId : request.workItemId;
     if (typeof ownerId !== "string" || !UUID_RE.test(ownerId)) return refuse("no_repo");
 
     return withTenant(deps.pool, accountId, async (client): Promise<SeatResult> => {
@@ -117,7 +129,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       let repoId = ownerId;
       let kind: string | null = null;
       let hasEnvelope = false;
-      if (!preview) {
+      if (!repoScoped) {
         const item = (await client.query<{ repo_id: string | null; kind: string | null; envelope_id: string | null }>("SELECT repo_id, kind, envelope_id FROM work_items WHERE id = $1 AND account_id = $2", [ownerId, accountId])).rows[0];
         if (item?.repo_id == null) return refuse("no_repo");
         repoId = item.repo_id;
@@ -131,7 +143,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
              LEFT JOIN work_items w ON w.account_id = r.account_id AND w.id = $3::uuid AND w.repo_id = r.id
              LEFT JOIN installations i ON i.account_id = r.account_id AND i.id = r.installation_id
             WHERE r.id = $1 AND r.account_id = $2`,
-          [repoId, accountId, preview ? null : ownerId],
+          [repoId, accountId, repoScoped ? null : ownerId],
         )
       ).rows[0];
       if (repo === undefined) return refuse("no_repo");
@@ -143,6 +155,9 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       if (preview) {
         // A preview reads a repo through the read-only App and never writes: any other kind is not a preview seat.
         if (repo.app_kind !== "team_readonly") return refuse("no_installation");
+      } else if (verify) {
+        // A verifier only reads (its GitHub role holds contents: read); either team App will do, and nothing else.
+        if (repo.app_kind !== "team_readonly" && repo.app_kind !== "team") return refuse("no_installation");
       } else {
         try {
           assertWriteInstallation(repo.app_kind);
@@ -157,15 +172,16 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
       if (!(monthlyModelBudgetUsd > 0) && !(deps.isOperatorAccount?.(accountId) ?? false)) return refuse("model_budget_unset");
 
       const resolved = runnerLimitsFrom(await resolveRunLimits(client, { accountId, role }));
-      // A preview must end by its own limit inside the invocation that reads its stream, and takes no extension.
-      const limits = preview ? { ...resolved.limits, maxRunMs: Math.min(resolved.limits.maxRunMs, PREVIEW_MAX_RUN_MS) } : resolved.limits;
-      const maxExtensions = preview ? 0 : resolved.maxExtensions;
-      const capUsd = preview ? PREVIEW_MODEL_CAP_USD : resolved.perRunUsd;
+      // A preview (and a verifier, read the same way) must end by its own limit inside the invocation that reads its stream, and takes no extension.
+      const limits = repoScoped ? { ...resolved.limits, maxRunMs: Math.min(resolved.limits.maxRunMs, PREVIEW_MAX_RUN_MS) } : resolved.limits;
+      const maxExtensions = repoScoped ? 0 : resolved.maxExtensions;
+      const capUsd = preview ? PREVIEW_MODEL_CAP_USD : verify ? request.capUsd : resolved.perRunUsd;
+      if (verify && !(capUsd > 0)) return refuse("model_budget_unset");
       const { maxPossibleRunMs, timeoutMs } = sandboxTimeFor(limits, maxExtensions);
       const estimateComputeUsd = sandboxComputeUsdFor(maxPossibleRunMs);
-      if (timeoutMs > (deps.maxTimeoutMs ?? SANDBOX_MAX_TIMEOUT_MS) || (preview && estimateComputeUsd > PREVIEW_COMPUTE_CAP_USD)) return refuse("limits_exceed_sandbox");
+      if (timeoutMs > (deps.maxTimeoutMs ?? SANDBOX_MAX_TIMEOUT_MS) || (repoScoped && estimateComputeUsd > PREVIEW_COMPUTE_CAP_USD)) return refuse("limits_exceed_sandbox");
 
-      const size = preview ? "Small" : kind === null ? undefined : SIZE_OF_KIND[kind];
+      const size = repoScoped ? "Small" : kind === null ? undefined : SIZE_OF_KIND[kind];
       const model = await modelFor(client, deps, { accountId, repoId, role, tier: entry.defaultModel, size });
       if (model === undefined) return refuse("no_model");
 
@@ -184,7 +200,7 @@ export function createSeatResolver(deps: SeatDeps): (request: SeatRequest) => Pr
           limits,
           maxExtensions,
           spend: {
-            ...(!preview && { workItemId: ownerId }),
+            ...(!repoScoped && { workItemId: ownerId }),
             ...(workItemKind !== undefined && { workItemKind }),
             purpose: preview ? "preview" : "run",
             trigger: "foreground",
