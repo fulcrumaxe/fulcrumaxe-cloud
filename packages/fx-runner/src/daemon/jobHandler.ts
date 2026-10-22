@@ -425,6 +425,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           git.check(job, claimed);
           // A fix round resumes its kept session only when that workspace is exactly at the branch's tip after a fresh mirror sync; any other
           // workspace is left unused and the run starts fresh on the tip (C25 section 1.4). The decision is made here, before the run starts.
+          const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           let planSession = deps.run.planSession;
           const wanted = job.continues === null ? undefined : deps.run.planSession(job.continues);
           if (job.continues !== null && wanted?.kind === "resume" && deps.run.workspaces.owns(wanted.workspace)) {
@@ -433,6 +434,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               started.base = resumed.base;
               mark("workspace_ready");
               mark("cloned");
+              // The resumed session gets the same dev shell a fresh start would (same step, same skips), built at the resumed head.
+              if (grant !== undefined) await prepareNix(job, git, grant, resumed.base, promptNotes);
               await prepareDeps(job, wanted.workspace, promptNotes, stopRun, mark);
             }
             else {
@@ -440,7 +443,6 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
               planSession = () => fresh;
             }
           }
-          const grant: JobAllowanceGrant | undefined = job.sandbox_allowances === undefined ? undefined : { entries: job.sandbox_allowances.entries, commandTimeoutS: job.sandbox_allowances.command_timeout_s, storeKey: storeKeyOf(job.repo) };
           const fill = async (workspace: string): Promise<void> => {
             // The job is verified, the sandbox gate has passed and the workspace directory exists; the mirror checkout comes next.
             mark("workspace_ready");
