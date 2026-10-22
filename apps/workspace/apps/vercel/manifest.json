@@ -1,0 +1,5 @@
+{
+  "id": "vercel",
+  "entry": "vercel-app.js",
+  "styles": ["vercel-app.css"]
+}

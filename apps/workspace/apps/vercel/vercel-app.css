@@ -1,0 +1,88 @@
+/* D#598 P8d-3b: Vercel connection app. Theme variables come from the shell; the fallbacks only matter if a theme leaves one out. */
+
+.vc-app {
+  container-type: inline-size;
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 14px;
+  background: var(--bg-base, #000);
+  color: var(--text-primary, #1aff80);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.vc-title { margin: 0 0 10px; font-size: 1rem; letter-spacing: 0.06em; font-weight: 600; }
+.vc-muted { color: var(--text-muted, rgba(26, 255, 128, 0.55)); margin: 4px 0; }
+.vc-help { font-size: 0.78rem; }
+
+.vc-notice { margin: 0; }
+.vc-notice-on {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+.vc-notice-error { border-color: #ff6b6b; color: #ff6b6b; }
+
+.vc-banner {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  background: var(--bg-surface, #0a0a0a);
+}
+.vc-banner-error { border-color: #ff6b6b; }
+
+.vc-facts { margin: 0 0 12px; display: grid; gap: 6px; }
+.vc-row { display: grid; grid-template-columns: 9rem 1fr; gap: 10px; align-items: baseline; }
+.vc-label { display: block; margin: 8px 0 3px; color: var(--text-muted, rgba(26, 255, 128, 0.55)); }
+.vc-facts .vc-label { margin: 0; }
+.vc-value { margin: 0; }
+.vc-projects { margin: 0; padding-left: 1.1rem; }
+
+.vc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.vc-form { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border, rgba(26, 255, 128, 0.3)); }
+
+.vc-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+  cursor: pointer;
+}
+.vc-btn:hover:not(:disabled) { border-color: var(--accent, #1aff80); }
+.vc-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.vc-btn-primary { border-color: var(--accent, #1aff80); color: var(--accent, #1aff80); }
+.vc-btn-danger { border-color: #ff6b6b; color: #ff6b6b; }
+
+.vc-input {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 420px;
+  min-height: 32px;
+  padding: 4px 8px;
+  background: var(--bg-surface, #0a0a0a);
+  border: 1px solid var(--border, rgba(26, 255, 128, 0.3));
+  border-radius: var(--border-radius-sm, 0);
+  color: var(--text-primary, #1aff80);
+  font: inherit;
+}
+.vc-input[aria-invalid="true"] { border-color: #ff6b6b; }
+.vc-btn:focus-visible,
+.vc-input:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }
+.vc-field-error { margin: 4px 0 0; color: #ff6b6b; }
+.vc-field-error[hidden] { display: none; }
+
+/* Phone: one column, and touch-sized controls. */
+@container (max-width: 480px) {
+  .vc-row { grid-template-columns: 1fr; gap: 0; }
+  .vc-actions .vc-btn { flex: 1 1 100%; }
+  .vc-input { max-width: none; }
+}
+@media (pointer: coarse) {
+  .vc-btn, .vc-input { min-height: 44px; }
+}
