@@ -17,7 +17,7 @@ describe("job schema", () => {
     expect(Object.keys(JobSchema.shape).sort()).toEqual(
       [
         "schema_version", "job_id", "run_id", "repo", "role", "mode", "spec", "task", "role_card", "role_tools_sha256", "continues",
-        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill", "context_window",
+        "branch_prefix", "model_hint", "issued_at", "expires_at", "key_id", "review", "sandbox_allowances", "requires_engine", "memory", "excludes", "spill", "context_window", "check",
       ].sort(),
     );
     expect(Object.keys(JobSchema.shape.repo.shape).sort()).toEqual(["id", "name", "owner", "private"]);

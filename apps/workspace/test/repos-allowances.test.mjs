@@ -121,6 +121,13 @@ describe("the picked file", () => {
     expect(ok({ entries: [A], command_timeout_s: 60 })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 } });
     expect(ok({ entries: [] })).toEqual({ ok: true, set: { entries: [] } });
   });
+  it("a declared check is tolerated and dropped: the panel shows none, so it sends none (D#6 R-CHK-1)", () => {
+    const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    expect(ok({ entries: [A], command_timeout_s: 60, check })).toEqual({ ok: true, set: { entries: [A], command_timeout_s: 60 } });
+    expect(ok({ entries: [], check })).toEqual({ ok: true, set: { entries: [] } });
+    // Only an object is a check; anything else in that place is still a malformed file.
+    for (const bad of ["bash", 7, [], true]) expect(ok({ entries: [A], command_timeout_s: 60, check: bad })).toEqual({ ok: false, code: "malformed" });
+  });
   it("a malformed file gets a closed code, never the parser's text", () => {
     expect(parseUpload("{ not json")).toEqual({ ok: false, code: "not_json" });
     expect(parseUpload("")).toEqual({ ok: false, code: "not_json" });

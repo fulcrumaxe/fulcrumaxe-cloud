@@ -6,6 +6,7 @@ import {
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
   SPILL_JOB_MIN_PROTOCOL,
+  CHECK_JOB_MIN_PROTOCOL,
   CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
@@ -172,12 +173,14 @@ export function createPgJobContext(pool: Pool): JobContextPort {
         }
         const parentBranch = options.parentRunId ? await readRecordedRunnerBranch(client, { accountId: run.accountId, runId: options.parentRunId }) : null;
         // The newest approval wins; one that was set aside (the repo left runner_local) signs nothing until an admin approves again.
-        const { rows: approved } = await client.query<{ entries: unknown; command_timeout_s: number | null; set_aside: boolean }>(
-          `SELECT entries, command_timeout_s, set_aside FROM repo_runner_sandbox_allowances WHERE account_id = $1 AND repo_id = $2 ORDER BY version DESC LIMIT 1`,
+        const { rows: approved } = await client.query<{ entries: unknown; command_timeout_s: number | null; set_aside: boolean; check_argv: string[] | null; check_dev_shell: boolean | null; check_timeout_s: number | null }>(
+          `SELECT entries, command_timeout_s, set_aside, check_argv, check_dev_shell, check_timeout_s FROM repo_runner_sandbox_allowances WHERE account_id = $1 AND repo_id = $2 ORDER BY version DESC LIMIT 1`,
           [run.accountId, run.repoId],
         );
         const latest = approved[0];
-        const sandboxAllowances = latest && !latest.set_aside ? { entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }) } : null;
+        // The approved check is part of the same row, so it is set aside with it (D#6 R-CHK-1). The three columns are all null or all set (a database CHECK).
+        const check = latest?.check_argv ? { argv: latest.check_argv, dev_shell: latest.check_dev_shell, timeout_s: latest.check_timeout_s } : null;
+        const sandboxAllowances = latest && !latest.set_aside ? ({ entries: latest.entries as AllowanceSet["entries"], ...(latest.command_timeout_s === null ? {} : { command_timeout_s: latest.command_timeout_s }), ...(check ? { check } : {}) } as AllowanceSet) : null;
         const issueNumber = row.gh_number === null ? null : Number(row.gh_number);
         return { repo: { owner: row.gh_owner, name: row.gh_name }, spec, parentBranch, issueNumber: issueNumber !== null && Number.isSafeInteger(issueNumber) && issueNumber >= 1 ? issueNumber : null, sandboxAllowances };
       });
@@ -389,11 +392,14 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
 
       // D#6 R7a (C35): the approved allowances ride in the job only when the set has entries, and only after they clear the floor again here (the
       // constant may have tightened since the approval). A set that does not is refused and nothing is recorded: never signed without it.
+      // The approved check (R-CHK-1) rides in its own key, read from the same stored row and held to the same schema; a check that no longer parses refuses the job too.
       let sandboxAllowances: Job["sandbox_allowances"];
+      let check: Job["check"];
       if (context.sandboxAllowances) {
         const set = parseAllowanceSet(context.sandboxAllowances);
         if (!set.ok) throw new JobIssueError("sandbox_allowances_invalid");
         if (set.set.entries.length > 0) sandboxAllowances = { entries: set.set.entries, command_timeout_s: set.set.command_timeout_s as number };
+        check = set.set.check;
       }
 
       // D#600 CX-5c: the item's excludes as they stand now (its own rules over the repository's), read when the job is issued, so a fix round gets the rules of its own issue and not those of the
@@ -436,6 +442,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         continues,
         ...(review ? { review } : {}),
         ...(sandboxAllowances ? { sandbox_allowances: sandboxAllowances } : {}),
+        ...(check ? { check } : {}),
         // D#601 MEM-3b: the memory the pipeline recalled, as it split it. Omitted when the run has none (never null, never an empty pair), so such a job's signed bytes are unchanged.
         ...(run.jobMemory && (run.jobMemory.person !== "" || run.jobMemory.fenced !== "") ? { memory: { person: run.jobMemory.person, fenced: run.jobMemory.fenced } } : {}),
         // D#600 CX-5c: omitted when the item has none (never null, never empty), so such a job's signed bytes are unchanged.
@@ -471,7 +478,7 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
         // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0) || null,
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0, candidate.check ? CHECK_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

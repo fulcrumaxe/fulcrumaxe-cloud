@@ -7,5 +7,10 @@
       "reason": "pnpm install --frozen-lockfile, the first step of scripts/check.sh, downloads every locked package from the npm registry; the only host the full run reaches besides the model host"
     }
   ],
-  "command_timeout_s": 1800
+  "command_timeout_s": 1800,
+  "check": {
+    "argv": ["bash", "scripts/check.sh"],
+    "dev_shell": true,
+    "timeout_s": 5400
+  }
 }

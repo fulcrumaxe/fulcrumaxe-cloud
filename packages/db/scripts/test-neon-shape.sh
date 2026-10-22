@@ -3542,14 +3542,14 @@ check_runner_fleet_table_shape() {
 }
 
 # D#6 R7a (0770, C35 section 3.4): the one SECURITY DEFINER function owned by runner_allowance_definer, which appends a repo's sandbox allowance
-# approval or sets it aside. Prints its oid when it is exactly 'repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text)' (matched by
+# approval or sets it aside. Prints its oid when it is exactly 'repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text,text[],boolean,integer)' (matched by
 # regprocedure), pinned to search_path=pg_catalog, public, pg_temp, with an ACL that holds app_user and nobody else but the owner (no PUBLIC, no
 # platform_ops), with no grant option; SHAPE_FAIL:<count> when any function the role owns is not; nothing when it owns none.
 check_runner_allowance_exception_shape() {
   local dbname="$1" row rc=0 oids bad
   row="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -F'|' -c "
     SELECT coalesce(string_agg(oid::text, ', ') FILTER (WHERE ok), ''), count(*) FILTER (WHERE NOT ok) FROM (
-      SELECT p.oid, (p.oid = 'public.repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text)'::regprocedure
+      SELECT p.oid, (p.oid = 'public.repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text,text[],boolean,integer)'::regprocedure
         AND p.proconfig = ARRAY['search_path=pg_catalog, public, pg_temp'] AND p.proacl IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.is_grantable)
         AND (SELECT array_agg(DISTINCT pg_get_userbyid(a.grantee)::text) FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner AND a.grantee <> 0) = ARRAY['app_user']
@@ -3568,11 +3568,11 @@ check_runner_allowance_exception_shape() {
 }
 
 # D#6 R7a (0770): role shape of runner_allowance_definer. A no-op when the role does not exist. Every problem is named: NOLOGIN and unprivileged, no
-# member but the migration role and no live membership for it, a member of no role, privileges exactly the 28 granted by 0770 (column grants on the
+# member but the migration role and no live membership for it, a member of no role, privileges exactly the 34 granted by 0770 and 0887 (column grants on the
 # allowance table, repos, account_members, accounts and audit_log, USAGE on public; nothing table-wide), owning exactly its one function and nothing else.
 check_runner_allowance_role_shape() {
   local dbname="$1" out rc=0 problems
-  local expected="'column repo_runner_sandbox_allowances.account_id SELECT','column repo_runner_sandbox_allowances.repo_id SELECT','column repo_runner_sandbox_allowances.version SELECT','column repo_runner_sandbox_allowances.entries SELECT','column repo_runner_sandbox_allowances.command_timeout_s SELECT','column repo_runner_sandbox_allowances.set_sha256 SELECT','column repo_runner_sandbox_allowances.set_aside SELECT','column repo_runner_sandbox_allowances.account_id INSERT','column repo_runner_sandbox_allowances.repo_id INSERT','column repo_runner_sandbox_allowances.version INSERT','column repo_runner_sandbox_allowances.entries INSERT','column repo_runner_sandbox_allowances.command_timeout_s INSERT','column repo_runner_sandbox_allowances.set_sha256 INSERT','column repo_runner_sandbox_allowances.set_aside INSERT','column repo_runner_sandbox_allowances.approved_by INSERT','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
+  local expected="'column repo_runner_sandbox_allowances.account_id SELECT','column repo_runner_sandbox_allowances.repo_id SELECT','column repo_runner_sandbox_allowances.version SELECT','column repo_runner_sandbox_allowances.entries SELECT','column repo_runner_sandbox_allowances.command_timeout_s SELECT','column repo_runner_sandbox_allowances.set_sha256 SELECT','column repo_runner_sandbox_allowances.set_aside SELECT','column repo_runner_sandbox_allowances.account_id INSERT','column repo_runner_sandbox_allowances.repo_id INSERT','column repo_runner_sandbox_allowances.version INSERT','column repo_runner_sandbox_allowances.entries INSERT','column repo_runner_sandbox_allowances.command_timeout_s INSERT','column repo_runner_sandbox_allowances.set_sha256 INSERT','column repo_runner_sandbox_allowances.set_aside INSERT','column repo_runner_sandbox_allowances.approved_by INSERT','column repo_runner_sandbox_allowances.check_argv SELECT','column repo_runner_sandbox_allowances.check_dev_shell SELECT','column repo_runner_sandbox_allowances.check_timeout_s SELECT','column repo_runner_sandbox_allowances.check_argv INSERT','column repo_runner_sandbox_allowances.check_dev_shell INSERT','column repo_runner_sandbox_allowances.check_timeout_s INSERT','column repos.id SELECT','column repos.account_id SELECT','column account_members.account_id SELECT','column account_members.user_id SELECT','column account_members.role SELECT','column accounts.id SELECT','column accounts.deleted_at SELECT','column audit_log.account_id INSERT','column audit_log.actor INSERT','column audit_log.action INSERT','column audit_log.payload INSERT','column audit_log.created_at INSERT','schema public USAGE'"
   out="$("${PSQL[@]}" -U fx_migrator -d "$dbname" -tA -c "
     WITH r AS (SELECT * FROM pg_roles WHERE rolname = 'runner_allowance_definer'),
     held AS (
@@ -3587,9 +3587,9 @@ check_runner_allowance_role_shape() {
       CASE WHEN coalesce((SELECT bool_or(inherit_option OR set_option) FROM pg_auth_members WHERE roleid = r.oid AND member = 'fx_migrator'::regrole), false)
                 OR pg_has_role('fx_migrator', 'runner_allowance_definer', 'USAGE') THEN 'fx_migrator holds a live membership' END,
       CASE WHEN EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) THEN 'is a member of another role' END,
-      CASE WHEN (SELECT count(*) FROM held) <> 28 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 28 granted by 0770' END,
+      CASE WHEN (SELECT count(*) FROM held) <> 34 OR EXISTS (SELECT 1 FROM held WHERE x <> ALL (ARRAY[$expected])) THEN 'privileges are not exactly the 34 granted by 0770 and 0887' END,
       CASE WHEN (SELECT count(*) FROM mine) <> 1
-              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text)'::regprocedure::oid)
+              OR EXISTS (SELECT 1 FROM mine WHERE oid <> 'public.repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text,text[],boolean,integer)'::regprocedure::oid)
               OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid) OR EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspowner = r.oid)
               OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typowner = r.oid) THEN 'does not own exactly its one function and nothing else' END,
       CASE WHEN has_schema_privilege('runner_allowance_definer', 'public', 'CREATE') THEN 'still has CREATE on public' END)
@@ -3669,7 +3669,7 @@ check_runner_concurrency_role_shape() {
 }
 
 # D#6 R7a (0770): the shape of repo_runner_sandbox_allowances. Row security enabled and forced; platform_ops and partner_user hold nothing on it;
-# app_user holds exactly the nine-column SELECT and no write; the definer cannot update or delete a row (the table is append-only). A no-op when
+# app_user holds exactly the twelve-column SELECT (nine from 0770, three from 0887) and no write; the definer cannot update or delete a row (the table is append-only). A no-op when
 # the table does not exist.
 check_runner_allowance_table_shape() {
   local dbname="$1" out rc=0
@@ -3681,7 +3681,7 @@ check_runner_allowance_table_shape() {
       CASE WHEN has_any_column_privilege('partner_user', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES') THEN 'partner_user holds a privilege on it' END,
       CASE WHEN has_any_column_privilege('app_user', c.oid, 'INSERT, UPDATE, REFERENCES') OR has_table_privilege('app_user', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'app_user can write it' END,
       CASE WHEN has_any_column_privilege('runner_allowance_definer', c.oid, 'UPDATE, REFERENCES') OR has_table_privilege('runner_allowance_definer', c.oid, 'DELETE, TRUNCATE, TRIGGER') THEN 'the definer can update or delete rows' END,
-      CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 9 THEN 'app_user does not read exactly its nine columns' END)
+      CASE WHEN (SELECT count(*) FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attnum > 0 AND NOT t.attisdropped AND has_column_privilege('app_user', c.oid, t.attnum, 'SELECT')) <> 12 THEN 'app_user does not read exactly its twelve columns' END)
     FROM pg_class c WHERE c.oid = to_regclass('public.repo_runner_sandbox_allowances');" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "neon-shape ($dbname): psql failed for check 'runner_allowance-table-shape' (exit $rc): $out" >&2

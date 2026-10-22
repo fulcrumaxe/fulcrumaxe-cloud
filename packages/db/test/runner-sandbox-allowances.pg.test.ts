@@ -6,7 +6,7 @@ import { withTenant } from '../src/withTenant.js';
 import { seedF2, type F2Fixture } from './helpers/members.js';
 
 const ROLE = 'runner_allowance_definer';
-const FN = 'repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text)';
+const FN = 'repo_runner_sandbox_allowances_write(uuid,text,jsonb,integer,text,text[],boolean,integer)';
 const TABLE = 'repo_runner_sandbox_allowances';
 const SHA_A = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
@@ -181,6 +181,97 @@ describe('migration 0770: repo_runner_sandbox_allowances and repo_runner_sandbox
     expect(await sqlstate(() => insert({}, 60, SHA_A, 1))).toBe('23514');
     await insert(ENTRIES, 60, SHA_A, 1);
     expect(await sqlstate(() => insert(ENTRIES, 60, SHA_A, 1))).toBe('23505');
+  });
+
+  // 0887 (D#6 R-CHK-1): the approved check rides in the same row and through the same writer.
+  describe('the approved check', () => {
+    const CHECK = { argv: ['bash', 'scripts/check.sh'], dev_shell: true, timeout_s: 5400 };
+    const writeCheck = (user: string, repoId: string, entries: unknown[], timeout: number | null, sha: string, check: { argv: unknown; dev_shell: unknown; timeout_s: unknown } | null) =>
+      withTenant(appPool, f.accountId, user, async (client) =>
+        (await client.query<{ changed: boolean; set_version: number }>('SELECT changed, set_version FROM repo_runner_sandbox_allowances_write($1, $2, $3::jsonb, $4, $5, $6::text[], $7::boolean, $8::integer)', [
+          repoId, 'approve', JSON.stringify(entries), timeout, sha, check?.argv ?? null, check?.dev_shell ?? null, check?.timeout_s ?? null,
+        ])).rows[0],
+      );
+    const stored = async (repoId: string) =>
+      (await admin.query<{ version: number; set_aside: boolean; check_argv: string[] | null; check_dev_shell: boolean | null; check_timeout_s: number | null }>(`SELECT version, set_aside, check_argv, check_dev_shell, check_timeout_s FROM ${TABLE} WHERE repo_id = $1 ORDER BY version`, [repoId])).rows;
+
+    it('an admin approves a set with a check: it is stored, and the audit row names the command', async () => {
+      const r = await newRepo(f.accountId);
+      expect(await writeCheck(f.a1, r, ENTRIES, 900, SHA_A, CHECK)).toEqual({ changed: true, set_version: 1 });
+      expect(await stored(r)).toEqual([{ version: 1, set_aside: false, check_argv: CHECK.argv, check_dev_shell: true, check_timeout_s: 5400 }]);
+      expect((await audits(r))[0]!.payload).toMatchObject({ version: 1, set_sha256: SHA_A, check: { argv: CHECK.argv, dev_shell: true, timeout_s: 5400 } });
+      expect(await writeCheck(f.a1, r, ENTRIES, 900, SHA_A, CHECK)).toEqual({ changed: false, set_version: 1 });
+    });
+
+    it('a member cannot write one (42501) and nothing is stored', async () => {
+      const r = await newRepo(f.accountId);
+      expect(await sqlstate(() => writeCheck(f.m1, r, ENTRIES, 900, SHA_A, CHECK))).toBe('42501');
+      expect(await stored(r)).toEqual([]);
+    });
+
+    it('a check alone, with no entries, is a set; replacing it with a set that has none removes it as the next version', async () => {
+      const r = await newRepo(f.accountId);
+      expect(await writeCheck(f.o1, r, [], null, SHA_A, CHECK)).toEqual({ changed: true, set_version: 1 });
+      expect(await writeCheck(f.o1, r, [], null, SHA_B, null)).toEqual({ changed: true, set_version: 2 });
+      expect((await stored(r)).map((x) => x.check_argv)).toEqual([CHECK.argv, null]);
+    });
+
+    it('set_aside sets a check-only set aside with its columns kept, and a set with neither entries nor a check stays a no-op', async () => {
+      const r = await newRepo(f.accountId);
+      await writeCheck(f.o1, r, [], null, SHA_A, CHECK);
+      expect(await write(f.o1, r, 'set_aside', null, null, null)).toEqual({ changed: true, set_version: 2 });
+      expect(await stored(r)).toEqual([
+        { version: 1, set_aside: false, check_argv: CHECK.argv, check_dev_shell: true, check_timeout_s: 5400 },
+        { version: 2, set_aside: true, check_argv: CHECK.argv, check_dev_shell: true, check_timeout_s: 5400 },
+      ]);
+      const empty = await newRepo(f.accountId);
+      await write(f.o1, empty, 'approve', [], null, SHA_B);
+      expect(await write(f.o1, empty, 'set_aside', null, null, null)).toEqual({ changed: false, set_version: 1 });
+    });
+
+    it('the writer refuses a half-set check, a bad vector and a time cap out of range (22023), and a set_aside that carries one', async () => {
+      const r = await newRepo(f.accountId);
+      const bad: Array<{ argv: unknown; dev_shell: unknown; timeout_s: unknown }> = [
+        { argv: CHECK.argv, dev_shell: null, timeout_s: 5400 },
+        { argv: CHECK.argv, dev_shell: true, timeout_s: null },
+        { argv: null, dev_shell: true, timeout_s: 5400 },
+        { ...CHECK, argv: [] },
+        { ...CHECK, argv: Array.from({ length: 17 }, () => 'a') },
+        { ...CHECK, argv: ['x'.repeat(257)] },
+        { ...CHECK, argv: [''] },
+        { ...CHECK, argv: ['a\nb'] },
+        { ...CHECK, argv: ['café'] },
+        { ...CHECK, argv: [null] },
+        { ...CHECK, timeout_s: 59 },
+        { ...CHECK, timeout_s: 10801 },
+      ];
+      for (const check of bad) expect(await sqlstate(() => writeCheck(f.o1, r, [], null, SHA_A, check as never)), JSON.stringify(check)).toBe('22023');
+      expect(await sqlstate(() => withTenant(appPool, f.accountId, f.o1, (c) => c.query("SELECT * FROM repo_runner_sandbox_allowances_write($1, 'set_aside', NULL, NULL, NULL, '{a}', true, 60)", [r])))).toBe('22023');
+      expect(await stored(r)).toEqual([]);
+    });
+
+    it('the table holds the same shape: all three or none, a vector the function accepts, and a cap of 60 to 10800', async () => {
+      const r = await newRepo(f.accountId);
+      let version = 0;
+      const insert = (argv: string[] | null, dev: boolean | null, timeout: number | null) =>
+        admin.query(`INSERT INTO ${TABLE} (account_id, repo_id, version, entries, set_sha256, approved_by, check_argv, check_dev_shell, check_timeout_s) VALUES ($1, $2, $3, '[]', $4, $5, $6, $7, $8)`, [f.accountId, r, ++version, SHA_A, f.o1, argv, dev, timeout]);
+      for (const [argv, dev, timeout] of [
+        [['a'], null, 60], [['a'], true, null], [null, true, 60], [[], true, 60], [['a\u0001'], true, 60], [['x'.repeat(257)], true, 60], [['a'], true, 59], [['a'], true, 10801],
+      ] as Array<[string[] | null, boolean | null, number | null]>) {
+        expect(await sqlstate(() => insert(argv, dev, timeout)), JSON.stringify([argv, dev, timeout])).toBe('23514');
+      }
+      await insert(['a'], false, 10800);
+      await insert(null, null, null);
+    });
+
+    it('app_user reads the three columns and writes none; platform_ops holds nothing on them', async () => {
+      for (const column of ['check_argv', 'check_dev_shell', 'check_timeout_s']) {
+        expect((await admin.query("SELECT has_column_privilege('app_user', $1, $2, 'SELECT') AS ok", [TABLE, column])).rows[0].ok, column).toBe(true);
+        expect((await admin.query("SELECT has_column_privilege('app_user', $1, $2, 'INSERT, UPDATE') AS ok", [TABLE, column])).rows[0].ok, column).toBe(false);
+        expect((await admin.query("SELECT has_column_privilege('platform_ops', $1, $2, 'SELECT, INSERT, UPDATE, REFERENCES') AS ok", [TABLE, column])).rows[0].ok, column).toBe(false);
+      }
+      expect((await admin.query("SELECT has_function_privilege('platform_ops', 'runner_check_argv_ok(text[])'::regprocedure, 'EXECUTE') AS ok")).rows[0].ok).toBe(false);
+    });
   });
 
   it('app_user cannot write the table, and sees only its own tenant; so does the run writer, which reads and cannot write', async () => {

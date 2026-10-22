@@ -84,6 +84,30 @@ describe('migration 0805: agent_runs.min_protocol_version (D#599 PL-2b-1)', () =
     await admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, plain]);
   });
 
+  // 0887 (D#6 R-CHK-1): a job that carries the repo's approved check is never written without the check floor, protocol 8.
+  it('refuses a first job write that carries a check with no minimum or one below 8, and accepts it with 8 or more', async () => {
+    const withCheck = JSON.stringify({ job: { check: { argv: ['bash', 'scripts/check.sh'], dev_shell: true, timeout_s: 5400 } }, signature: 'x' });
+    for (const minimum of [null, '7']) {
+      const id = await run(null);
+      await admin.query('BEGIN');
+      try {
+        if (minimum !== null) await admin.query("SELECT set_config('fx.job_min_protocol', $1, true)", [minimum]);
+        await expect(admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, withCheck])).rejects.toMatchObject({ code: '23514' });
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+    }
+    const id = await run(null);
+    await admin.query('BEGIN');
+    try {
+      await admin.query("SELECT set_config('fx.job_min_protocol', '8', true)");
+      await admin.query('UPDATE agent_runs SET job_signed = $2::jsonb WHERE id = $1', [id, withCheck]);
+      expect((await admin.query<{ v: number }>('SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1', [id])).rows[0]!.v).toBe(8);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+  });
+
   it('app_user reads it and cannot write it; platform_ops and the public hold nothing on the column', async () => {
     expect(await q("SELECT has_column_privilege('app_user', 'public.agent_runs', 'min_protocol_version', 'SELECT') AS ok")).toBe(true);
     for (const priv of ['UPDATE', 'INSERT']) expect(await q(`SELECT has_column_privilege('app_user', 'public.agent_runs', 'min_protocol_version', '${priv}') AS ok`), priv).toBe(false);

@@ -126,6 +126,12 @@ export interface RunnerCloudDeps {
    * runner. Absent is "unknown".
    */
   repoVisibility?: (accountId: string, repoId: string) => Promise<"private" | "public" | "unknown">;
+  /**
+   * D#6 R-CHK-1: the text of `.fulcrumaxe/runner-sandbox.json` at the repository's default branch tip, or null when there is none (apps/web supplies it from the
+   * read-only plan client). Read only to pre-fill the Repos form with a SUGGESTED check for an owner or admin; nothing it returns is ever used to run anything.
+   * Absent, or throwing, the suggestion is "unavailable".
+   */
+  readAllowanceFile?: (target: { repoId: string; owner: string; name: string }) => Promise<string | null>;
 }
 
 /**

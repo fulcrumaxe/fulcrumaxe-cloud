@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { MAX_ALLOWANCE_ENTRIES, MAX_COMMAND_TIMEOUT_S, allowanceSetSha256, parseAllowanceSet } from "@fulcrumaxe/runner-protocol";
+import { CheckSchema, type Check, MAX_ALLOWANCE_ENTRIES, MAX_CHECK_TIMEOUT_S, MAX_COMMAND_TIMEOUT_S, allowanceSetSha256, parseAllowanceSet } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { RunnerHttpError, pgCode, type RunnerCloudDeps, type RunnerHttpResponse, type SessionPrincipal } from "./http.js";
 import { requireMemberRole } from "./memberRole.js";
@@ -19,6 +19,9 @@ interface StoredRow {
   set_sha256: string;
   set_aside: boolean;
   created_at: Date;
+  check_argv: string[] | null;
+  check_dev_shell: boolean | null;
+  check_timeout_s: number | null;
 }
 
 /** `lock` takes the row lock the mode switch takes, so a write's mode check and its append are one step against a switch (a read does not lock). */
@@ -31,14 +34,15 @@ async function loadRepo(client: PoolClient, repoId: string, lock = false): Promi
 /** The newest row, which is the one in force (or set aside). Nothing is read from the repository: only what an admin approved is here. */
 async function loadLatest(client: PoolClient, repoId: string): Promise<StoredRow | null> {
   const { rows } = await client.query<StoredRow>(
-    "SELECT version, entries, command_timeout_s, set_sha256, set_aside, created_at FROM repo_runner_sandbox_allowances WHERE repo_id = $1 ORDER BY version DESC LIMIT 1",
+    "SELECT version, entries, command_timeout_s, set_sha256, set_aside, created_at, check_argv, check_dev_shell, check_timeout_s FROM repo_runner_sandbox_allowances WHERE repo_id = $1 ORDER BY version DESC LIMIT 1",
     [repoId],
   );
   return rows[0] ?? null;
 }
 
 function view(repoId: string, repo: RepoRow, latest: StoredRow | null, canChange: boolean): RunnerHttpResponse["body"] {
-  const inForce = latest !== null && !latest.set_aside && latest.entries.length > 0;
+  // A check alone is a set in force too: it is signed into a job on its own (D#6 R-CHK-1).
+  const inForce = latest !== null && !latest.set_aside && (latest.entries.length > 0 || latest.check_argv !== null);
   return {
     repo_id: repoId,
     execution_mode: repo.execution_mode,
@@ -48,10 +52,36 @@ function view(repoId: string, repo: RepoRow, latest: StoredRow | null, canChange
     approved:
       latest === null
         ? null
-        : { version: latest.version, entries: latest.entries, command_timeout_s: latest.command_timeout_s, set_sha256: latest.set_sha256, approved_at: latest.created_at.toISOString() },
+        : { version: latest.version, entries: latest.entries, command_timeout_s: latest.command_timeout_s,
+            check: latest.check_argv === null ? null : { argv: latest.check_argv, dev_shell: latest.check_dev_shell, timeout_s: latest.check_timeout_s },
+            set_sha256: latest.set_sha256,
+            approved_at: latest.created_at.toISOString(),
+          },
     can_change: canChange,
-    limits: { max_entries: MAX_ALLOWANCE_ENTRIES, max_command_timeout_s: MAX_COMMAND_TIMEOUT_S },
+    limits: { max_entries: MAX_ALLOWANCE_ENTRIES, max_command_timeout_s: MAX_COMMAND_TIMEOUT_S, max_check_timeout_s: MAX_CHECK_TIMEOUT_S },
   };
+}
+
+/** What the Repos form is offered as the check: from the repository's declared file, never used to run anything (D#6 R-CHK-1). `unreadable` carries its sentence. */
+export type SuggestedCheck = { status: "none" | "unavailable" } | { status: "ok"; check: Check } | { status: "unreadable"; message: string };
+
+export const CHECK_UNREADABLE_MESSAGE = "The check in .fulcrumaxe/runner-sandbox.json could not be read";
+
+/** Reads the `check` of the declared file with the same schema the approval uses. A file or check that does not parse pre-fills nothing; a file that is not there, or has no check, suggests nothing. */
+export function suggestCheckFromFile(text: string | null): SuggestedCheck {
+  if (text === null) return { status: "none" };
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // fx-swallow-ok: a file that is not JSON is reported as unreadable, never repaired
+    return { status: "unreadable", message: CHECK_UNREADABLE_MESSAGE };
+  }
+  if (typeof json !== "object" || json === null || Array.isArray(json)) return { status: "unreadable", message: CHECK_UNREADABLE_MESSAGE };
+  const declared = (json as { check?: unknown }).check;
+  if (declared === undefined || declared === null) return { status: "none" };
+  const parsed = CheckSchema.safeParse(declared);
+  return parsed.success ? { status: "ok", check: parsed.data } : { status: "unreadable", message: CHECK_UNREADABLE_MESSAGE };
 }
 
 const ok = (body: RunnerHttpResponse["body"]): RunnerHttpResponse => ({ status: 200, body, headers: { "cache-control": "no-store" } });
@@ -63,20 +93,34 @@ const ok = (body: RunnerHttpResponse["body"]): RunnerHttpResponse => ({ status: 
  */
 export async function getSandboxAllowances(deps: RunnerCloudDeps, principal: SessionPrincipal, repoId: string): Promise<RunnerHttpResponse> {
   if (!UUID.test(repoId)) throw new RunnerHttpError(404, "not_found", "no such repository");
-  return ok(
-    await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
-      const role = await requireMemberRole(client);
-      const repo = await loadRepo(client, repoId);
-      return view(repoId, repo, await loadLatest(client, repoId), role === "owner" || role === "admin");
-    }),
-  );
+  const { body, target } = await withTenant(deps.appUserPool, principal.accountId, principal.userId, async (client) => {
+    const role = await requireMemberRole(client);
+    const repo = await loadRepo(client, repoId);
+    const canChange = role === "owner" || role === "admin";
+    return {
+      body: view(repoId, repo, await loadLatest(client, repoId), canChange) as Record<string, unknown>,
+      target: canChange && repo.gh_owner && repo.gh_name ? { repoId, owner: repo.gh_owner, name: repo.gh_name } : null,
+    };
+  });
+  // The suggestion is for the person who can approve, and is read from GitHub after the transaction is closed. A member gets none.
+  let suggested: SuggestedCheck | null = null;
+  if (target) {
+    try {
+      suggested = deps.readAllowanceFile ? suggestCheckFromFile(await deps.readAllowanceFile(target)) : { status: "unavailable" };
+    } catch {
+      // fx-swallow-ok: GitHub being unreachable only means no suggestion; the approved set above is what counts
+      suggested = { status: "unavailable" };
+    }
+  }
+  return ok({ ...body, suggested_check: suggested });
 }
 
 /**
  * PUT /api/runners/repos/:id/sandbox-allowances (a session route, owner or admin only; a member gets 403 and nothing is written).
  *
  * The body is exactly `{ set, confirm_repo? }`, where `set` is the reviewed `.fulcrumaxe/runner-sandbox.json` the admin picked in the browser:
- * `{ entries: [{ kind, value, access, reason }], command_timeout_s? }`. The cloud never reads that file from the repository (correction C35); it
+ * `{ entries: [{ kind, value, access, reason }], command_timeout_s?, check?: { argv, dev_shell, timeout_s } | null }`. The check (D#6 R-CHK-1) is the command a runner
+ * runs after the agent; it is part of the set, so it is hashed, versioned and set aside with it, and `check: null` or no check is how one is removed (a new version). The cloud never reads that file from the repository (correction C35); it
  * stores what this person sent, after the floor, and a repo's contents cannot widen a sandbox.
  *
  *  - The set is read strictly and held to the floor in runner-protocol (400 `sandbox_allowance_refused`, with the closed `reason` and the entry's
@@ -106,17 +150,21 @@ export async function setSandboxAllowances(deps: RunnerCloudDeps, principal: Ses
         const repo = await loadRepo(client, repoId, true);
         const parsed = parseAllowanceSet(uploaded);
         if (!parsed.ok) throw new RunnerHttpError(400, "sandbox_allowance_refused", "the allowance set was refused", { reason: parsed.code, index: parsed.index });
-        const widening = parsed.set.entries.length > 0;
+        // A check is a command a customer's machine will run, so approving one widens exactly as entries do.
+        const widening = parsed.set.entries.length > 0 || parsed.set.check !== undefined;
         if (widening) {
           const full = repo.gh_owner && repo.gh_name ? `${repo.gh_owner}/${repo.gh_name}` : null;
           if (full === null || typeof typed !== "string" || typed !== full) throw new RunnerHttpError(400, "confirmation_mismatch", "type the repository's full name to confirm");
           if (repo.execution_mode !== "runner_local") throw new RunnerHttpError(409, "not_runner_local", "allowances are for repositories on a runner");
         }
-        const { rows } = await client.query<{ changed: boolean }>("SELECT changed FROM repo_runner_sandbox_allowances_write($1, 'approve', $2::jsonb, $3, $4)", [
+        const { rows } = await client.query<{ changed: boolean }>("SELECT changed FROM repo_runner_sandbox_allowances_write($1, 'approve', $2::jsonb, $3, $4, $5::text[], $6::boolean, $7::integer)", [
           repoId,
           JSON.stringify(parsed.set.entries),
           parsed.set.command_timeout_s ?? null,
           allowanceSetSha256(parsed.set),
+          parsed.set.check?.argv ?? null,
+          parsed.set.check?.dev_shell ?? null,
+          parsed.set.check?.timeout_s ?? null,
         ]);
         return { ...(view(repoId, repo, await loadLatest(client, repoId), true) as object), changed: rows[0]?.changed === true };
       }),
@@ -141,5 +189,5 @@ export async function setSandboxAllowances(deps: RunnerCloudDeps, principal: Ses
  * a repo that comes back is approved again before any job carries them (correction C15 section 4). Writes nothing when there are none.
  */
 export async function setAsideSandboxAllowances(client: PoolClient, repoId: string): Promise<void> {
-  await client.query("SELECT repo_runner_sandbox_allowances_write($1, 'set_aside', NULL::jsonb, NULL::integer, NULL::text)", [repoId]);
+  await client.query("SELECT repo_runner_sandbox_allowances_write($1, 'set_aside', NULL::jsonb, NULL::integer, NULL::text, NULL::text[], NULL::boolean, NULL::integer)", [repoId]);
 }

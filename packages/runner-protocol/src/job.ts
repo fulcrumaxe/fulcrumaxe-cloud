@@ -15,7 +15,7 @@ import { z } from "zod";
 import { CONTEXT_WINDOW_MAX_TOKENS } from "./contextLevers.js";
 import { CONTEXT_SPILL_CODES, CONTEXT_SPILL_MAX_TOTAL_BYTES } from "./contextSpill.js";
 import { MAX_EXCLUDE_RULES, isRuleablePath } from "./excludeRules.js";
-import { JobAllowancesSchema } from "./sandboxAllowances.js";
+import { CheckSchema, JobAllowancesSchema } from "./sandboxAllowances.js";
 
 /** Largest `spec.text`, in characters. It matches the cap on a request body. */
 export const MAX_SPEC_TEXT_CHARS = 256 * 1024;
@@ -197,6 +197,10 @@ export const JobSchema = z
     // D#6 R7a (C35): the repo's admin-approved sandbox allowances, present only when the approved set has entries and omitted (never null or empty)
     // on every other job, so their canonical JSON and signature are unchanged. The signature covers it. The runner floor-checks it (R7b).
     sandbox_allowances: JobAllowancesSchema.optional(),
+    // D#6 R-CHK-1 (C47): the repo's admin-approved check, present only while the approved set (not set aside) has one and omitted (never null) on every other job, so their
+    // canonical JSON and signature are unchanged. The signature covers it. The cloud signs it only for a runner of `CHECK_JOB_MIN_PROTOCOL` or later: an older runner's strict
+    // parse would refuse the key, and one that ignored it would report `done` for a run nobody checked. Only an owner or admin sets it; nothing is read from the branch.
+    check: CheckSchema.optional(),
     // D#605 FL-4: the sandbox engine this job cannot run without, present only on a job that needs a microVM and omitted (never null) on every
     // other job, so their canonical JSON and signature are unchanged. The cloud's claim hands such a job only to a runner whose reported engine
     // is `microvm`, whatever the person's routing says. Set by the cloud when it signs the job; no person-set rule can write or clear it.

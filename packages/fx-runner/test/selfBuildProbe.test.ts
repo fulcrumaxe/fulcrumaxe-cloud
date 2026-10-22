@@ -344,6 +344,12 @@ describe(".fulcrumaxe/runner-sandbox.json", () => {
     for (const entry of file.entries as Parameters<typeof allowanceFloorViolation>[0][]) expect(allowanceFloorViolation(entry)).toBeNull();
   });
 
+  it("carries the suggested check (D#6 R-CHK-1): the set with it is accepted whole, and it is the full check of this repository, 90 minutes, in the dev shell", () => {
+    const whole = parseAllowanceSet(JSON.parse(readFileSync(ALLOWANCE_FILE, "utf8")));
+    expect(whole.ok).toBe(true);
+    expect(whole.ok && whole.set.check).toEqual({ argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 });
+  });
+
   it("every entry is in the doc, and the doc lists none the file lacks", () => {
     const listed = [...readFileSync(DOC, "utf8").matchAll(/^### Allowance: `(path|domain|loopback)` `([^`]+)` `(read|write|connect|bind)`$/gm)].map((m) => `${m[1]} ${m[2]} ${m[3]}`).sort();
     expect(listed).toEqual(file.entries.map((entry) => `${entry.kind} ${entry.value} ${entry.access}`).sort());

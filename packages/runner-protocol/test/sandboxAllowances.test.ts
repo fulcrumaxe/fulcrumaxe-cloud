@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JobAllowancesSchema, allowanceFloorViolation, allowanceSetSha256, parseAllowanceSet, type AllowanceEntry, type AllowanceRefusal } from "../src/index.js";
+import { JobAllowancesSchema, MAX_CHECK_TIMEOUT_S, MAX_COMMAND_TIMEOUT_S, allowanceFloorViolation, allowanceSetSha256, parseAllowanceSet, type AllowanceEntry, type AllowanceRefusal } from "../src/index.js";
 
 const why = "needed by a step of check.sh, proved by a denial";
 const path = (value: string, access: "read" | "write" = "read"): AllowanceEntry => ({ kind: "path", value, access, reason: why });
@@ -165,5 +165,62 @@ describe("parseAllowanceSet", () => {
   it("the signed job's schema is the same set, with entries required", () => {
     expect(JobAllowancesSchema.safeParse({ entries: [path("/nix/store")], command_timeout_s: 60 }).success).toBe(true);
     expect(JobAllowancesSchema.safeParse({ entries: [], command_timeout_s: 60 }).success).toBe(false);
+  });
+});
+
+describe("the approved check (D#6 R-CHK-1, C47)", () => {
+  const entry = { kind: "domain", value: "registry.npmjs.org", access: "connect", reason: "pnpm install" } as const;
+  const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+  const parse = (value: unknown) => parseAllowanceSet(value);
+  const hashOf = (value: unknown): string => {
+    const parsed = parse(value);
+    if (!parsed.ok) throw new Error(`refused: ${parsed.code}`);
+    return allowanceSetSha256(parsed.set);
+  };
+
+  // Computed outside this code base (Python, sorted keys, no whitespace), so a change to the canonical form shows up here.
+  it("a set without a check hashes exactly as it did before checks existed", () => {
+    expect(hashOf({ entries: [entry], command_timeout_s: 900 })).toBe("d9f767c666fc131ee4526914a84976166ead9066a6f0285fc282e0b8cf1905f8");
+    expect(hashOf({ entries: [] })).toBe("d801aa1fb7ddcc330a5e3173372ea6af4a3d08ec58074478e85aa5603e926658");
+    expect(hashOf({ entries: [entry], command_timeout_s: 900, check: null })).toBe(hashOf({ entries: [entry], command_timeout_s: 900 }));
+  });
+
+  it("the hash covers the check: two sets that differ only in it hash differently, and each matches the independent value", () => {
+    expect(hashOf({ entries: [entry], command_timeout_s: 900, check })).toBe("72ad24435642d5836acafdfcebdb5a4364bfb893a31c93e8a63867a6b1b441a2");
+    expect(hashOf({ entries: [], check })).toBe("4fee82872f42ab7fd550cdce6cd6b7012d0d6fd934219657c07105f220874dbe");
+    for (const changed of [{ ...check, argv: ["bash", "scripts/check.sh", "--fast"] }, { ...check, dev_shell: false }, { ...check, timeout_s: 5401 }]) {
+      expect(hashOf({ entries: [entry], command_timeout_s: 900, check: changed })).not.toBe(hashOf({ entries: [entry], command_timeout_s: 900, check }));
+    }
+  });
+
+  it("keeps a check on a set with no entries, and a null check parses to a set without the key", () => {
+    expect(parse({ entries: [], check })).toEqual({ ok: true, set: { entries: [], check } });
+    expect(parse({ entries: [], check: null })).toEqual({ ok: true, set: { entries: [] } });
+  });
+
+  it("its time cap is its own: 5400 s is a check, and still not a command timeout", () => {
+    expect(MAX_CHECK_TIMEOUT_S).toBe(10800);
+    expect(MAX_COMMAND_TIMEOUT_S).toBe(1800);
+    expect(parse({ entries: [], check }).ok).toBe(true);
+    expect(parse({ entries: [entry], command_timeout_s: 5400 }).ok).toBe(false);
+    for (const [timeout, accepted] of [[59, false], [60, true], [10800, true], [10801, false], [90.5, false], [0, false]] as const) {
+      expect(parse({ entries: [], check: { ...check, timeout_s: timeout } }).ok, String(timeout)).toBe(accepted);
+    }
+  });
+
+  it("takes an argument vector of 1 to 16 printable ASCII strings of 1 to 256 characters, and nothing else", () => {
+    const argv = (value: unknown) => parse({ entries: [], check: { ...check, argv: value } }).ok;
+    expect(argv(Array.from({ length: 16 }, () => "a"))).toBe(true);
+    expect(argv(["x".repeat(256)])).toBe(true);
+    expect(argv(["bash", "-c", "pnpm test && pnpm lint"])).toBe(true);
+    for (const bad of [[], Array.from({ length: 17 }, () => "a"), [""], ["x".repeat(257)], ["a\0b"], ["a\nb"], ["a\rb"], ["a\tb"], ["café"], ["a‮b"], ["a\u007fb"], [1], "bash scripts/check.sh", null, [null]]) {
+      expect(argv(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("is strict: an unknown key, a missing field or a wrong type is invalid_shape", () => {
+    for (const bad of [{ ...check, extra: 1 }, { argv: check.argv, dev_shell: true }, { ...check, dev_shell: "yes" }, { ...check, timeout_s: "5400" }, "x", []]) {
+      expect(parse({ entries: [], check: bad }), JSON.stringify(bad)).toEqual({ ok: false, code: "invalid_shape", index: null });
+    }
   });
 });

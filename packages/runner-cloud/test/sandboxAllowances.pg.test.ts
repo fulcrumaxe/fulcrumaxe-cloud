@@ -250,6 +250,119 @@ describe("sandbox allowances [pg] (C35 section 3.4, C15 section 4)", () => {
     });
   });
 
+  // D#6 R-CHK-1 (C47): the approved check is part of the set an admin approves, and nothing else ever supplies one.
+  describe("the approved check", () => {
+    const CHECK = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    const withCheck = { ...SET, check: CHECK };
+    const checkCols = async (repoId: string) => (await h.admin.query("SELECT version, set_aside, check_argv, check_dev_shell, check_timeout_s FROM repo_runner_sandbox_allowances WHERE repo_id = $1 ORDER BY version", [repoId])).rows;
+
+    it("an admin approves a set with a check: stored, hashed with the set, answered back with the limit, and the audit row names the command", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      const parsed = parseAllowanceSet(withCheck);
+      if (!parsed.ok) throw new Error("fixture set refused");
+      const res = await put(f, f.a1, id, ok(withCheck));
+      expect(res).toMatchObject({ status: 200, body: { in_use: true, changed: true, approved: { version: 1, check: CHECK, set_sha256: allowanceSetSha256(parsed.set) }, limits: { max_check_timeout_s: 10800, max_command_timeout_s: 1800 } } });
+      expect(await checkCols(id)).toEqual([{ version: 1, set_aside: false, check_argv: CHECK.argv, check_dev_shell: true, check_timeout_s: 5400 }]);
+      expect((await audits(f))[0]!.payload).toMatchObject({ check: { argv: CHECK.argv, dev_shell: true, timeout_s: 5400 } });
+      expect(await get(f, f.m1, id)).toMatchObject({ body: { approved: { check: CHECK }, can_change: false } });
+    });
+
+    it("a set that differs only in its check is a new version; the same set again is changed: false", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      await put(f, f.o1, id, ok(SET));
+      expect(await put(f, f.o1, id, ok(withCheck))).toMatchObject({ body: { changed: true, approved: { version: 2, check: CHECK } } });
+      expect(await put(f, f.o1, id, ok(withCheck))).toMatchObject({ body: { changed: false, approved: { version: 2 } } });
+      expect(await put(f, f.o1, id, ok({ ...SET, check: { ...CHECK, timeout_s: 10800 } }))).toMatchObject({ body: { changed: true, approved: { version: 3 } } });
+    });
+
+    it("removing it is approving a set without one, or with check: null: a new version, and the old one stays on record", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      await put(f, f.o1, id, ok(withCheck));
+      expect(await put(f, f.o1, id, ok({ ...SET, check: null }))).toMatchObject({ body: { changed: true, approved: { version: 2, check: null }, in_use: true } });
+      expect(await put(f, f.o1, id, ok(SET))).toMatchObject({ body: { changed: false, approved: { version: 2 } } });
+      expect((await checkCols(id)).map((r) => r.check_argv)).toEqual([CHECK.argv, null]);
+    });
+
+    it("a check with no entries is a set in force on its own, needs the repository's name typed back and a repo on a runner", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      expect(code(await put(f, f.o1, id, { set: { entries: [], check: CHECK } }))).toBe("confirmation_mismatch");
+      const off = await repo(f, "sandbox");
+      expect(await put(f, f.o1, off, ok({ entries: [], check: CHECK }))).toMatchObject({ status: 409, body: { error: { code: "not_runner_local" } } });
+      expect(await put(f, f.o1, id, ok({ entries: [], check: CHECK }))).toMatchObject({ status: 200, body: { in_use: true, approved: { check: CHECK, command_timeout_s: null } } });
+      expect(await checkCols(off)).toEqual([]);
+    });
+
+    it("a member gets 403 and nothing is stored", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      expect((await put(f, f.m1, id, ok(withCheck))).status).toBe(403);
+      expect(await checkCols(id)).toEqual([]);
+    });
+
+    it("refuses a check the schema refuses (400 sandbox_allowance_refused, invalid_shape) and writes nothing: a command timeout is not a check cap", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      const bad: unknown[] = [
+        { ...CHECK, argv: [] }, { ...CHECK, argv: ["a\nb"] }, { ...CHECK, argv: ["x".repeat(257)] }, { ...CHECK, argv: "bash scripts/check.sh" }, { ...CHECK, timeout_s: 59 },
+        { ...CHECK, timeout_s: 10801 }, { ...CHECK, extra: 1 }, { argv: CHECK.argv, timeout_s: 60 }, "bash scripts/check.sh",
+      ];
+      for (const check of bad) expect(await put(f, f.o1, id, ok({ ...SET, check })), JSON.stringify(check)).toMatchObject({ status: 400, body: { error: { code: "sandbox_allowance_refused" }, reason: "invalid_shape" } });
+      expect((await put(f, f.o1, id, ok({ ...SET, command_timeout_s: 5400 }))).status).toBe(400);
+      expect(await checkCols(id)).toEqual([]);
+    });
+
+    it("leaving the runner sets the check aside with the allowances: in_use is false, the columns stay on record, and approving again restores it", async () => {
+      const f = await fresh();
+      const id = await repo(f);
+      await put(f, f.o1, id, ok({ entries: [], check: CHECK }));
+      expect((await respond(() => setExecutionMode(h.deps(), { accountId: f.accountId, userId: f.o1 }, id, { mode: "sandbox", confirm_repo: NAME }))).status).toBe(200);
+      expect(await get(f, f.o1, id)).toMatchObject({ body: { in_use: false, set_aside: true } });
+      expect((await checkCols(id)).map((r) => [r.version, r.set_aside, r.check_argv])).toEqual([[1, false, CHECK.argv], [2, true, CHECK.argv]]);
+    });
+
+    describe("the suggestion from the declared file", () => {
+      const file = JSON.stringify({ ...SET, check: CHECK });
+      const suggestionOf = async (f: F2Fixture, user: string, id: string, read: (() => Promise<string | null>) | undefined) =>
+        ((await respond(() => getSandboxAllowances(h.deps(read ? { readAllowanceFile: read } : {}), { accountId: f.accountId, userId: user }, id))).body as { suggested_check: unknown; approved: unknown }).suggested_check;
+
+      it("is read for an owner or admin from the repository's own name, parsed with the approval's schema, and changes nothing that is approved", async () => {
+        const f = await fresh();
+        const id = await repo(f);
+        const read = vi.fn(async (_target: { repoId: string; owner: string; name: string }) => file);
+        const res = await respond(() => getSandboxAllowances(h.deps({ readAllowanceFile: read }), { accountId: f.accountId, userId: f.a1 }, id));
+        expect(res.body).toMatchObject({ approved: null, in_use: false, suggested_check: { status: "ok", check: CHECK } });
+        expect(read.mock.calls).toEqual([[{ repoId: id, owner: "Acme", name: "widgets" }]]);
+        expect(await checkCols(id)).toEqual([]);
+      });
+
+      it("is not read for a member (null), and a missing file, a file without a check and a null check suggest nothing", async () => {
+        const f = await fresh();
+        const id = await repo(f);
+        const read = vi.fn(async () => file);
+        expect(await suggestionOf(f, f.m1, id, read)).toBeNull();
+        expect(read).not.toHaveBeenCalled();
+        expect(await suggestionOf(f, f.o1, id, async () => null)).toEqual({ status: "none" });
+        expect(await suggestionOf(f, f.o1, id, async () => JSON.stringify(SET))).toEqual({ status: "none" });
+        expect(await suggestionOf(f, f.o1, id, async () => JSON.stringify({ ...SET, check: null }))).toEqual({ status: "none" });
+      });
+
+      it("a file or check that cannot be read pre-fills nothing and says so in the fixed sentence; a failed read is unavailable, as is no reader", async () => {
+        const f = await fresh();
+        const id = await repo(f);
+        const unreadable = { status: "unreadable", message: "The check in .fulcrumaxe/runner-sandbox.json could not be read" };
+        for (const text of ["not json", "[]", JSON.stringify({ ...SET, check: { ...CHECK, timeout_s: 10801 } }), JSON.stringify({ ...SET, check: { ...CHECK, argv: ["a\nb"] } }), JSON.stringify({ ...SET, check: "bash" })]) {
+          expect(await suggestionOf(f, f.o1, id, async () => text), text).toEqual(unreadable);
+        }
+        expect(await suggestionOf(f, f.o1, id, async () => { throw new Error("github down"); })).toEqual({ status: "unavailable" });
+        expect(await suggestionOf(f, f.o1, id, undefined)).toEqual({ status: "unavailable" });
+      });
+    });
+  });
+
   describe("the cloud never reads the repository (C35)", () => {
     it("approving, reading and setting aside make no network call at all: a fetch that throws and a GitHub port that throws are never reached", async () => {
       const f = await fresh();
