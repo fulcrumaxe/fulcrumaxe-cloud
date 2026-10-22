@@ -8,7 +8,7 @@ import { runActionDeps } from "./run-actions.js";
 
 /** What answering needs from the worker: it runs on the receipt login's pool, which this package never holds. */
 export type DecisionAskAnswerer = (input: {
-  principal: { accountId: string; userId: string };
+  principal: { accountId: string; userId: string; tokenId?: string };
   askId: string;
   choice: string;
   signal?: RunActionSignal;
@@ -126,11 +126,11 @@ export const decisionAskRoutes: RouteEntry[] = [
     async handler(ctx, input) {
       const answer = await decisionAskDeps.getAnswerer();
       if (answer === null) throw new ApiError(503, "decision_answers_unavailable", "answers are not available yet");
-      const { accountId, userId } = ctx.principal;
+      const { accountId, userId, tokenId } = ctx.principal;
       const signal = runActionDeps.getRunActionSignal();
       try {
         const done = await answer({
-          principal: { accountId, userId },
+          principal: { accountId, userId, ...(tokenId ? { tokenId } : {}) },
           askId: input.params.id!,
           choice: (input.body as z.infer<typeof answerBodySchema>).choice,
           ...(signal ? { signal } : {}),

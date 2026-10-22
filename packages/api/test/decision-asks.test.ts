@@ -12,7 +12,7 @@ import { generateToken } from '../src/tokens/format.js';
 import { hashToken } from '../src/tokens/resolve.js';
 import { handleApiRequest } from '../src/handler.js';
 import { ROUTES } from '../src/routes/index.js';
-import { decisionAskDeps } from '../src/routes/decisionAsks.js';
+import { decisionAskDeps, decisionAskRoutes } from '../src/routes/decisionAsks.js';
 import { runActionDeps } from '../src/routes/run-actions.js';
 
 /**
@@ -155,6 +155,29 @@ describe('D#598 P8c-2a: decision asks', () => {
       const body = (await (await list(f.member)).json()) as { asks: AskDto[]; not_shown: number };
       expect(body.asks).toHaveLength(100);
       expect(body.not_shown).toBe(2);
+    });
+  });
+
+  describe('the principal handed to the worker', () => {
+    const answerRoute = decisionAskRoutes.find((r) => r.operationId === 'answerDecisionAsk')!;
+
+    it('a session answer carries no tokenId; a token principal reaching the handler passes its tokenId on, so the core refuses it with 403 session_required', async () => {
+      const f = await fixture();
+      const id = await raise(f.refs);
+      const seen: unknown[] = [];
+      const prev = decisionAskDeps.getAnswerer;
+      decisionAskDeps.getAnswerer = async () => async (input) => (seen.push(input.principal), answerAsk({ pool: receiptPool, principal: input.principal }, { askId: input.askId, choice: input.choice }));
+      try {
+        const handle = (principal: Record<string, unknown>) =>
+          answerRoute.handler({ pool: appUserPool, principal } as never, { params: { id }, body: { choice: 'skip' }, query: {} } as never);
+        await expect(handle({ kind: 'token', accountId: f.refs.accountId, userId: f.admin.userId, tokenId: 'tok-1', scopes: [] })).rejects.toMatchObject({ status: 403, code: 'session_required' });
+        expect(seen[0]).toEqual({ accountId: f.refs.accountId, userId: f.admin.userId, tokenId: 'tok-1' });
+        expect((await readAsk(id)).state).toBe('open');
+        expect((await answer(f.admin, id)).status).toBe(200);
+        expect(seen[1]).toEqual({ accountId: f.refs.accountId, userId: f.admin.userId });
+      } finally {
+        decisionAskDeps.getAnswerer = prev;
+      }
     });
   });
 
