@@ -55,8 +55,11 @@ export type StageResumeSweepWorker = Pick<Worker, "sweepParkedStages">;
 /** What the setup-request check cron asks of the worker (D#598 P8b): one pass of the check sweep (the worker keeps the run-writer pool). */
 export type SetupRequestCheckWorker = Pick<Worker, "sweepSetupRequestChecks">;
 
+/** What the branch cleanup cron asks of the worker (D#598 P1f-5d): one pass of the cleanup sweep. */
+export type BranchCleanupWorker = Pick<Worker, "sweepBranchCleanups">;
+
 /** What the web app asks of the worker: the pipeline's run-action port, the compute-settle tick, the runner lease-fail method (D#6 R2a), the runner queue tick (R2b) and the sandbox reaper's two methods (SANDBOX-REAPER-1b; the reconcile cron calls them). */
-export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker;
+export type AppWorker = RunActionsWorker & ComputeSettleSweepWorker & AdvanceWorker & DecisionWorker & ReviewWorker & LightPublishWorker & RespecPublishWorker & RunnerLeaseFacade & RunnerClaimFacade & RunnerDoneFacade & RunnerGitTicketFacade & RunnerPlanePushFacade & RunnerSweepWorker & HandoffSweepWorker & Pick<RunHandoffs, "completeHandoffOnDone"> & InvariantSweepWorker & StageResumeSweepWorker & SetupRequestCheckWorker & BranchCleanupWorker & Pick<PlanePublish, "retryPublish" | "openPublicPullRequest"> & SandboxReapWorker;
 
 export type WorkerOptionsProvider = () => CreateWorkerOptions | null;
 

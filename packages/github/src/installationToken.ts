@@ -224,7 +224,7 @@ export class InstallationTokenCache {
  * permission set no other purpose may ask for (see MERGE_GATE_PERMISSIONS). It exists so the check-run, status and
  * branch-protection reads, and the commit-status write, are NOT in the allowlist of every other purpose.
  */
-export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_publish_read"] as const;
+export const MINT_PURPOSES = ["run", "preview_read", "sitekit_read", "merge_gate", "plan_read", "runner_git", "plane_push", "plane_publish_read", "branch_delete"] as const;
 export type MintPurpose = (typeof MINT_PURPOSES)[number];
 
 /**
@@ -258,6 +258,13 @@ export const MERGE_GATE_PERMISSIONS: Readonly<Record<string, "read" | "write">> 
  * permission the mint response may carry beyond these two (see `assertPlanePushToken`).
  */
 export const PLANE_PUSH_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write", pull_requests: "write" });
+
+/**
+ * D#598 P1f-5d: the only permission a `branch_delete` token ever asks for. GitHub has no narrower grant for removing a ref than `contents: write`, so
+ * what makes the token delete-only is the client built on it (`installationHttp.ts` kind `branch_delete`: one pinned branch, GET and DELETE of that
+ * ref, once) and the signed one-use grant in front of that (`branchDeleteToken.ts`). The token itself covers one repository and is never cached.
+ */
+export const BRANCH_DELETE_PERMISSIONS: Readonly<Record<string, "write">> = Object.freeze({ contents: "write" });
 
 /**
  * D#598 P1f-4b: the only permissions a `plane_publish_read` token ever asks for: reads of the contents of ONE private repository, for the publish
@@ -312,6 +319,16 @@ export function assertPlanePushToken(minted: Pick<MintedAccessToken, "permission
   if (!metadataOk || !writes || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
 }
 
+/** D#598 P1f-5d: GitHub's answer to a `branch_delete` mint must say the token covers exactly the one repository asked for and holds `contents: write` and nothing else but `metadata: read`. */
+export function assertBranchDeleteToken(minted: Pick<MintedAccessToken, "permissions" | "repositories">, repo: string): void {
+  const perms = minted.permissions;
+  if (perms === undefined || perms === null || typeof perms !== "object" || Array.isArray(perms)) throw new InstallationTokenError("token_scope_mismatch");
+  const exact = Object.entries(perms).filter(([k]) => k !== "metadata");
+  const repos = minted.repositories;
+  const coversOnly = Array.isArray(repos) && repos.length === 1 && repos[0]!.toLowerCase() === repo.toLowerCase();
+  if ((perms.metadata !== undefined && perms.metadata !== "read") || exact.length !== 1 || exact[0]![0] !== "contents" || exact[0]![1] !== "write" || !coversOnly) throw new InstallationTokenError("token_scope_mismatch");
+}
+
 /**
  * D#598 P1f-4b: GitHub's answer to a `plane_publish_read` mint must say the token covers exactly the one repository asked for and holds
  * `contents` (and the implicit `metadata`) at `read` and nothing else.
@@ -345,6 +362,8 @@ export interface GetInstallationTokenParams {
   fresh?: boolean;
   /** D#598 P1f-2: told GitHub's own expiry (ms since the epoch) of a token minted fresh, so a caller can hand the real time on. Never called with the token. */
   onExpiry?: (expiresAtMs: number) => void;
+  /** D#598 P1f-5d: called with a `branch_delete` token whose scope check failed, so the caller can revoke it before the error is thrown. */
+  revoke?: (token: string) => Promise<void>;
 }
 
 /** Cached tokens are dropped 5 minutes before GitHub's own expiry, never used right up to the wire. */
@@ -395,6 +414,14 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     allowed = Object.keys(PLANE_PUSH_PERMISSIONS);
     appKind = params.appKind;
     namespace = "plane_push:";
+  } else if (params.purpose === "branch_delete") {
+    // D#598 P1f-5d: the write App, ONE repository (the private repository whose branch is being removed) and `contents: write`, nothing else. Fresh every time.
+    assertWriteInstallation(params.appKind);
+    if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
+    scope = { repositories: params.scope.repositories, permissions: BRANCH_DELETE_PERMISSIONS };
+    allowed = Object.keys(BRANCH_DELETE_PERMISSIONS);
+    appKind = params.appKind;
+    namespace = "branch_delete:";
   } else if (params.purpose === "plane_publish_read" && (params.appKind === "team" || params.appKind === "team_readonly")) {
     // D#598 P1f-4b: one private repository, contents read. Minted anew for every proxied request of a publish run and never cached.
     if (isWide(params.scope)) throw new InstallationTokenError("purpose_not_allowed");
@@ -423,7 +450,7 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
     throw new InstallationTokenError("permission_not_allowed");
   }
 
-  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_publish_read";
+  const neverCached = params.purpose === "plane_push" || params.purpose === "plane_publish_read" || params.purpose === "branch_delete";
   if (params.fresh === true && !neverCached) throw new InstallationTokenError("purpose_not_allowed");
   // D#598 C4: a plane_push token is never cached on any path, so it is fresh whatever the caller passes. Nothing is read from or written to the cache for it.
   // The same holds for a plane_publish_read token, which is minted and revoked for one proxied request.
@@ -460,6 +487,15 @@ export async function getInstallationToken(params: GetInstallationTokenParams): 
   if (params.purpose === "plan_read") assertTokenReadOnly(minted.permissions);
   if (params.purpose === "plane_push") assertPlanePushToken(minted, (scope as MergeGateScope).repositories[0]);
   if (params.purpose === "plane_publish_read") assertPlanePublishReadToken(minted, (scope as MergeGateScope).repositories[0]);
+  if (params.purpose === "branch_delete") {
+    try {
+      assertBranchDeleteToken(minted, (scope as MergeGateScope).repositories[0]);
+    } catch (error) {
+      // A token wider than asked for is revoked at once rather than left to expire; the original refusal is what the caller sees.
+      await params.revoke?.(minted.token).catch(() => undefined);
+      throw error;
+    }
+  }
   if (fresh) {
     noteLiveInstallationToken(minted.token, expiresAtMs);
     params.onExpiry?.(expiresAtMs);

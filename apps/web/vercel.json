@@ -40,6 +40,10 @@
     {
       "path": "/api/cron/setup-request-check",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/branch-cleanup",
+      "schedule": "* * * * *"
     }
   ]
 }

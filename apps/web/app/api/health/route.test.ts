@@ -76,19 +76,31 @@ describe("GET /api/health", () => {
     }
   });
 
+  it("D#598 P1f-5d: the operator is told, by a fixed code, when the git-ticket key pair that signs the branch cleanup's grants is not set; anonymous callers and the verdict are not", async () => {
+    const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
+    const unset = await call(env, bearer(OPERATOR_SECRET));
+    expect(unset.status).toBe(200);
+    expect((unset.body as { unconfigured: string[] }).unconfigured).toContain("branch_cleanup_signer_unconfigured");
+    const half: Env = { ...env, FX_GIT_TICKET_SIGNING_KEY_PEM: "pem-not-read-here" };
+    expect((await call(half, bearer(OPERATOR_SECRET))).body).toMatchObject({ unconfigured: expect.arrayContaining(["branch_cleanup_signer_unconfigured"]) });
+    const both: Env = { ...half, FX_GIT_TICKET_KEY_ID: "ticket-key-1" };
+    expect((await call(both, bearer(OPERATOR_SECRET))).body).not.toMatchObject({ unconfigured: expect.arrayContaining(["branch_cleanup_signer_unconfigured"]) });
+    expect(JSON.stringify((await call(env)).body)).not.toContain("branch_cleanup");
+  });
+
   it("D#483 S5-e1: the operator is told, by a fixed code, when the envelope margin figure is absent; anonymous callers and the verdict are not", async () => {
     const saved = process.env.FX_PLAN_DATA;
     try {
       const env: Env = { ...completeEnv("staging"), CRON_SECRET: OPERATOR_SECRET };
       resetPlanDataCache();
-      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["vercel_env_source_unconfigured"] });
+      expect((await call(env, bearer(OPERATOR_SECRET))).body).toMatchObject({ ok: true, unconfigured: ["vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
       const data = JSON.parse(process.env.FX_PLAN_DATA!);
       delete data.envelope;
       process.env.FX_PLAN_DATA = JSON.stringify(data);
       resetPlanDataCache();
       const operator = await call(env, bearer(OPERATOR_SECRET));
       expect(operator.status).toBe(200);
-      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "vercel_env_source_unconfigured"] });
+      expect(operator.body).toMatchObject({ ok: true, unconfigured: ["envelope_margin_unconfigured", "vercel_env_source_unconfigured", "branch_cleanup_signer_unconfigured"] });
       const anonymous = await call(env);
       expect(anonymous.status).toBe(200);
       expect(JSON.stringify(anonymous.body)).not.toContain("envelope_margin");
