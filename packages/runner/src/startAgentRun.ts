@@ -118,8 +118,8 @@ export interface StartAgentRunInput {
    */
   continues?: { branch: string; prNumber?: number };
   workdir?: string;
-  /** D#2 PREVIEW-RUNNER-EVENTS: preview runs only; see `ExecutionRun.cloneRepo`. */
-  cloneRepo?: { owner: string; name: string };
+  /** D#2 PREVIEW-RUNNER-EVENTS: see `ExecutionRun.cloneRepo` (`sha`: the proposal verifier's pinned checkout). */
+  cloneRepo?: { owner: string; name: string; sha?: string };
   capUsd: number;
   /** Milliseconds. Spec: "2 h default" for the sandbox itself -- distinct
    * from `QUEUE_TTL_MS`, which bounds how long `dispatch` may take to

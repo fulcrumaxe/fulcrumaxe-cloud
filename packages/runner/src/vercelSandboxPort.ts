@@ -19,7 +19,7 @@ import {
   installEnv,
   type DepsOutcome,
 } from "./depsInstall.js";
-import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail } from "./repoClone.js";
+import { CLONE_EXIT_TOO_LARGE, CLONE_OUTPUT_BUFFER_CHARS, CLONE_TIMEOUT_MS, CloneError, buildCloneCommand, redactedCloneTail, type CloneTarget } from "./repoClone.js";
 import { isKnownStreamJsonType, isMalformedAssistant, normalizeMessage } from "@fx/runtime/src/streamJson.js";
 import type { NormalizedEvent } from "./types.js";
 import { assertSandboxEnvMatchesRole } from "./fakeSandbox.js";
@@ -726,7 +726,7 @@ export function createVercelSandboxPort(options: CreateVercelSandboxPortOptions)
    * command is built by `buildCloneCommand` (fixed script, values as arguments). Its output is drained and never kept.
    * Past the time bound it is killed. Throws `CloneError` with a fixed reason; the launch fails with it.
    */
-  async function cloneRepository(sandbox: SdkSandbox, clone: { owner: string; name: string }, workdir: string, env: Record<string, string>): Promise<void> {
+  async function cloneRepository(sandbox: SdkSandbox, clone: CloneTarget, workdir: string, env: Record<string, string>): Promise<void> {
     const built = buildCloneCommand(clone, workdir);
     const command = await guarded("runCommand", () =>
       sandbox.runCommand({ cmd: built.cmd, args: built.args, env: { ...env, GIT_TERMINAL_PROMPT: "0" }, detached: true, signal: signal() }),

@@ -53,6 +53,15 @@ export type CardRuntime = "sandbox" | "runner";
  */
 export const RUNNER_CARD_VARIANTS: ReadonlySet<string> = new Set(["executor"]);
 
+/**
+ * D#483 S4-b2a: the card of a role the PLATFORM runs that is not in the manifest (a customer cannot add, configure or price it). Only the
+ * names listed here are looked up; anything else gives `undefined`.
+ */
+export const PLATFORM_CARD_ROLES: ReadonlySet<string> = new Set(["proposal-verifier"]);
+export function loadPlatformCard(role: string): string | undefined {
+  return PLATFORM_CARD_ROLES.has(role) && Object.hasOwn(PRODUCT_CARD_MAP, role) ? PRODUCT_CARD_MAP[role] : undefined;
+}
+
 export function loadProductCard(role: string, options: { runtime?: CardRuntime } = {}): string | undefined {
   if (!ROLE_MANIFEST.some((entry) => entry.name === role)) return undefined;
   const key = options.runtime === "runner" && RUNNER_CARD_VARIANTS.has(role) ? `${role}.runner` : role;

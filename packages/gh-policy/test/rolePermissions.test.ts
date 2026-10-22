@@ -64,11 +64,12 @@ describe("criterion 8: ROLE_PERMISSIONS is pinned", () => {
       "analytics-engineer": { metadata: "read", contents: "read" },
       "browser-tester": { metadata: "read", contents: "read", pull_requests: "write" },
       "tui-tester": { metadata: "read", contents: "read" },
+      "proposal-verifier": { metadata: "read", contents: "read" },
     });
   });
 
-  it("lists exactly the 26 roles", () => {
-    expect(Object.keys(ROLE_PERMISSIONS)).toHaveLength(26);
+  it("lists exactly the 27 roles", () => {
+    expect(Object.keys(ROLE_PERMISSIONS)).toHaveLength(27);
   });
 
   it("every reviewer role has an entry, and none of them grants contents:write", () => {
