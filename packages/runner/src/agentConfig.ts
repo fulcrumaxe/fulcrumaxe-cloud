@@ -83,7 +83,7 @@ export function toolsForRole(role: string): readonly string[] {
  *  - a PreToolUse hook (`VERIFIER_READ_GUARD`) refuses any Read, Glob or Grep whose path, file path, glob or Glob pattern is absolute outside
  *    the checkout, climbs with `..`, starts at `~`, holds a backslash, or names `.git` or `.env`, and any Glob pattern with a `{` or `,/`
  *    (brace alternation could name an absolute root). The CLI does not limit Glob and Grep to a path by rule (CX-5b), so the hook is what
- *    keeps those two in the tree. It fails closed: input over `VERIFIER_GUARD_MAX_INPUT` characters, input it cannot read, another tool,
+ *    keeps those two in the tree. It fails closed: input over `VERIFIER_GUARD_MAX_INPUT` bytes, input it cannot read, another tool,
  *    or a path it cannot resolve is refused (exit 2).
  * The rules and the hook's lexical checks see names, not files. A symlink committed in the repository could name a place outside the tree
  * by a relative, in-tree name. Two things stop that: the clone writes every link as a plain file (`core.symlinks=false`, repoClone.ts), and,
@@ -101,15 +101,17 @@ export const VERIFIER_DENY: readonly string[] = Object.freeze([
   "Read(~/**)",
 ]);
 /**
- * The most hook input the guard looks at. Its `case` matches cost time that grows with the square of the input under bash, and the CLI
- * lets a tool call through when a hook runs past its timeout, so the input is bounded before any match: well under a second at this size.
+ * The most hook input the guard looks at, in bytes (the script sets `LC_ALL=C`, so `${#j}` counts bytes under bash as well as dash). Its
+ * `case` matches cost time that grows with the square of the input under bash, so the input is bounded before any match: well under a
+ * second at this size, far inside the hook's timeout.
  */
 export const VERIFIER_GUARD_MAX_INPUT = 32768;
 /**
  * The hook script (POSIX sh, builtins only). It holds no single quote, so it is passed whole to `sh -c '...'`. Its one argument (`$1`) is the
  * checkout, the directory it confines to and resolves relative paths from.
  */
-export const VERIFIER_READ_GUARD_SCRIPT = `exec 2>/dev/null
+export const VERIFIER_READ_GUARD_SCRIPT = `LC_ALL=C; export LC_ALL
+exec 2>/dev/null
 W=$1
 [ -n "$W" ] || exit 2
 q=\\"
@@ -154,13 +156,14 @@ exit 0
 `;
 const shQuote = (s: string): string => `'${s}'`;
 /**
- * A PreToolUse command hook killed at its `timeout` does not block the call. The CLI's per-hook `onFailure: "block"` (which would make a
- * timeout block) needs a newer CLI than the image pins (versions.lock.json), so it is not set here; the input bound above keeps the script
- * far inside the timeout instead.
+ * By default the CLI lets a tool call through when a command hook times out, cannot start, or exits with a code other than 0 or 2.
+ * `onFailure: "block"` (Claude Code 2.1.295 or later; the image pins at least that, versions.lock.json) makes each of those refuse the call,
+ * as exit 2 does, so the guard fails closed even when it is killed at its `timeout` or crashes. The input bound above keeps it far inside the
+ * timeout as well.
  */
 export const VERIFIER_READ_GUARD = {
   matcher: "Read|Glob|Grep",
-  hooks: [{ type: "command", command: `/bin/sh -c ${shQuote(VERIFIER_READ_GUARD_SCRIPT)} fx-read-guard ${VERIFIER_WORKDIR}`, timeout: 5 }],
+  hooks: [{ type: "command", command: `/bin/sh -c ${shQuote(VERIFIER_READ_GUARD_SCRIPT)} fx-read-guard ${VERIFIER_WORKDIR}`, timeout: 5, onFailure: "block" }],
 };
 
 /**

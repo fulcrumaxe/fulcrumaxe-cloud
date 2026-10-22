@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CLAUDE_CLI_VERSION } from "../src/sandboxRuntime.js";
 import { FX_AGENT_SETTINGS, PROPOSAL_VERIFIER_ROLE, VERIFIER_DENY, VERIFIER_GUARD_MAX_INPUT, VERIFIER_READ_GUARD, VERIFIER_READ_GUARD_SCRIPT, VERIFIER_WORKDIR, agentSettingsFor, toolsForRole } from "../src/agentConfig.js";
 
 /**
@@ -19,9 +20,9 @@ const hookInput = (tool: string, input: Record<string, unknown>): string =>
   JSON.stringify({ session_id: "s", transcript_path: "/root/.claude/projects/x/s.jsonl", cwd: W, permission_mode: "dontAsk", hook_event_name: "PreToolUse", tool_name: tool, tool_input: input, tool_use_id: "toolu_01" });
 
 const shells = ["/bin/sh", ...["bash", "dash"].map((s) => spawnSync("sh", ["-c", `command -v ${s}`], { encoding: "utf8" }).stdout.trim()).filter((s) => s !== "")];
-function run(shell: string, stdin: string, workdir = W): { status: number | null; ms: number } {
+function run(shell: string, stdin: string, workdir = W, opts: { env?: NodeJS.ProcessEnv; script?: string } = {}): { status: number | null; ms: number } {
   const t0 = Date.now();
-  const r = spawnSync(shell, ["-c", VERIFIER_READ_GUARD_SCRIPT, "fx-read-guard", workdir], { input: stdin, timeout: 10_000, cwd: base });
+  const r = spawnSync(shell, ["-c", opts.script ?? VERIFIER_READ_GUARD_SCRIPT, "fx-read-guard", workdir], { input: stdin, timeout: 10_000, cwd: base, env: opts.env });
   return { status: r.status, ms: Date.now() - t0 };
 }
 /** The exit code, which must be the same under every shell. */
@@ -167,6 +168,63 @@ describe("the proposal verifier's read confinement", () => {
       expect(big.ms, sh).toBeLessThan(2000);
     }
     expect(VERIFIER_READ_GUARD_SCRIPT).toContain(`[ \${#j} -le ${VERIFIER_GUARD_MAX_INPUT} ] || exit 2`);
+  });
+
+  it("the guard hook fails closed when it times out or crashes: onFailure is block, on a CLI that honours it", () => {
+    // Without onFailure the CLI lets the call through when the hook is killed at its timeout, cannot start, or exits other than 0 or 2.
+    expect(VERIFIER_READ_GUARD.hooks).toEqual([{ type: "command", command: VERIFIER_READ_GUARD.hooks[0]!.command, timeout: 5, onFailure: "block" }]);
+    // The bytes written to the settings file carry it.
+    const written = JSON.parse(JSON.stringify(agentSettingsFor(PROPOSAL_VERIFIER_ROLE))) as { hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<Record<string, unknown>> }> } };
+    expect(written.hooks.PreToolUse).toHaveLength(1);
+    expect(written.hooks.PreToolUse[0]!.matcher).toBe("Read|Glob|Grep");
+    expect(written.hooks.PreToolUse[0]!.hooks.map((h) => h.onFailure)).toEqual(["block"]);
+    // onFailure needs Claude Code 2.1.295 or later; an older CLI ignores it. The image's pinned CLI is at least that.
+    const [major, minor, patch] = CLAUDE_CLI_VERSION.split(".").map(Number) as [number, number, number];
+    expect(major * 1e8 + minor * 1e4 + patch, CLAUDE_CLI_VERSION).toBeGreaterThanOrEqual(2 * 1e8 + 1 * 1e4 + 295);
+  });
+
+  it("the guard counts its cap in bytes under every shell, also in a UTF-8 locale: 2-byte characters at the cap", () => {
+    expect(VERIFIER_READ_GUARD_SCRIPT.split("\n")[0]).toBe("LC_ALL=C; export LC_ALL");
+    const utf8 = { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
+    // A Grep whose pattern is "é" (2 bytes, 1 character) repeated, padded with one "x" to land on an exact byte length.
+    const twoByte = (bytes: number): string => {
+      const pad = bytes - Buffer.byteLength(hookInput("Grep", { pattern: "", path: "src" }));
+      const s = hookInput("Grep", { pattern: "é".repeat(Math.floor(pad / 2)) + "x".repeat(pad % 2), path: "src" });
+      expect(Buffer.byteLength(s)).toBe(bytes);
+      expect(s.length).toBeLessThan(VERIFIER_GUARD_MAX_INPUT);
+      return s;
+    };
+    const at = twoByte(VERIFIER_GUARD_MAX_INPUT);
+    const over = twoByte(VERIFIER_GUARD_MAX_INPUT + 1);
+    const bash = shells.find((s) => s.endsWith("/bash"));
+    expect(bash, "bash is needed for this check").toBeDefined();
+    expect(shells.some((s) => s.endsWith("/dash")), "dash is needed for this check").toBe(true);
+    for (const sh of shells) {
+      expect(run(sh, at, W, { env: utf8 }).status, sh).toBe(0);
+      expect(run(sh, over, W, { env: utf8 }).status, sh).toBe(2);
+    }
+    // Control: without the LC_ALL line, bash in a UTF-8 locale counts characters and lets the over-cap input through, so the check above can fail.
+    const noLocale = VERIFIER_READ_GUARD_SCRIPT.replace("LC_ALL=C; export LC_ALL\n", "");
+    expect(noLocale).not.toBe(VERIFIER_READ_GUARD_SCRIPT);
+    expect(run(bash!, over, W, { env: utf8, script: noLocale }).status).toBe(0);
+  });
+
+  it("the worst input at the cap, a run of escaped quotes, finishes well inside the 5 s hook timeout under bash", () => {
+    const bash = shells.find((s) => s.endsWith("/bash"));
+    expect(bash, "bash is needed for this check").toBeDefined();
+    expect(VERIFIER_READ_GUARD.hooks[0]!.timeout).toBe(5);
+    // Each quote is written as \" in the JSON, two bytes. Of the shapes measured (a run of quotes in the Grep pattern, path or glob, the Glob
+    // pattern, the Read file_path, or a run of \"), a Grep pattern of quotes with an in-tree path is the slowest: it is allowed, so every match
+    // runs to the end (about 1.6 s under bash on the team's host).
+    const empty = Buffer.byteLength(hookInput("Grep", { pattern: "", path: "src" }));
+    const quotes = (n: number): string => hookInput("Grep", { pattern: '"'.repeat(n), path: "src" });
+    const n = Math.floor((VERIFIER_GUARD_MAX_INPUT - empty) / 2);
+    const worst = quotes(n);
+    expect(Buffer.byteLength(worst)).toBeLessThanOrEqual(VERIFIER_GUARD_MAX_INPUT);
+    expect(Buffer.byteLength(quotes(n + 1))).toBeGreaterThan(VERIFIER_GUARD_MAX_INPUT);
+    const r = run(bash!, worst, W, { env: { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" } });
+    expect(r.status).toBe(0);
+    expect(r.ms, `${r.ms} ms`).toBeLessThan(2500);
   });
 
   it("the guard fails closed on input it cannot read and on other tools", () => {
