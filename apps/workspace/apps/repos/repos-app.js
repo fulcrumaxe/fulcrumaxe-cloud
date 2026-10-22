@@ -85,7 +85,11 @@ function mountRepos(host, installNote) {
   };
   let destroyed = false, listGen = 0, settingsGen = 0;
   // D#6 R7d: the sandbox allowance panel for the open repo. Its own state survives the detail pane being rebuilt.
-  const allowances = createAllowancePanel({ call: (method, id, body) => api(method, allowancesUrl(id), body, abort.signal), isCancelled: () => destroyed });
+  const allowances = createAllowancePanel({
+    call: (method, id, body) => api(method, allowancesUrl(id), body, abort.signal), isCancelled: () => destroyed,
+    // D#6 R-CHK-3c: every runner that covers the repo is below the supported floor (the runners read is shared with the Runners section).
+    runnerOutdated: (full) => { const rs = runners.data.state.runners.filter((r) => r.repos.includes(full)); return rs.length > 0 && rs.every((r) => r.state === "outdated"); },
+  });
 
   const root = h("div", { class: "repos-app", "data-testid": "repos-app" });
   const headEl = h("div", { class: "repos-head" });
@@ -98,7 +102,7 @@ function mountRepos(host, installNote) {
   // D#6 R2b-4b: the Runners section below the repos, and the runner-run setting in the open repo's settings (it reads the same runners answer).
   let dial = null;
   let mode = null; // D#6 R5b-2b-iii: the mode picker of the open repo
-  const runners = createRunnersSection({ signal: abort.signal, onData: () => dial && dial.repaint() });
+  const runners = createRunnersSection({ signal: abort.signal, onData: () => (dial && dial.repaint(), allowances.repaint()) });
   // dom-insert-ok: runners.el is the section element createRunnersSection built with h()
   root.append(runners.el);
   const makeDial = () => {
