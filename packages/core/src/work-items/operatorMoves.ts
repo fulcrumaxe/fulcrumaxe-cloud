@@ -139,3 +139,19 @@ export async function reopenWorkItem(ctx: OperatorMoveCtx, workItemId: string): 
   });
   return { workItemId, stage: 'triaged' };
 }
+
+/**
+ * D#598 P1f-6b: Try the push again (`retry_push`) and Open the pull request again (`open_pr`). The table is asked with the item's row locked, and the audit row names
+ * who pressed which. Nothing else is written here: the push itself is the worker's (`retryPublish`, `openPublicPullRequest`), and it starts only after this returns.
+ *
+ * TODO: like Reopen, the audit row is written as `work_item.sent_back` with an `action` in its payload, because the 0713 definer's allowlist has no event of its own for
+ * these and this change adds no migration. When it becomes permanent, add `public_change.retry_push` and `public_change.open_pr` in a migration numbered at merge.
+ */
+export async function requestPublicChangeAction(ctx: OperatorMoveCtx, workItemId: string, action: 'retry_push' | 'open_pr'): Promise<void> {
+  if (!UUID_RE.test(workItemId)) throw new NotFoundError('not found');
+  const { accountId, userId } = ctx.principal;
+  await withTenant(ctx.pool, accountId, userId, async (client) => {
+    const facts = await allowed(client, ctx, workItemId, action);
+    await audit(client, 'work_item.sent_back', { work_item_id: workItemId, action, from_stage: facts.stage, public_change_state: facts.push?.state ?? null });
+  });
+}

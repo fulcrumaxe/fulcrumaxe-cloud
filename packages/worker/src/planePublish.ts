@@ -3,7 +3,10 @@ import type { Pool, PoolClient } from "pg";
 import { PLANE_REFUSAL_CODES, type PlaneRefusalCode } from "@fulcrumaxe/runner-protocol/planePush";
 import { buildPlanePushText } from "@fulcrumaxe/runner-protocol/planePushText";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { pairingDigest, recordVerifiedOutcome, type PlanePushState, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
+import { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, pairingDigest, publicPullRequestUrlMatches, recordVerifiedOutcome, type PlanePushState, type RetryFacts, type VerifiedOutcome } from "@fx/core/src/repos/planePushRecord.js";
+
+// The retry predicate and the attempt limit live in @fx/core (the item view and the operator actions list themselves from them); re-exported so this module keeps its names.
+export { PUBLISH_ATTEMPT_LIMIT, mayRetryPublish, type RetryFacts };
 import { PLANE_PUBLISH_ROLE, PLANE_PUBLISH_VCPUS, insertAgentRun, insertRunEvent, runPublishSandbox, sandboxNameFor, writeRunStatus, writeRunStatusOn, type ExecutionRun, type LostRunOutcome, type NetworkPolicyRule, type PlanePublishInput, type PlanePublishLine, type SandboxPort } from "@fx/runner";
 import { sandboxRunCost } from "@fx/spend";
 import { readStackParentPull } from "@fx/core/src/work-items/stackParentPull.js";
@@ -31,27 +34,8 @@ export const PUBLIC_UNAVAILABLE_NOTE = "The public repository could not be reach
 /** The `run_events` kind the executor run carries once its private pull request is open: the per-run marker, so a replay opens nothing. */
 const PRIVATE_PR_MARKER = "plane.private_pr";
 
-/** A push has at most this many attempts per row (the schema checks the same number). */
-export const PUBLISH_ATTEMPT_LIMIT = 3;
 /** The worker's own refusal codes, next to the hook's (`PlaneRefusalCode`). They are stored as the item's code and the attempt's label. */
 export const PUBLISH_CODES = { retryLimit: "retry_limit", pairingOff: "pairing_off", hookCrashed: "hook_crashed", reportMismatch: "report_mismatch" } as const;
-
-/** What the retry predicate needs: the push row's state, the runtime of its latest push attempt, and how many push attempts it has. */
-export interface RetryFacts {
-  state: PlanePushState;
-  lastPushRuntime: "runner" | "sandbox" | "hosted" | null;
-  pushAttempts: number;
-  managedByPerson: boolean;
-}
-
-/**
- * THE one predicate for "may this item try the push again now": a refused push of a sandbox build with fewer than three push attempts. `retryPublish`
- * enforces it, and P1f-6's `retry_push` action lists itself from it, so the page never offers a retry that would be refused. (A `pushed_pr_not_opened`
- * item is not here: that retry opens the PR with no sandbox, and it is 5c's.)
- */
-export function mayRetryPublish(f: RetryFacts): boolean {
-  return f.state === "refused" && f.lastPushRuntime === "sandbox" && f.pushAttempts < PUBLISH_ATTEMPT_LIMIT && !f.managedByPerson;
-}
 
 export interface PlanePublishDeps {
   pool: Pool;
@@ -393,7 +377,7 @@ async function verify(deps: PlanePublishDeps, facts: Facts, line: PlanePublishLi
         if (!(await deps.hosted.verifyPushed({ codeRepo: facts.codeRepo, branch: facts.branch, headSha: line.head_sha, tipSha: line.tip_sha }))) return mismatch;
         if (line.phase === "pr_failed") return { outcome: { state: "pushed_pr_not_opened", headSha: line.head_sha, tipSha: line.tip_sha }, label: "pr_failed" };
         const pr = await deps.hosted.verifyPullRequest({ codeRepo: facts.codeRepo, branch: facts.branch, number: line.pr_number! });
-        return pr === null ? mismatch : { outcome: { state: "pr_opened", headSha: line.head_sha, tipSha: line.tip_sha, prNumber: line.pr_number!, prUrl: pr.url }, label: "pr_opened" };
+        return pr === null || !publicPullRequestUrlMatches(facts.codeRepo, line.pr_number!, pr.url) ? mismatch : { outcome: { state: "pr_opened", headSha: line.head_sha, tipSha: line.tip_sha, prNumber: line.pr_number!, prUrl: pr.url }, label: "pr_opened" };
       } catch {
         // fx-swallow-ok: GitHub could not be asked; nothing is stored from the line and the item shows the fixed unavailable refusal
         return REFUSED("public_unavailable");
@@ -493,7 +477,7 @@ async function openPublicPullRequest(deps: PlanePublishDeps, accountId: string, 
     const text = buildPlanePushText({ itemTitle: p.title, runId: p.run_id });
     const opened = await deps.hosted.openPullRequest({ codeRepo: p.code_repo, branch: p.branch, title: text.title, body: text.body });
     const pr = await deps.hosted.verifyPullRequest({ codeRepo: p.code_repo, branch: p.branch, number: opened.number });
-    if (pr === null) return await stop(PUBLISH_CODES.reportMismatch);
+    if (pr === null || !publicPullRequestUrlMatches(p.code_repo, opened.number, pr.url)) return await stop(PUBLISH_CODES.reportMismatch);
     await end("pr_opened", { state: "pr_opened", headSha: p.head_sha, tipSha: p.tip_sha, prNumber: opened.number, prUrl: pr.url });
     return { kind: "opened", prNumber: opened.number, attemptNo };
   } catch (err) {
