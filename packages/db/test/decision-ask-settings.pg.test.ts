@@ -228,10 +228,15 @@ describe('decision_ask_settings (0812)', () => {
       const winnerIn = new Promise<void>((r) => { inserted = r; });
       const winner = withTenant(appUserPool, refs.accountId, refs.userId, async (c) => { await insert(c); inserted(); await gate; });
       await winnerIn;
-      const loser = withTenant(appUserPool, refs.accountId, refs.userId, insert);
+      // The loser's rejection arrives the moment the winner commits, on another socket, and can beat the winner's own acknowledgement.
+      // Observe the loser from the moment it exists: with no handler attached yet, that early rejection is an unhandled rejection.
+      const loserOutcome = withTenant(appUserPool, refs.accountId, refs.userId, insert).then(
+        () => 'won' as const,
+        (e: unknown) => e,
+      );
       setTimeout(release, 150);
       await expect(winner).resolves.toBeUndefined();
-      await expect(loser).rejects.toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
+      expect(await loserOutcome).toMatchObject({ code: PG_ERROR.UNIQUE_VIOLATION });
     });
 
     it('two writers racing for the first version of an account-wide key (repo NULL): exactly one wins, the loser gets ask_setting_version_conflict', async () => {
