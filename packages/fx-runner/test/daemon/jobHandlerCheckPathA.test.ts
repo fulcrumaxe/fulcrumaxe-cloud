@@ -1,10 +1,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Check, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
+import type { Check, Job, NormalizedEvent } from "@fulcrumaxe/runner-protocol";
 import { createRunnerClient, type Claimed, type GitTicketResult } from "../../src/daemon/client.js";
 import { createBaseFile, createCheckStep, createVcsState, type CheckLaunch } from "../../src/daemon/checkStep.js";
 import type { GitCapture } from "../../src/daemon/git.js";
@@ -12,7 +12,9 @@ import { createGitPathA } from "../../src/daemon/gitPathA.js";
 import { createJobHandler, type JobHandlerDeps } from "../../src/daemon/jobHandler.js";
 import { createEventRelay, type Clock } from "../../src/daemon/lease.js";
 import { createFileLedger } from "../../src/daemon/ledger.js";
+import { createNixShell, type NixDetail, type NixSkip } from "../../src/daemon/nixShell.js";
 import { runCapture, runInstall } from "../../src/engines/claude/capture.js";
+import { NIX_FLAKE_CHANGED_NOTE } from "../../src/job/prompt.js";
 import { generateRunnerKey } from "../../src/keys.js";
 import { originHash } from "../../src/keyring.js";
 import { runJob, type RunJobDeps } from "../../src/job/runJob.js";
@@ -64,7 +66,13 @@ const sh = (...args: string[]): string => execFileSync("git", args, { env: SETUP
 const BASE_CHECK = (body: string): string => `#!/bin/sh\necho base check ran\n${body}\n`;
 const AGENT_CHECK = "#!/bin/sh\necho agent check ran\nexit 0\n";
 
-function seedUpstream(checkBody: string): void {
+/** D#6 R-CHK-2c: a flake whose dev shell is told apart by the name in its first line (the stand-in `nix` reads it from the commit it is asked to build). */
+const FLAKE = (shell: string): string => `# shell: ${shell}\n{ outputs = { self }: {}; }\n`;
+const LOCK = JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } } });
+const ALLOWANCES = { entries: [{ kind: "domain" as const, value: "registry.npmjs.org", access: "connect" as const, reason: "install" }], command_timeout_s: 600 };
+const STORE_HASH = "a".repeat(32);
+
+function seedUpstream(checkBody: string, shell?: string): void {
   upstream = path.join(root, "projects", "acme", "widgets.git");
   mkdirSync(path.dirname(upstream), { recursive: true });
   sh("init", "--bare", "-b", "main", upstream);
@@ -74,6 +82,11 @@ function seedUpstream(checkBody: string): void {
   writeFileSync(path.join(seed, "README.md"), "hello\n");
   writeFileSync(path.join(seed, "scripts", "check.sh"), BASE_CHECK(checkBody));
   chmodSync(path.join(seed, "scripts", "check.sh"), 0o755);
+  if (shell !== undefined) {
+    writeFileSync(path.join(seed, "flake.nix"), FLAKE(shell));
+    writeFileSync(path.join(seed, "flake.lock"), LOCK);
+    sh("-C", seed, "add", "flake.nix", "flake.lock");
+  }
   sh("-C", seed, "add", "README.md", "scripts/check.sh");
   sh("-C", seed, "commit", "-q", "-m", "first");
   sh("-C", seed, "push", "-q", upstream, "main");
@@ -98,8 +111,52 @@ afterEach(async () => {
 
 const clock: Clock = { now: () => new Date(), sleep: (ms, signal) => new Promise<void>((resolve) => { if (signal.aborted) return resolve(); const t = setTimeout(resolve, Math.min(ms, 1)); signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true }); }) };
 
-async function rig(checkBody: string, over: { wired?: boolean } = {}) {
-  seedUpstream(checkBody);
+/**
+ * D#6 R-CHK-2c: the real Nix step (`createNixShell`) on real processes, with a stand-in `nix` and `bwrap` (as in jobHandlerNix.test.ts). The stand-in `nix`
+ * builds nothing: asked for a dev shell of `git+file://<mirror>?rev=<sha>`, it reads `flake.nix` at that commit from that mirror with the real git and names
+ * the shell after it, so which flake the shell came from is read off the output, not off a flag. Every call is logged.
+ */
+function writeNixStandIns(): void {
+  const gitBin = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  writeFileSync(
+    path.join(root, "nix"),
+    `#!/bin/sh
+echo "$@" >> "${root}/nix-calls.log"
+case "$*" in
+  *"config show trusted-users"*) echo root; exit 0;;
+  *print-dev-env*)
+    for a in "$@"; do case "$a" in git+file://*) ref="$a";; esac; done
+    dir="\${ref#git+file://}"; dir="\${dir%%\\?*}"; rev="\${ref##*rev=}"
+    name=$("${gitBin}" --git-dir="$dir" show "$rev:flake.nix" | sed -n 's/^# shell: //p')
+    [ -n "$name" ] || exit 7
+    echo "{\\"variables\\":{\\"PATH\\":{\\"type\\":\\"exported\\",\\"value\\":\\"/nix/store/${STORE_HASH}-$name/bin\\"}}}"; exit 0;;
+esac
+exit 9
+`,
+  );
+  chmodSync(path.join(root, "nix"), 0o755);
+  writeFileSync(
+    path.join(root, "bwrap"),
+    `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in --) shift; break;; --setenv|--ro-bind) shift 3;; --proc|--dev|--tmpfs|--dir) shift 2;; *) shift;; esac
+done
+exec "$@"
+`,
+  );
+  chmodSync(path.join(root, "bwrap"), 0o755);
+}
+const nixCalls = (): string[] => (existsSync(path.join(root, "nix-calls.log")) ? readFileSync(path.join(root, "nix-calls.log"), "utf8").trim().split("\n") : []);
+const devEnvRevs = (): string[] => nixCalls().filter((c) => c.includes("print-dev-env")).map((c) => /\?rev=([0-9a-f]+)/.exec(c)?.[1] ?? "");
+
+async function rig(checkBody: string, over: { wired?: boolean; shell?: string; nix?: "standin" | "not_installed"; agentEditsFlake?: boolean } = {}) {
+  seedUpstream(checkBody, over.shell);
+  if (over.nix !== undefined) writeNixStandIns();
+  const skips: NixSkip[] = [];
+  const details: NixDetail[] = [];
+  const prompts: string[] = [];
+  /** The dev shell each agent start was given (the grant's `nixEnv`), as the real host sandbox keeps it for the check. */
+  const shells: Array<Readonly<Record<string, string>> | undefined> = [];
   relay = await startRelay({ projectRoot: path.join(root, "projects"), ticket, owner: "acme", name: "widgets" });
   caFile = path.join(root, "ca.pem");
   writeFileSync(caFile, relay.caPem);
@@ -122,8 +179,15 @@ async function rig(checkBody: string, over: { wired?: boolean } = {}) {
       // The agent: replaces the check with one that always passes, and commits it on the run branch.
       const workdir = opts.workdir;
       if (workdir === undefined) throw new Error("the agent is always started in its workspace");
+      prompts.push(opts.prompt);
+      shells.push(opts.allowances?.nixEnv);
       writeFileSync(path.join(workdir, "scripts", "check.sh"), AGENT_CHECK);
       sh("-C", workdir, "add", "scripts/check.sh");
+      if (over.agentEditsFlake === true) {
+        writeFileSync(path.join(workdir, "flake.nix"), FLAKE("agent-shell"));
+        writeFileSync(path.join(workdir, "flake.lock"), JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } }, edited: true }));
+        sh("-C", workdir, "add", "flake.nix", "flake.lock");
+      }
       sh("-C", workdir, "commit", "-q", "-m", "make the check pass");
       const event: NormalizedEvent = { runId: opts.runId, role: "executor", seq: 1, type: "result", ts: "2026-10-08T12:00:00.000Z", sessionId: "s1", agentOutput: { verdict: "done" } };
       return { handle, hookFired: Promise.resolve(event) };
@@ -135,17 +199,31 @@ async function rig(checkBody: string, over: { wired?: boolean } = {}) {
   const deps: JobHandlerDeps = {
     client, keyring: KEYRING, clock, run, sandbox: port, ledger: createFileLedger(path.join(root, "jobs.json"), ledgerOptions()), git: gitB, gitA, events: createEventRelay(),
     recordSession: async () => {}, heartbeatMs: 1e9, flushMs: 1e9, runJobFn: runJob,
+    ...(over.nix === undefined ? {} : {
+      nix: createNixShell({
+        nixBin: over.nix === "not_installed" ? undefined : path.join(root, "nix"), bwrapBin: path.join(root, "bwrap"), viewFs: { exists: () => true, isDir: () => true, isFile: () => false, list: () => [] },
+        capture: (command, args, env, timeoutMs) => runCapture(spawn, command, args, env, timeoutMs, 1024 * 1024, 2048), dataDir: path.join(root, "nix-data"), storeExists: () => true,
+        identity: async () => ({ user: "runner", groups: ["users"] }),
+      }),
+      onNixSkip: (skip: NixSkip) => skips.push(skip),
+      onNixDetail: (detail: NixDetail) => details.push(detail),
+    }),
     ...(over.wired === false ? {} : {
       checkStep: createCheckStep({ capture: (command, args, env, cwd, timeoutMs, tail, signal, feed) => runInstall(spawn, command, args, env, cwd, timeoutMs, tail, signal, feed), now: () => new Date(), vcsState: createVcsState(captureLarge, {}) }),
       baseFile: createBaseFile(captureLarge, {}),
-      checkLaunch: (target: SandboxHandle, argv: readonly string[]): CheckLaunch => (launchedIn.push(target.sandboxName), { tool: argv[0]!, args: argv.slice(1), env: SETUP_ENV() }),
+      // A dev-shell check gets the shell the agent's sandbox was started with, in front of the host PATH (the real merge is HostSandbox.checkLaunch's, proved there).
+      checkLaunch: (target: SandboxHandle, argv: readonly string[], devShell: boolean): CheckLaunch => {
+        launchedIn.push(target.sandboxName);
+        const shell = shells.at(-1);
+        return { tool: argv[0]!, args: argv.slice(1), env: devShell && shell !== undefined ? { ...SETUP_ENV(), PATH: `${shell.PATH}:${SETUP_ENV().PATH}` } : SETUP_ENV() };
+      },
       checkHome: home,
     }),
   };
   return {
-    gitB, agentSandboxes, launchedIn, client, handle: createJobHandler(deps),
-    async claim(check: Check | null = CHECK): Promise<Claimed> {
-      cloud.enqueue(signRaw(jobFor({ mode: "verified", ...(check === null ? {} : { check }) })) as never);
+    gitB, agentSandboxes, launchedIn, client, skips, details, prompts, shells, handle: createJobHandler(deps),
+    async claim(check: Check | null = CHECK, extra: Partial<Job> = {}): Promise<Claimed> {
+      cloud.enqueue(signRaw(jobFor({ mode: "verified", ...(check === null ? {} : { check }), ...extra })) as never);
       const claimed = await client.claim();
       if (claimed.kind !== "claimed") throw new Error("expected a claim");
       return claimed;
@@ -264,5 +342,97 @@ describe("a verified-mode job without a usable check behaves as on path B", () =
     expect(r.launchedIn).toEqual([]);
     expect(relay.requests).toEqual([]);
     expect(bodies("/done")).toEqual([]);
+  });
+});
+
+describe("a verified-mode job whose check needs the dev shell (path A, D#6 R-CHK-2c)", () => {
+  /**
+   * The check prints the first entry of the PATH it was started with: the dev shell's bin, which the launch puts in front. Only that entry, never the whole PATH:
+   * done keeps the last 4096 bytes of output, and a host PATH (under `nix develop` it runs to several KB) would push "base check ran" and the shell's entry out of it.
+   */
+  const SHELL_CHECK = 'echo "check PATH starts: ${PATH%%:*}"\nexit 0';
+  const DEV_CHECK: Check = { ...CHECK, dev_shell: true };
+  /** Commits `files` on `branch` of the upstream (cut from `from` when given) and returns the new tip. */
+  function upstreamFiles(branch: string, files: Record<string, string>, from?: string): string {
+    const clone = path.join(root, `clone-${randomBytes(6).toString("hex")}`);
+    sh("clone", "-q", upstream, clone);
+    if (from !== undefined) sh("-C", clone, "checkout", "-q", "-b", branch, from);
+    else sh("-C", clone, "checkout", "-q", branch);
+    for (const [file, text] of Object.entries(files)) writeFileSync(path.join(clone, file), text);
+    sh("-C", clone, "add", ...Object.keys(files));
+    sh("-C", clone, "commit", "-q", "-m", Object.keys(files).join(" "));
+    sh("-C", clone, "push", "-q", upstream, branch);
+    return sh("-C", clone, "rev-parse", "HEAD").trim();
+  }
+
+  it("runs in the shell built from the default branch's flake, at the run's start commit, even when the agent rewrites flake.nix and flake.lock", async () => {
+    const r = await rig(SHELL_CHECK, { shell: "default-shell", nix: "standin", agentEditsFlake: true });
+    const start = sh("-C", upstream, "rev-parse", "main").trim();
+    const claimed = await r.claim(DEV_CHECK, { sandbox_allowances: ALLOWANCES });
+    expect((await r.handle(claimed)).status).toBe("completed");
+    expect(r.skips).toEqual([]);
+    // One build, of the default branch's commit the run started from, through the mirror path A synced; the agent's sandbox got that shell.
+    expect(devEnvRevs()).toEqual([start]);
+    expect(r.shells).toEqual([{ PATH: `/nix/store/${STORE_HASH}-default-shell/bin` }]);
+    expect(r.launchedIn).toEqual(r.agentSandboxes);
+    const check = bodies("/done")[0]!.check as Record<string, unknown>;
+    expect(check).toMatchObject({ exit_code: 0, timed_out: false });
+    expect(check.summary).toContain("base check ran");
+    expect(check.summary).toContain(`${STORE_HASH}-default-shell/bin`);
+    expect(check.summary).not.toContain("agent-shell");
+    expect(runEnded()).toEqual([]);
+    // The agent's flake edit is on its branch, untouched; it was never built.
+    expect(upstreamFile(branchOf(claimed), "flake.nix")).toBe(FLAKE("agent-shell"));
+    expect(nixCalls().join("\n")).not.toContain(sh("-C", upstream, "rev-parse", branchOf(claimed)).trim());
+  });
+
+  it("a fix round on a branch that edited flake.nix and flake.lock gets the merge-base's shell, never the branch's or the moved-on tip's, and is told so", async () => {
+    const r = await rig(SHELL_CHECK, { shell: "default-shell", nix: "standin" });
+    const forkPoint = sh("-C", upstream, "rev-parse", "main").trim();
+    const parent = "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f";
+    const prior = `fx/${parent}-g1`;
+    const priorTip = upstreamFiles(prior, { "flake.nix": FLAKE("agent-shell"), "flake.lock": JSON.stringify({ version: 7, root: "root", nodes: { root: { inputs: {} } }, edited: true }) }, forkPoint);
+    upstreamFiles("main", { "flake.nix": FLAKE("later-shell") }); // the default branch moves on after the branch was cut
+    const claimed = await r.claim(DEV_CHECK, { sandbox_allowances: ALLOWANCES, continues: { parent_run_id: parent, session_id: null, branch: prior } });
+    expect((await r.handle(claimed)).status).toBe("completed");
+    expect(r.skips).toEqual([]);
+    expect(devEnvRevs()).toEqual([forkPoint]);
+    expect(nixCalls().join("\n")).not.toContain(priorTip);
+    expect(r.details).toEqual(["nix_from_default_branch", "nix_flake_changed"]);
+    expect(r.prompts[0]).toContain(NIX_FLAKE_CHANGED_NOTE);
+    const check = bodies("/done")[0]!.check as Record<string, unknown>;
+    expect(check).toMatchObject({ exit_code: 0 });
+    expect(check.summary).toContain(`${STORE_HASH}-default-shell/bin`);
+    expect(check.summary).not.toContain("agent-shell");
+    expect(check.summary).not.toContain("later-shell");
+    expect(runEnded()).toEqual([]);
+  });
+
+  it("allowances still gate the build: a job without signed allowances starts no nix at all, and its dev-shell check ends check_no_dev_shell", async () => {
+    const r = await rig(SHELL_CHECK, { shell: "default-shell", nix: "standin" });
+    await r.handle(await r.claim(DEV_CHECK));
+    expect(nixCalls()).toEqual([]);
+    expect(r.skips).toEqual([]);
+    expect(r.shells).toEqual([undefined]);
+    expect(r.launchedIn).toEqual([]);
+    expect(runEnded()).toEqual([expect.objectContaining({ reason: "check_failed", detail: "check_no_dev_shell" })]);
+  });
+
+  it("no flake on the default branch: no dev shell, and the check is not run but ends check_no_dev_shell", async () => {
+    const r = await rig(SHELL_CHECK, { nix: "standin" });
+    await r.handle(await r.claim(DEV_CHECK, { sandbox_allowances: ALLOWANCES }));
+    expect(r.skips).toEqual(["nix_no_flake"]);
+    expect(devEnvRevs()).toEqual([]);
+    expect(r.launchedIn).toEqual([]);
+    expect(runEnded()).toEqual([expect.objectContaining({ reason: "check_failed", detail: "check_no_dev_shell" })]);
+  });
+
+  it("no nix on the machine: no dev shell, and the check is not run but ends check_no_dev_shell", async () => {
+    const r = await rig(SHELL_CHECK, { shell: "default-shell", nix: "not_installed" });
+    await r.handle(await r.claim(DEV_CHECK, { sandbox_allowances: ALLOWANCES }));
+    expect(r.skips).toEqual(["nix_not_installed"]);
+    expect(nixCalls()).toEqual([]);
+    expect(r.launchedIn).toEqual([]);
+    expect(runEnded()).toEqual([expect.objectContaining({ reason: "check_failed", detail: "check_no_dev_shell" })]);
   });
 });

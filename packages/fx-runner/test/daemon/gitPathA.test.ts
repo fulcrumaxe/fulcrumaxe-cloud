@@ -525,3 +525,55 @@ describe("checkBase on path A (D#6 R-CHK-2b): the same pin as path B, read from 
     expect(await gitPath.checkBase!(jobFor(), tip(upstream, "main"))).toBeNull();
   });
 });
+
+describe("nixSource on path A (D#6 R-CHK-2c): path B's dev-shell rules, read from the mirror alone", () => {
+  const LOCK = JSON.stringify({ nodes: { root: {} }, root: "root", version: 7 });
+  /** Commits `files` on `branch` of the upstream (cut from `from` when given) and returns the new tip. */
+  function upstreamFiles(branch: string, files: Record<string, string>, from?: string): string {
+    const clone = path.join(root, `clone-${randomUUID()}`);
+    sh("clone", "-q", upstream, clone);
+    if (from !== undefined) sh("-C", clone, "checkout", "-q", "-b", branch, from);
+    else sh("-C", clone, "checkout", "-q", branch);
+    for (const [file, text] of Object.entries(files)) writeFileSync(path.join(clone, file), text);
+    sh("-C", clone, "add", ...Object.keys(files));
+    sh("-C", clone, "commit", "-q", "-m", Object.keys(files).join(" "));
+    sh("-C", clone, "push", "-q", upstream, branch);
+    return tip(clone, "HEAD");
+  }
+
+  it("a fresh run's start commit gives the default branch's flake as it is; a fix round that edited the flake is built from the merge-base, with the base's lock; no ticket, no request", async () => {
+    const forkPoint = upstreamFiles("main", { "flake.nix": "{ outputs = { self }: {}; }\n", "flake.lock": LOCK });
+    const prior = "fx/7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f-g1";
+    const edited = JSON.stringify({ nodes: { root: {} }, root: "root", version: 7, edited: true });
+    const priorTip = upstreamFiles(prior, { "flake.nix": "{ outputs = { self }: { touched = true; }; }\n", "flake.lock": edited }, forkPoint);
+    upstreamFiles("main", { "later.txt": "x\n" }); // the default branch moves on after the branch was cut
+    const { gitPath, mints } = makePathA();
+    const fresh = jobFor();
+    const { base } = await gitPath.prepare(fresh, lease, newWorkspace("fresh"));
+    const fix = jobFor({ repo: fresh.repo, continues: { parent_run_id: "7c7c7c7c-7a43-4d5e-8a77-0f0f0f0f0f0f", session_id: null, branch: prior } as never });
+    const fixed = await gitPath.prepare(fix, lease, newWorkspace("fix"));
+    expect(fixed.base).toBe(priorTip);
+    const requests = relay.requests.length;
+    const minted = mints.length;
+    const mirror = gitPath.mirrorDir!(fresh);
+    expect(await gitPath.nixSource!(fresh, base)).toEqual({ kind: "flake", mirrorDir: mirror, lock: LOCK });
+    // The branch's own flake and lock are never handed on: the shell is the default branch's, and the edit is only reported.
+    expect(await gitPath.nixSource!(fix, fixed.base)).toEqual({ kind: "flake", mirrorDir: mirror, lock: LOCK, fromDefault: { rev: forkPoint, flakeChanged: true } });
+    // Local reads of the mirror: the relay saw nothing more and no ticket was asked for.
+    expect(relay.requests.length).toBe(requests);
+    expect(mints.length).toBe(minted);
+  });
+
+  it("no flake, a .gitmodules file, an unknown or malformed sha, and a repo with no mirror keep the closed answers", async () => {
+    const { gitPath } = makePathA();
+    const job = jobFor();
+    const { base: noFlake } = await gitPath.prepare(job, lease, newWorkspace("a"));
+    expect(await gitPath.nixSource!(job, noFlake)).toEqual({ kind: "no_flake" });
+    const subs = upstreamFiles("main", { "flake.nix": "{ outputs = { self }: {}; }\n", "flake.lock": LOCK, ".gitmodules": '[submodule "x"]\n\tpath = x\n\turl = file:///srv/x\n' });
+    await gitPath.prepare(job, lease, newWorkspace("b"));
+    expect(await gitPath.nixSource!(job, subs)).toEqual({ kind: "submodules" });
+    expect(await gitPath.nixSource!(job, "e".repeat(40))).toEqual({ kind: "not_default_branch" });
+    expect(await gitPath.nixSource!(job, "HEAD; rm -rf")).toEqual({ kind: "not_default_branch" });
+    expect(await gitPath.nixSource!(jobFor(), subs)).toEqual({ kind: "not_default_branch" });
+  });
+});
