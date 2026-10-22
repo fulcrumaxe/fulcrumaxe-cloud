@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
+import { CHECK_JOB_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, waitText } from "@fulcrumaxe/runner-protocol";
 import { seedF2, type F2Fixture } from "@fx/db/test/helpers/members.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
 import { RUN_WAIT_REASONS, getRunWait, getRunWaitReason } from "../src/index.js";
@@ -110,6 +110,27 @@ describe("waiting_for_runner_update [pg]", () => {
     const w = await world();
     await runner(w, { protocol: null });
     expect(await reason(w, await run(w, 3))).toBe("waiting_for_runner_update");
+  });
+
+  // D#6 R-CHK-1: a job that carries the repo's approved check is told apart, so the person is told it is the check an old runner cannot run.
+  it("a job with the repo's check and only an older runner waits as runner_too_old_for_check, with the remedy sentence; an updated runner clears it", async () => {
+    const w = await world();
+    const old = await runner(w, { protocol: CHECK_JOB_MIN_PROTOCOL - 1 });
+    const id = randomUUID();
+    await h.admin.query(
+      `INSERT INTO agent_runs (id, account_id, role, runtime, status, initiated_by, approved_by, dispatch_repo_id, min_protocol_version, job_signed)
+       VALUES ($1, $2, 'executor', 'runner', 'pending', $3, $3, $4, $5, $6::jsonb)`,
+      [id, w.f.accountId, w.f.a1, w.repoId, CHECK_JOB_MIN_PROTOCOL, JSON.stringify({ job: { check: { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 } }, signature: "x" })],
+    );
+    expect(RUN_WAIT_REASONS).toContain("runner_too_old_for_check");
+    expect(await reason(w, id)).toBe("runner_too_old_for_check");
+    const wait = await getRunWait(deps(), w.f.accountId, id);
+    expect(wait).toEqual({ reason: "runner_too_old_for_check", limited_by: null });
+    expect(waitText(wait.reason!, wait.limited_by, null)).toBe("Update your runner to run this repository's check.");
+    // The same floor on a job with no check in it is the older, plainer reason.
+    expect(await reason(w, await run(w, CHECK_JOB_MIN_PROTOCOL))).toBe("waiting_for_runner_update");
+    await h.admin.query("UPDATE runners SET protocol_version = $2 WHERE id = $1", [old, CHECK_JOB_MIN_PROTOCOL]);
+    expect(await reason(w, id)).toBeNull();
   });
 
   it("D#600 CX-5c: a job with excludes (gated at the excludes floor) with only a memory-era runner shows the update-your-runner state, and the sentence names the version and the remedy", async () => {

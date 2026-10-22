@@ -12,6 +12,7 @@ import { getWorker } from "./worker";
 import { createAppRunPullRequestPort } from "./github/runnerPullRequest";
 import { readPlanePushIdentity } from "@fx/core/src/repos/planePushIdentity.js";
 import { createLivePlanePushPort } from "./github/planePushHosted";
+import { openPlanSource } from "./github/planSource";
 import { applyRefreshedSessionCookie, resolveActiveSession } from "./shell/session-guard";
 
 /**
@@ -69,6 +70,13 @@ function accountJobLimit(plan: string): { jobs: number; hosted: boolean } {
   return "hosted" in limits ? { jobs: limits.defaultAccountJobs, hosted: true } : { jobs: limits.maxConcurrentRunnerJobs, hosted: false };
 }
 
+/** D#6 R-CHK-1: the repo's declared `.fulcrumaxe/runner-sandbox.json` at its default branch tip (null when absent), through the read-only plan client. Only ever a suggestion for the Repos form. */
+const ALLOWANCE_FILE_MAX_BYTES = 64 * 1024;
+async function readAllowanceFile(target: { repoId: string; owner: string; name: string }): Promise<string | null> {
+  const source = openPlanSource(target);
+  return source.file(".fulcrumaxe/runner-sandbox.json", (await source.head()).sha, ALLOWANCE_FILE_MAX_BYTES);
+}
+
 /** D#598 P1f-2b: the platform commit identity, read from the hosted settings on every call (a changed or removed setting applies to the next token). Null while either is missing or malformed. */
 function planePushIdentity(): { name: string; email: string } | null {
   const read = readPlanePushIdentity(process.env);
@@ -77,7 +85,7 @@ function planePushIdentity(): { name: string; email: string } | null {
 
 export function runnerDeps(): RunnerCloudDeps {
   const auth = defaultAuthDeps();
-  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), planePushIdentity };
+  return { appUserPool: auth.appUserPool, origin: process.env.FX_APP_ORIGIN, failRunnerLeases, leases, maxRunners: (plan) => runnerLimitsFor(plan).maxRunners, accountRunnerCaps: accountRunnerCaps, accountJobLimit, repoVisibility: (accountId, repoId) => liveVisibility().visibility({ accountId, repoId }), pullRequests: (pullRequests ??= createAppRunPullRequestPort()), planePush: (planePush ??= createLivePlanePushPort()), readAllowanceFile, planePushIdentity };
 }
 
 /** Reads at most `max` bytes of the body, or returns null as soon as it is over. A declared length over the cap is refused unread. */

@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { Job } from "../src/job.js";
+import { JobSchema, type Job } from "../src/job.js";
 import { JobSignatureError, canonicalJson, signJob, verifyJob, type JobSignatureErrorCode } from "../src/jobSignature.js";
 import { GOLDEN_JOBS, GOLDEN_KEY } from "./helpers/goldenJobs.js";
 import { sampleJob } from "./helpers/sampleJob.js";
@@ -264,5 +264,31 @@ describe("job.sandbox_allowances and the signature (D#6 R7a, C35)", () => {
     expect(codeOf(() => verifyJob(stripped, keyring, { now: NOW }))).toBe("bad_signature");
     const added = signJob(job, privateKey);
     expect(codeOf(() => verifyJob({ ...added, job: { ...added.job, sandbox_allowances: allowances } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+});
+
+describe("a job's approved check (D#6 R-CHK-1)", () => {
+  const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+
+  it("is signed: it verifies as issued, and a changed command, shell flag or time cap, or one removed or added, is a bad signature", () => {
+    const signed = signJob(sampleJob({ check }) as Job, privateKey);
+    expect(verifyJob(signed, keyring, { now: NOW }).check).toEqual(check);
+    for (const changed of [{ ...check, argv: ["bash", "-c", "true"] }, { ...check, dev_shell: false }, { ...check, timeout_s: 60 }]) {
+      expect(codeOf(() => verifyJob({ ...signed, job: { ...signed.job, check: changed } }, keyring, { now: NOW }))).toBe("bad_signature");
+    }
+    const stripped = { ...signed, job: { ...signed.job } };
+    delete stripped.job.check;
+    expect(codeOf(() => verifyJob(stripped, keyring, { now: NOW }))).toBe("bad_signature");
+    const plain = signJob(job, privateKey);
+    expect(codeOf(() => verifyJob({ ...plain, job: { ...plain.job, check } }, keyring, { now: NOW }))).toBe("bad_signature");
+  });
+
+  it("a job without one has the bytes it always had: no check key at all", () => {
+    expect(canonicalJson(signJob(job, privateKey).job)).not.toContain('"check"');
+  });
+
+  it("is refused by the parse of a runner that predates the key, which is why the cloud gates the job", () => {
+    expect(JobSchema.omit({ check: true }).safeParse(sampleJob({ check })).success).toBe(false);
+    expect(JobSchema.safeParse(sampleJob({ check: null })).success).toBe(false);
   });
 });

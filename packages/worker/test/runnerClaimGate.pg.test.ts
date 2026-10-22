@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CONTINUES_CROSS_SIDE_MIN_PROTOCOL, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { CHECK_JOB_MIN_PROTOCOL, CONTINUES_CROSS_SIDE_MIN_PROTOCOL, CURRENT_PROTOCOL_VERSION, EXCLUDES_JOB_MIN_PROTOCOL, MEMORY_JOB_MIN_PROTOCOL, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { withTenant } from "@fx/db/src/withTenant.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
@@ -44,7 +44,7 @@ describe("the claim's protocol gate [pg]", () => {
   }
 
   /** A pending executor run with a real signed job and the given gate (null: any runner). */
-  async function pending(minProtocolVersion: number | null): Promise<string> {
+  async function pending(minProtocolVersion: number | null, extra: Partial<Job> = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -63,6 +63,7 @@ describe("the claim's protocol gate [pg]", () => {
       issued_at: new Date(T0 - 1000).toISOString(),
       expires_at: new Date(T0 + 72 * 3_600_000).toISOString(),
       key_id: "k1",
+      ...extra,
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, min_protocol_version)
@@ -103,6 +104,20 @@ describe("the claim's protocol gate [pg]", () => {
     expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
     const updated = await runnerAt(EXCLUDES_JOB_MIN_PROTOCOL);
     expect(await claim(updated)).toMatchObject({ kind: "claimed", runId: job });
+  });
+
+  // D#6 R-CHK-1: a job that carries the repo's approved check is refused to a runner below protocol 8 and claimed by one at it.
+  it("a job with the repo's check is not given to a runner below the check floor, and is claimed at it", async () => {
+    const check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    const before = await runnerAt(CHECK_JOB_MIN_PROTOCOL - 1);
+    // A runner built from this tree declares the current version, which is below the floor: until the check step exists, no runner can take a job with a check.
+    const shipped = await runnerAt(CURRENT_PROTOCOL_VERSION);
+    const job = await pending(CHECK_JOB_MIN_PROTOCOL, { check });
+    expect((await claim(before)).kind).toBe("idle");
+    expect((await claim(shipped)).kind).toBe("idle");
+    expect(await holder(job)).toEqual({ status: "pending", runner_id: null });
+    const current = await runnerAt(CHECK_JOB_MIN_PROTOCOL);
+    expect(await claim(current)).toMatchObject({ kind: "claimed", runId: job });
   });
 
   it("a job with no gate is claimed by an old runner and by a current one", async () => {

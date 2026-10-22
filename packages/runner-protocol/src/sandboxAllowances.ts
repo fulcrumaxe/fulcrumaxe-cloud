@@ -22,6 +22,27 @@ export const MAX_ALLOWANCE_REASON_CHARS = 500;
 /** The longest a job's command may run, in seconds. The same bound sits in the database. */
 export const MAX_COMMAND_TIMEOUT_S = 1800;
 
+/**
+ * D#6 R-CHK-1 (C47): the repo's approved check, the one command the platform tells a runner to run after the agent's last turn. Its own time cap, separate from
+ * the per-command one above, because a full run of a repo's checks outlasts a single command. The same bounds sit in the database (0887).
+ */
+export const MAX_CHECK_TIMEOUT_S = 10800;
+export const MIN_CHECK_TIMEOUT_S = 60;
+export const MAX_CHECK_ARGV = 16;
+export const MAX_CHECK_ARG_CHARS = 256;
+/** Printable ASCII, spaces allowed: no control character (so no NUL or line break), and no look-alike or bidirectional character for a screen to show a person wrongly. */
+const CHECK_ARG = new RegExp(`^[\\x20-\\x7e]{1,${MAX_CHECK_ARG_CHARS}}$`);
+
+/** An argument vector, never a shell string: the runner runs argv[0] with the rest as its arguments. `dev_shell` runs it inside the job's prepared dev shell. */
+export const CheckSchema = z
+  .object({
+    argv: z.array(z.string().regex(CHECK_ARG)).min(1).max(MAX_CHECK_ARGV),
+    dev_shell: z.boolean(),
+    timeout_s: z.number().int().min(MIN_CHECK_TIMEOUT_S).max(MAX_CHECK_TIMEOUT_S),
+  })
+  .strict();
+export type Check = z.infer<typeof CheckSchema>;
+
 /** No control characters and no line breaks; the reason is for a person to read, never to act on. */
 const REASON = new RegExp(`^[^\\u0000-\\u001f\\u007f]{1,${MAX_ALLOWANCE_REASON_CHARS}}$`);
 /** Printable ASCII with no space. Whether a value is a path, a host or the loopback address is the floor's question. */
@@ -39,9 +60,14 @@ export type AllowanceEntry = z.infer<typeof AllowanceEntrySchema>;
 
 /** The set as it is uploaded, approved, stored and signed. A set with no entries has no timeout. */
 export const AllowanceSetSchema = z
-  .object({ entries: z.array(AllowanceEntrySchema).max(MAX_ALLOWANCE_ENTRIES), command_timeout_s: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_S).optional() })
+  .object({
+    entries: z.array(AllowanceEntrySchema).max(MAX_ALLOWANCE_ENTRIES),
+    command_timeout_s: z.number().int().min(1).max(MAX_COMMAND_TIMEOUT_S).optional(),
+    // A set uploaded with `check: null` says "no check", the same as leaving it out; a parsed set never holds a null (see parseAllowanceSet).
+    check: CheckSchema.nullable().optional(),
+  })
   .strict();
-export type AllowanceSet = z.infer<typeof AllowanceSetSchema>;
+export type AllowanceSet = Omit<z.infer<typeof AllowanceSetSchema>, "check"> & { check?: Check };
 
 /** The job's key: present only when the approved set has entries, so it never has none. */
 export const JobAllowancesSchema = z
@@ -127,7 +153,7 @@ export type ParsedAllowanceSet = { ok: true; set: AllowanceSet } | { ok: false; 
 export function parseAllowanceSet(input: unknown): ParsedAllowanceSet {
   const parsed = AllowanceSetSchema.safeParse(input);
   if (!parsed.success) return { ok: false, code: "invalid_shape", index: null };
-  const { entries, command_timeout_s: timeout } = parsed.data;
+  const { entries, command_timeout_s: timeout, check } = parsed.data;
   for (const [index, entry] of entries.entries()) {
     const code = allowanceFloorViolation(entry);
     if (code) return { ok: false, code, index };
@@ -142,5 +168,5 @@ export function parseAllowanceSet(input: unknown): ParsedAllowanceSet {
   }
   if (sorted.length === 0 && timeout !== undefined) return { ok: false, code: "timeout_without_entries", index: null };
   if (sorted.length > 0 && timeout === undefined) return { ok: false, code: "entries_without_timeout", index: null };
-  return { ok: true, set: { entries: sorted, ...(timeout === undefined ? {} : { command_timeout_s: timeout }) } };
+  return { ok: true, set: { entries: sorted, ...(timeout === undefined ? {} : { command_timeout_s: timeout }), ...(check ? { check } : {}) } };
 }

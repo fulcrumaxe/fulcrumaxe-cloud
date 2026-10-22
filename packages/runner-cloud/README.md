@@ -143,6 +143,14 @@ same transaction. The merge gate reads it through `createPgLocalReviewOptIn`.
   name typed back (400 `confirmation_mismatch`) and a repo on a runner (409); an empty set is the safe direction and needs neither. A set
   that crosses the floor is 400 `sandbox_allowance_refused`, naming the closed reason and the entry. `GET` shows any member the approved
   set, its hash, whether it is in use and whether the caller may change it.
+- The approved check (R-CHK-1, 0887): the set may also carry `check: { argv, dev_shell, timeout_s }`, the one command a runner is told to run after
+  the agent. It is part of the set, so it is hashed (`allowanceSetSha256` covers it; a set without one hashes as before), versioned and set aside with
+  it, and `check: null` or no check removes it as a new version. Vector of 1 to 16 printable ASCII strings of at most 256 characters, a cap of 60 to
+  10800 seconds (`MAX_CHECK_TIMEOUT_S`, apart from the 1800 second command cap). Approving one needs the repository's name typed back, as entries do. It is
+  signed into the job as `check` only while the approval is in force, and such a job is gated at protocol 8 (`CHECK_JOB_MIN_PROTOCOL`): an older runner is
+  never offered it, the claim definer and the `job_signed` guard both refuse, and the run reads `runner_too_old_for_check`. `GET` also answers
+  `suggested_check` for an owner or admin: the `check` of the declared file at the default branch tip, read through the read-only plan client and parsed
+  with the same schema. It only pre-fills a form; nothing from the branch is ever run, and an agent that edits the file changes nothing that runs.
 - `repo_runner_sandbox_allowances` is append-only (0770): one row per approval, newest wins, each with the set's sha256 and one audit row.
   Leaving `runner_local` sets the approved set aside in the same transaction (kept on record, ignored), so a repo that comes back is approved
   again first. Ruling: Chromium's `--no-sandbox` for test browsers is not an allowance kind in R7a or R7b; the self-build run (R7e) records it as a

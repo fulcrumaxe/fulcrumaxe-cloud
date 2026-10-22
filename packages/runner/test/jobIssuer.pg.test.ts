@@ -744,6 +744,81 @@ describe("JobIssuer [pg]", () => {
       expect(await stored(run.id)).toBeNull();
     });
 
+    // D#6 R-CHK-1 (C47): the repo's approved check rides in the same signed job, only as approved, and only to a runner that can be given one.
+    describe("the approved check", () => {
+      const CHECK = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+      const approveCheck = async (w: { accountId: string; userId: string; repoId: string }, version: number, entries: unknown[], timeout: number | null, check: typeof CHECK | null, setAside = false) =>
+        db.admin.query(
+          "INSERT INTO repo_runner_sandbox_allowances (account_id, repo_id, version, entries, command_timeout_s, set_sha256, set_aside, approved_by, check_argv, check_dev_shell, check_timeout_s) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11)",
+          [w.accountId, w.repoId, version, JSON.stringify(entries), timeout, "d".repeat(64), setAside, w.userId, check?.argv ?? null, check?.dev_shell ?? null, check?.timeout_s ?? null],
+        );
+      const minProtocol = async (runId: string) => (await db.admin.query<{ v: number | null }>("SELECT min_protocol_version AS v FROM agent_runs WHERE id = $1", [runId])).rows[0]!.v;
+      const issue = async (w: Awaited<ReturnType<typeof world>>, role = "executor") => {
+        const run = await runnerRun(w, role);
+        await issuer().issuer.issue({ run });
+        return { run, job: verifyJob(await stored(run.id), { "job-key-1": publicKey }, { now: NOW }) };
+      };
+
+      it("is signed into the job beside the allowances, bound to this run and repo, and gates the job at protocol 8", async () => {
+        const w = await world();
+        await approveCheck(w, 1, [NPM], 900, CHECK);
+        const { run, job } = await issue(w);
+        expect(job.check).toEqual(CHECK);
+        expect(job.sandbox_allowances).toEqual({ entries: [NPM], command_timeout_s: 900 });
+        expect(job).toMatchObject({ run_id: run.id, repo: { id: w.repoId } });
+        expect(await minProtocol(run.id)).toBe(8);
+        // A review job carries it too: the check is the repository's, not the role's.
+        expect((await issue(w, "code-reviewer")).job.check).toEqual(CHECK);
+      });
+
+      it("a check alone, with no entries, is signed on its own and still gates the job", async () => {
+        const w = await world();
+        await approveCheck(w, 1, [], null, CHECK);
+        const { run, job } = await issue(w);
+        expect(job.check).toEqual(CHECK);
+        expect("sandbox_allowances" in job).toBe(false);
+        expect(await minProtocol(run.id)).toBe(8);
+      });
+
+      it("the newest version wins: a later set without a check, and one set aside, leave the key out and the job open to any runner", async () => {
+        const removed = await world();
+        await approveCheck(removed, 1, [NPM], 900, CHECK);
+        await approveCheck(removed, 2, [NPM], 900, null);
+        const aside = await world();
+        await approveCheck(aside, 1, [NPM], 900, CHECK);
+        await approveCheck(aside, 2, [NPM], 900, CHECK, true);
+        for (const w of [removed, aside]) {
+          const { run, job } = await issue(w);
+          expect("check" in job).toBe(false);
+          expect(canonicalJson((await stored(run.id)).job)).not.toContain('"check"');
+          expect(await minProtocol(run.id)).toBeNull();
+        }
+      });
+
+      it("is per repo: another repo's job in the same account carries none of it", async () => {
+        const a = await world();
+        const otherRepo = randomUUID();
+        const otherItem = randomUUID();
+        await seedRepo(db.admin, a.accountId, otherRepo, { executionMode: "runner_local" });
+        await db.admin.query("UPDATE repos SET gh_owner = 'acme', gh_name = 'gadgets' WHERE id = $1", [otherRepo]);
+        await seedWorkItem(db.admin, a.accountId, otherItem, otherRepo, { ghNumber: 14 });
+        await approveCheck(a, 1, [], null, CHECK);
+        expect((await issue(a)).job.check).toEqual(CHECK);
+        expect("check" in (await issue({ ...a, repoId: otherRepo, workItemId: otherItem })).job).toBe(false);
+      });
+
+      it("a context port's hand-made check that the schema refuses is sandbox_allowances_invalid, and no job is written", async () => {
+        const w = await world();
+        const run = await runnerRun(w, "executor");
+        const real = createPgJobContext(db.runWriterPool);
+        for (const check of [{ ...CHECK, timeout_s: 10801 }, { ...CHECK, argv: ["a\nb"] }, { ...CHECK, argv: [] }]) {
+          const context: JobContextPort = { load: async (r, o) => ({ ...(await real.load(r, o)), sandboxAllowances: { entries: [], check } }) };
+          expect(await codeOf(issuer({ context }).issuer.issue({ run })), JSON.stringify(check)).toBe("sandbox_allowances_invalid");
+        }
+        expect(await stored(run.id)).toBeNull();
+      });
+    });
+
     it("a context port that returns a hand-made set is held to the floor too", async () => {
       const w = await world();
       const run = await runnerRun(w, "executor");

@@ -34,6 +34,8 @@ export function parseUpload(text, limits = LIMITS) {
   if (typeof text !== "string" || text.length > MAX_FILE_BYTES) return { ok: false, code: "too_big" };
   let data;
   try { data = JSON.parse(text); } catch { return { ok: false, code: "not_json" }; }
+  // D#6 R-CHK-1: the file may now declare a `check`. It is tolerated and NOT sent: this panel does not show a check, so it does not approve one unseen (the form that does is a later change).
+  if (data && typeof data === "object" && !Array.isArray(data) && data.check !== null && typeof data.check === "object" && !Array.isArray(data.check)) { data = { ...data }; delete data.check; }
   const keys = data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).sort().join() : "";
   if (keys !== "entries" && keys !== "command_timeout_s,entries") return { ok: false, code: "malformed" };
   const t = data.command_timeout_s;

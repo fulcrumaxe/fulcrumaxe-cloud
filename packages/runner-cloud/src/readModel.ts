@@ -18,7 +18,7 @@ import { MIN_SUPPORTED_PROTOCOL_VERSION, RunnerHttpError, type RunnerCloudDeps }
 export const RUNNER_STATES = ["online_idle", "busy", "paused", "draining", "offline", "outdated", "revoked"] as const;
 export type RunnerState = (typeof RUNNER_STATES)[number];
 
-export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
+export const RUN_WAIT_REASONS = ["waiting_for_runner", "waiting_for_account_cap", "waiting_for_runner_slot", "waiting_for_approval", "waiting_for_runner_update", "runner_too_old_for_check", "runner_lost_retrying", "timed_out_waiting", "paused_usage_limit"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /** A runner that has made no request for `RUNNER_ONLINE_SECONDS` (120) is `offline` (criterion 13; D#605 FL-3: one figure for every online test). */
@@ -402,6 +402,8 @@ export interface RawRun {
   slot_limited_by: string | null;
   /** D#599 PL-2b-2: the lowest runner protocol that may claim this run (`agent_runs.min_protocol_version`), or null when any runner may. */
   min_protocol_version?: number | null;
+  /** D#6 R-CHK-1: the signed job carries the repo's approved check, which is why its minimum is `CHECK_JOB_MIN_PROTOCOL`. Absent in a hand-built row, which reads as no check. */
+  job_has_check?: boolean;
   /** D#599 PL-2b-2: the highest protocol version among the live runners that cover the run's repo (the ones `runner_online` counts), or null when there are none or none stored one. */
   runner_max_protocol?: number | null;
   /** D#6 C42-3: runner runs the whole account has `running` now, and how many of those are heavy: the counts the claim measures the account's caps against. Absent in a hand-built row, which reads as no cap held. */
@@ -420,7 +422,7 @@ export interface AccountRunnerCaps {
  * the filter's own parameters start at `$4`.
  */
 const WAIT_FACTS = (filter: string, tail: string): string => `
-  SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after, a.min_protocol_version,
+  SELECT a.id, a.work_item_id, a.role, a.dispatch_repo_id, a.created_at, a.status, a.runtime, a.initiated_by, a.approved_by, a.claimable_after, a.min_protocol_version, (a.job_signed #> '{job,check}') IS NOT NULL AS job_has_check,
          -- D#599 PL-2b-2: the newest protocol any live, covering runner has said (at hello). A job that needs a higher one waits for an update; derived here, never stamped.
          (SELECT max(r.protocol_version) FROM runners r WHERE r.account_id = a.account_id AND r.revoked_at IS NULL AND r.last_seen_at > $2::timestamptz - make_interval(secs => $3)
              AND a.dispatch_repo_id = ANY(r.allowed_repo_ids) AND NOT EXISTS (SELECT 1 FROM runner_settings ps WHERE ps.runner_id = r.id AND ps.account_id = r.account_id AND (ps.paused_at IS NOT NULL OR ps.draining))) AS runner_max_protocol,
@@ -495,7 +497,8 @@ export function waitReasonOf(row: RawRun, now: Date, caps?: AccountRunnerCaps | 
   if (!row.runner_online) return "waiting_for_runner";
   // D#599 PL-2b-2: a job in the cross-side shape is never offered to a runner whose stored protocol is below the job's minimum (the claim definer's gate). When every live
   // covering runner is below it, no free slot or cap changes anything: the run waits for an update. Re-derived on each read, so an updated runner's hello clears it.
-  if (row.min_protocol_version != null && (row.runner_max_protocol ?? 0) < Number(row.min_protocol_version)) return "waiting_for_runner_update";
+  // A job that carries the repo's check is told apart: the person needs to hear that it is the check an old runner cannot run (D#6 R-CHK-1).
+  if (row.min_protocol_version != null && (row.runner_max_protocol ?? 0) < Number(row.min_protocol_version)) return row.job_has_check === true ? "runner_too_old_for_check" : "waiting_for_runner_update";
   // The claim checks the account's caps before the runner's own slots, so a held account is told first: a free slot on the runner does not help.
   if (heldByAccountCap(row, caps)) return "waiting_for_account_cap";
   if (!row.runner_slot_free) return "waiting_for_runner_slot";

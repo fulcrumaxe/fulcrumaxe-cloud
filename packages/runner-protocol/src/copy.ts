@@ -180,6 +180,8 @@ export const WAIT_LINES = {
   waiting_for_approval: "Waiting for approval before it runs on a Claude plan",
   // D#599 PL-2b-2: `waitText` adds "(version V or later)" when the job's minimum is known; this is the line without it.
   waiting_for_runner_update: "Waiting for a runner update before this run can start",
+  // D#6 R-CHK-1: the repository has an approved check and every runner that could take this run is below the version that can run it.
+  runner_too_old_for_check: "Update your runner to run this repository's check.",
   runner_lost_retrying: "Your runner lost contact. A new attempt is waiting to start",
   timed_out_waiting: COPY.timedOut,
   paused_usage_limit: "Paused: Claude usage limit reached. It starts again when the limit resets",
