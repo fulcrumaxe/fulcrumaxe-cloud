@@ -18,7 +18,7 @@
  * nor use a tool its role was not given. The boundary that matters is still the sandbox VM, the egress firewall and the
  * gh-proxy's push and PR rules; these lists are least privilege on top of them, not a replacement.
  */
-import { CONTEXT_WARN_PCT, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
+import { CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 // D#600 CX-5c: the exclude helpers live in the protocol package, so the local runner writes the very same rules. Re-exported here under the names this package always had.
 export { EXCLUDE_PROMPT_LINE, MAX_EXCLUDE_RULES, disabledToolsFor, escapeRulePath, excludeDenyRules } from "@fulcrumaxe/runner-protocol";
 
@@ -87,12 +87,12 @@ export function agentSettingsFor(role: string, excludes: readonly string[] = [])
  * or call warning can never be mistaken for the context one. `{N}` is the number. A text holds no quote, backslash, dollar sign or backtick: it goes
  * into the shell script and the hook's JSON as it is.
  */
-export const LIMIT_WARNING_CODES = { time: "time_warning", calls: "calls_warning", context: "context_warning" } as const;
+export const LIMIT_WARNING_CODES = { time: "time_warning", calls: "calls_warning", context: CONTEXT_WARNING_CODE } as const;
 export type LimitWarningCode = (typeof LIMIT_WARNING_CODES)[keyof typeof LIMIT_WARNING_CODES];
 export const LIMIT_WARNING_TEXT: Readonly<Record<LimitWarningCode, string>> = Object.freeze({
   time_warning: "About {N} minutes remain in this run. If the work will not finish, end with a checkpoint envelope: verdict checkpoint and a short summary of what is done and what is left.",
   calls_warning: "Only {N} model calls remain in this run; if the work will not finish, end with the same checkpoint envelope.",
-  context_warning: "Context is at {N}% of the window: finish, or end with a checkpoint envelope",
+  context_warning: CONTEXT_WARNING_TEXT,
 });
 /** The text a warning prints for `n`. */
 export function limitWarningText(code: LimitWarningCode, n: number): string {

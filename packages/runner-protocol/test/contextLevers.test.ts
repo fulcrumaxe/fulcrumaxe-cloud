@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BASH_MAX_OUTPUT_LENGTH, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CONTEXT_LEVER_ENV, CONTEXT_WARN_PCT, contextPct } from "../src/contextLevers.js";
+import { BASH_MAX_OUTPUT_LENGTH, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CONTEXT_LEVER_ENV, CONTEXT_WARNING_CODE, CONTEXT_WARNING_TEXT, CONTEXT_WARN_PCT, contextNoteLine, contextPct } from "../src/contextLevers.js";
 import { ContextLedgerCapture } from "../src/contextLedger.js";
 
 describe("D#600 CX-6a: context levers", () => {
@@ -50,5 +50,12 @@ describe("D#600 CX-6a: ContextLedgerCapture.lastContextTokens", () => {
     c.observe({ type: "assistant", message: { id: "m2", usage: { input_tokens: "x" } } });
     c.observe("junk");
     expect(c.lastContextTokens()).toBe(7);
+  });
+
+  it("D#600 CX-6b: the context note is the warning text with one whole number, closed by a full stop, and holds nothing the hook's shell script could not print", () => {
+    expect(CONTEXT_WARNING_CODE).toBe("context_warning");
+    expect(contextNoteLine(72)).toBe("Context is at 72% of the window: finish, or end with a checkpoint envelope.");
+    expect(contextNoteLine(100)).toContain("100%");
+    expect(CONTEXT_WARNING_TEXT).not.toMatch(/["'\\$`]/);
   });
 });

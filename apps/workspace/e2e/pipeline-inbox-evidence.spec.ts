@@ -228,6 +228,51 @@ test.describe("D#483 S4-h: opening a proposal", () => {
     await clean(page, errors);
   });
 
+  test("a proposal that has not been checked says so instead of 'nothing to check' or 'no evidence'", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [
+      proposal(1, { verification: "pending", title: "Waiting" }),
+      proposal(2, { verification: "check_failed", verify_attempts: 1, verify_retry: true, title: "Failed" }),
+      proposal(3, { verification: "not_checked", title: "No key" }),
+      proposal(4, { verification: "verified", title: "Checked, found none" }),
+    ];
+    for (const p of m.proposals) m.details[String(p.id)] = { claims: [], evidence: [] };
+    const { errors } = await start(page, m);
+    const toggle = tid(page, "pl-inbox-toggle");
+    for (const [section, line] of [
+      ["being_checked", "Not checked yet. Claims and evidence show here once the check is done."],
+      ["couldnt_confirm", "The check didn't finish, so there are no claims or evidence to show."],
+      ["not_checked", "Not checked yet: add a model key or connect a runner"],
+    ] as const) {
+      await press(page, filter(page, section));
+      await press(page, toggle);
+      await expect(tid(page, "pl-check-status")).toHaveText(line);
+      await expect(tid(page, "pl-no-claims")).toHaveCount(0);
+      await expect(tid(page, "pl-no-evidence")).toHaveCount(0);
+    }
+    // A finished check that really found nothing keeps the two sentences.
+    await press(page, filter(page, "new"));
+    await press(page, toggle);
+    await expect(tid(page, "pl-check-status")).toHaveCount(0);
+    await expect(tid(page, "pl-no-claims")).toHaveText("There was nothing to check in this proposal.");
+    await expect(tid(page, "pl-no-evidence")).toHaveText("No evidence was found for this proposal.");
+    await axeClean(page);
+    await clean(page, errors);
+  });
+
+  test("an unfinished check still lists rows it already has", async ({ page }) => {
+    const m = newMock();
+    m.proposals = [proposal(1, { verification: "check_failed", verify_attempts: 1, verify_retry: true, title: "Partial" })];
+    m.details[String(m.proposals[0].id)] = { claims: [claim(1)], evidence: [] };
+    const { errors } = await start(page, m);
+    await press(page, filter(page, "couldnt_confirm"));
+    await press(page, tid(page, "pl-inbox-toggle"));
+    await expect(tid(page, "pl-claim")).toHaveCount(1);
+    await expect(tid(page, "pl-check-status")).toHaveCount(0);
+    await expect(tid(page, "pl-no-evidence")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
   test("an excerpt and a claim holding markup are text: no img element, and the handler never runs", async ({ page }) => {
     const m = newMock();
     m.proposals = [proposal(1, { title: "Hostile", provenance: "external" })];

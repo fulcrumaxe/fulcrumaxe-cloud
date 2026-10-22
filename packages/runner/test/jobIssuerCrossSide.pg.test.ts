@@ -10,6 +10,9 @@ import { createFakeVisibility } from "./helpers/runnerTargetFakes.js";
 import { createFakeContinuationBinding, type FakeBindingState } from "./helpers/fakeContinuationBinding.js";
 import { pgHarness } from "./helpers/pgHarness.js";
 
+/** A model with no price-table entry, so no window figure: these jobs carry no `context_window` and keep only the floors this file is about (D#600 CX-6b). */
+const NO_WINDOW_MODEL = "windowless-model";
+
 /**
  * D#599 PL-2b-1: a continuation on the item's own pull request branch. The issuer binds `fx/issue-<n>` to the item's open pull request in this
  * repository on GitHub, refuses a default or protected branch, records the binding with the job, and gates the job to runners new enough to read it.
@@ -49,7 +52,7 @@ describe("cross-side continuation: the issuer's binding [pg] (D#599 PL-2b-1)", (
     const id = randomUUID();
     const pin = parentRunId ? undefined : (await db.admin.query<{ id: string }>("SELECT id FROM spec_versions WHERE work_item_id = $1 ORDER BY version DESC LIMIT 1", [w.workItemId])).rows[0]?.id;
     await insertAgentRun(db.runWriterPool, { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, ...(pin ? { specVersionId: pin } : {}), role: "executor", runtime: "runner", executionMode: "runner_local", dispatchRepoId: w.repoId, initiatedBy: w.userId });
-    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: "executor", product: "team", repoId: w.repoId, headSha: null, roleCard: "You are the executor.\n", prompt: "Fix the review findings.\n", model: "haiku-4.5", capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
+    return { id, accountId: w.accountId, workItemId: w.workItemId, parentRunId, role: "executor", product: "team", repoId: w.repoId, headSha: null, roleCard: "You are the executor.\n", prompt: "Fix the review findings.\n", model: NO_WINDOW_MODEL, capUsd: 0, spend: { plan: "starter", estimateComputeUsd: 0, trigger: "foreground" } };
   }
 
   const openPull = (over: Partial<FakeBindingState["pulls"][number]> = {}): FakeBindingState["pulls"][number] => ({ number: 41, state: "open", headRepoId: REPO_GH_ID, baseRepoId: REPO_GH_ID, headRef: ITEM_BRANCH, headOwner: OWNER, ...over });

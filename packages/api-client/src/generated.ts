@@ -497,6 +497,17 @@ export interface Operations {
         kind: "merge_only";
         sentence: string;
       }) | (null);
+      public_change?: ({
+        state: "building" | "scanning" | "pushed" | "pr_opened" | "refused" | "pushed_pr_not_opened" | "no_public_change";
+        code: string | null;
+        sentence: string;
+        repo: string;
+        branch: string;
+        pr_number: (number) | (null);
+        pr_url: string | null;
+        head_sha: string | null;
+        actions: Array<"retry_push" | "open_pr" | "build_again">;
+      }) | (null);
       actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen">;
       close_on_github: boolean;
     };

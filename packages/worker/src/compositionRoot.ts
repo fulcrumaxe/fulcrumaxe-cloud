@@ -1,5 +1,5 @@
 import { envKekSource, type KekSource } from "@fx/model-connection";
-import { outsideMeterOn, runnerLimitsFor } from "@fx/spend";
+import { contextWindowTokensFor, outsideMeterOn, runnerLimitsFor } from "@fx/spend";
 import type { HostLookup } from "@fx/net-guard";
 import {
   RunnerTarget,
@@ -299,7 +299,7 @@ export async function buildWorker(options: BuildWorkerOptions): Promise<BuiltWor
     // D#6 R3b: the job-signing key is read here, once, and goes straight into the signer. Without it the issuer stays unwired and a runner run cannot be dispatched.
     const repoVisibility = options.ports.repoVisibility ?? unwiredRepoVisibility;
     const jobSigner = loadJobSigner(env);
-    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}), ...(options.ports.continuationBinding ? { continuationBinding: options.ports.continuationBinding } : {}) }) : unwiredJobIssuer);
+    const jobIssuer = options.ports.jobIssuer ?? (jobSigner ? createJobIssuer({ pool: pools.runnerPool, signer: jobSigner, visibility: repoVisibility, context: createPgJobContext(pools.runnerPool), contextWindowTokensFor, ...(options.ports.continuationBase ? { continuationBase: options.ports.continuationBase } : {}), ...(options.ports.continuationBinding ? { continuationBinding: options.ports.continuationBinding } : {}) }) : unwiredJobIssuer);
     const runnerLimits = options.ports.runnerLimits ?? { runsPerDay: () => runnerLimitsFor('runner').runsPerDay };
     const runnerTarget = new RunnerTarget({ pool: pools.runnerPool, issuer: jobIssuer, visibility: repoVisibility, limits: runnerLimits }, "runner_local");
     // D#6 R5b-2a: a cloud-verified repository's agents run on the runner, and its four reviewers in the sandbox target above, on the customer's key.

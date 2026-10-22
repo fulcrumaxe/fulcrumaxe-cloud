@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { COPY } from "@fulcrumaxe/runner-protocol";
 import { FILE_LIST_NOTICE_COPY_KEY, REVIEW_STOP_COPY_KEY, getWorkItemActivity } from "@fx/core/src/work-items/activity.js";
+import { PUBLIC_CHANGE_STATES } from "@fx/core/src/repos/publicChangeCopy.js";
 import { OPERATOR_ACTIONS } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteEntry } from "../registry.js";
 import { runnerUsageSchema } from "./runs.js";
@@ -57,6 +58,21 @@ export const activityResponseSchema = z.object({
   notice: z.object({ kind: z.enum(["not_feasible", "needs_human", "check_failed", "no_file_list", "respec_failed", "build_slot_wait", "resume_refused"]), reason: z.string() }).nullable(),
   // D#598 P7c: present only while the newest review round was a merge-only re-check; `sentence` is the approved line.
   review_recheck: z.object({ kind: z.literal("merge_only"), sentence: z.string() }).nullable().optional(),
+  // D#598 P1f-6a: the item's change to its paired public repo; absent when the item has none. `sentence` is fixed words; `actions` is empty until the actions ship.
+  public_change: z
+    .object({
+      state: z.enum(PUBLIC_CHANGE_STATES),
+      code: z.string().nullable(),
+      sentence: z.string(),
+      repo: z.string(),
+      branch: z.string(),
+      pr_number: z.number().int().nullable(),
+      pr_url: z.string().nullable(),
+      head_sha: z.string().nullable(),
+      actions: z.array(z.enum(["retry_push", "open_pr", "build_again"])),
+    })
+    .nullable()
+    .optional(),
   actions: z.array(z.enum(OPERATOR_ACTIONS)),
   close_on_github: z.boolean(),
 });
@@ -75,7 +91,7 @@ export const workItemActivityRoutes: RouteEntry[] = [
     operationId: "getWorkItemActivity",
     summary: "What the pipeline is doing for one work item",
     description:
-      "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
+      "Session only, member. The stage, `halted` (true while a customer halt stands: set by a halt at any stage, cleared only by a person's Approve, Build again, Back to discussion or Treat as a feature that came after it), `waiting_on_answer` (true while an agent's question about this item is open or overdue and was asked by the item's newest executor run: derived from that question, so it is false once the question is answered, withdrawn, or the item has a newer run), the panel's signed comments, the newest Spec, the item's newest agent runs (oldest first, each with its summary and activity lines) and the run actions aimed at it, plus the repo, the issue number, the pull request number when a reviewer or a run's own report names one, the repo's real auto-merge setting, and a `notice` ({ kind, reason }, or null) when the pipeline stopped and needs a person: `not_feasible` (the project manager's reason the request cannot be built as written) or `needs_human` (the executor's own account of a build that ended without a pull request) or `check_failed` (the Check the build button could not decide; a fixed sentence) or, for an item at `spec_ready` or `needs_human` whose newest Spec has no readable file list, `no_file_list` (a build was refused for it, or a run ended without a pull request for it: the fixed sentence says to Re-spec, then Build again) or `respec_failed` (the last Re-spec's file list could not be read, so nothing was changed; a fixed sentence) or `build_slot_wait` (not a stop: an item at `spec_ready` or `needs_human` whose build is waiting for a build slot; the fixed sentence says why and, for the repository's slot, which item holds it) or `resume_refused` (an item at `in_progress` or `changes_requested` whose answered question did not resume it, while nothing of it is running: `reason` is a fixed CODE such as `prompt_not_retained`, `work_item_not_resumable` or `resume_pause_expired`, not a sentence, and the app shows its own words for it). `actions` lists what the caller may do to the item right now, from the same table the action routes use (`build_again`, `respec`, `back_to_discussion`, `treat_as_feature`, `close`, `reopen`): empty for a member, an external item, an item with a live run, or a stage none applies to. `public_change` is present only for an item with a change to a paired public repository: its `state`, the stored refusal `code`, a fixed `sentence` (a code the app does not know reads \"Refused: the change was not sent\"), the public `repo`, `branch`, pull request and `head_sha`, and `actions` (empty for now). `close_on_github` is true when the caller could close the item but it has an open pull request, which is closed on GitHub instead. Credential-shaped text in a summary or a reason is redacted. Model text is plain text: show it as text only.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",
@@ -91,8 +107,9 @@ export const workItemActivityRoutes: RouteEntry[] = [
       }));
       // The review section's line for a merge-only re-check is written once, in the runner protocol's copy.
       // The field is present only when there is a line to show, so every other answer keeps the shape it had.
-      const { review_recheck: recheck, ...rest } = read;
-      const activity = { ...rest, runs, ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }) };
+      // `public_change` follows the same rule: absent for an item with no public change, so every other answer keeps its shape.
+      const { review_recheck: recheck, public_change: publicChange, ...rest } = read;
+      const activity = { ...rest, runs, ...(publicChange === null ? {} : { public_change: publicChange }), ...(recheck === null ? {} : { review_recheck: { kind: recheck.kind, sentence: COPY.reviewMergeOnlyRecheck } }) };
       // The Re-spec notices carry the KEY of their sentence out of @fx/core; the words are written once, in the runner protocol's copy.
       const n = activity.notice;
       if (n !== null && n.kind === "build_slot_wait") return { ...activity, notice: { kind: n.kind, reason: buildWaitSentence(n.reason, n.holder ?? null) } };

@@ -3,8 +3,14 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, r
 import path from "node:path";
 import { SESSION_ID_PATTERN } from "@fulcrumaxe/runner-protocol";
 
-/** What the runner remembers of a finished session: where its workspace was. Ids and paths only, never transcript text. */
-export type SessionIndex = Record<string, { workspace: string }>;
+/**
+ * What the runner remembers of a finished session: where its workspace was, and (D#600 CX-6b) how full its context was when its last command ended
+ * (`contextPct`, a whole percentage) and the value a context note was last delivered for (`notedPct`). Ids, paths and two integers only, never transcript text.
+ */
+export type SessionIndex = Record<string, { workspace: string; contextPct?: number; notedPct?: number }>;
+
+/** A stored percentage, or undefined for anything that is not a whole number from 0 to 100. */
+const pctOf = (value: unknown): number | undefined => (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100 ? value : undefined);
 
 export function readSessionIndex(file: string): SessionIndex {
   try {
@@ -13,7 +19,11 @@ export function readSessionIndex(file: string): SessionIndex {
     const index: SessionIndex = {};
     for (const [id, entry] of Object.entries(parsed)) {
       const workspace = (entry as { workspace?: unknown } | null)?.workspace;
-      if (SESSION_ID_PATTERN.test(id) && typeof workspace === "string" && path.isAbsolute(workspace)) index[id] = { workspace };
+      if (SESSION_ID_PATTERN.test(id) && typeof workspace === "string" && path.isAbsolute(workspace)) {
+        const contextPct = pctOf((entry as { contextPct?: unknown }).contextPct);
+        const notedPct = pctOf((entry as { notedPct?: unknown }).notedPct);
+        index[id] = { workspace, ...(contextPct === undefined ? {} : { contextPct }), ...(notedPct === undefined ? {} : { notedPct }) };
+      }
     }
     return index;
   } catch {
@@ -58,12 +68,14 @@ async function withFileLock<T>(file: string, work: () => T): Promise<T> {
  * serialised by a lock file, so two runs ending together (in this process or two) each keep their entry; the temp
  * name is unique per write.
  */
-export async function recordSession(file: string, sessionId: string, workspace: string): Promise<void> {
+export async function recordSession(file: string, sessionId: string, workspace: string, context: { contextPct?: number | undefined; notedPct?: number | undefined } = {}): Promise<void> {
   if (!SESSION_ID_PATTERN.test(sessionId) || !path.isAbsolute(workspace)) return;
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   await withFileLock(file, () => {
     const index = readSessionIndex(file);
-    index[sessionId] = { workspace };
+    const contextPct = pctOf(context.contextPct);
+    const notedPct = pctOf(context.notedPct);
+    index[sessionId] = { workspace, ...(contextPct === undefined ? {} : { contextPct }), ...(notedPct === undefined ? {} : { notedPct }) };
     const temp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
     writeFileSync(temp, `${JSON.stringify(index)}\n`, { mode: 0o600 });
     renameSync(temp, file);

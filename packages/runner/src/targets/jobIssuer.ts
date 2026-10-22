@@ -6,6 +6,7 @@ import {
   MEMORY_JOB_MIN_PROTOCOL,
   EXCLUDES_JOB_MIN_PROTOCOL,
   SPILL_JOB_MIN_PROTOCOL,
+  CONTEXT_WINDOW_JOB_MIN_PROTOCOL,
   ITEM_PR_BRANCH,
   REVIEW_JOB_ROLES,
   RUNNER_ELIGIBLE_ROLES,
@@ -243,6 +244,11 @@ export interface JobIssuerDeps {
    * (`continues_base_unavailable`). A continuation on a run branch does not use it.
    */
   continuationBinding?: ContinuationBindingPort;
+  /**
+   * D#600 CX-6b: the model's context window in tokens from the price table, or undefined when it has none. Wired where `@fx/spend` may be imported (this module may not). Absent:
+   * no job carries a window.
+   */
+  contextWindowTokensFor?: (model: string) => number | undefined;
   /** Tests pass a fixed clock and id source. */
   now?: () => Date;
   newId?: () => string;
@@ -404,6 +410,17 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         }
       }
 
+      // D#600 CX-6b: the model's window from the price table, for the local runner's context note. A model with no figure, a name that is not a model hint, or a price table that cannot be read
+      // carries none, and that run gets no note (no default window): advisory only, so it never fails the job.
+      let contextWindowTokens: number | undefined;
+      if (deps.contextWindowTokensFor !== undefined && MODEL_HINT.test(run.model)) {
+        try {
+          contextWindowTokens = deps.contextWindowTokensFor(run.model);
+        } catch {
+          // fx-swallow-ok: the window only drives an advisory note; without it the job simply carries none
+        }
+      }
+
       const issuedAt = now();
       const candidate: Job = {
         schema_version: 1,
@@ -425,6 +442,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         ...(excludes.length > 0 ? { excludes } : {}),
         // D#600 CX-4b: the full text the prompt cut, in the run's own spill files (closed codes and text, nothing else). Omitted when the prompt cut nothing. The prompt already carries the marker.
         ...(run.contextSpill && run.contextSpill.files.length > 0 ? { spill: run.contextSpill.files.map((f) => ({ code: f.code, text: f.text })) } : {}),
+        // D#600 CX-6b: omitted when the model has no window figure (never null), so such a job's signed bytes are unchanged.
+        ...(contextWindowTokens !== undefined ? { context_window: contextWindowTokens } : {}),
         branch_prefix: RUNNER_BRANCH_PREFIX,
         model_hint: MODEL_HINT.test(run.model) ? run.model : null,
         issued_at: issuedAt.toISOString(),
@@ -451,8 +470,8 @@ export function createJobIssuer(deps: JobIssuerDeps): JobIssuer {
         accountId: run.accountId,
         runId: run.id,
         job: signed as unknown as Record<string, unknown>,
-        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one.
-        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0) || null,
+        // A job that carries memory is also gated: an older runner's strict parse would refuse the `memory` key, so it waits for an updated runner instead. The same holds for excludes (CX-5c): a runner that ignored them would run the agent with nothing denied. And for a spill (CX-4b): a cut prompt is never sent uncut to an older runner, it waits for an updated one. And for a window figure (CX-6b): the same strict-parse reason.
+        minProtocolVersion: Math.max(crossSide ? CONTINUES_CROSS_SIDE_MIN_PROTOCOL : 0, candidate.memory ? MEMORY_JOB_MIN_PROTOCOL : 0, candidate.excludes ? EXCLUDES_JOB_MIN_PROTOCOL : 0, candidate.spill ? SPILL_JOB_MIN_PROTOCOL : 0, candidate.context_window !== undefined ? CONTEXT_WINDOW_JOB_MIN_PROTOCOL : 0) || null,
         ...(boundPullRequest ? { continuesBound: boundPullRequest } : {}),
       });
       if (!recorded) throw new JobIssueError("job_not_recorded");

@@ -65,6 +65,12 @@ export function proposal(n: number, over: Record<string, unknown> = {}): Proposa
     evidence_count: 0,
     ...over,
   } as Record<string, unknown>;
+  // The real column rule (0839 proposals_verification_stamped): a proposal is stamped exactly when it is no longer pending, so a pending row has no check time or sha.
+  if (row.verification === "pending") {
+    if (!("verified_at" in over)) row.verified_at = null;
+    if (!("verified_sha" in over)) row.verified_sha = null;
+  }
+  if (row.verification === "pending" ? row.verified_at !== null : row.verified_at === null) throw new Error("plan-mock: verified_at is null exactly when verification is pending");
   if (!("inbox_section" in over)) row.inbox_section = row.state === "new" && row.owner_process === "product" ? SECTION_OF[row.verification as string] : null;
   return row as Proposal;
 }
