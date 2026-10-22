@@ -30,7 +30,7 @@ export interface VercelCredentialResolver {
   readonly configured: boolean;
   resolve(accountId: string): Promise<VercelCredential>;
   /** Records that Vercel refused (401/403) the credential `ref` named, so the connection can say so. A newer credential is left alone. */
-  markRejected?(accountId: string, ref: string | undefined): Promise<void>;
+  markRejected?(accountId: string, ref: string | undefined): Promise<boolean | void>;
 }
 
 /** A resolver for a platform where the connection kind is not wired: no account has a token. Production uses the sealed store (apps/web/lib/setupRequestEnvSource.ts). */
@@ -52,7 +52,7 @@ export const VERCEL_LISTING_DEADLINE_MS = 20_000;
 const MAX_BODY_BYTES = 2_000_000;
 
 /** The body as text, read as a stream and stopped (the rest cancelled) the moment it passes `max` bytes; null when it does. */
-async function readCapped(res: Response, max: number): Promise<string | null> {
+export async function readCapped(res: Response, max: number): Promise<string | null> {
   const declared = Number(res.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > max) {
     await res.body?.cancel();
@@ -75,6 +75,35 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
   return Buffer.concat(chunks).toString('utf8');
 }
 const PROJECT_RE = /^[a-z0-9._-]{1,100}$/;
+
+/**
+ * Why Vercel refused a request, the one classifier the connect-time check, the env-var check and the names read share. Vercel answers a
+ * revoked, expired, unknown or missing token with 403 and `{"error":{"code":"forbidden","invalidToken":true}}` (`missingToken: true` for none), not 401,
+ * so a 401 and that body are both "the token is refused" (`token_rejected`). Any other 403 and a 404 mean a valid token cannot see this project
+ * (`token_cannot_read`). The body is read only for a 403, capped small, parsed defensively: anything unreadable is `token_cannot_read`. Consumes the body.
+ */
+export async function refusalReason(res: Response): Promise<'token_rejected' | 'token_cannot_read' | undefined> {
+  if (res.status === 401) {
+    await res.body?.cancel();
+    return 'token_rejected';
+  }
+  if (res.status === 404) {
+    await res.body?.cancel();
+    return 'token_cannot_read';
+  }
+  if (res.status !== 403) {
+    await res.body?.cancel();
+    return undefined;
+  }
+  try {
+    const text = await readCapped(res, 4096);
+    const error = (text === null ? null : (JSON.parse(text) as { error?: { invalidToken?: unknown; missingToken?: unknown } | null } | null))?.error;
+    return error?.invalidToken === true || error?.missingToken === true ? 'token_rejected' : 'token_cannot_read';
+  } catch {
+    // fx-swallow-ok: a refusal body that cannot be read or parsed is the safe reading (this token cannot read it), never a thrown error
+    return 'token_cannot_read';
+  }
+}
 /** What the adapter will send as a token / team id. The connection kind stores nothing the adapter would refuse. */
 export const VERCEL_TOKEN_RE = /^[\x21-\x7E]{1,2000}$/;
 export const VERCEL_TEAM_RE = /^team_[A-Za-z0-9]{1,64}$/;
@@ -114,9 +143,9 @@ export function createVercelEnvSource(opts: VercelEnvSourceOptions): VercelEnvSo
   const deadlineMs = opts.deadlineMs ?? VERCEL_LISTING_DEADLINE_MS;
   const pageCap = opts.pageCap ?? VERCEL_PAGE_CAP;
   const log = opts.log ?? ((line: string) => console.info(line));
-  const fail = (code: string): VercelEnvListing => {
+  const fail = (code: string, reason?: 'token_rejected' | 'token_cannot_read'): VercelEnvListing => {
     log(JSON.stringify({ event: 'vercel_env_source.failed', code }));
-    return { ok: false };
+    return reason === undefined ? { ok: false } : { ok: false, reason };
   };
   return {
     available: opts.credentials.configured,
@@ -147,9 +176,17 @@ export function createVercelEnvSource(opts: VercelEnvSourceOptions): VercelEnvSo
             signal: AbortSignal.timeout(Math.min(callTimeoutMs, remaining)),
           });
           if (res.status !== 200) {
-            await res.body?.cancel();
-            if (res.status === 401 || res.status === 403) await opts.credentials.markRejected?.(accountId, credential.ref).catch(() => log(JSON.stringify({ event: 'vercel_env_source.failed', code: 'mark_rejected_error' })));
-            return fail(`http_${res.status}`);
+            // A 401, or a 403 whose body says invalidToken/missingToken, is a refused token; any other 403 and a 404 say this token cannot see this project (see refusalReason).
+            const status = res.status;
+            let why = await refusalReason(res);
+            if (why === 'token_rejected') {
+              const marked = await opts.credentials.markRejected?.(accountId, credential.ref).catch(() => {
+                log(JSON.stringify({ event: 'vercel_env_source.failed', code: 'mark_rejected_error' }));
+              });
+              // The stored token was replaced while this check ran: the refusal was of the OLD token, so it says nothing about the one in use now.
+              if (marked === false) why = undefined;
+            }
+            return fail(`http_${status}`, why);
           }
           const text = await readCapped(res, MAX_BODY_BYTES);
           if (text === null) return fail('body_too_large');

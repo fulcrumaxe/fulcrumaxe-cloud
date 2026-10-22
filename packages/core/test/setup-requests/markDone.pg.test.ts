@@ -183,6 +183,22 @@ describe('setup request Mark done [pg]', () => {
     expect(await restarts(A)).toHaveLength(1);
   });
 
+  it.each([
+    ['token_rejected', (v: FakeVercel) => v.revoke(A.accountId)],
+    ['token_cannot_read', (v: FakeVercel) => v.failNext('http_403')],
+    ['token_cannot_read', (v: FakeVercel) => v.failNext('http_404')],
+  ] as const)('a check that was refused (%s) never re-pauses: it could not read the project, so the person\'s word stands and the stamp moves', async (_reason, refuse) => {
+    const vercel = withVar();
+    refuse(vercel);
+    const r = await propose(A);
+    const out = await press(vercel.source(), r.id);
+    expect(out).toMatchObject({ changed: true, check: 'unreachable', request: { state: 'done', resolution: 'marked_done' }, foldedInto: null });
+    expect(out.request.repausedAt).toBeNull();
+    expect(await hold(A)).toBeNull();
+    expect(sentence(out.request)).toBeNull();
+    expect(await restarts(A)).toHaveLength(1);
+  });
+
   it('with no credential source bound (production today) Mark done resumes with no check, and the provider is never asked', async () => {
     const r = await propose(A);
     const out = await press(unavailableVercelEnvSource, r.id);

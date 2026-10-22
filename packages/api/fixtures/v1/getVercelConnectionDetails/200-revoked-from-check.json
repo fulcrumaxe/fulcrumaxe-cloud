@@ -1,0 +1,13 @@
+{
+  "state": "revoked_or_expired",
+  "names": {
+    "status": "unavailable"
+  },
+  "check": {
+    "result": "token_rejected",
+    "reason": "token_rejected",
+    "sentence": "Vercel did not accept the connected token, so web-app could not be checked.",
+    "project": "web-app",
+    "ran_at": "2026-10-22T10:15:30.000Z"
+  }
+}

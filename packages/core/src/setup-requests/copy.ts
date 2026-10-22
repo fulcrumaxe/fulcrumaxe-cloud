@@ -11,7 +11,9 @@ import type { SetupRequestCheckKind, SetupRequestState, TargetEnvironment } from
 export const CHECK_INTERVAL_SECONDS = 60;
 
 /** The reasons an env-var check can give for "not yet", in the order a person is most likely to meet them. */
-export const CHECK_REASON_CODES = ['env_var_missing', 'env_var_wrong_target', 'check_unavailable'] as const;
+export const CHECK_REASON_CODES = ['env_var_missing', 'env_var_wrong_target', 'check_unavailable', 'token_rejected', 'token_cannot_read'] as const;
+/** Reasons that say the check could not read the project at all (so nothing is known about the variable): never a "not yet" about the variable. */
+export const UNREADABLE_REASONS: readonly CheckReasonCode[] = ['check_unavailable', 'token_rejected', 'token_cannot_read'];
 export type CheckReasonCode = (typeof CHECK_REASON_CODES)[number];
 export function isCheckReasonCode(value: unknown): value is CheckReasonCode {
   return typeof value === 'string' && (CHECK_REASON_CODES as readonly string[]).includes(value);
@@ -28,6 +30,8 @@ export const COPY_REASON: Readonly<Record<CheckReasonCode, string>> = {
   env_var_missing: "{name} isn't set on {project} yet.",
   env_var_wrong_target: '{name} is set on {project}, but not for {environment}.',
   check_unavailable: "We couldn't reach {provider} to check.",
+  token_rejected: '{provider} did not accept the connected token, so {project} could not be checked.',
+  token_cannot_read: 'The connected {provider} token cannot read {project}.',
 };
 
 function fill(template: string, values: Readonly<Record<string, string>>): string {
@@ -94,7 +98,7 @@ export function statusSentence(request: StatusSentenceInput, opts: StatusSentenc
     return pending ? COPY_CHECKING_NOW : null;
   }
   if (request.state !== 'open') return null;
-  if (request.checkKind === null || !opts.checksAvailable || request.checkReason === 'check_unavailable') return COPY_WAITING_UNCHECKED;
+  if (request.checkKind === null || !opts.checksAvailable || request.checkReason === 'check_unavailable' || request.checkReason === 'token_rejected') return COPY_WAITING_UNCHECKED;
   if ((request.repausedAt ?? null) !== null && isCheckReasonCode(request.checkReason) && request.target !== undefined && request.targetEnvironment !== undefined) {
     return repausedSentence(request.checkReason, { name: request.envName ?? request.target, project: request.target, environment: request.targetEnvironment });
   }

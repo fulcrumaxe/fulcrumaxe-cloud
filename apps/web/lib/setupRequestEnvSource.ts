@@ -1,5 +1,6 @@
 import { appUserPool } from "@fx/api/src/sse/pools.js";
 import { bindVercelEnvSource, createVercelEnvSource, type VercelCredentialResolver } from "@fx/core/src/setup-requests/vercelEnvSource";
+import { createVercelNamesReader } from "@fx/core/src/setup-requests/vercelNames";
 import { createSealedVercelCredentials, envKekSource } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "./vercelPinnedFetch";
 
@@ -31,3 +32,6 @@ export const productionVercelEnvSource = bindVercelEnvSource(createVercelEnvSour
 
 /** The fixed code the health detail carries while the source above cannot read anything. */
 export const VERCEL_ENV_SOURCE_UNCONFIGURED = "vercel_env_source_unconfigured";
+
+/** D#598 P8d-3a: the team and project names the connection screen shows, read with the same sealed token through the same pinned fetch. */
+export const productionVercelNames = createVercelNamesReader({ credentials: sealedCredentials, fetch: createPinnedVercelFetch() });

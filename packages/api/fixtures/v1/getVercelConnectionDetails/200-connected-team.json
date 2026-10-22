@@ -1,0 +1,13 @@
+{
+  "state": "connected",
+  "names": {
+    "status": "ok",
+    "team_name": "Acme Studio",
+    "projects": [
+      "api",
+      "web-app"
+    ],
+    "truncated": false
+  },
+  "check": null
+}

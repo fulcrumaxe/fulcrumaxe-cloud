@@ -11,6 +11,7 @@ import {
   VERCEL_USER_AGENT,
   type VercelCredentialResolver,
 } from '../../src/setup-requests/vercelEnvSource.js';
+import { refusalReason } from '../../src/setup-requests/vercelEnvSource.js';
 import { FakeVercel } from '../support/vercelEnvFake.js';
 
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
@@ -144,7 +145,9 @@ describe('Vercel env-name adapter (P8d-1)', () => {
     const v = fresh().project('cloud-staging', names(2));
     for (const mode of ['http_401', 'http_403', 'http_404', 'http_429', 'http_500', 'bad_json', 'bad_body', 'throw'] as const) {
       lines.length = 0;
-      expect(await list(v.failNext(mode).source({ log })), mode).toEqual({ ok: false });
+      // 401 says the token is refused; 403 and 404 say this token cannot see the project; nothing else says why
+      const why = mode === 'http_401' ? { reason: 'token_rejected' } : mode === 'http_403' || mode === 'http_404' ? { reason: 'token_cannot_read' } : {};
+      expect(await list(v.failNext(mode).source({ log })), mode).toEqual({ ok: false, ...why });
       expect(lines, mode).toHaveLength(1);
       expect(JSON.parse(lines[0]!), mode).toMatchObject({ event: 'vercel_env_source.failed' });
     }
@@ -158,13 +161,34 @@ describe('Vercel env-name adapter (P8d-1)', () => {
     expect(await list(source)).toEqual({ ok: false });
   });
 
-  it('a revoked token is 401 and a disconnected account never reaches the provider', async () => {
+  it('a revoked token is answered the way the live API does (403 with invalidToken) and a disconnected account never reaches the provider', async () => {
     const v = fresh().project('cloud-staging', names(1));
-    expect(await list(v.revoke(ACCOUNT).source({ log }))).toEqual({ ok: false });
-    expect(lines.join('')).toContain('http_401');
+    expect(await list(v.revoke(ACCOUNT).source({ log }))).toEqual({ ok: false, reason: 'token_rejected' });
+    expect(lines.join('')).toContain('http_403');
     v.calls.length = 0;
     expect(await list(v.disconnect(ACCOUNT).source({ log }))).toEqual({ ok: false });
     expect(v.calls).toHaveLength(0);
+  });
+
+  it('refusalReason: 401, or 403 with invalidToken/missingToken, is a refused token; other 403s and 404 cannot read; junk bodies never throw', async () => {
+    const res = (status: number, body: string | null) => new Response(body, { status });
+    expect(await refusalReason(res(401, null))).toBe('token_rejected');
+    expect(await refusalReason(res(403, '{"error":{"code":"forbidden","message":"Not authorized","invalidToken":true}}'))).toBe('token_rejected');
+    expect(await refusalReason(res(403, '{"error":{"code":"forbidden","missingToken":true}}'))).toBe('token_rejected');
+    expect(await refusalReason(res(403, '{"error":{"code":"forbidden","invalidToken":"true"}}'))).toBe('token_cannot_read');
+    expect(await refusalReason(res(403, '{"error":{"code":"forbidden"}}'))).toBe('token_cannot_read');
+    expect(await refusalReason(res(403, 'not json'))).toBe('token_cannot_read');
+    expect(await refusalReason(res(403, null))).toBe('token_cannot_read');
+    expect(await refusalReason(res(403, `{"error":{"invalidToken":true,"pad":"${'x'.repeat(10_000)}"}}`))).toBe('token_cannot_read'); // over the cap: not trusted
+    expect(await refusalReason(res(404, null))).toBe('token_cannot_read');
+    for (const status of [429, 500, 502]) expect(await refusalReason(res(status, '{"error":{"invalidToken":true}}')), String(status)).toBeUndefined();
+  });
+
+  it('a token replaced while its check ran: the refusal of the old token is not reported against the new one', async () => {
+    const v = fresh().project('cloud-staging', names(1));
+    v.revoke(ACCOUNT);
+    const credentials = { configured: true, resolve: async () => ({ status: 'ok' as const, token: TOKEN, ref: 'abc' }), markRejected: async () => false };
+    expect(await list(v.source({ credentials, log }))).toEqual({ ok: false });
   });
 
   it('a team-scoped token sends its team id; a malformed project name is refused before any call', async () => {
@@ -213,16 +237,20 @@ describe('Vercel env-name adapter (P8d-1)', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('a 401 or 403 from Vercel tells the lookup which stored credential was refused; other failures do not, and a failing hook cannot change the answer', async () => {
+  it('a 401 from Vercel (and only a 401) tells the lookup which stored credential was refused; other failures do not, and a failing hook cannot change the answer', async () => {
     const v = fresh().project('cloud-staging', names(1));
     const marked: Array<[string, string | undefined]> = [];
     const mk = (markRejected: VercelCredentialResolver['markRejected']) =>
       v.source({ credentials: { configured: true, resolve: async () => ({ status: 'ok', token: TOKEN, ref: 'abc' }), ...(markRejected ? { markRejected } : {}) }, log });
     const record = async (a: string, r: string | undefined) => void marked.push([a, r]);
     v.revoke(ACCOUNT);
-    expect(await list(mk(record))).toEqual({ ok: false });
+    expect(await list(mk(record))).toEqual({ ok: false, reason: 'token_rejected' });
     expect(marked).toEqual([[ACCOUNT, 'abc']]);
     marked.length = 0;
+    v.failNext('http_403'); // this token cannot see the project: the token itself is not revoked
+    v.disconnect(ACCOUNT).connect(ACCOUNT);
+    expect(await list(mk(record))).toEqual({ ok: false, reason: 'token_cannot_read' });
+    expect(marked).toEqual([]);
     v.failNext('http_500');
     v.disconnect(ACCOUNT).connect(ACCOUNT);
     expect(await list(mk(record))).toEqual({ ok: false });
@@ -230,8 +258,8 @@ describe('Vercel env-name adapter (P8d-1)', () => {
     expect(await list(mk(record))).toEqual({ ok: false });
     expect(marked).toEqual([]);
     v.revoke(ACCOUNT);
-    expect(await list(mk(async () => { throw new Error('db down'); }))).toEqual({ ok: false });
-    expect(await list(mk(undefined))).toEqual({ ok: false });
+    expect(await list(mk(async () => { throw new Error('db down'); }))).toEqual({ ok: false, reason: 'token_rejected' });
+    expect(await list(mk(undefined))).toEqual({ ok: false, reason: 'token_rejected' });
     expect(lines.join('\n')).toContain('mark_rejected_error');
   });
 

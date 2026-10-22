@@ -1,0 +1,18 @@
+{
+  "state": "connected",
+  "names": {
+    "status": "ok",
+    "team_name": null,
+    "projects": [
+      "web-app"
+    ],
+    "truncated": false
+  },
+  "check": {
+    "result": "read",
+    "reason": null,
+    "sentence": "DATABASE_URL is set on web-app.",
+    "project": "web-app",
+    "ran_at": "2026-10-22T10:15:30.000Z"
+  }
+}

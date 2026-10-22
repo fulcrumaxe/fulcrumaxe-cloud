@@ -9,7 +9,7 @@ import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
-import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
+import { productionVercelEnvSource, productionVercelNames } from "../../../../lib/setupRequestEnvSource";
 import { liveInstallationTokens } from "@fx/github";
 import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
@@ -54,6 +54,7 @@ publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.
 vercelConnectionDeps.getValidator = () => createVercelTokenValidator({ fetch: createPinnedVercelFetch() });
+vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();
 onboardingDeps.projectPreviewResult = parsePreviewResult;

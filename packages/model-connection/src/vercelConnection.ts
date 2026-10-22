@@ -8,6 +8,7 @@ import {
   VERCEL_TEAM_RE,
   VERCEL_TOKEN_RE,
   VERCEL_USER_AGENT,
+  refusalReason,
   type VercelCredential,
   type VercelCredentialResolver,
 } from '@fx/core/src/setup-requests/vercelEnvSource.js';
@@ -72,9 +73,13 @@ export function createVercelTokenValidator(opts: { fetch: typeof fetch; baseUrl?
           redirect: 'error',
           signal: AbortSignal.timeout(opts.timeoutMs ?? 8_000),
         });
-        await res.body?.cancel();
-        if (res.status === 200) return 'ok';
-        return res.status === 401 || res.status === 403 ? 'rejected' : 'unreachable';
+        if (res.status === 200) {
+          await res.body?.cancel();
+          return 'ok';
+        }
+        // The same classifier the env-var check and the names read use: a refused token (401, or 403 with invalidToken/missingToken) and a valid token
+        // that cannot list this scope (other 403, 404) are both "rejected" at connect time, because a token that cannot list projects is no use to us.
+        return (await refusalReason(res)) !== undefined ? 'rejected' : 'unreachable';
       } catch {
         // fx-swallow-ok: a network error or timeout is "could not reach Vercel"; its message can carry a host, so nothing of it is kept
         return 'unreachable';
@@ -281,15 +286,21 @@ export function createSealedVercelCredentials(opts: { pool: Pool; kek: KekSource
         return note('open_failed');
       }
     },
-    async markRejected(accountId, ref): Promise<void> {
-      if (ref === undefined || !/^[0-9a-f]{24}$/.test(ref)) return;
-      await withTenant(opts.pool, accountId, (client) =>
+    async markRejected(accountId, ref): Promise<boolean> {
+      if (ref === undefined || !/^[0-9a-f]{24}$/.test(ref)) return false;
+      const done = await withTenant(opts.pool, accountId, (client) =>
         client.query(
           `UPDATE vercel_connections SET status = 'rejected', rejected_at = now()
             WHERE account_id = $1 AND token_nonce = decode($2, 'hex') AND status = 'ok'`,
           [accountId, ref],
         ),
       );
+      // false: the stored token is no longer the one that was refused (replaced meanwhile); true: it was marked, or already was
+      if (done.rowCount) return true;
+      const same = await withTenant(opts.pool, accountId, (client) =>
+        client.query(`SELECT 1 FROM vercel_connections WHERE account_id = $1 AND token_nonce = decode($2, 'hex')`, [accountId, ref]),
+      );
+      return (same.rowCount ?? 0) > 0;
     },
   };
 }

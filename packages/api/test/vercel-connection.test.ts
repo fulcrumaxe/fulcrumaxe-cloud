@@ -246,9 +246,9 @@ describe('D#598 P8d-2: vercel-connection routes', () => {
     expect(await ask()).toEqual({ pass: true });
     expect(vercel.calls.at(-1)!.userAgent).not.toBeNull();
 
-    // Vercel revokes the token: the next check is told it cannot check, and the connection reads rejected
+    // Vercel revokes the token: the next check says the token was refused, and the connection reads rejected
     vercel.revoke(vercel.accountOfToken(token)!);
-    expect(await ask()).toEqual({ pass: false, reason: 'check_unavailable' });
+    expect(await ask()).toEqual({ pass: false, reason: 'token_rejected' });
     expect(((await (await call(owner, 'GET')).json()) as Dto).state).toBe('rejected');
 
     expect((await call(owner, 'DELETE')).status).toBe(204);
