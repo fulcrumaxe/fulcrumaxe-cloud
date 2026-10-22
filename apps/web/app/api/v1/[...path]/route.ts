@@ -6,6 +6,7 @@ import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
+import { decisionAskDeps } from "@fx/api/src/routes/decisionAsks.js";
 import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
 import { createVercelTokenValidator } from "@fx/model-connection";
 import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
@@ -14,7 +15,7 @@ import { liveInstallationTokens } from "@fx/github";
 import { parsePreviewResult } from "@fx/pipeline";
 import { operatorMode } from "@fx/worker";
 import { httpRunActionSignalFromEnv } from "@fx/api/src/runActions/httpSignal.js";
-import { previewEnabled, workerConfigured } from "../../../../lib/worker";
+import { getWorker, previewEnabled, workerConfigured } from "../../../../lib/worker";
 import { createStartRetryPush, openPublicPullRequestViaWorker } from "../../../../lib/retryPush";
 import { getAuthorCheck } from "../../../../lib/github/authorCheck";
 
@@ -54,6 +55,11 @@ publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
 // D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.
 vercelConnectionDeps.getValidator = () => createVercelTokenValidator({ fetch: createPinnedVercelFetch() });
+// D#598 P8c-2a: an answer to a decision ask runs on the worker, which alone holds the receipt login; null (a 503) until a worker can be built.
+decisionAskDeps.getAnswerer = async () => {
+  const worker = await getWorker();
+  return worker === null ? null : (input) => worker.answerDecisionAsk(input);
+};
 vercelConnectionDeps.getNames = () => productionVercelNames;
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();

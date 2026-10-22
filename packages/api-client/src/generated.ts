@@ -1725,6 +1725,43 @@ export interface Operations {
       check_interval_seconds: (number) | (null);
     };
   };
+  listDecisionAsks: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      asks: Array<{
+        id: string;
+        work_item_id: string;
+        decision_type: string;
+        label: string;
+        options: Array<{
+          id: string;
+          label: string;
+        }>;
+        proposed: string;
+        rationale: string;
+        answer_due_at: string;
+        timeout_outcome: "stop_and_flag" | "proceed_recommended";
+        state: "open" | "overdue";
+      }>;
+      not_shown: number;
+    };
+  };
+  answerDecisionAsk: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: {
+      choice: string;
+    };
+    response: {
+      ask_id: string;
+      receipt_id: string;
+      answered_option: string;
+    };
+  };
   getActionAccountRules: {
     path: undefined;
     query: undefined;
@@ -4598,6 +4635,28 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: false,
+  },
+  listDecisionAsks: {
+    method: "GET",
+    path: "/api/v1/decision-asks",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  answerDecisionAsk: {
+    method: "POST",
+    path: "/api/v1/decision-asks/{id}/answer",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: true,
   },
   getActionAccountRules: {
     method: "GET",

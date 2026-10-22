@@ -1,6 +1,9 @@
 // D#598 P8c: the Needs you list's logic, with no DOM (unit-tested with a fake call()). The page is needs-you-app.js.
 //
-// A row is one setup request (GET /api/v1/setup-requests). The cloud writes every sentence about a request's check: `status_sentence` and
+// A row is a decision ask (GET /api/v1/decision-asks, D#598 P8c-2a) or a setup request (GET /api/v1/setup-requests). An ask shows the cloud's own name for
+// the decision, the option the agent recommends, one button per option and Deny, and the agent's reason as a quotation. Answering is final (the work item
+// resumes), so there is no undo here; a second answer from another window is told it was already answered.
+// The cloud writes every sentence about a request's check: `status_sentence` and
 // `check_interval_seconds` come from the API and are shown as they arrive. This file adds no words about a check of its own, except "Checking now."
 // while the person's own Mark done is in flight (the approved sentence 3, only for a request that has an automatic check).
 //
@@ -12,6 +15,8 @@ import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 export const LIST_URL = "/api/v1/setup-requests?state=open";
 // The done and withdraw routes take no request body at all (the API answers 400 to any body), so these two POSTs are sent bare.
 export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComponent(id) + "/" + verb;
+export const ASKS_URL = "/api/v1/decision-asks";
+export const answerUrl = (id) => "/api/v1/decision-asks/" + encodeURIComponent(id) + "/answer";
 export const REFRESH_MS = 30000;
 export const PROVIDER_HOSTS = ["github.com", "vercel.com"];
 const STATES = ["open", "done", "withdrawn"];
@@ -30,9 +35,17 @@ export const WORDS = {
   checkingNow: "Checking now.",
   onlyAdmins: "Only owners and admins can do this.",
   failed: "That didn't go through. Try again.",
+  deny: "Deny",
+  recommended: "Recommended",
+  overdue: "Overdue",
+  answered: "Answered",
+  alreadyAnswered: "That was already answered.",
 };
 
 const text = (v) => (typeof v === "string" ? v : "");
+
+/** The line under the list when the cloud sent fewer asks than are waiting. */
+export const notShownWords = (n) => (n === 1 ? "1 more isn't shown." : n + " more aren't shown.");
 
 /** The provider link of a row: https on a host from the fixed list, no credentials or port; else null. */
 export function providerLink(url) {
@@ -52,6 +65,7 @@ export function providerLink(url) {
 export function readRequest(r) {
   if (!r || typeof r.id !== "string" || r.id === "" || typeof r.title !== "string" || r.title === "" || !STATES.includes(r.state)) return null;
   return {
+    kind: "setup",
     id: r.id,
     title: r.title,
     reason: text(r.reason),
@@ -62,10 +76,42 @@ export function readRequest(r) {
   };
 }
 
+const FENCE_START = "<<UNTRUSTED EXTERNAL CONTENT>>";
+const FENCE_END = "<<END UNTRUSTED>>";
+
+/** The agent's reason as plain text for a quotation: the cloud's untrusted-content fence is taken off the ends, nothing else is changed. */
+export function quotedReason(raw) {
+  let t = text(raw);
+  if (t.startsWith(FENCE_START)) t = t.slice(FENCE_START.length);
+  if (t.endsWith(FENCE_END)) t = t.slice(0, t.length - FENCE_END.length);
+  return t.replace(/^\n/, "").replace(/\n$/, "");
+}
+
+/** One ask of the read, or null when it is not usable. Options keep only entries with a text id and name; `proposedLabel` is the recommended option's name. */
+export function readAsk(a) {
+  if (!a || typeof a.id !== "string" || a.id === "" || typeof a.label !== "string" || a.label === "" || !Array.isArray(a.options)) return null;
+  const options = a.options.filter((o) => o && typeof o.id === "string" && o.id !== "" && typeof o.label === "string" && o.label !== "").map((o) => ({ id: o.id, label: o.label }));
+  if (options.length === 0) return null;
+  const proposed = options.find((o) => o.id === a.proposed);
+  return {
+    kind: "ask",
+    id: a.id,
+    title: a.label,
+    reason: quotedReason(a.rationale),
+    state: "open",
+    overdue: a.state === "overdue",
+    options,
+    proposed: proposed ? proposed.id : "",
+    proposedLabel: proposed ? proposed.label : "",
+    sentence: "",
+  };
+}
+
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
 export function failureSentence(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
   if (e && e.status === 403) return WORDS.onlyAdmins;
+  if (e && e.status === 409 && e.code === "already_answered") return WORDS.alreadyAnswered;
   return WORDS.failed;
 }
 
@@ -76,7 +122,7 @@ const cancelled = (e) => !!e && e.name === "AbortError";
  * by a failed check is open again and so is simply in the open part). `state` is { status, rows, truncated, announce, error }.
  */
 export function createNeedsYou({ call = api, signal, onChange = () => {} } = {}) {
-  let st = { status: "loading", rows: [], truncated: false, announce: "", error: "" };
+  let st = { status: "loading", rows: [], truncated: false, notShown: 0, announce: "", error: "" };
   const closed = new Map(); // id -> row closed here, shown until the window closes
   const busy = new Map(); // id -> "done" | "withdraw"
   let open = [];
@@ -88,12 +134,13 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
   async function load() {
     const mine = ++gen;
     try {
-      const data = await call("GET", LIST_URL, undefined, signal);
+      // Both reads must answer: a screen that showed only one of them would say nothing is waiting while the other part is unread.
+      const [data, asks] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal)]);
       if (mine !== gen) return;
-      if (!data || !Array.isArray(data.requests)) throw new Error("shape");
-      open = data.requests.map(readRequest).filter((r) => r && r.state === "open");
+      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks)) throw new Error("shape");
+      open = [...asks.asks.map(readAsk).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
       for (const r of open) closed.delete(r.id);
-      st = { ...st, status: "ready", truncated: data.truncated === true };
+      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: Number.isInteger(asks.not_shown) && asks.not_shown > 0 ? asks.not_shown : 0 };
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;
@@ -128,6 +175,37 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     onChange();
   }
 
+  /**
+   * Answers an ask with one of its option ids or "deny". A second press while one is in flight is ignored, and a choice the ask does not list is not sent.
+   * The answer is final: the ask leaves the open part and shows who it was answered with, until the window closes. Any refusal is a fixed sentence, then a re-read.
+   */
+  async function answer(id, choice) {
+    const row = open.find((r) => r.id === id && r.kind === "ask");
+    if (!row || busy.has(id)) return;
+    if (choice !== "deny" && !row.options.some((o) => o.id === choice)) return;
+    busy.set(id, "answer");
+    st = { ...st, error: "", announce: "" };
+    onChange();
+    try {
+      const res = await call("POST", answerUrl(id), { choice }, signal);
+      if (!res || typeof res.answered_option !== "string") throw new Error("shape");
+      const picked = row.options.find((o) => o.id === res.answered_option);
+      const name = picked ? picked.label : WORDS.deny;
+      open = open.filter((r) => r.id !== id);
+      closed.set(id, { ...row, state: "done", sentence: WORDS.answered + ": " + name });
+      st = { ...st, announce: WORDS.answered + ": " + name + "." };
+      merge();
+    } catch (e) {
+      busy.delete(id);
+      if (cancelled(e)) return;
+      st = { ...st, error: failureSentence(e) };
+      await load(); // a refused answer may mean the ask changed under the person: show what is true now
+      return;
+    }
+    busy.delete(id);
+    onChange();
+  }
+
   /** The app has put the announcement on the page: it is said once, so it is not kept for the next draw. Does not redraw. */
   const clearAnnounce = () => {
     st = { ...st, announce: "" };
@@ -154,5 +232,5 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     stopFn = null;
   }
 
-  return { load, act, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
+  return { load, act, answer, start, stop, clearAnnounce, anyBusy: () => busy.size > 0, busyVerb: (id) => busy.get(id) || "", get state() { return st; } };
 }

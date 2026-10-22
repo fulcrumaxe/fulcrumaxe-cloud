@@ -29,10 +29,23 @@ const request = (over: Req = {}): Req => ({
   state: "open", origin: "agent", created_by: null, created_at: "2026-10-16T20:00:00.000Z", resolution: null, resolved_by: null, resolved_at: null, check_reason: null, check_ran_at: null,
   status_sentence: S1, check_interval_seconds: 60, ...over,
 });
+const A1 = "5c0d9e2a-8b41-4f6e-9a37-2d1e4c6b8a90";
+const ask = (over: Req = {}): Req => ({
+  id: A1, work_item_id: "9d2c7b1e-5f3a-4e8b-8a6d-1c2b3a4d5e66", decision_type: "dependency_patch_bump", label: "Patch-level dependency updates",
+  options: [{ id: "bump_now", label: "Update the dependency now" }, { id: "leave_it", label: "Leave it as it is" }], proposed: "bump_now",
+  rationale: "<<UNTRUSTED EXTERNAL CONTENT>>\nThe patch release fixes a crash we hit in the last run.\n<<END UNTRUSTED>>",
+  answer_due_at: "2026-10-23T09:00:00.000Z", timeout_outcome: "stop_and_flag", state: "open", ...over,
+});
 const closed = (state: "done" | "withdrawn", over: Req = {}) => request({ state, status_sentence: null, check_interval_seconds: null, ...over });
 
 interface Mock {
   requests: Req[];
+  asks: Req[];
+  /** What the answer POST replies: the contract's body, or a number for an error status. */
+  answerReply: Req | number;
+  /** The bodies the answer POSTs carried, by path. */
+  answers: { path: string; body: unknown }[];
+  notShown: number;
   listStatus: number;
   /** What a POST answers: a request, or a number for an error status. */
   doneAnswer: Req | number;
@@ -48,7 +61,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
-  const mock: Mock = { requests: [request()], listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
+  const mock: Mock = { requests: [request()], asks: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
@@ -61,6 +74,15 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     if (p === "/api/v1/setup-requests" && req.method() === "GET") {
       if (mock.listStatus !== 200) return json(route, mock.listStatus, { error: { code: "server_error", message: SERVER_TEXT, request_id: "r" } });
       return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open"), truncated: false });
+    }
+    if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, { asks: mock.asks, not_shown: mock.notShown });
+    const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
+    if (answerMatch && req.method() === "POST") {
+      mock.answers.push({ path: p, body: req.postDataJSON() });
+      if (mock.delay > 0) await new Promise((r) => setTimeout(r, mock.delay));
+      if (typeof mock.answerReply === "number") return json(route, mock.answerReply, { error: { code: mock.answerReply === 403 ? "forbidden" : mock.answerReply === 409 ? "already_answered" : "x", message: SERVER_TEXT, request_id: "r" } });
+      mock.asks = mock.asks.filter((a) => a.id !== answerMatch[1]);
+      return json(route, 200, mock.answerReply);
     }
     const act = p.match(/^\/api\/v1\/setup-requests\/([^/]+)\/(done|withdraw)$/);
     if (act && req.method() === "POST") {
@@ -294,6 +316,85 @@ test.describe("D#598 P8c: Needs you", () => {
     }
     await press(t(page, "ny-withdraw-" + R1)); // a closed row is checked too
     await expect(t(page, "ny-state")).toHaveText("Withdrawn");
+    expect(await axeSeriousOrCritical(page)).toEqual([]);
+  });
+
+  test("an ask shows the cloud's name for the decision, the recommended option, the reason as a quotation and one button per option and Deny", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask({ state: "overdue" })], notShown: 2 });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(t(page, "ny-title")).toHaveText("Patch-level dependency updates");
+    await expect(t(page, "ny-proposed")).toHaveText("Recommended: Update the dependency now");
+    await expect(t(page, "ny-overdue")).toHaveText("Overdue");
+    await expect(t(page, "ny-reason")).toHaveText("The patch release fixes a crash we hit in the last run.");
+    expect(await t(page, "ny-reason").evaluate((el) => el.tagName)).toBe("BLOCKQUOTE");
+    await expect(t(page, `ny-choice-${A1}-bump_now`)).toHaveAccessibleName("Update the dependency now (recommended): Patch-level dependency updates");
+    await expect(t(page, `ny-choice-${A1}-leave_it`)).toHaveAccessibleName("Leave it as it is: Patch-level dependency updates");
+    await expect(t(page, `ny-choice-${A1}-deny`)).toHaveText("Deny");
+    await expect(t(page, "ny-not-shown")).toHaveText("2 more aren't shown.");
+    await clean(page, errors);
+  });
+
+  test("an ask's reason, label and option names are only ever text", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask({ label: HOSTILE, rationale: HOSTILE, options: [{ id: "a", label: HOSTILE }], proposed: "a" })] });
+    await open(page);
+    await expect(t(page, "ny-reason")).toHaveText(HOSTILE);
+    await expect(t(page, "ny-title")).toHaveText(HOSTILE);
+    await expect(t(page, "ny-row").locator("img, script, a, b, strong, em, iframe, svg")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  test("choosing an option sends exactly that choice once, shows the answer, announces it once and moves focus to the heading", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask()], delay: 200 });
+    await open(page);
+    await t(page, `ny-choice-${A1}-bump_now`).dblclick();
+    await expect(t(page, "ny-state")).toHaveText("Answered: Update the dependency now");
+    await expect(t(page, "ny-live")).toHaveText("Answered: Update the dependency now.");
+    expect(mock.answers).toEqual([{ path: `/api/v1/decision-asks/${A1}/answer`, body: { choice: "bump_now" } }]);
+    await expect(t(page, `ny-choice-${A1}-bump_now`)).toHaveCount(0);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (0)");
+    expect(await focusedTestId(page)).toBe("ny-title");
+    await clean(page, errors);
+  });
+
+  test("Deny sends choice deny", async ({ page }) => {
+    const { mock } = await setup(page, { requests: [], asks: [ask()], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "deny" } });
+    await open(page);
+    await press(t(page, `ny-choice-${A1}-deny`));
+    await expect(t(page, "ny-state")).toHaveText("Answered: Deny");
+    expect(mock.answers.map((a) => a.body)).toEqual([{ choice: "deny" }]);
+  });
+
+  test("a member's refused answer says so in words, keeps the ask open and focus on the same button", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], asks: [ask()], answerReply: 403 });
+    await open(page);
+    await press(t(page, `ny-choice-${A1}-leave_it`));
+    await expect(t(page, "ny-action-error")).toHaveText("Only owners and admins can do this.");
+    await expect(t(page, "ny-row")).toHaveAttribute("data-state", "open");
+    expect(await focusedTestId(page)).toBe(`ny-choice-${A1}-leave_it`);
+    await clean(page, errors);
+  });
+
+  test("an ask someone else already answered shows a fixed sentence and the list is read again", async ({ page }) => {
+    const { mock, errors } = await setup(page, { requests: [], asks: [ask()], answerReply: 409 });
+    await open(page);
+    mock.asks = []; // the other window's answer
+    await press(t(page, `ny-choice-${A1}-bump_now`));
+    await expect(t(page, "ny-action-error")).toHaveText("That was already answered.");
+    await expect(t(page, "ny-empty")).toHaveText("Nothing needs you right now.");
+    await clean(page, errors);
+  });
+
+  test("axe finds nothing serious or critical on an open and an answered ask, under every theme", async ({ page }) => {
+    await setup(page, { requests: [], asks: [ask({ state: "overdue" })] });
+    await open(page);
+    for (const theme of THEMES) {
+      await applyTheme(page, theme);
+      expect(await axeSeriousOrCritical(page), theme).toEqual([]);
+    }
+    await press(t(page, `ny-choice-${A1}-deny`));
+    await expect(t(page, "ny-state")).toContainText("Answered");
     expect(await axeSeriousOrCritical(page)).toEqual([]);
   });
 
