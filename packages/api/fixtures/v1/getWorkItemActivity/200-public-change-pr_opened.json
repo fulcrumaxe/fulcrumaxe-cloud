@@ -1,0 +1,32 @@
+{
+  "stage": "in_progress",
+  "halted": false,
+  "waiting_on_answer": false,
+  "repo": {
+    "owner": "acme",
+    "name": "docs"
+  },
+  "issue_number": 595,
+  "pr_number": null,
+  "auto_merge": false,
+  "comments": [],
+  "comments_truncated": false,
+  "spec": null,
+  "runs": [],
+  "runs_truncated": false,
+  "steps": [],
+  "notice": null,
+  "actions": [],
+  "close_on_github": false,
+  "public_change": {
+    "state": "pr_opened",
+    "code": null,
+    "sentence": "PR opened",
+    "repo": "acme/docs-public",
+    "branch": "fx/p-0598a6a0-0000-4000-8000-300000000004",
+    "pr_number": 88,
+    "pr_url": "https://github.com/acme/docs-public/pull/88",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "actions": []
+  }
+}
