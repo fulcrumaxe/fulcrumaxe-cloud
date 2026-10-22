@@ -36,6 +36,8 @@ describe("the paired publish step [pg]", () => {
   /** What the hook prints; set per test. A function sees the sandbox name. */
   let output: (name: string) => { exitCode: number; stdout: string };
   let onRun: (() => Promise<void>) | undefined;
+  /** Runs after the facts are read and before the locked attempt: the window a person or another writer can use. */
+  let onHead: (() => Promise<void>) | undefined;
   let clock = 0;
   const github = { pushed: true, pr: { url: "https://github.com/acme/widgets-public/pull/9" } as { url: string } | null, asked: [] as string[], head: PRIVATE_HEAD as string | null, headError: false };
   let identity: { name: string; email: string } | null;
@@ -68,6 +70,7 @@ describe("the paired publish step [pg]", () => {
       },
       identity: () => identity,
       privateHead: async () => {
+        if (onHead) await onHead();
         if (github.headError) throw new Error("github down");
         return github.head;
       },
@@ -106,6 +109,7 @@ describe("the paired publish step [pg]", () => {
     fake = createFakeSandbox(noRuntime);
     output = () => say(prOpened());
     onRun = undefined;
+    onHead = undefined;
     clock = 1_000_000;
     github.pushed = true;
     github.pr = { url: "https://github.com/acme/widgets-public/pull/9" };
@@ -302,6 +306,42 @@ describe("the paired publish step [pg]", () => {
       expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
       await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
       expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
+    });
+
+    it("a person taking the branch over between the read and the locked attempt: nothing is attempted, no sandbox, no run row, and the person's mark is kept", async () => {
+      await refuseOnce();
+      await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
+      const created = fake.state.created.length;
+      const runs = (await publishRuns()).length;
+      onHead = async () => void (await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]));
+      expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
+      expect(fake.state.created).toHaveLength(created);
+      expect(await publishRuns()).toHaveLength(runs);
+      expect(await attempts()).toHaveLength(1);
+      expect((await planeRow()).managed_by_person_at).not.toBeNull();
+    });
+
+    it("the row leaving 'refused' between the read and the locked attempt: nothing is attempted", async () => {
+      await refuseOnce();
+      await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
+      const created = fake.state.created.length;
+      onHead = async () => void (await admin.query("UPDATE plane_pushes SET state = 'no_public_change', code = NULL WHERE work_item_id = $1", [A.workItemId]));
+      expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toEqual({ kind: "skipped", why: "not_retryable" });
+      expect(fake.state.created).toHaveLength(created);
+      expect(await attempts()).toHaveLength(1);
+      expect(await planeRow()).toMatchObject({ state: "no_public_change" });
+    });
+
+    it("the same takeover before a first attempt starts nothing either, and with no change in the window the count-only path still makes attempt 2", async () => {
+      onHead = async () => void (await admin.query("UPDATE plane_pushes SET managed_by_person_at = now() WHERE work_item_id = $1", [A.workItemId]));
+      expect(await publish().publishPairedChange({ accountId: A.accountId, executorRunId })).toEqual({ kind: "skipped", why: "busy" });
+      expect(fake.state.created).toHaveLength(0);
+      expect(await attempts()).toHaveLength(0);
+      onHead = undefined;
+      await admin.query("UPDATE plane_pushes SET managed_by_person_at = NULL WHERE work_item_id = $1", [A.workItemId]);
+      await refuseOnce();
+      await publish().publishPairedChange({ accountId: A.accountId, executorRunId });
+      expect(await publish().retryPublish({ accountId: A.accountId, workItemId: A.workItemId })).toMatchObject({ attemptNo: 2 });
     });
 
     it("the predicate: refused + sandbox + under 3 only, and never for a person-managed branch", () => {

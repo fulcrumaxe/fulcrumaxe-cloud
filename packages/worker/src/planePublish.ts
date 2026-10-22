@@ -153,6 +153,8 @@ const digestOf = (p: NonNullable<Facts["pairing"]>): string => pairingDigest({ c
 class AttemptLimitReached extends Error {}
 /** Thrown inside the create transaction when a first attempt finds an earlier push attempt (a replay that raced the first one). */
 class AttemptOutOfOrder extends Error {}
+/** Thrown inside the create transaction when, under the row lock, the push row is no longer in the state this attempt was read in, or a person has taken the branch over. */
+class PushRowChanged extends Error {}
 /** The schema index that allows one live publish run per executor run (0680): the only unique violation that means "another attempt is in flight". */
 const LIVE_CHILD_INDEX = "agent_runs_one_live_continuation_per_parent";
 
@@ -213,7 +215,14 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
       await insertAgentRun(deps.pool, {
         id: randomUUID(), accountId, workItemId: facts.workItemId, parentRunId: facts.runId, role: PLANE_PUBLISH_ROLE, runtime: "production", dispatchRepoId: facts.repo.id,
         inCreateTransaction: async (client, runId) => {
-          await client.query("SELECT 1 FROM plane_pushes WHERE account_id = $1 AND id = $2 FOR UPDATE", [accountId, facts.pushId]);
+          const { rows: locked } = await client.query<{ state: string; managed: boolean }>(
+            "SELECT state, managed_by_person_at IS NOT NULL AS managed FROM plane_pushes WHERE account_id = $1 AND id = $2 FOR UPDATE",
+            [accountId, facts.pushId],
+          );
+          // The facts above were read before this lock: a person may have taken the branch over, or the row moved on, since. Act only on what is true now.
+          const now = locked[0];
+          const stateOk = mode === "retry" ? now?.state === "refused" : now?.state === "building" || now?.state === "scanning";
+          if (!now || now.managed || !stateOk) throw new PushRowChanged();
           // Numbered per kind, like the runner path (migration 0882): past the highest PUSH number, so a PR-open retry never uses one up.
           const { rows } = await client.query<{ pushes: number; top: number; own: number }>(
             `SELECT count(*)::int AS pushes, COALESCE(max(a.attempt_no), 0)::int AS top, (count(*) FILTER (WHERE pr.parent_run_id = $3))::int AS own
@@ -233,6 +242,7 @@ async function attempt(deps: PlanePublishDeps, accountId: string, which: { runId
   } catch (err) {
     if (err instanceof AttemptLimitReached) return refuse(PUBLISH_CODES.retryLimit);
     if (err instanceof AttemptOutOfOrder) return { kind: "skipped", why: "busy" };
+    if (err instanceof PushRowChanged) return { kind: "skipped", why: mode === "retry" ? "not_retryable" : "busy" };
     // Another attempt is in flight (the live-child index). Any other unique violation is a real fault and is not hidden as "busy".
     const pg = err as { code?: string; constraint?: string } | undefined;
     if (pg?.code === "23505" && pg.constraint === LIVE_CHILD_INDEX) return { kind: "skipped", why: "busy" };
