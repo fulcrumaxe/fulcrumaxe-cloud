@@ -384,6 +384,18 @@ export async function setupHoldFor(client: PoolClient, workItemId: string): Prom
   return rows[0]?.hold ?? null;
 }
 
+/**
+ * The pause an item is under, for the Pipeline card: the hold itself plus the request that causes it. An open hold names the newest open
+ * request of the item (null only if it closed between the two reads); a withdrawn hold has no request to quote. Derived on every read.
+ */
+export async function setupPauseFor(client: PoolClient, workItemId: string): Promise<{ hold: SetupHold; request: SetupRequest | null } | null> {
+  const hold = await setupHoldFor(client, workItemId);
+  if (hold === null) return null;
+  if (hold === 'setup_request_withdrawn') return { hold, request: null };
+  const { requests } = await listSetupRequests(client, { state: 'open', workItemId, limit: 1 });
+  return { hold, request: requests[0] ?? null };
+}
+
 export type CheckApplied =
   | { result: 'skipped' }
   | { result: 'stamped'; request: SetupRequest }
