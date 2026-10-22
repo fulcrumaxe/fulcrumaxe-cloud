@@ -64,6 +64,8 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
     }
     const act = p.match(/^\/api\/v1\/setup-requests\/([^/]+)\/(done|withdraw)$/);
     if (act && req.method() === "POST") {
+      // The real API refuses any body on these two routes (packages/api/src/handler.ts), same status, code and message.
+      if (req.postData()) return json(route, 400, { error: { code: "invalid_request", message: "this route does not accept a request body", request_id: "r" } });
       mock.posts.push(p);
       if (mock.delay > 0) await new Promise((r) => setTimeout(r, mock.delay));
       const answer = act[2] === "done" ? mock.doneAnswer : mock.withdrawAnswer;

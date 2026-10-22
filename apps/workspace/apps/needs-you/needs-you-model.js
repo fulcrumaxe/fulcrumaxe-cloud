@@ -10,6 +10,7 @@
 import { api, isRateLimited, retryWords, waitSeconds } from "../_lib/api.js";
 
 export const LIST_URL = "/api/v1/setup-requests?state=open";
+// The done and withdraw routes take no request body at all (the API answers 400 to any body), so these two POSTs are sent bare.
 export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComponent(id) + "/" + verb;
 export const REFRESH_MS = 30000;
 export const PROVIDER_HOSTS = ["github.com", "vercel.com"];
@@ -108,7 +109,7 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     st = { ...st, error: "", announce: "" };
     onChange();
     try {
-      const row = readRequest(await call("POST", actionUrl(id, verb), {}, signal));
+      const row = readRequest(await call("POST", actionUrl(id, verb), undefined, signal));
       if (!row) throw new Error("shape");
       open = open.filter((r) => r.id !== id);
       closed.delete(id);
