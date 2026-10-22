@@ -179,3 +179,9 @@
 .runs-ctx .runs-sub,
 .runs-ctx .runs-muted { color: inherit; }
 .runs-ctx .runs-sub { margin: 10px 0 4px; font-size: 0.85rem; font-weight: 600; }
+
+.runs-check-argv { margin: 0 0 6px; padding: 0 0 0 1.6em; display: flex; flex-direction: column; gap: 2px; }
+.runs-check-argv code { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.runs-check-changed { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid #ffcc66; color: #ffcc66; font-weight: bold; white-space: pre-wrap; overflow-wrap: anywhere; }
+.runs-check-out { margin: 0 0 6px; padding: 6px 8px; max-height: 16em; overflow: auto; background: var(--bg-base, #000); border: 1px solid var(--border, rgba(26, 255, 128, 0.3)); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.runs-check-out:focus-visible { outline: 2px solid var(--accent, #1aff80); outline-offset: 2px; }

@@ -5091,7 +5091,7 @@
       "get": {
         "operationId": "getRunInsight",
         "summary": "What one agent run did, what it cost and who pays",
-        "description": "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. Model text is plain text: show it as text only.",
+        "description": "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
         "security": [
           {
             "session": []
@@ -5683,6 +5683,91 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "check": {
+                      "type": "object",
+                      "properties": {
+                        "argv": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "dev_shell": {
+                          "type": "boolean"
+                        },
+                        "timeout_s": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "no_dev_shell": {
+                          "type": "boolean"
+                        },
+                        "result": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "exit_code": {
+                                  "anyOf": [
+                                    {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "duration_ms": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "timed_out": {
+                                  "type": "boolean"
+                                },
+                                "skipped_tests": {
+                                  "anyOf": [
+                                    {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "summary": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "exit_code",
+                                "duration_ms",
+                                "timed_out",
+                                "skipped_tests",
+                                "summary"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "argv",
+                        "dev_shell",
+                        "timeout_s",
+                        "no_dev_shell",
+                        "result"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [

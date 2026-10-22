@@ -1,0 +1,76 @@
+{
+  "server_time": "2026-10-03T12:00:00.000Z",
+  "run": {
+    "id": "00000000-0000-4000-8000-900000000004",
+    "role": "executor",
+    "status": "succeeded",
+    "runtime": "runner",
+    "execution_mode": "runner_local",
+    "model": null,
+    "head_sha": null,
+    "created_at": "2026-10-03T10:00:00.000Z",
+    "started_at": null,
+    "ended_at": "2026-10-03T10:01:00.000Z"
+  },
+  "work_item": null,
+  "pr_number": null,
+  "failure_reason": null,
+  "outcome": null,
+  "cost": {
+    "model": {
+      "usd": null,
+      "source": null,
+      "tokens_in": null,
+      "tokens_out": null
+    },
+    "compute": {
+      "usd": null,
+      "source": null
+    }
+  },
+  "lines": [],
+  "lines_truncated": false,
+  "limits": {
+    "max_run_minutes": 60,
+    "max_model_calls": 300,
+    "per_run_usd": 40,
+    "max_turns": 100,
+    "silence_minutes": 15,
+    "max_extensions": 2,
+    "max_resumes": 2,
+    "auto_resume": true
+  },
+  "parent": null,
+  "escalated_from": null,
+  "children": [],
+  "outside_meter": {
+    "state": "off",
+    "reason": null,
+    "added_usd": null,
+    "text": "Outside check off"
+  },
+  "runner_usage": null,
+  "runner_usage_state": "not_recorded",
+  "runner_usage_note": "This run ended without reporting how many tokens it used, so there is no cost estimate. That is not the same as $0.",
+  "runner_checked_in_at": null,
+  "check": {
+    "argv": [
+      "pnpm",
+      "run",
+      "check",
+      "--",
+      "a  b"
+    ],
+    "dev_shell": true,
+    "timeout_s": 1800,
+    "no_dev_shell": false,
+    "result": {
+      "exit_code": 0,
+      "duration_ms": 95400,
+      "timed_out": false,
+      "skipped_tests": 3,
+      "summary": "check files changed by this branch: scripts/check.sh\nTests  12 passed | 3 skipped (15)"
+    }
+  },
+  "wait": null
+}

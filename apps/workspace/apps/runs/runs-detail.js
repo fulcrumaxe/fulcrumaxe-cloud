@@ -624,6 +624,73 @@ export function activityLines(insight) {
   return lost ? [...insight.lines, { at: insight.run.ended_at || "", text: "Your runner stopped checking in, so this run was ended. Build again to retry." }] : insight.lines;
 }
 
+// D#6 R-CHK-3b: the repository's approved check on a run on the person's machine. Every sentence is chosen from recorded fields; the command and the output are drawn as text.
+const SPACE = "␣"; // the open-box mark the Repos app shows in place of each space
+/** One argument as the person must see it: quoted, each space marked, so a leading, trailing or doubled space cannot pass for tidy. */
+export const showArg = (a) => '"' + String(a).replace(/ /g, SPACE) + '"';
+export const CHECK_CHANGED = "check files changed by this branch: ";
+// The runner's own words when it would not run the check (sandbox, pin): the check was refused, not decided.
+const NOT_SAFE = /^(the sandbox could not start the check|the check was not run:|the check could not be started)/;
+export const CHECK_COPY = {
+  not_set: ["Not set", "This repository has no approved check, so nothing was run after the agent finished."],
+  not_run: ["Not run", "The run ended before the check ran."],
+  running: ["Not finished", "The check runs on your runner after the agent finishes. Its result appears here when the run ends."],
+  passed: ["Passed", "The check passed."],
+  failed: ["Failed", "The check failed, so this run ended without a pull request."],
+  timed_out: ["Timed out", "The check was stopped at its time limit, so this run ended without a pull request."],
+  no_dev_shell: ["No dev shell", "The check needs the repository's dev shell and none was built, so it was not run and this run ended without a pull request."],
+  unsafe: ["Could not run safely", "The check could not run safely: your runner would not run it with weaker rules than the agent had, so it was not run. This run ended without a pull request."],
+  runner_too_old: ["Runner too old", "Update your runner to run this repository's check."],
+};
+const secsText = (s) => (s < 60 ? s + "s" : Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s");
+
+/** The Check block as data, or null for a run that is not on the person's machine. The state is told from recorded facts only. */
+export function checkView(insight) {
+  if (!isRunner(insight)) return null;
+  const c = isObj(insight.check) && Array.isArray(insight.check.argv) ? insight.check : null;
+  const r = c && isObj(c.result) ? c.result : null;
+  const summary = r && typeof r.summary === "string" ? r.summary : "";
+  let state;
+  if (!c) state = "not_set";
+  else if (c.no_dev_shell === true) state = "no_dev_shell";
+  else if (r) state = r.timed_out === true ? "timed_out" : r.exit_code === 0 ? "passed" : r.exit_code === null && NOT_SAFE.test(summary) ? "unsafe" : "failed";
+  else if (isObj(insight.wait) && insight.wait.reason === "runner_too_old_for_check") state = "runner_too_old";
+  else state = isLive(insight) ? "running" : "not_run";
+  const [label, copy] = CHECK_COPY[state];
+  const facts = [];
+  if (c) {
+    if (c.dev_shell === true) facts.push("Runs in the dev shell");
+    if (Number.isInteger(c.timeout_s)) facts.push("Time limit " + secsText(c.timeout_s));
+  }
+  if (r && state !== "no_dev_shell" && state !== "unsafe") {
+    if (state === "failed") facts.push(Number.isInteger(r.exit_code) ? "Exit status " + r.exit_code : "No exit status recorded");
+    else if (state === "passed") facts.push("Exit status 0");
+    if (Number.isFinite(r.duration_ms)) facts.push("Took " + secsText(Math.round(r.duration_ms / 1000)));
+    if (state !== "timed_out") facts.push("Skipped tests: " + (Number.isInteger(r.skipped_tests) ? r.skipped_tests : "Not recorded"));
+  }
+  const text = state === "runner_too_old" && isObj(insight.wait) && typeof insight.wait.text === "string" && insight.wait.text !== "" ? insight.wait.text : copy;
+  const nl = summary.indexOf("\n");
+  const first = nl === -1 ? summary : summary.slice(0, nl);
+  const changed = first.startsWith(CHECK_CHANGED) ? first : null;
+  const tail = changed ? (nl === -1 ? "" : summary.slice(nl + 1)) : summary;
+  return { state, label, copy: text, argv: c ? c.argv.filter((a) => typeof a === "string") : [], facts, changed, tail };
+}
+
+const CHECK_TONE = { passed: "ok", failed: "bad", timed_out: "bad", unsafe: "bad", no_dev_shell: "bad", runner_too_old: "warn" };
+function checkSection(insight) {
+  const v = checkView(insight);
+  if (!v) return null;
+  return section(
+    "runs-check",
+    "Check",
+    h("p", { class: "runs-verdict", "data-testid": "runs-check-state", "data-state": v.state }, h("span", { class: "runs-vchip runs-vchip-" + (CHECK_TONE[v.state] || "plain") }, v.label), " ", v.copy),
+    v.argv.length ? h("ol", { class: "runs-check-argv", "aria-label": "Approved command, one argument per line", "data-testid": "runs-check-argv" }, v.argv.map((a) => h("li", null, h("code", { "data-testid": "runs-check-arg" }, showArg(a))))) : null,
+    v.facts.length ? h("p", { class: "runs-muted", "data-testid": "runs-check-facts" }, v.facts.join(" · ")) : null,
+    v.changed ? h("p", { class: "runs-check-changed", role: "note", "data-testid": "runs-check-changed" }, v.changed) : null,
+    v.tail.trim() !== "" ? h("pre", { class: "runs-check-out", tabindex: "0", role: "region", "aria-label": "Check output, last lines", "data-testid": "runs-check-output" }, v.tail) : null
+  );
+}
+
 function outcomeSection(insight) {
   const why = failureText(insight);
   const body = outcomeBody(insight, insight.outcome, insight.run.role);
@@ -709,7 +776,7 @@ function factsSection(insight, openRun, ui) {
   );
 }
 
-/** The sections under the header, in the approved order: outcome, cost, context, activity, run facts. */
+/** The sections under the header, in the approved order: outcome, check (a run on the person's machine only), cost, context, activity, run facts. */
 export function renderInsight(insight, { openRun, ui, context, retryContext }) {
-  return [outcomeSection(insight), costSection(insight), contextSection(context, retryContext), activitySection(insight, ui), factsSection(insight, openRun, ui)];
+  return [outcomeSection(insight), checkSection(insight), costSection(insight), contextSection(context, retryContext), activitySection(insight, ui), factsSection(insight, openRun, ui)];
 }
