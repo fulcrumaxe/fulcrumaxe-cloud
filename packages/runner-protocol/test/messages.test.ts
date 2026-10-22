@@ -138,9 +138,9 @@ describe("LocalOnlyEvent", () => {
 
   describe("run_ended (D#6 R4a-2, C24 section 1)", () => {
     const ended = { ...EVENT, type: "run_ended" };
-    it("is a local-only event type, with exactly the eight reasons", () => {
+    it("is a local-only event type, with exactly the nine reasons", () => {
       expect(LOCAL_ONLY_EVENT_TYPES).toContain("run_ended");
-      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "handed_off", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
+      expect(Object.keys(DETAILS_OF_RUN_ENDED).sort()).toEqual(["agent_failed", "check_failed", "handed_off", "job_refused", "push_rejected", "repo_not_private", "runner_setup", "runner_shutdown", "wall_clock"]);
     });
 
     it("takes each reason, and for the two reasons with a closed detail set, each of that set's codes", () => {
@@ -299,7 +299,7 @@ describe("the other messages", () => {
     expect(done({ session_id: "7f0c1d2e-aaaa-bbbb-cccc-0123456789ab" })).toBe(true);
     for (const bad of ["", "a b", "s;ls", "x".repeat(129), 5, null]) expect(done({ session_id: bad }), String(bad)).toBe(false);
     // Additive: every key the message had before is still there.
-    expect(Object.keys(RUNNER_MESSAGES.done.shape).sort()).toEqual(["agentOutput", "context_ledger", "lease_generation", "run_id", "session_id"]);
+    expect(Object.keys(RUNNER_MESSAGES.done.shape).sort()).toEqual(["agentOutput", "check", "context_ledger", "lease_generation", "run_id", "session_id"]);
   });
 
   it("done's advisory agentOutput is bounded", () => {

@@ -17,14 +17,15 @@
  * checkpoint prompt (`checkpointTurn.ts`), the commit is pushed, and one `run_ended` `handed_off` (`pushed`, `push_failed` or `deadline`) goes out in place
  * of `done`. The note the agent writes stays on this machine.
  */
-import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type ContextSection, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { DONE_RETRY_AFTER_SECONDS, LocalOnlyEvent, contextLedgerToWire, type ContextLedgerMeasure, type ContextSection, type DoneCheck, type HANDED_OFF_DETAILS, type Job, type JobKeyring, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { CHECKPOINT_MAX_TURN_MS, runCheckpointTurn } from "./checkpointTurn.js";
 import type { CheckpointNote } from "../job/checkpoint.js";
 import type { NixDetail, NixFromDefault, NixResult, NixShellStep, NixSkip, NixSource } from "./nixShell.js";
+import type { CheckLaunch, CheckOutcome, CheckRefused, CheckStepInput } from "./checkStep.js";
 import { depsDetail, registryHostOf, TEST_ROLES, type DepsDetail } from "../job/depsRegistry.js";
 import { repoMapDigest } from "../job/repoMap.js";
 import { SpillRefused, prepareSpill, removeSpill, type SpillHandle } from "../job/spillFiles.js";
-import { DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
+import { checkNote, DEPS_FAILED_NOTE, DEPS_INSTALLED_NOTE, DEPS_REGISTRY_NOTE, NIX_FLAKE_CHANGED_NOTE } from "../job/prompt.js";
 import type { DepsInstaller } from "./depsInstall.js";
 import { NotAPlainSegment, segmentUnder } from "../job/plainSegment.js";
 import { cliModelFor, runJob, type JobLedger, type RunJobDeps, type RunJobResult } from "../job/runJob.js";
@@ -115,6 +116,14 @@ export interface JobHandlerDeps {
   /** The lease's short flush while an activity or stage event waits (default 2 s). */
   activityFlushMs?: number;
   doneAttempts?: number;
+  /**
+   * D#6 R-CHK-2: the check step (`checkStep.ts`), how to start its argument vector under the sandbox's rules (`HostSandbox.checkLaunch`), the content of a file at the job's start
+   * commit, and the home directory to hide in the output. A job that carries a check while any of the first three is absent fails its check: it is never passed by default.
+   */
+  checkStep?: (input: CheckStepInput) => Promise<CheckOutcome>;
+  checkLaunch?: (handle: SandboxHandle, argv: readonly string[], devShell: boolean) => CheckLaunch | CheckRefused | undefined;
+  baseFile?: CheckStepInput["baseFile"];
+  checkHome?: string;
   /** The tmux watch and take-over (R4a-7). Absent: no watch. */
   watch?: JobWatch;
   /** Sends the agent in a sandbox SIGINT, which ends its turn cleanly. Required for a take-over to stop the agent. */
@@ -220,6 +229,8 @@ const isGitStop = (code: string): boolean => code === "git_stopped" || code === 
 
 /** The runs that enter the public-push hook: a fresh executor run. A fix round updates a branch that already exists (a later change), and no other role pushes. */
 const enters = (job: Job): boolean => job.role === "executor" && job.continues === null && (job.review ?? null) === null;
+
+const closedCheck = (summary = "", extra: Partial<CheckOutcome> = {}): CheckOutcome => ({ passed: false, body: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary }, ...extra });
 
 export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Promise<JobResult> {
   const run = deps.runJobFn ?? runJob;
@@ -399,6 +410,8 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     try {
       const started: { base?: string } = {};
       const promptNotes: string[] = [];
+      if (job.check !== undefined) promptNotes.push(checkNote(job.check));
+      const checkHeld: { outcome?: CheckOutcome } = {};
       const repoMapHeld: { map?: { version: string; text: string } } = {};
       let result: RunJobResult;
       let notReady: string | undefined;
@@ -444,7 +457,35 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
           const withGrants = grant === undefined ? granted : withAllowances(granted, grant);
           const allowed = withSpillDir(withExcludes(withGrants, job.excludes), spillHeld?.dir);
           usedPort = allowed;
-          result = await run(job, { ...deps.run, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
+          const afterAgent = async (sandboxHandle: SandboxHandle, workspace: string): Promise<void> => {
+            const check = job.check;
+            if (check === undefined) return;
+            const closed = closedCheck;
+            // A check that needs the dev shell is not run without one, and never passes by default.
+            if (check.dev_shell && grant?.nixEnv === undefined) {
+              checkHeld.outcome = closed("", { noDevShell: true });
+              return;
+            }
+            const { checkStep, checkLaunch, baseFile } = deps;
+            if (checkStep === undefined || checkLaunch === undefined || baseFile === undefined || started.base === undefined) {
+              checkHeld.outcome = closed("the check was not run: it is not set up on this runner");
+              return;
+            }
+            // The files the check names are pinned to the merge-base of the branch tip with the default branch, read from the runner's mirror; without one the check fails.
+            const mirror = git.mirrorDir?.(job);
+            const pin = mirror === undefined ? null : await git.checkBase?.(job, started.base).catch(() => null);
+            if (mirror === undefined || pin === null || pin === undefined) {
+              checkHeld.outcome = closed("the check was not run: the default branch's copy of its files could not be found");
+              return;
+            }
+            try {
+              checkHeld.outcome = await checkStep({ check, workspace, base: pin, baseDir: mirror, launch: (argv, devShell) => checkLaunch(sandboxHandle, argv, devShell), baseFile, home: deps.checkHome, signal: stopRun });
+            } catch {
+              // fx-swallow-ok: a check step that threw did not pass; the error text could hold a path
+              checkHeld.outcome = closed("the check was not run: it is not set up on this runner");
+            }
+          };
+          result = await run(job, { ...deps.run, afterAgent, promptNotes: () => promptNotes, repoMap: () => repoMapHeld.map, ...(spillHeld === undefined ? {} : { taskPrompt: spillHeld.rewrite }), planSession, workspaces: filledWith(deps.run.workspaces, fill), sandbox: stopOnAbort(allowed, stopRun, held), ledger: deps.ledger });
         }
       } catch (error) {
         // The workspace could not be made, or the job is not one this path pushes. Only the closed code is kept: an error text could hold a path or a remote.
@@ -503,6 +544,19 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
         await reportEnd(lease, endOfFailure(error.code, error.sizeMb)!);
         return { status: "failed", reason: error.code };
       }
+      // A check that did not pass: the branch is on the run branch for the fix round (pushed above), the public-push hook is not entered, and the run ends `check_failed`.
+      // `done` still goes, carrying the check result, so the cloud records what ran (the run is already ended by `run_ended`, which the cloud may answer with a stop).
+      // A job with a check always has an outcome here; if the hook never recorded one, that is a failure, not a pass.
+      const checked = checkHeld.outcome ?? (job.check === undefined ? undefined : closedCheck("the check was not run"));
+      if (checked !== undefined && !checked.passed) {
+        await lease.flush();
+        const stoppedAtCheck = lease.ended();
+        if (stoppedAtCheck !== undefined) return stoppedBy(stoppedAtCheck);
+        await reportEnd(lease, { reason: "check_failed", ...(checked.noDevShell === true ? { detail: "check_no_dev_shell" as const } : {}) });
+        const sentFailed = await sendDone(claimed, result, lease, [], checked.body);
+        if (sentFailed.status === "aborted") abandonSend = !(await reportShutdown(lease));
+        return sentFailed;
+      }
       // The run-end hook for a paired repository (D#598 P1f-3). Its calls need the live lease, so it runs before `done`. It never fails the run: an
       // unexpected error is the closed outcome `failed`, and a cloud that ended the run ends this one too.
       const mirrorDir = deps.planePush !== undefined && enters(job) ? git.mirrorDir?.(job) : undefined;
@@ -517,7 +571,7 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
       // A stop reply (to anything sent so far, the flush included) ends the run: `done` is not sent for it.
       const stoppedAfterPush = lease.ended();
       if (stoppedAfterPush !== undefined) return stoppedBy(stoppedAfterPush);
-      const sent = await sendDone(claimed, result, lease, repoMapHeld.map === undefined ? [] : [{ code: "map", ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }]);
+      const sent = await sendDone(claimed, result, lease, repoMapHeld.map === undefined ? [] : [{ code: "map", ...repoMapDigest(repoMapHeld.map.text), trimmed_bytes: 0 }], checked?.body);
       if (sent.status === "aborted") abandonSend = !(await reportShutdown(lease));
       return sent;
     } finally {
@@ -585,12 +639,12 @@ export function createJobHandler(deps: JobHandlerDeps): (claimed: Claimed) => Pr
     return sent;
   }
 
-  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>, sections: readonly ContextSection[] = []): Promise<JobResult> {
+  async function sendDone(claimed: Claimed, result: { sessionId?: string; agentOutput?: Record<string, unknown>; contextLedger?: ContextLedgerMeasure; workspace?: string }, lease: ReturnType<typeof startLease>, sections: readonly ContextSection[] = [], check?: DoneCheck): Promise<JobResult> {
     // Integers, enums and hashes only (C8 section 6). The one section the runner knows is the repository map it built (D#600 CX-3b): a byte count and the
     // text's sha256, never a path or any of the text. The other sections are the cloud's, which sent the prompt.
     const contextLedger = result.contextLedger === undefined ? undefined : contextLedgerToWire(result.contextLedger, sections);
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger });
+      const reply = await deps.client.done({ runId: claimed.runId, leaseGeneration: claimed.leaseGeneration, sessionId: result.sessionId, agentOutput: result.agentOutput, contextLedger, check });
       if (reply.kind === "done") {
         if (result.sessionId !== undefined && result.workspace !== undefined) {
           await deps.recordSession(result.sessionId, result.workspace).catch(() => undefined);

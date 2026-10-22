@@ -8,7 +8,8 @@ item 12) is tracked with the macOS sandbox workflow (D#587 B-10) and is not cove
 **Result in one line:** one allowance (the npm registry) is the whole minimal set. The six blockers found first (B1 to B6) are resolved by
 the runner fix (#145) and the repo fix (#146), as ruled in C39. Run again at the tip that holds both, `check.sh` passes every step except
 three test files (7 failures out of about 20,000 tests), and each of those has a cause in the repo's own tests or dev shell, listed as N1 to
-N3 below. None was worked around, and no allowance was added for any of them.
+N3 below. None was worked around, and no allowance was added for any of them. **N1 to N3 have since been fixed by #151 (2026-10-09); the tables below record
+what the run found at the time and predate that fix.** The runner now also runs the repo's approved check itself (see the last section).
 
 ## Re-verified after C39 fixes
 
@@ -40,9 +41,9 @@ was left after any segment.
 
 | # | Where | Denial as seen | Cause |
 |---|---|---|---|
-| N1 | `fx-runner` `test/release/seaTamper.test.ts` (3 tests) | `build-sea: EROFS: read-only file system, mkdtemp '/tmp/fx-sea-XXXXXX'` | the test starts `build-sea.mjs` with an environment of its own (`PATH`, CA file, mirror URL) and no `TMPDIR`, so `os.tmpdir()` falls back to the read-only `/tmp`. Same class as B2, in a test that landed after C39 |
-| N2 | `fx-runner` `test/release/installSh.test.ts` (2 tests: "the shells and checkers ... are present", "dash was available") | `expected [ 'dash', 'shellcheck' ] to deeply equal []` | under `CI=1` the test requires `dash` and `shellcheck` on `PATH`; the dev shell holds neither (91 of its 189 tests skip for lack of `dash`). Not a sandbox denial |
-| N3 | `gh-proxy` `test/strippedBuild.test.ts` (2 failures: `next build output`, `next start: raw request lines`) | `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` from `pnpm exec next build`, then `next start did not come up` | the test builds an environment from a fixed name list. #146 added the proxy variables, but the list has neither `CI` nor `pnpm_config_store_dir`, which #145 now sets. `pnpm exec` then sees a different store than the one `node_modules` was installed with, wants to reinstall, and aborts without a terminal. Checked in the sandbox: the same command with the test's list fails the same way, and with `pnpm_config_store_dir` added it goes past that point |
+| N1 (fixed by #151) | `fx-runner` `test/release/seaTamper.test.ts` (3 tests) | `build-sea: EROFS: read-only file system, mkdtemp '/tmp/fx-sea-XXXXXX'` | the test starts `build-sea.mjs` with an environment of its own (`PATH`, CA file, mirror URL) and no `TMPDIR`, so `os.tmpdir()` falls back to the read-only `/tmp`. Same class as B2, in a test that landed after C39 |
+| N2 (fixed by #151) | `fx-runner` `test/release/installSh.test.ts` (2 tests: "the shells and checkers ... are present", "dash was available") | `expected [ 'dash', 'shellcheck' ] to deeply equal []` | under `CI=1` the test requires `dash` and `shellcheck` on `PATH`; the dev shell holds neither (91 of its 189 tests skip for lack of `dash`). Not a sandbox denial |
+| N3 (fixed by #151) | `gh-proxy` `test/strippedBuild.test.ts` (2 failures: `next build output`, `next start: raw request lines`) | `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` from `pnpm exec next build`, then `next start did not come up` | the test builds an environment from a fixed name list. #146 added the proxy variables, but the list has neither `CI` nor `pnpm_config_store_dir`, which #145 now sets. `pnpm exec` then sees a different store than the one `node_modules` was installed with, wants to reinstall, and aborts without a terminal. Checked in the sandbox: the same command with the test's list fails the same way, and with `pnpm_config_store_dir` added it goes past that point |
 
 Everything B1 to B6 named is gone from the log: no Unix-socket denial (Postgres clusters on TCP, `node --import tsx`), no `/tmp` write denial
 outside N1, the browser tier and the live-e2e browser tests find Chromium, the nix and bwrap suites skip, and the pnpm store is the per-repo
@@ -69,17 +70,18 @@ C15b ruling 2 (sandbox off) is not needed on this host and no entry or flag was 
 
 Rulings: C39 (the owner may override). Item 5 of the probe is reworded there; see the probe section.
 
-## Remaining blockers (acceptance 13)
+## Former blockers N1 to N3 (acceptance 13): all fixed by #151
 
-**N1. `seaTamper` runs `build-sea.mjs` without `TMPDIR`.** Fix in the test: pass `TMPDIR` (`os.tmpdir()`) in the child's environment. Weakens nothing; same ruling as B2.
+**N1 (fixed: `seaTamper.test.ts` passes `TMPDIR: tmpdir()`). `seaTamper` ran `build-sea.mjs` without `TMPDIR`.** Fix in the test: pass `TMPDIR` (`os.tmpdir()`) in the child's environment. Weakens nothing; same ruling as B2.
 
-**N2. `installSh` needs `dash` and `shellcheck` under `CI=1`.** The dev shell has neither. Options: add both to the flake's dev shell
+**N2 (fixed: `flake.nix` puts `dash` and `shellcheck` in the dev shell, the recommended option). `installSh` needed `dash` and `shellcheck` under `CI=1`.** The dev shell has neither. Options: add both to the flake's dev shell
 (small, keeps the check byte-for-byte the CI one), or skip those cases inside a job. **Question: add to the dev shell (recommended)?**
 
-**N3. `strippedBuild` drops `CI` and the pnpm store variable.** Fix in the test: add `CI` and the `pnpm_config_` names to the list it
+**N3 (fixed: `strippedBuild.test.ts` lists `CI` and the `pnpm_config_` names). `strippedBuild` dropped `CI` and the pnpm store variable.** Fix in the test: add `CI` and the `pnpm_config_` names to the list it
 passes on. No ruling needed.
 
-All three are repo changes (a follow-up to #146); none needs a sandbox allowance.
+All three were repo changes (the follow-up to #146, landed as #151); none needed a sandbox allowance. The in-job `FX_RUNNER_JOB=1` skips that remain are the runner's
+own real-Nix and real-bubblewrap suites and the tmux watch tests, which test the runner's host integration, not this repo's product.
 
 ## How the denials were found
 
@@ -161,3 +163,23 @@ false pass would need a reused process id). On a host where other sessions start
 for processes that are not the job's (seen once here; the immediate re-run was clean), so run the probe on a quiet account. The harness used for these
 local runs also checks, separately, that no process still carries the run's environment tag; that found nothing in every run, and is an extra, not the
 criterion.
+
+## The runner's check step (R-CHK-2)
+
+When a signed job carries an approved `check` (for this repo `bash scripts/check.sh` in the dev shell, 90 minutes), the runner runs it after the agent's last turn.
+It has its own time cap, not the 1800 s per-command one, and the whole process group is killed at the cap.
+
+- **Sandbox.** The agent's own shell sandbox is Claude Code's, started by the CLI on a model turn, so the runner cannot reuse that launch for a command of its own. The
+  check is started by the runner from the same settings (the file-system rules, the allowances, the Nix store view), with no network, its own process table, the
+  user's runtime directory hidden, and a seccomp filter that refuses Unix-domain sockets, as for the agent (B1). It has no model credential and no env file.
+  Only the internet socket families (loopback, in the check's own network namespace) are allowed; every other family, `io_uring` and x32 system calls are refused.
+  The agent's whole deny-read list applies, files as well as directories (a toolchain prefix's `etc/npmrc`, `etc/gitconfig`, `.npmrc`, `etc/yarnrc`, `.yarnrc.yml`). The
+  version-control folder and the files the agent's sandbox protects (lock files, package-manager and shell settings, `.env*`) are read-only for the check; the runner also
+  compares them before and after, puts back any protected file the check changed or created, and fails the check naming them.
+  **Verified on bubblewrap (Linux x86-64 and arm64) only.** On macOS there is no Seatbelt profile that matches the agent's yet, so a check job fails closed there
+  (the summary says why); Seatbelt is unverified. If any part of this cannot be applied the check fails; it never runs under weaker rules.
+- **Files the vector names** (here `scripts/check.sh`) are restored for the run to their content at the merge-base of the job's branch tip with the repository's default
+  branch as the runner fetched it (never the tip: a fix round's tip holds the previous round's edits), then given back. The summary names the paths that differed. A link on
+  such a path, a blob that cannot be read byte-exact, or a give-back that finds a parent directory changed fails the check.
+- **Result.** Exit code, duration, timed-out flag, skipped-test count and the last 4096 bytes of redacted output go on `done`; a check that does not pass ends the run
+  `check_failed`, with the branch pushed for the fix round and nothing pushed to the public repository.

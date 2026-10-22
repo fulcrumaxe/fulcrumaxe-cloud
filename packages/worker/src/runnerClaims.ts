@@ -188,7 +188,7 @@ const RUN_ENDED_ENDINGS = {
   runner_shutdown: { to: "failed", reason: "runner_lost", followUp: true },
   // D#6 R4a-3b (C25 section 1.4): the fix round's branch moved while the agent worked. A retry runs on the new head, so no automatic follow-up.
   push_rejected: { to: "failed", reason: "push_rejected", followUp: false },
-} as const satisfies Record<Exclude<RunEndedReason, "handed_off">, Ending>;
+} as const satisfies Record<Exclude<RunEndedReason, "handed_off" | "check_failed">, Ending>;
 /**
  * D#599 HO-1: `handed_off` is deliberately not in the table. The event is stored and ends nothing here; the handoff completion
  * (HO-2b, `runHandoffs.ts`) makes the parent terminal and the child run in one transaction, after this batch commits (`onHandedOff`),
