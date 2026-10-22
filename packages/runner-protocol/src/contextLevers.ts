@@ -27,3 +27,18 @@ export function contextPct(contextTokens: number, windowTokens: number): number 
   if (!Number.isSafeInteger(contextTokens) || contextTokens < 0 || !Number.isSafeInteger(windowTokens) || windowTokens <= 0) return undefined;
   return Math.min(Math.floor((contextTokens * 100) / windowTokens), 100);
 }
+
+/**
+ * D#600 CX-6b: the context warning's code and its one line, shared by the cloud's sandbox hook and the local runner's note so the two cannot drift. The code differs from the
+ * time and call warnings' codes and so does the text. `{N}` is one whole number; the text holds no quote, backslash, dollar sign or backtick (the hook prints it from a shell script).
+ */
+export const CONTEXT_WARNING_CODE = "context_warning";
+export const CONTEXT_WARNING_TEXT = "Context is at {N}% of the window: finish, or end with a checkpoint envelope";
+
+/** The line the local runner puts ahead of the prompt of a turn it starts: the hook's text, closed by the same full stop. `pct` is a whole number from `CONTEXT_WARN_PCT` to 100. */
+export function contextNoteLine(pct: number): string {
+  return `${CONTEXT_WARNING_TEXT.replace("{N}", String(pct))}.`;
+}
+
+/** The largest window a job may name, in tokens (the price table's own bound). */
+export const CONTEXT_WINDOW_MAX_TOKENS = 10_000_000;
