@@ -29,14 +29,14 @@ describe('env-var check (P8b)', () => {
     expect(await runSetupRequestCheck(v.source(), ACCOUNT, REQ)).toEqual({ pass: true });
   });
 
-  it('check_unavailable, never a pass, for: no connection, an unknown project, a malformed project name, a 500, a body that is not a listing, a throw, and the production binding', async () => {
+  it('never a pass, and check_unavailable unless Vercel said why (revoked token: token_rejected; unknown project: token_cannot_read), for: no connection, an unknown project, a malformed project name, a 500, a body that is not a listing, a throw, and the production binding', async () => {
     const v = new FakeVercel().connect(ACCOUNT).project('cloud-staging', [{ key: 'STRIPE_KEY', value: 'x', target: ['production'] }]);
     const unavailable = { pass: false, reason: 'check_unavailable' };
     expect(await runSetupRequestCheck(v.source(), OTHER, REQ), 'no connection').toEqual(unavailable);
     expect(v.calls, 'an account with no connection never reaches the provider').toHaveLength(0);
-    expect(await runSetupRequestCheck(v.revoke(ACCOUNT).source(), ACCOUNT, REQ), 'revoked token').toEqual(unavailable);
+    expect(await runSetupRequestCheck(v.revoke(ACCOUNT).source(), ACCOUNT, REQ), 'revoked token').toEqual({ pass: false, reason: 'token_rejected' });
     v.connect(ACCOUNT);
-    expect(await runSetupRequestCheck(v.source(), ACCOUNT, { ...REQ, target: 'no-such-project' }), 'unknown project').toEqual(unavailable);
+    expect(await runSetupRequestCheck(v.source(), ACCOUNT, { ...REQ, target: 'no-such-project' }), 'unknown project').toEqual({ pass: false, reason: 'token_cannot_read' });
     expect(await runSetupRequestCheck(v.source(), ACCOUNT, { ...REQ, target: 'Cloud Staging' }), 'malformed name').toEqual(unavailable);
     expect(await runSetupRequestCheck(v.failNext('http_500').source(), ACCOUNT, REQ), '500').toEqual(unavailable);
     expect(await runSetupRequestCheck(v.failNext('bad_body').source(), ACCOUNT, REQ), 'bad body').toEqual(unavailable);

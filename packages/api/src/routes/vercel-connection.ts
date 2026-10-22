@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { markSetupRequestCheckPending } from "@fx/core/src/setup-requests/store.js";
+import { getLatestVercelCheck } from "@fx/core/src/setup-requests/latestCheck.js";
+import type { VercelNamesReader } from "@fx/core/src/setup-requests/vercelNames.js";
+import { withTenant } from "@fx/db/src/withTenant.js";
 import {
   connectVercel,
   envKekSource,
@@ -40,9 +43,36 @@ export const vercelConnectionResponseSchema = z.object({
 });
 type Dto = z.infer<typeof vercelConnectionResponseSchema>;
 
+/**
+ * D#598 P8d-3a: `GET /api/v1/vercel-connection/details`, the read side of the connection screen: the Vercel team and project NAMES the stored token
+ * can see, and what the latest env-var check found. A separate route from the status above because it calls Vercel (cached and bounded, see
+ * vercelNames.ts) and can fail on its own: the status stays a cheap database read, and a Vercel outage reads as `names.status: "unavailable"`, never
+ * as an error and never as ids. `state` is derived from the latest check since the token was last connected or replaced, not from a stored stamp.
+ * Session-only: it carries names of the customer's Vercel projects, which an API token has no need to read.
+ */
+export const vercelConnectionDetailsSchema = z.object({
+  state: z.enum(["not_connected", "connected", "revoked_or_expired"]),
+  names: z
+    .discriminatedUnion("status", [
+      z.object({ status: z.literal("ok"), team_name: z.string().nullable(), projects: z.array(z.string()), truncated: z.boolean() }),
+      z.object({ status: z.literal("unavailable") }),
+    ])
+    .nullable(),
+  check: z
+    .object({
+      result: z.enum(["read", "cannot_read", "token_rejected", "unreachable"]),
+      reason: z.string().nullable(),
+      sentence: z.string(),
+      project: z.string(),
+      ran_at: z.string(),
+    })
+    .nullable(),
+});
+
 /** Test seam and production wiring: the validator (production passes the net-guarded fetch, apps/web/app/api/v1/[...path]/route.ts) and the KEK. */
-export const vercelConnectionDeps: { getValidator: () => VercelTokenValidator | null; getKek: () => KekSource } = {
+export const vercelConnectionDeps: { getValidator: () => VercelTokenValidator | null; getKek: () => KekSource; getNames: () => VercelNamesReader | null } = {
   getValidator: () => null,
+  getNames: () => null,
   getKek: () => envKekSource(),
 };
 
@@ -83,6 +113,34 @@ function serviceCtx(ctx: { pool: VercelConnectionCtx["pool"]; principal: { accou
 }
 
 export const vercelConnectionRoutes: RouteEntry[] = [
+  {
+    method: "GET",
+    path: "/api/v1/vercel-connection/details",
+    operationId: "getVercelConnectionDetails",
+    summary: "The Vercel team and project names the stored token can see, and the latest env-var check (never the token or ids)",
+    // principals omitted -> session-only.
+    minRole: "member",
+    idempotency: "never",
+    rateClass: "read",
+    responseSchema: vercelConnectionDetailsSchema,
+    async handler(ctx) {
+      const { accountId, userId } = ctx.principal;
+      const view = await getVercelConnection({ pool: ctx.pool, principal: ctx.principal });
+      if (view.state === "not_connected" || view.connected_at === null) return { state: "not_connected" as const, names: null, check: null };
+      const since = view.rotated_at ?? view.connected_at;
+      const latest = await withTenant(ctx.pool, accountId, userId, (client) => getLatestVercelCheck(client, accountId, since));
+      const check = latest && { result: latest.result, reason: latest.reason, sentence: latest.sentence, project: latest.project, ran_at: latest.ranAt.toISOString() };
+      // Derived from the latest check; the stored status (set when a check is refused with 401) only says the same thing sooner.
+      if (view.state === "rejected" || latest?.result === "token_rejected") return { state: "revoked_or_expired" as const, names: { status: "unavailable" as const }, check };
+      const reader = vercelConnectionDeps.getNames();
+      const names = reader === null ? { status: "unavailable" as const } : await reader.read(accountId);
+      return {
+        state: "connected" as const,
+        names: names.status === "ok" ? { status: "ok" as const, team_name: names.teamName, projects: names.projects, truncated: names.truncated } : { status: "unavailable" as const },
+        check,
+      };
+    },
+  },
   {
     method: "GET",
     path: "/api/v1/vercel-connection",

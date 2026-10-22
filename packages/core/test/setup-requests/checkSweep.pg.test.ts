@@ -21,6 +21,7 @@ import {
   type ProposeSetupRequestInput,
   type SetupRequest,
 } from '../../src/setup-requests/store.js';
+import { statusSentence } from '../../src/setup-requests/copy.js';
 import { FakeVercel } from '../support/vercelEnvFake.js';
 
 /**
@@ -161,6 +162,21 @@ describe('setup request check sweep [pg]', () => {
     await step();
     expect(reasons).toEqual(['env_var_missing', 'env_var_wrong_target', 'check_unavailable', 'check_unavailable']);
     expect(await read(A, r.id)).toMatchObject({ state: 'done', resolution: 'check_passed' });
+  });
+
+  it('a refused token is stamped on the open request with its own reason, and the words differ: revoked reads as unchecked, a project it cannot see keeps its reason', async () => {
+    const vercel = new FakeVercel().connect(A.accountId).project('cloud-staging', [{ key: NAME, value: SECRET, target: ['production'] }]);
+    const r = await propose(A);
+    const words = async (): Promise<string | null> => statusSentence(await read(A, r.id), { checksAvailable: true });
+    vercel.failNext('http_403'); // a valid token that cannot see this project
+    await sweep(vercel.source());
+    expect(await read(A, r.id)).toMatchObject({ state: 'open', checkReason: 'token_cannot_read' });
+    expect(await words()).toBe("We check for this every 60 seconds. The item continues by itself once it's done, or press Mark done.");
+    vercel.revoke(A.accountId); // the token itself is refused (403 with invalidToken)
+    await ageCheck(r.id);
+    await sweep(vercel.source());
+    expect(await read(A, r.id)).toMatchObject({ state: 'open', checkReason: 'token_rejected' });
+    expect(await words()).toBe("We can't check this one for you. Press Mark done when it's finished.");
   });
 
   it('the production binding is "unavailable": the request stays open with check_unavailable and is never resumed by the sweep', async () => {

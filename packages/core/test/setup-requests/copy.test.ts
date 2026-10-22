@@ -56,8 +56,13 @@ describe('setup request copy (P8b)', () => {
     for (const code of CHECK_REASON_CODES) expect(repausedSentence(code, FIELDS)).toMatch(/^We checked and it isn't done yet: .+ The item is paused again\.$/);
   });
 
+  it('the two token reasons name the project and read as plain sentences', () => {
+    expect(checkReasonSentence('token_cannot_read', FIELDS)).toBe('The connected Vercel token cannot read cloud-staging.');
+    expect(checkReasonSentence('token_rejected', FIELDS)).toBe('Vercel did not accept the connected token, so cloud-staging could not be checked.');
+  });
+
   it('a reason is one fixed code, never free text; no sentence ever shows a placeholder, null or undefined', () => {
-    expect(CHECK_REASON_CODES).toEqual(['env_var_missing', 'env_var_wrong_target', 'check_unavailable']);
+    expect(CHECK_REASON_CODES).toEqual(['env_var_missing', 'env_var_wrong_target', 'check_unavailable', 'token_rejected', 'token_cannot_read']);
     for (const bad of ['', 'something else', null, undefined, 3]) expect(isCheckReasonCode(bad), String(bad)).toBe(false);
     for (const code of CHECK_REASON_CODES) {
       expect(checkReasonSentence(code, FIELDS)).not.toMatch(/[{}]|null|undefined/);

@@ -1,0 +1,18 @@
+{
+  "state": "connected",
+  "names": {
+    "status": "ok",
+    "team_name": null,
+    "projects": [
+      "web-app"
+    ],
+    "truncated": false
+  },
+  "check": {
+    "result": "cannot_read",
+    "reason": "token_cannot_read",
+    "sentence": "The connected Vercel token cannot read web-app.",
+    "project": "web-app",
+    "ran_at": "2026-10-22T10:15:30.000Z"
+  }
+}

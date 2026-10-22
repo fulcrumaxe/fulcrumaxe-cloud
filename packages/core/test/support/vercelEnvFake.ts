@@ -7,9 +7,15 @@ import { createVercelEnvSource, VERCEL_USER_AGENT, type VercelCredentialResolver
  * A strict stand-in for Vercel's project environment-variable listing (`GET /v10/projects/{idOrName}/env`), spoken over HTTP so the real
  * adapter (src/setup-requests/vercelEnvSource.ts) runs against it, either through an in-process `fetch` ({@link FakeVercel.source}) or over a
  * real socket ({@link FakeVercel.listen}). It enforces what the real API does that our code touches:
- *  - `Authorization: Bearer <token>` with a token that is currently connected, otherwise 401; a token scoped to a team needs that `teamId`
+ *  - `Authorization: Bearer <token>` with a token that is currently connected, otherwise 403 with `invalidToken: true` (`missingToken: true` with no
+ *    header), as the live API answers (it never sends 401 for a bad token; `failNext('http_401')` still models one). A valid token without access to
+ *    the project or team is a 403 WITHOUT those flags; a token scoped to a team needs that `teamId`
  *    query, otherwise 403; a request with no `User-Agent` header is refused (403);
- *  - `GET /v10/projects` (the token check made when a person connects Vercel) answers 200 under the same rules, with no projects listed;
+ *  - `GET /v10/projects` (the token check made when a person connects Vercel, and the project-name read) answers 200 under the same rules, listing the
+ *    projects of the token's scope (the team named by `teamId`, or the personal ones) as Vercel does: full objects with an `id` and a `name`, newest first,
+ *    `limit` capped at 100 (ASSUMED, the published reference lists no bound), `pagination: { count, next, prev }`;
+ *  - `GET /v2/teams/{teamId}` answers the Team object (`id`, `slug`, `name`, plus fields we must not keep) for the team the token is scoped to; a
+ *    personal token, or another team, is 403; an unknown team is 404 (ASSUMED: the published reference shows this object only inside the list);
  *  - the project name is a real Vercel name (lowercase letters, digits, `.`, `_`, `-`; at most 100 characters; no `---`), otherwise 400; an
  *    unknown project is 404, never an empty list;
  *  - a listing carries what Vercel's does, including the fields our code must NOT keep: every entry has an id, a type, a `value` (plain
@@ -50,6 +56,8 @@ interface Answer {
   raw?: string;
 }
 
+const accountIdOfPersonal = 'user_fake';
+
 export class FakeVercel {
   readonly calls: FakeVercelCall[] = [];
   /** Page size the fake uses when the request asks for more (a server may cap `limit`); tests lower it to force paging. */
@@ -57,6 +65,9 @@ export class FakeVercel {
   /** Models an API that ignores `until`: every call answers the first page, with a `next` cursor while more remain. */
   ignoresPagingParams = false;
   private readonly projects = new Map<string, FakeVercelEnv[]>();
+  /** project -> the team it belongs to (absent: a personal project). */
+  private readonly projectTeam = new Map<string, string>();
+  private readonly teams = new Map<string, string>();
   /** account -> token, for accounts that have a connection. */
   private readonly tokens = new Map<string, { token: string; teamId?: string }>();
   private readonly revoked = new Set<string>();
@@ -86,8 +97,14 @@ export class FakeVercel {
     this.tokens.delete(accountId);
     return this;
   }
-  project(name: string, envs: FakeVercelEnv[] = []): this {
+  project(name: string, envs: FakeVercelEnv[] = [], opts: { teamId?: string } = {}): this {
     this.projects.set(name, envs);
+    if (opts.teamId !== undefined) this.projectTeam.set(name, opts.teamId);
+    return this;
+  }
+  /** A team Vercel knows, with the display name the screen shows. */
+  team(teamId: string, name: string): this {
+    this.teams.set(teamId, name);
     return this;
   }
   setVar(project: string, env: FakeVercelEnv): this {
@@ -129,6 +146,7 @@ export class FakeVercel {
     const match = /^\/v10\/projects\/([^/]+)\/env$/.exec(url.pathname);
     // P8d-2: `GET /v10/projects` (the connect-time token check) answers under the same auth rules; the listing itself is not modelled.
     const isProjectList = url.pathname === '/v10/projects';
+    const teamMatch = /^\/v2\/teams\/(team_[A-Za-z0-9]+)$/.exec(url.pathname);
     const project = match ? decodeURIComponent(match[1]!) : '';
     const bearer = /^Bearer (.+)$/.exec(req.headers['authorization'] ?? '')?.[1] ?? null;
     this.calls.push({ accountId: bearer === null ? null : this.accountOf(bearer), project, query: url.searchParams.toString(), userAgent: req.headers['user-agent'] ?? null });
@@ -141,13 +159,33 @@ export class FakeVercel {
       const status = Number(mode.slice(5));
       return { status, body: { error: { code: 'failure' } }, ...(status === 429 ? { headers: { 'retry-after': '30' } } : {}) };
     }
-    if (req.method !== 'GET' || (!match && !isProjectList)) return { status: 404, body: { error: { code: 'not_found' } } };
+    if (req.method !== 'GET' || (!match && !isProjectList && !teamMatch)) return { status: 404, body: { error: { code: 'not_found' } } };
     const account = bearer === null ? null : this.accountOf(bearer);
-    if (bearer === null || account === null || this.revoked.has(bearer)) return { status: 401, body: { error: { code: 'forbidden' } } };
+    // Verified live (2026-10-22): Vercel answers a missing, unknown, revoked or expired token with 403 and `invalidToken`/`missingToken`, never 401.
+    if (bearer === null) return { status: 403, body: { error: { code: 'forbidden', message: 'Not authorized', missingToken: true } } };
+    if (account === null || this.revoked.has(bearer)) return { status: 403, body: { error: { code: 'forbidden', message: 'Not authorized', invalidToken: true } } };
     if (!req.headers['user-agent']) return { status: 403, body: { error: { code: 'forbidden', message: 'a User-Agent header is required' } } };
     const team = this.tokens.get(account)!.teamId;
+    if (teamMatch) {
+      if (url.search !== '' || team !== teamMatch[1]) return { status: url.search !== '' ? 400 : 403, body: { error: { code: 'forbidden' } } };
+      const name = this.teams.get(teamMatch[1]!);
+      return name === undefined ? { status: 404, body: { error: { code: 'not_found' } } } : { status: 200, body: { id: teamMatch[1], slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'), name, createdAt: 1_630_748_523_395, membership: { role: 'OWNER' } } };
+    }
     if (team !== undefined && url.searchParams.get('teamId') !== team) return { status: 403, body: { error: { code: 'forbidden' } } };
-    if (isProjectList) return { status: 200, body: { projects: [], pagination: { count: 0, next: null, prev: null } } };
+    if (isProjectList) {
+      const limitText = url.searchParams.get('limit');
+      const asked = limitText === null ? 20 : Number(limitText);
+      if (!Number.isInteger(asked) || asked < 1) return { status: 400, body: { error: { code: 'bad_request' } } };
+      const own = [...this.projects.keys()].filter((n) => this.projectTeam.get(n) === team);
+      const page = own.slice(0, Math.min(asked, 100));
+      return {
+        status: 200,
+        body: {
+          projects: page.map((name, i) => ({ id: `prj_${name.replace(/[^a-z0-9]/g, '')}${i}`, name, accountId: team ?? accountIdOfPersonal, framework: 'nextjs', createdAt: 1_700_000_000_000 - i, link: { type: 'github', repo: 'private/repo' } })),
+          pagination: { count: page.length, next: own.length > page.length ? 1_700_000_000_000 - page.length : null, prev: null },
+        },
+      };
+    }
     if (!/^[a-z0-9._-]{1,100}$/.test(project) || project.includes('---')) return { status: 400, body: { error: { code: 'bad_request' } } };
     if (url.searchParams.getAll('decrypt').includes('true')) return { status: 400, body: { error: { code: 'bad_request', message: 'decrypt is not allowed' } } };
     // `limit` and `until` are not in Vercel's published reference for this endpoint; the fake treats them as hints and invents no bounds.

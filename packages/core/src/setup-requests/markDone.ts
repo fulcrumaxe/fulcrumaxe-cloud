@@ -5,6 +5,7 @@ import { markWorkPending } from '../pendingWork.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { runSetupRequestCheck, type VercelEnvSource } from './checks.js';
 import { markSetupRequestDoneInTx, reopenSetupRequest, stampMarkDoneCheck, type SetupRequest } from './store.js';
+import { UNREADABLE_REASONS } from './copy.js';
 
 /**
  * D#598 P8b-2: Mark done with its own immediate check. The check sweep lists open requests only, so a request a person has just closed is
@@ -62,7 +63,7 @@ export async function markSetupRequestDone(deps: MarkDoneDeps, input: { accountI
   const outcome = await runSetupRequestCheck(deps.envSource, input.accountId, marked.request);
   if (outcome === null) return done({});
   try {
-    if (outcome.pass || outcome.reason === 'check_unavailable') {
+    if (outcome.pass || UNREADABLE_REASONS.includes(outcome.reason)) {
       const request = await withTenant(deps.pool, input.accountId, input.userId, undefined, (client) => stampMarkDoneCheck(client, { id: marked.request.id }));
       return done({ request, check: outcome.pass ? 'passed' : 'unreachable' });
     }

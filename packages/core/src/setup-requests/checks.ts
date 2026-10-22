@@ -17,7 +17,11 @@ export interface VercelEnvEntry {
 }
 
 /** `skipped` counts listing entries that were malformed and left out (never their content); absent means none. */
-export type VercelEnvListing = { ok: true; entries: readonly VercelEnvEntry[]; skipped?: number } | { ok: false };
+/**
+ * `reason` on a failure says why the token could not read, when Vercel said so: 401 `token_rejected` (revoked or expired), 403 or 404 `token_cannot_read`
+ * (this token cannot see this project). Anything else (timeouts, 5xx, bad bodies) carries none and stays `check_unavailable`.
+ */
+export type VercelEnvListing = { ok: true; entries: readonly VercelEnvEntry[]; skipped?: number } | { ok: false; reason?: 'token_rejected' | 'token_cannot_read' };
 
 /**
  * Where the check gets a project's variable NAMES. `available` is false for a source with no credential behind it: the status line then
@@ -89,7 +93,7 @@ export async function runSetupRequestCheck(source: VercelEnvSource, accountId: s
     // fx-swallow-ok: a provider that cannot be asked is the result (check_unavailable), reported to the person as such, never a pass
     return { pass: false, reason: 'check_unavailable' };
   }
-  if (!listing.ok) return { pass: false, reason: 'check_unavailable' };
+  if (!listing.ok) return { pass: false, reason: listing.reason ?? 'check_unavailable' };
   const named = listing.entries.filter((e) => e.name === request.envName);
   if (named.length === 0) return { pass: false, reason: 'env_var_missing' };
   if (!named.some((e) => e.targets.includes(request.targetEnvironment))) return { pass: false, reason: 'env_var_wrong_target' };

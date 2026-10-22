@@ -47,6 +47,25 @@ describe("createPinnedVercelFetch refusals", () => {
     expect(t.sent[0]).toMatchObject({ host: "api.vercel.com", method: "GET", path: "/v10/projects?limit=1&teamId=team_abc1", body: null });
   });
 
+  it("sends the team's display-name read, GET /v2/teams/<team id> with no query, and nothing else under /v2/teams", async () => {
+    const t = recorder({ status: 200, body: '{"name":"Acme"}' });
+    const res = await t.fetchImpl(new URL("https://api.vercel.com/v2/teams/team_abc1"), { headers: { Authorization: "Bearer tok" } });
+    expect(res.status).toBe(200);
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0]).toMatchObject({ host: "api.vercel.com", method: "GET", path: "/v2/teams/team_abc1", body: null });
+    for (const bad of [
+      "https://api.vercel.com/v2/teams", // the list of every team the token can see
+      "https://api.vercel.com/v2/teams/team_abc1?slug=x",
+      "https://api.vercel.com/v2/teams/team_abc1/members",
+      "https://api.vercel.com/v2/teams/abc1",
+      "https://api.vercel.com/v2/teams/team_abc1/",
+      "https://api.vercel.com/v2/user",
+    ]) {
+      await expect(t.fetchImpl(new URL(bad), { headers: { Authorization: "Bearer tok" } }), bad).rejects.toThrow(/pinned vercel fetch/);
+    }
+    expect(t.sent).toHaveLength(1);
+  });
+
   it("refuses any other host, scheme, port, credentials, fragment, path, method, body or decrypt=true, before resolving or sending anything", async () => {
     const t = recorder();
     const bad: Array<[string, RequestInit?]> = [

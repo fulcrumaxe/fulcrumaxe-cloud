@@ -993,6 +993,29 @@ export interface Operations {
       }) | (null);
     };
   };
+  getVercelConnectionDetails: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      state: "not_connected" | "connected" | "revoked_or_expired";
+      names: (({
+        status: "ok";
+        team_name: string | null;
+        projects: Array<string>;
+        truncated: boolean;
+      }) | ({
+        status: "unavailable";
+      })) | (null);
+      check: ({
+        result: "read" | "cannot_read" | "token_rejected" | "unreachable";
+        reason: string | null;
+        sentence: string;
+        project: string;
+        ran_at: string;
+      }) | (null);
+    };
+  };
   getVercelConnection: {
     path: undefined;
     query: undefined;
@@ -4260,6 +4283,17 @@ export const operations = {
   testModelConnection: {
     method: "POST",
     path: "/api/v1/model-connection/test",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  getVercelConnectionDetails: {
+    method: "GET",
+    path: "/api/v1/vercel-connection/details",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
