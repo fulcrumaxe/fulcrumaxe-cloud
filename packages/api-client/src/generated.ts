@@ -691,6 +691,19 @@ export interface Operations {
         text: string;
       }) | (null);
       runner_checked_in_at?: string | null;
+      check?: {
+        argv: Array<string>;
+        dev_shell: boolean;
+        timeout_s: number;
+        no_dev_shell: boolean;
+        result: ({
+          exit_code: (number) | (null);
+          duration_ms: number;
+          timed_out: boolean;
+          skipped_tests: (number) | (null);
+          summary: string;
+        }) | (null);
+      };
     };
   };
   getRunContext: {

@@ -73,6 +73,19 @@ export const runInsightResponseSchema = z.object({
   wait: runWaitSchema.nullable().optional(),
   // D#6 C42-3: a runner run only: when the runner last checked in while the run is live, else null.
   runner_checked_in_at: z.string().nullable().optional(),
+  // D#6 R-CHK-3b: a runner run whose signed job carried the repository's approved check (absent when it carried none). The command is the job's own, `result` is the recorded
+  // outcome (null before the runner reports, or when the run ended earlier), `no_dev_shell` is the runner's note that the check needs a dev shell and none was built.
+  check: z
+    .object({
+      argv: z.array(z.string()),
+      dev_shell: z.boolean(),
+      timeout_s: z.number().int(),
+      no_dev_shell: z.boolean(),
+      result: z
+        .object({ exit_code: z.number().int().nullable(), duration_ms: z.number().int(), timed_out: z.boolean(), skipped_tests: z.number().int().nullable(), summary: z.string() })
+        .nullable(),
+    })
+    .optional(),
 });
 
 export const runInsightRoutes: RouteEntry[] = [
@@ -82,7 +95,7 @@ export const runInsightRoutes: RouteEntry[] = [
     operationId: "getRunInsight",
     summary: "What one agent run did, what it cost and who pays",
     description:
-      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. Model text is plain text: show it as text only.",
+      "Session only, member. The run's facts (model, head commit, limits now in effect for its role), its work item and PR, the agent's outcome read from its envelope (summary, verdict, findings, branch; null when it recorded none), model usage and sandbox compute shown separately with the source that pays each, the run's activity lines, and the runs it continues or that continue it. For a run on the person's runner whose job carried the repository's approved check: that check (the command as approved, a dev-shell flag, a time cap), its recorded result (exit status, duration, skipped tests, the last output as plain text) and whether the runner had no dev shell to run it in. Model text and check output are plain text: show them as text only.",
     principals: ["session"],
     minRole: "member",
     idempotency: "never",

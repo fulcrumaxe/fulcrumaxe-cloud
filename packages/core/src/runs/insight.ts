@@ -1,7 +1,9 @@
+import type { PoolClient } from 'pg';
 import { NotFoundError } from '../tenancy/errors.js';
 import { withTenant } from '../tenancy/withTenant.js';
 import { resolveRunLimits } from '../run-limits/resolve.js';
 import type { RunLimits } from '../run-limits/types.js';
+import { RUNNER_EVENT_KIND } from '../onboarding/previewProgress.js';
 import { ACTIVITY_LIMITS, RUNNER_VERDICT_PR_SQL, capText, readRunLines, runnerCheckedInAt, type ActivityLine } from '../work-items/activity.js';
 import type { RunsReadCtx } from './read.js';
 import { RUNNER_USAGE_COLUMN, runnerUsageStateOf, toRunnerUsage, type RunnerUsage, type RunnerUsageState } from './runnerUsage.js';
@@ -85,6 +87,19 @@ export interface RunInsight {
   runner_usage_note?: string | null;
   /** D#6 C42-3: a runner run only (absent on any other): when the runner last checked in, while the run is live (its lease expiry less the lease length); null once it has ended. */
   runner_checked_in_at?: string | null;
+  /**
+   * D#6 R-CHK-3b: a runner run whose signed job carried the repository's approved check (absent otherwise: no check was set when the job was made). `argv`, `dev_shell`
+   * and `timeout_s` are the job's own, so they are what was approved for THIS run, not what the repository says now. `result` is the run_checks row (null until the
+   * runner reports done, or when the run ended before the check); `no_dev_shell` is the runner's `run_ended` detail saying the check needs a dev shell and none was built.
+   */
+  check?: RunCheck;
+}
+export interface RunCheck {
+  argv: string[];
+  dev_shell: boolean;
+  timeout_s: number;
+  no_dev_shell: boolean;
+  result: { exit_code: number | null; duration_ms: number; timed_out: boolean; skipped_tests: number | null; summary: string } | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -122,6 +137,7 @@ interface RunRow {
   om_true_up_usd: string | null;
   runner_usage_json: unknown;
   lease_expires_at: Date | null;
+  job_check: unknown;
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -138,6 +154,35 @@ function outsideMeterOf(r: Pick<RunRow, 'om_state' | 'om_reason' | 'om_true_up_u
   };
 }
 const costSource = (s: string): CostSource | null => (COST_SOURCES.includes(s) ? (s as CostSource) : null);
+
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const CHECK_SUMMARY_CHARS = 4096;
+
+/** The run's check, read from facts the cloud itself recorded: the signed job's `check`, the `run_checks` row and the runner's `check_no_dev_shell` run_ended event. Null when the job carried none. */
+async function readRunCheck(client: Pick<PoolClient, 'query'>, id: string, job: unknown): Promise<RunCheck | null> {
+  const j = job !== null && typeof job === 'object' && !Array.isArray(job) ? (job as Record<string, unknown>) : null;
+  if (j === null || !Array.isArray(j.argv) || !j.argv.every(isStr) || typeof j.dev_shell !== 'boolean' || !Number.isInteger(j.timeout_s)) return null;
+  const row = (
+    await client.query<{ exit_code: number | null; duration_ms: string; timed_out: boolean; skipped_tests: number | null; summary: string }>(
+      `SELECT exit_code, duration_ms::text AS duration_ms, timed_out, skipped_tests, left(summary, ${CHECK_SUMMARY_CHARS}) AS summary FROM run_checks WHERE run_id = $1::uuid`,
+      [id],
+    )
+  ).rows[0];
+  const noDevShell =
+    (
+      await client.query(
+        `SELECT 1 FROM run_events WHERE run_id = $1::uuid AND kind = $2::text AND payload->>'type' = 'run_ended' AND payload->>'reason' = 'check_failed' AND payload->>'detail' = 'check_no_dev_shell' LIMIT 1`,
+        [id, RUNNER_EVENT_KIND],
+      )
+    ).rowCount === 1;
+  return {
+    argv: j.argv as string[],
+    dev_shell: j.dev_shell,
+    timeout_s: j.timeout_s as number,
+    no_dev_shell: noDevShell,
+    result: row ? { exit_code: row.exit_code, duration_ms: Number(row.duration_ms), timed_out: row.timed_out, skipped_tests: row.skipped_tests, summary: row.summary } : null,
+  };
+}
 
 export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunInsight> {
   if (!UUID_RE.test(id)) throw new NotFoundError(`run ${id} not found`);
@@ -162,7 +207,8 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
                                    END)
                     FROM (SELECT f FROM jsonb_array_elements(envelope->'findings') AS f LIMIT $4::int) s
                 ) END AS findings,
-                om_state, om_reason, om_true_up_usd, lease_expires_at, ${RUNNER_USAGE_COLUMN}
+                om_state, om_reason, om_true_up_usd, lease_expires_at, ${RUNNER_USAGE_COLUMN},
+                CASE WHEN runtime = 'runner' THEN job_signed #> '{job,check}' END AS job_check
            FROM agent_runs WHERE id = $1::uuid`,
         [id, ACTIVITY_LIMITS.maxSummaryChars + 1, INSIGHT_LIMITS.maxFindingChars + 1, INSIGHT_LIMITS.maxFindings + 1],
       )
@@ -222,6 +268,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       )
     ).rows[0]?.code;
 
+    const check = await readRunCheck(client, id, r.job_check);
     const runnerUsage = toRunnerUsage(r.runtime, r.runner_usage_json);
     const usageState = runnerUsageStateOf(r.runtime, r.status, runnerUsage);
     return {
@@ -272,6 +319,7 @@ export async function getRunInsight(ctx: RunsReadCtx, id: string): Promise<RunIn
       children,
       outside_meter: outsideMeterOf(r),
       ...(runnerUsage === undefined ? {} : { runner_usage: runnerUsage, runner_usage_state: usageState?.state ?? null, runner_usage_note: usageState?.note ?? null, runner_checked_in_at: runnerCheckedInAt(r.status, r.lease_expires_at) }),
+      ...(check === null ? {} : { check }),
     };
   });
 }
