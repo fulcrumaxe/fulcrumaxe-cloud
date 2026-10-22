@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { DoneReply, DoneRetryReply, NOT_RECORDED_MEASURE, type Check, type DoneCheck, RUNNER_ELIGIBLE_ROLES, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
 import { createPool } from "@fx/db/src/pool.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { insertRunner } from "@fx/db/test/helpers/runnerFixtures.js";
@@ -74,7 +74,7 @@ describe("runner done [pg]", () => {
   }
 
   /** A pending runner run with a real signed job, ready to be claimed. */
-  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number } } = {}): Promise<string> {
+  async function pending(o: { role?: string; specVersion?: string | null; continues?: { branch: string; prNumber?: number }; check?: Check } = {}): Promise<string> {
     const id = randomUUID();
     const job: Job = {
       schema_version: 1,
@@ -93,6 +93,7 @@ describe("runner done [pg]", () => {
       issued_at: new Date(T0 - 1000).toISOString(),
       expires_at: new Date(T0 + 72 * 3_600_000).toISOString(),
       key_id: "k1",
+      ...(o.check ? { check: o.check } : {}),
     };
     await admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, initiated_by, spec_version_id, created_at)
@@ -224,6 +225,7 @@ describe("runner done [pg]", () => {
         { outcome: "failed", failureReason: "pr_rejected", prNumber: null },
         { outcome: "failed", failureReason: "internal_error", prNumber: 9 },
         { outcome: "failed", failureReason: "taken_over", prNumber: null },
+        { outcome: "failed", failureReason: "check_failed", prNumber: null },
       ];
       expect(new Set(cases.map((c) => c.failureReason))).toEqual(new Set(DONE_FAILURE_REASONS));
       for (const verdict of cases) {
@@ -454,6 +456,123 @@ describe("runner done [pg]", () => {
     });
   });
 
+  // D#6 R-CHK-3 (C47): the approved check's result is a row of its own (migration 0888), written in the transaction that ends the run.
+  describe("the approved check (R-CHK-3)", () => {
+    const checkRows = async (id: string) => (await admin.query("SELECT exit_code, duration_ms, timed_out, skipped_tests, summary FROM run_checks WHERE account_id = $1 AND run_id = $2", [A.accountId, id])).rows;
+    const result = (over: Partial<DoneCheck> = {}): DoneCheck => ({ exit_code: 1, duration_ms: 2_460_000, timed_out: false, skipped_tests: 4, summary: "FAIL src/a.test.ts", ...over });
+    const result0 = (over: Partial<DoneCheck>): DoneCheck => ({ exit_code: 0, duration_ms: 1000, timed_out: false, skipped_tests: null, summary: "ok", ...over });
+    const failedVerdict = (branch: string): RunnerDoneVerdict => ({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch });
+
+    it("a failed check ends the run failed check_failed with its row, a log line, the run branch recorded without a pull request, and a replay gives the verdict back", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const verdict = failedVerdict(`fx/${id}-g${g}`);
+      expect(await facade.finishRunnerDone({ ...lease(id, g), verdict, check: result() })).toEqual({ kind: "recorded", verdict });
+      expect((await row(id)).status).toBe("failed");
+      expect(await checkRows(id)).toEqual([{ exit_code: 1, duration_ms: "2460000", timed_out: false, skipped_tests: 4, summary: "FAIL src/a.test.ts" }]);
+      expect((await statusEvents(id)).at(-1)).toEqual({ from: "running", to: "failed", failureReason: "check_failed", viaRunnerDone: true, prNumber: null, branch: verdict.branch });
+      const logged = (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'run.check_ended'", [id])).rows.map((r) => r.payload);
+      expect(logged).toEqual([{ exit_code: 1, timed_out: false, duration_ms: 2_460_000 }]);
+      expect(await facade.beginRunnerDone(lease(id, g))).toEqual({ kind: "replay", verdict });
+      // The same reading the job issuer uses to find the branch a fix round continues.
+      expect(await withTenant(writerPool, A.accountId, (c) => readRecordedRunnerBranch(c, { accountId: A.accountId, runId: id }))).toBe(verdict.branch);
+      // Recorded once: a second finish is the stored verdict, with no second row.
+      expect((await facade.finishRunnerDone({ ...lease(id, g), verdict, check: result({ exit_code: 2 }) })).kind).toBe("replay");
+      expect(await checkRows(id)).toHaveLength(1);
+    });
+
+    it("a check killed at its cap has no exit status and says so; one that never started records exit null, 0 ms and an empty summary", async () => {
+      const killed = await pending();
+      const gk = await claimed(killed);
+      await facade.finishRunnerDone({ ...lease(killed, gk), verdict: failedVerdict(`fx/${killed}-g${gk}`), check: result({ exit_code: null, timed_out: true, duration_ms: 5_400_000, skipped_tests: null }) });
+      expect(await checkRows(killed)).toEqual([{ exit_code: null, duration_ms: "5400000", timed_out: true, skipped_tests: null, summary: "FAIL src/a.test.ts" }]);
+      const never = await pending();
+      const gn = await claimed(never);
+      await facade.finishRunnerDone({ ...lease(never, gn), verdict: failedVerdict(`fx/${never}-g${gn}`), check: result({ exit_code: null, duration_ms: 0, skipped_tests: null, summary: "" }) });
+      expect(await checkRows(never)).toEqual([{ exit_code: null, duration_ms: "0", timed_out: false, skipped_tests: null, summary: "" }]);
+    });
+
+    it("a passing check is recorded beside a success, the summary is redacted again and cut at 4096 characters", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const token = `ghp_${"A1b2".repeat(9)}`;
+      await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, check: result({ exit_code: 0, summary: `token ${token}\n${"y".repeat(5000)}`.slice(0, 4096) }) });
+      const [only] = await checkRows(id);
+      expect(only!.exit_code).toBe(0);
+      expect(only!.summary).not.toContain(token);
+      expect(only!.summary.length).toBeLessThanOrEqual(4096);
+    });
+
+    // A result the table cannot hold must not abort the finish (the run would stay running with no fix round) and must not count as a pass: it is stored in its nearest storable form,
+    // with a note in the summary, and the run ends failed check_failed whatever verdict came with it.
+    it.each([
+      ["a NUL in the summary", { summary: "bad\u0000output" }, "summary", { summary: "badoutput\ncheck result out of range: summary" }],
+      ["a summary over the cap", { summary: "x".repeat(5000) }, "summary", {}],
+      ["a killed check with an exit status", { timed_out: true, exit_code: 0 }, "exit_code", { exit_code: null, timed_out: true }],
+      ["an exit status out of range", { exit_code: 2_000_000 }, "exit_code", { exit_code: 1_000_000 }],
+      ["a negative duration", { duration_ms: -5 }, "duration_ms", { duration_ms: "0" }],
+      ["a duration past a week", { duration_ms: 999_999_999_999 }, "duration_ms", { duration_ms: "604800000" }],
+      ["a negative skipped count", { skipped_tests: -1 }, "skipped_tests", { skipped_tests: 0 }],
+      ["a skipped count out of range", { skipped_tests: 999_999_999 }, "skipped_tests", { skipped_tests: 100_000_000 }],
+    ] as Array<[string, Partial<DoneCheck>, string, Record<string, unknown>]>)("%s: the run ends failed check_failed with a row, even beside a success verdict", async (_name, bad, field, expectedRow) => {
+      const id = await pending();
+      const g = await claimed(id);
+      const result = await facade.finishRunnerDone({ ...lease(id, g), verdict: ok, check: result0(bad) });
+      expect(result).toMatchObject({ kind: "recorded", verdict: { outcome: "failed", failureReason: "check_failed", prNumber: null } });
+      expect((await row(id)).status).toBe("failed");
+      expect((await statusEvents(id)).at(-1)).toMatchObject({ to: "failed", failureReason: "check_failed", viaRunnerDone: true });
+      const rows = await checkRows(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.summary).toContain(`check result out of range: ${field}`);
+      expect(rows[0]).toMatchObject(expectedRow);
+      expect(rows[0]!.summary.length).toBeLessThanOrEqual(4096);
+      expect(rows[0]!.summary).not.toContain("\u0000");
+    });
+
+    it("an out-of-range result keeps the run branch of the verdict it arrives with, so the fix round can continue from it", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const branch = `fx/${id}-g${g}`;
+      await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(branch), check: result0({ duration_ms: -1 }) });
+      expect(await withTenant(writerPool, A.accountId, (c) => readRecordedRunnerBranch(c, { accountId: A.accountId, runId: id }))).toBe(branch);
+    });
+
+    it("a taken-over run records no result, whatever the runner sent", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await facade.finishRunnerDone({ ...lease(id, g), verdict: { outcome: "failed", failureReason: "taken_over", prNumber: null }, check: result({ exit_code: 0 }) });
+      expect(await checkRows(id)).toEqual([]);
+    });
+
+    it("a run branch rides on a check_failed verdict only; any other verdict with a branch and no pull request is refused, as is an item branch with none", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      const branch = `fx/${id}-g${g}`;
+      for (const verdict of [{ outcome: "failed", failureReason: "no_commit", prNumber: null, branch }, { outcome: "failed", failureReason: "check_failed", prNumber: null, branch: "main" }] as RunnerDoneVerdict[]) {
+        await expect(facade.finishRunnerDone({ ...lease(id, g), verdict }), JSON.stringify(verdict)).rejects.toBeInstanceOf(RunActionInputError);
+      }
+      await nothingWritten(id);
+    });
+
+    it("the table: the run's own tenant reads its rows and no other does; the runner login inserts for its tenant and can neither update, delete nor insert for another account; the database refuses an exit status on a killed check", async () => {
+      const id = await pending();
+      const g = await claimed(id);
+      await facade.finishRunnerDone({ ...lease(id, g), verdict: failedVerdict(`fx/${id}-g${g}`), check: result() });
+      const mine = await withTenant(appPool, A.accountId, (c) => c.query("SELECT 1 FROM run_checks WHERE run_id = $1", [id]));
+      expect(mine.rowCount).toBe(1);
+      const other = await seedAccount(admin, randomUUID());
+      const theirs = await withTenant(appPool, other.accountId, (c) => c.query("SELECT 1 FROM run_checks WHERE run_id = $1", [id]));
+      expect(theirs.rowCount).toBe(0);
+      await expect(withTenant(appPool, A.accountId, (c) => c.query("DELETE FROM run_checks WHERE run_id = $1", [id]))).rejects.toThrow();
+      await expect(withTenant(writerPool, A.accountId, (c) => c.query("UPDATE run_checks SET exit_code = 0 WHERE run_id = $1", [id]))).rejects.toThrow();
+      await expect(withTenant(writerPool, A.accountId, (c) => c.query("DELETE FROM run_checks WHERE run_id = $1", [id]))).rejects.toThrow();
+      await expect(withTenant(writerPool, other.accountId, (c) => c.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, 0, 1, false, '')", [A.accountId, id]))).rejects.toThrow();
+      const second = await pending();
+      await expect(admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, 1, 1, true, '')", [A.accountId, second])).rejects.toThrow();
+      await expect(admin.query("INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, summary) VALUES ($1, $2, 1, 1, false, $3)", [A.accountId, second, "z".repeat(4097)])).rejects.toThrow();
+    });
+  });
+
   describe("the item's pull request branch is recorded only for the run bound to it (D#599 PL-2b-1)", () => {
     const ITEM = "fx/issue-12";
     const bind = (runId: string, payload: Record<string, unknown>) =>
@@ -613,6 +732,67 @@ describe("runner done [pg]", () => {
       expect(fake.calls.length).toBe(calls);
       expect(await statusEvents(id)).toEqual(events);
       expect(await row(id)).toMatchObject({ cc_session_id: "7f0c1d2e-aaaa", envelope: { verdict: "pass" } });
+    });
+
+    // D#6 R-CHK-3 (C47). The runner sends run_ended(check_failed) FIRST and `done` with its `check` after it: the event ends nothing, the `done` is accepted (no stop), and the run ends
+    // `failed check_failed` from the check. Nothing is asked of GitHub and no pull request is opened.
+    describe("the approved check, in the order a runner sends it", () => {
+      const CHECK: Check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+      const runEnded = (id: string, g: number, extra: object = {}) =>
+        run(() => ingestEvents(deps, send(eventsPath(id), { run_id: id, lease_generation: g, events: [{ seq: 0, ts: new Date().toISOString(), type: "run_ended", reason: "check_failed", ...extra }] }), id));
+      const storedEnded = async (id: string) => (await admin.query("SELECT payload FROM run_events WHERE run_id = $1 AND kind = 'runner.event' AND payload->>'type' = 'run_ended'", [id])).rows.map((r) => r.payload);
+      const checkRow = async (id: string) => (await admin.query("SELECT exit_code, duration_ms, timed_out, skipped_tests, summary FROM run_checks WHERE run_id = $1", [id])).rows;
+
+      it("a failed check: run_ended(check_failed) leaves the run running, then done is recorded failed check_failed with the check, the branch kept, no GitHub call", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        expect((await runEnded(id, g)).status).toBe(200);
+        expect((await row(id)).status).toBe("running");
+        const summary = "check files changed by this branch: scripts/check.sh, package.json\nFAIL src/a.test.ts";
+        const res = await done(id, g, { check: { exit_code: 1, duration_ms: 2_460_000, timed_out: false, skipped_tests: 4, summary } });
+        expect(res.status).toBe(200);
+        expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect((await row(id)).status).toBe("failed");
+        expect(fake.calls).toEqual([]);
+        expect(fake.repos.get("acme/widgets")!.pulls).toHaveLength(0);
+        // The first summary line is the base-commit pin (#386); it is stored exactly as sent.
+        expect(await checkRow(id)).toEqual([{ exit_code: 1, duration_ms: "2460000", timed_out: false, skipped_tests: 4, summary }]);
+        expect((await statusEvents(id)).at(-1)).toEqual({ from: "running", to: "failed", failureReason: "check_failed", viaRunnerDone: true, prNumber: null, branch: BRANCH(id, g) });
+        expect(await storedEnded(id)).toEqual([{ type: "run_ended", reason: "check_failed", seq: 0, ts: expect.any(String) }]);
+        // The repeat replays the stored verdict and writes nothing more.
+        expect(await done(id, g, { check: { exit_code: 0, duration_ms: 1, timed_out: false, skipped_tests: null, summary: "" } })).toEqual(res);
+        expect(await checkRow(id)).toHaveLength(1);
+      });
+
+      it("no dev shell: run_ended(check_failed, check_no_dev_shell), then done with exit null, 0 ms and an empty summary: failed check_failed, the detail kept on the event", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        expect((await runEnded(id, g, { detail: "check_no_dev_shell" })).status).toBe(200);
+        expect((await row(id)).status).toBe("running");
+        const res = await done(id, g, { check: { exit_code: null, duration_ms: 0, timed_out: false, skipped_tests: null, summary: "" } });
+        expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+        expect(await checkRow(id)).toEqual([{ exit_code: null, duration_ms: "0", timed_out: false, skipped_tests: null, summary: "" }]);
+        expect((await storedEnded(id))[0]).toMatchObject({ reason: "check_failed", detail: "check_no_dev_shell" });
+        expect(fake.calls).toEqual([]);
+      });
+
+      it("a check that timed out ends the same way, with no exit status", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        expect((await runEnded(id, g)).status).toBe(200);
+        const res = await done(id, g, { check: { exit_code: null, duration_ms: 5_400_000, timed_out: true, skipped_tests: null, summary: "tail" } });
+        expect(DoneReply.parse(res.body).failure_reason).toBe("check_failed");
+        expect(await checkRow(id)).toEqual([{ exit_code: null, duration_ms: "5400000", timed_out: true, skipped_tests: null, summary: "tail" }]);
+      });
+
+      it("a passing check goes on to the pull request, and its row is recorded with the success", async () => {
+        const id = await pending({ specVersion: await spec(["src/**"]), check: CHECK });
+        const g = await claimRoute(id);
+        fake.pushBranch(fake.repos.get("acme/widgets")!, BRANCH(id, g), { files: [{ path: "src/a.ts", changeType: "MODIFIED" }], aheadBy: 1 });
+        const res = await done(id, g, { check: { exit_code: 0, duration_ms: 41 * 60_000, timed_out: false, skipped_tests: 3, summary: "ok" } });
+        expect(DoneReply.parse(res.body)).toEqual({ continue: false, outcome: "succeeded", failure_reason: null, pr_number: 1 });
+        expect(await checkRow(id)).toHaveLength(1);
+      });
     });
 
     it("a violation ends the run failed with the pull request closed, and the repeat replays it", async () => {

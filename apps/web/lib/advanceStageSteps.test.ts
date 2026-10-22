@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AdvanceItem, AdvanceStepResult } from "@fx/worker";
-import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, decisionBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
+import { buildBody, buildFailedBody, buildOutcomeBody, cancelRunBody, checkFixBody, decisionBody, panelBody, specBody, stageBody } from "./advanceStageSteps";
 import type { AdvanceWorker } from "./advanceSteps";
 
 const ACCOUNT = "11111111-1111-4111-8111-111111111111";
@@ -207,5 +207,22 @@ describe("buildOutcomeBody: the platform settles a paired sandbox build (D#598 P
 
   it("a worker without the settle (or a test double) behaves exactly as before", async () => {
     expect(await buildOutcomeBody(done(), ACCOUNT, "r")).toMatchObject({ status: "succeeded", done: true });
+  });
+});
+
+// D#6 R-CHK-3: the fix round after a failed check hands the workflow a status word, a run id and a reason code, never anything the worker read.
+describe("checkFixBody", () => {
+  const fix = (answer: { ok: true; runId: string } | { ok: false; reason: string }) => ({ advanceStartCheckFix: vi.fn(async () => answer) });
+  it("a started round is its run id", async () => {
+    const w = fix({ ok: true, runId: "run-fix-1" });
+    expect(await checkFixBody(w, WHO, "run-b")).toEqual({ status: "started", runId: "run-fix-1", reason: null });
+    expect(w.advanceStartCheckFix).toHaveBeenCalledWith(WHO, "run-b");
+  });
+  it("the spent limit is the one refusal that escalates; any other refusal is only a refusal", async () => {
+    expect(await checkFixBody(fix({ ok: false, reason: "check_rounds_used" }), WHO, "r")).toEqual({ status: "escalated", runId: null, reason: "check_rounds_used" });
+    expect(await checkFixBody(fix({ ok: false, reason: "already_running" }), WHO, "r")).toEqual({ status: "refused", runId: null, reason: "already_running" });
+  });
+  it("no worker is a refusal", async () => {
+    expect(await checkFixBody(null, WHO, "r")).toEqual({ status: "refused", runId: null, reason: "worker_unavailable" });
   });
 });

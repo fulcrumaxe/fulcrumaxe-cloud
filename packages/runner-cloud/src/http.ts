@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { CURRENT_PROTOCOL_VERSION, MAX_CREATED_SKEW_SECONDS, MIN_SUPPORTED_PROTOCOL_VERSION, type ClaimCapacity, type ContextLedgerBody, type DoneCheck, type Job, type LocalOnlyEvent, type SignedJob, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { reportError } from "@fx/telemetry";
 import type { RunPullRequestPort } from "./runPullRequest.js";
 
@@ -246,13 +246,15 @@ export interface RunnerLeaseOps {
     agentOutput?: Record<string, unknown>;
     /** The runner's context ledger (D#600 CX-1b), already schema-checked; absent from an older runner. */
     contextLedger?: ContextLedgerBody;
+    /** D#6 R-CHK-3: the check result, passed on only when the run's own signed job carried a check; recorded with the verdict. */
+    check?: DoneCheck;
   }): Promise<{ kind: "recorded"; verdict: RunnerDoneStored } | { kind: "fenced"; reason: StopReason } | { kind: "replay"; verdict: RunnerDoneStored }>;
 }
 
 /** What a finished-by-`done` run stored (the shape of packages/worker `RunnerDoneVerdict`, which this package cannot import). */
 export interface RunnerDoneStored {
   outcome: "succeeded" | "failed";
-  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | "taken_over" | null;
+  failureReason: "no_commit" | "scope_unknown" | "scope_violation" | "pr_rejected" | "internal_error" | "taken_over" | "check_failed" | null;
   prNumber: number | null;
   /** The run branch the verdict was judged on (`fx/<run>-g<generation>` for a fresh run, a continuation's own branch otherwise); set exactly when `prNumber` is (C25 section 1.2). */
   branch?: string;

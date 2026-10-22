@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Job } from "@fulcrumaxe/runner-protocol";
+import { DoneReply, DoneRetryReply, StopReply, sha256Text, signJob, type Check, type DoneCheck, type Job } from "@fulcrumaxe/runner-protocol";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import {
   DISPATCH_BASE_KIND,
@@ -96,6 +96,8 @@ describe("done route [pg]", () => {
     port?: "real" | "none";
     /** false: the run has no work item. */
     workItem?: false;
+    /** D#6 R-CHK-3: the approved check the run's signed job carries. */
+    check?: Check;
   }
 
   const file = (path: string, changeType: FakeChangeType = "MODIFIED") => ({ path, changeType });
@@ -134,6 +136,7 @@ describe("done route [pg]", () => {
       issued_at: "2026-10-10T12:00:00.000Z",
       expires_at: "2026-10-13T12:00:00.000Z",
       key_id: "k1",
+      ...(o.check ? { check: o.check } : {}),
     };
     await h.admin.query(
       `INSERT INTO agent_runs (id, account_id, work_item_id, role, runtime, status, execution_mode, dispatch_repo_id, job_signed, runner_id, lease_generation, lease_expires_at, started_at, spec_version_id)
@@ -224,6 +227,91 @@ describe("done route [pg]", () => {
     it("scope entries with brace groups and Next.js segments are held to (C23)", async () => {
       const s = await scene({ scope: ["apps/web/app/api/runner/runs/[id]/{events,done}/route.ts"], files: [file("apps/web/app/api/runner/runs/[id]/done/route.ts")] });
       expect(parsedDone(await s.call())).toMatchObject({ outcome: "succeeded" });
+    });
+  });
+
+  // D#6 R-CHK-3 (C47). Ids in this block are prefixed `chk3-` in the comments only: the scene makes its own random run ids.
+  describe("the approved check (R-CHK-3)", () => {
+    const APPROVED: Check = { argv: ["bash", "scripts/check.sh"], dev_shell: true, timeout_s: 5400 };
+    const report = (over: Partial<DoneCheck> = {}): DoneCheck => ({ exit_code: 0, duration_ms: 41 * 60_000, timed_out: false, skipped_tests: 3, summary: "ok", ...over });
+
+    it("a passing check goes on to the commit and scope tests, and its result is passed on to be recorded with the verdict", async () => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report() } });
+      expect(parsedDone(res)).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+      expect(finished[0]!.check).toEqual(report());
+    });
+
+    it.each([
+      ["exit status 1", report({ exit_code: 1, summary: "FAIL src/a.test.ts" })],
+      ["a kill at the cap", report({ exit_code: null, timed_out: true, duration_ms: 5_400_000 })],
+      ["never started (no exit status)", report({ exit_code: null, duration_ms: 0, skipped_tests: null, summary: "" })],
+    ])("a check that ends with %s ends the run failed check_failed BEFORE GitHub is asked anything: no pull request, no commit or scope test, the run branch recorded", async (_name, failing) => {
+      const s = await scene({ check: APPROVED, files: [file("outside/x.ts", "ADDED")] });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: failing } });
+      expect(parsedDone(res)).toEqual({ continue: false, outcome: "failed", failure_reason: "check_failed", pr_number: null });
+      expect(labels(s.fake)).toEqual([]);
+      expect(s.repo.pulls).toHaveLength(0);
+      expect(verdictOf()).toEqual({ outcome: "failed", failureReason: "check_failed", prNumber: null, branch: s.branch });
+      expect(finished[0]!.check).toEqual(failing);
+    });
+
+    it("the outcome comes from the check, never from agentOutput: a runner claiming success in its envelope still ends check_failed", async () => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, agentOutput: { verdict: "pass", summary: "all green" }, check: report({ exit_code: 2 }) } });
+      expect(parsedDone(res).failure_reason).toBe("check_failed");
+    });
+
+    it("a job that carried a check and a done with no result is not judged either way: internal_error, GitHub never asked, no result recorded", async () => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call();
+      expect(parsedDone(res)).toEqual({ continue: false, outcome: "failed", failure_reason: "internal_error", pr_number: null });
+      expect(labels(s.fake)).toEqual([]);
+      expect(finished[0]).not.toHaveProperty("check");
+    });
+
+    it("a result for a job that carried no check is not the cloud's to record: it is ignored and the run is judged as before", async () => {
+      const s = await scene();
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report({ exit_code: 9 }) } });
+      expect(parsedDone(res)).toMatchObject({ outcome: "succeeded", pr_number: 1 });
+      expect(finished[0]).not.toHaveProperty("check");
+    });
+
+    it("a passing check does not hide a missing commit: no_commit, with the result still recorded", async () => {
+      const s = await scene({ check: APPROVED, aheadBy: 0 });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report() } });
+      expect(parsedDone(res).failure_reason).toBe("no_commit");
+      expect(finished[0]!.check).toEqual(report());
+    });
+
+    // Whatever the schema lets through, a result outside what the table can hold never counts as a pass and is handed on in its storable form; where the schema refuses it, nothing is judged.
+    it.each([
+      ["a NUL in the summary", { summary: "a\u0000b" }],
+      ["an exit status after a kill", { timed_out: true, exit_code: 0 }],
+      ["an exit status out of range", { exit_code: 5_000_000 }],
+      ["a negative duration", { duration_ms: -1 }],
+      ["a skipped count out of range", { skipped_tests: 999_999_999 }],
+    ] as Array<[string, Partial<DoneCheck>]>)("%s is never a pass", async (_name, bad) => {
+      const s = await scene({ check: APPROVED });
+      const res = await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: report(bad) } });
+      if (res.status === 400) {
+        expect(finished).toHaveLength(0);
+        return;
+      }
+      expect(parsedDone(res)).toMatchObject({ outcome: "failed", failure_reason: "check_failed", pr_number: null });
+      expect(labels(s.fake)).toEqual([]);
+      const stored = finished[0]!.check as DoneCheck;
+      expect(stored.summary).toContain("check result out of range");
+      expect(stored.summary).not.toContain("\u0000");
+      expect(stored.timed_out && stored.exit_code !== null).toBe(false);
+    });
+
+    it("the body is strict: an unknown key inside check, a string exit code and a summary over 4096 characters are all refused", async () => {
+      const s = await scene({ check: APPROVED });
+      for (const bad of [{ ...report(), extra: 1 }, { ...report(), exit_code: "0" }, report({ summary: "x".repeat(4097) })]) {
+        expect((await s.call({ body: { run_id: s.runId, lease_generation: s.gen, check: bad } })).status).toBe(400);
+      }
+      expect(finished).toHaveLength(0);
     });
   });
 

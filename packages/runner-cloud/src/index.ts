@@ -23,6 +23,7 @@ export { CLAIM_PATH, claimRun } from "./claim.js";
 export { HEARTBEAT_PATH, heartbeatRun } from "./heartbeat.js";
 export { eventsPath, ingestEvents } from "./ingestEvents.js";
 export { DISPATCH_BASE_KIND, branchOf, donePath, doneRun } from "./done.js";
+export { CHECK_BOUNDS, normaliseCheck } from "./checkResult.js";
 export { gitTicketRun } from "./gitTicket.js";
 export { PLANE_PUSH_REPORT_CODES, planePushPairingRun, planePushReportRun, planePushTokenRun } from "./planePush.js";
 export {

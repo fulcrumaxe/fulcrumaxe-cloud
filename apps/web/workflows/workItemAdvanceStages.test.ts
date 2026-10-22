@@ -51,12 +51,15 @@ interface SetupOptions {
   light?: { status: string; reason: string | null; version: number | null };
   /** What the decision step answers (D#7 DP4b-2); `none` when absent. */
   decision?: DecisionStepCode;
+  /** D#6 R-CHK-3: what the check fix start answers, one per call (the last repeats); a started run named `run-fix-<n>` when absent. */
+  checkFix?: AdvanceRunStart[];
 }
 
 function setup(o: SetupOptions = {}) {
   const buildOutcomes = [...(o.buildOutcomes ?? [{ status: "succeeded", done: true, envelope: { summary: "I changed the footer." } }])];
   const stages = [...(o.stages ?? ["pr_opened"])];
   let loads = 0;
+  let checkFixCalls = 0;
   const worker = {
     advanceLoadItem: vi.fn(async () => {
       const item = o.item ?? TRIAGED;
@@ -76,6 +79,10 @@ function setup(o: SetupOptions = {}) {
     advanceSpec: vi.fn(async (): Promise<AdvanceStepResult> => o.spec ?? { status: "published", stage: "spec_ready", version: 1 }),
     advanceBuild: vi.fn(async (): Promise<AdvanceStepResult> => (o.buildSequence?.length ? o.buildSequence.shift()! : undefined) ?? o.build ?? { status: "started", runId: "run-b", branch: "fx/issue-7" }),
     advanceBuildFailed: vi.fn(async (): Promise<AdvanceStepResult> => ({ status: "recorded", stage: "needs_human" })),
+    advanceStartCheckFix: vi.fn(async (_who: unknown, _failed: string): Promise<AdvanceRunStart> => {
+      checkFixCalls += 1;
+      return o.checkFix ? (o.checkFix[checkFixCalls - 1] ?? o.checkFix.at(-1)!) : { ok: true as const, runId: `run-fix-${checkFixCalls}` };
+    }),
     advanceDecision: vi.fn(async (): Promise<DecisionStepCode> => o.decision ?? "none"),
     advanceCancel: vi.fn(async () => undefined),
     advanceRecordEvent: vi.fn(async () => ({ recorded: true })),
@@ -364,6 +371,63 @@ describe("the build for an item at Spec ready", () => {
     expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", `run_${status}`);
     expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "build", reason: `run_${status}`, recorded: "recorded" });
     expect(w.advanceRecordEvent).toHaveBeenCalledWith({ accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 }, { kind: "stopped", dedupeKey: "build:run-b", code: `build_run_${status}`, runId: "run-b" });
+  });
+
+  // D#6 R-CHK-3 (C47): a run whose approved check failed has no pull request; each fix round resumes it, up to the worker's limit.
+  describe("a run whose approved check failed", () => {
+    const checkFailed = (tail: string): AdvanceRunOutcome => ({ status: "failed", done: true, envelope: null, runtime: "runner", tailRunId: tail, failureReason: "check_failed" });
+    const WHO = { accountId: ACCOUNT, userId: ARGS.userId, workItemId: ITEM, haltEpoch: 0 };
+
+    it("starts a fix round on the failed run, waits for it like the build, and goes on to the pull request and the review when it passes", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? { status: "succeeded", done: true, envelope: { summary: "Fixed the failing test." } } : undefined) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+      expect(w.advanceStartCheckFix).toHaveBeenCalledWith(WHO, "run-b");
+      expect(w.advanceBuildFailed).not.toHaveBeenCalled();
+      expect(events()).toContain("advance.check_fix_started");
+      expect(logs.find((l) => l.event === "advance.check_fix_started")).toMatchObject({ work_item_id: ITEM, run_id: "run-fix-1", round: 1 });
+      expect(logs.find((l) => l.event === "advance.built")).toMatchObject({ run_id: "run-fix-1" });
+    });
+
+    it("a round that fails its check again is followed by another, each on the newest failed run", async () => {
+      const w = setup({
+        item: AT_SPEC,
+        buildOutcomes: [checkFailed("run-b")],
+        outcomeFor: (id) => (id === "run-fix-1" ? checkFailed("run-fix-1") : id === "run-fix-2" ? { status: "succeeded", done: true, envelope: { summary: "Done." } } : undefined),
+      });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual(REVIEW_STOPS);
+      expect(w.advanceStartCheckFix.mock.calls.map((c) => c[1])).toEqual(["run-b", "run-fix-1"]);
+    });
+
+    it("past the limit the item goes to Needs human under check_rounds_used, with the stopped fact, and the workflow ends failed", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? checkFailed("run-fix-1") : undefined), checkFix: [{ ok: true, runId: "run-fix-1" }, { ok: false, reason: "check_rounds_used" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_check_rounds_used" });
+      expect(w.advanceBuildFailed).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-fix-1", "check_rounds_used");
+      expect(w.advanceRecordEvent).toHaveBeenCalledWith(WHO, { kind: "stopped", dedupeKey: "build:run-fix-1", code: "build_check_rounds_used", runId: "run-fix-1" });
+      expect(logs.at(-1)).toMatchObject({ event: "advance.failed", at: "check_fix", reason: "check_rounds_used", recorded: "recorded" });
+    });
+
+    it("a fix round the worker could not start (another refusal) ends like any failed build: recorded under the run's own failure code, not as a spent limit", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], checkFix: [{ ok: false, reason: "already_running" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_failed" });
+      expect(w.advanceStartCheckFix).toHaveBeenCalledTimes(1);
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-b", "run_failed");
+    });
+
+    it("a run that failed another way gets no check fix round", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [{ status: "failed", done: true, envelope: null, runtime: "runner", tailRunId: "run-b", failureReason: "no_commit" }] });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_failed" });
+      expect(w.advanceStartCheckFix).not.toHaveBeenCalled();
+    });
+
+    it("a fix round that never ends is given up on like the build: cancelled and recorded wait_timeout", async () => {
+      const w = setup({ item: AT_SPEC, buildOutcomes: [checkFailed("run-b")], outcomeFor: (id) => (id === "run-fix-1" ? { status: "running", done: false, envelope: null, tailRunId: "run-fix-1" } : undefined) });
+      expect(await workItemAdvanceWorkflow(ARGS)).toEqual({ status: "failed", detail: "build_wait_timeout" });
+      expect(world.sleeps).toBe(250);
+      expect(w.advanceCancel).toHaveBeenCalledWith(expect.objectContaining({ workItemId: ITEM }), "run-fix-1");
+      expect(w.advanceBuildFailed).toHaveBeenCalledWith(ACCOUNT, ITEM, "run-fix-1", "wait_timeout");
+    });
   });
 
   it("a run that succeeded but opened no pull request is recorded after the grace period", async () => {

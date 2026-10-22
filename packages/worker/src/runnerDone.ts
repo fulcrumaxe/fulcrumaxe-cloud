@@ -1,7 +1,8 @@
 import type { Pool, PoolClient } from "pg";
-import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type StopReason } from "@fulcrumaxe/runner-protocol";
+import { ITEM_PR_BRANCH, MAX_ENVELOPE_INPUT_BYTES, redactText, NOT_RECORDED_MEASURE, RUNNER_LEASE_SECONDS, SESSION_ID_PATTERN, contextLedgerFromWire, redactDeep, type ContextLedgerBody, type ContextSection, type DoneCheck, type StopReason } from "@fulcrumaxe/runner-protocol";
 import { withTenant } from "@fx/db/src/withTenant.js";
-import { RUNNER_RUN_BRANCH, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { RUNNER_RUN_BRANCH, insertRunEvent, noteRunnerActivityCap, readBoundItemBranch, recordContextLedger, writeRunStatusOn, type FailureReason } from "@fx/runner";
+import { normaliseCheck } from "@fx/runner-cloud";
 import { guarded, RunActionInputError } from "./runActions.js";
 import { leaseVerdict, requireLease, stopReasonFor, type HeartbeatRunnerRunInput } from "./runnerClaims.js";
 import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
@@ -31,7 +32,7 @@ import { runnerLimits, type RunnerLimitsSource } from "./runnerLimits.js";
  */
 
 /** The reasons a `done` can end a run `failed` with. All are `FailureReason`s (checked at compile time). */
-export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error", "taken_over"] as const satisfies readonly FailureReason[];
+export const DONE_FAILURE_REASONS = ["no_commit", "scope_unknown", "scope_violation", "pr_rejected", "internal_error", "taken_over", "check_failed"] as const satisfies readonly FailureReason[];
 export type DoneFailureReason = (typeof DONE_FAILURE_REASONS)[number];
 
 /** What the cloud decided about a run that sent `done`. */
@@ -55,6 +56,8 @@ export interface FinishRunnerDoneInput extends HeartbeatRunnerRunInput {
   verdict: RunnerDoneVerdict;
   /** The runner's context ledger (D#600 CX-1b), already schema-checked by the route. Absent from an older runner: the run's row is then `partial`. */
   contextLedger?: ContextLedgerBody;
+  /** D#6 R-CHK-3: the check result (already schema-checked, and only for a run whose signed job carried a check). Recorded in `run_checks` in the transaction that ends the run. */
+  check?: DoneCheck;
   /** The Claude Code session the run ended in (already shape-checked by the protocol); stored in `cc_session_id`. */
   sessionId?: string;
   /** The runner's own output envelope: advisory, stored after redaction and capped in bytes. */
@@ -89,7 +92,7 @@ function requireVerdict(verdict: RunnerDoneVerdict): void {
   if (!okReason) throw new RunActionInputError();
   if (verdict.prNumber !== null && !(Number.isSafeInteger(verdict.prNumber) && verdict.prNumber >= 1)) throw new RunActionInputError();
   // A run branch, or (D#599 PL-2b) the item's pull request branch; the latter is checked against the run's bound event in `requireBoundBranch`, in the writing transaction.
-  if (verdict.branch !== undefined && !(verdict.prNumber !== null && typeof verdict.branch === "string" && (RUNNER_RUN_BRANCH.test(verdict.branch) || ITEM_PR_BRANCH.test(verdict.branch)))) throw new RunActionInputError();
+  if (verdict.branch !== undefined && !((verdict.prNumber !== null || (verdict.failureReason === "check_failed" && RUNNER_RUN_BRANCH.test(verdict.branch))) && typeof verdict.branch === "string" && (RUNNER_RUN_BRANCH.test(verdict.branch) || ITEM_PR_BRANCH.test(verdict.branch)))) throw new RunActionInputError();
   if (verdict.headOid !== undefined && !(verdict.prNumber !== null && typeof verdict.headOid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(verdict.headOid))) throw new RunActionInputError();
   if (verdict.prHttpStatus !== undefined && !(Number.isInteger(verdict.prHttpStatus) && verdict.prHttpStatus >= 100 && verdict.prHttpStatus <= 599)) throw new RunActionInputError();
   if (verdict.detail !== undefined && !((verdict.detail === "renamed" || verdict.detail === "unknown_change_type" || verdict.detail === "no_file_list") && verdict.failureReason === "scope_unknown")) throw new RunActionInputError();
@@ -144,7 +147,7 @@ async function storedVerdict(client: PoolClient, i: HeartbeatRunnerRunInput): Pr
     outcome: p.to,
     failureReason,
     prNumber,
-    ...(prNumber !== null && typeof p.branch === "string" && (RUNNER_RUN_BRANCH.test(p.branch) || (ITEM_PR_BRANCH.test(p.branch) && bound?.branch === p.branch && bound.prNumber === prNumber)) ? { branch: p.branch } : {}),
+    ...((prNumber !== null || failureReason === "check_failed") && typeof p.branch === "string" && (RUNNER_RUN_BRANCH.test(p.branch) || (ITEM_PR_BRANCH.test(p.branch) && bound?.branch === p.branch && bound.prNumber === prNumber)) ? { branch: p.branch } : {}),
     ...(prNumber !== null && typeof p.headOid === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(p.headOid) ? { headOid: p.headOid } : {}),
     ...(typeof p.prHttpStatus === "number" ? { prHttpStatus: p.prHttpStatus } : {}),
     ...(p.detail === "renamed" || p.detail === "unknown_change_type" || p.detail === "no_file_list" ? { detail: p.detail } : {}),
@@ -174,6 +177,24 @@ async function recordRunnerLedger(client: PoolClient, input: FinishRunnerDoneInp
   }
 }
 
+/** The `run_events` kind the check's end is logged under (D#6 R-CHK-3): numbers and a flag only, so the activity log can show the duration without the output. */
+export const CHECK_ENDED_EVENT = "run.check_ended";
+
+/**
+ * D#6 R-CHK-3: the check's row, beside the status move. The summary is redacted again here (the runner already did) and cut at the column's cap; the row and the log
+ * line commit with the verdict or not at all. A taken-over run records none (nothing the runner reported counts after the owner took over).
+ */
+async function recordRunnerCheck(client: PoolClient, input: FinishRunnerDoneInput): Promise<void> {
+  const check = input.check;
+  if (check === undefined || input.verdict.failureReason === "taken_over") return;
+  const summary = redactText(check.summary, []).slice(0, 4096);
+  await client.query(
+    `INSERT INTO run_checks (account_id, run_id, exit_code, duration_ms, timed_out, skipped_tests, summary) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [input.accountId, input.runId, check.exit_code, check.duration_ms, check.timed_out, check.skipped_tests, summary],
+  );
+  await insertRunEvent(client, input.accountId, input.runId, CHECK_ENDED_EVENT, { exit_code: check.exit_code, timed_out: check.timed_out, duration_ms: check.duration_ms });
+}
+
 /** Package-internal: `runnerPool` is the runner login's pool and is captured here, never exposed. */
 export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = {}): RunnerDoneFacade {
   const now = deps.now ?? Date.now;
@@ -199,9 +220,17 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
       guarded(async () => {
         requireLease(input);
         requireVerdict(input.verdict);
+        // D#6 R-CHK-3: a check result that cannot be stored is stored in its nearest storable form and fails the check, whatever verdict came with it; it never aborts the finish below.
+        const norm = input.check === undefined ? null : normaliseCheck(input.check);
+        const forced = norm !== null && norm.outOfContract !== null && input.verdict.failureReason !== "taken_over" && input.verdict.failureReason !== "check_failed";
+        const rec: FinishRunnerDoneInput = {
+          ...input,
+          ...(norm === null ? {} : { check: norm.check }),
+          ...(forced ? { verdict: { outcome: "failed", failureReason: "check_failed", prNumber: null, ...(input.verdict.branch !== undefined && RUNNER_RUN_BRANCH.test(input.verdict.branch) ? { branch: input.verdict.branch } : {}) } } : {}),
+        };
         if (input.sessionId !== undefined && (typeof input.sessionId !== "string" || !SESSION_ID_PATTERN.test(input.sessionId))) throw new RunActionInputError();
         // A taken-over run stores no envelope (D#6 R4a-7): nothing the agent said before the owner stopped it can count as a result.
-        const envelope = input.agentOutput === undefined || input.verdict.failureReason === "taken_over" ? undefined : storedAgentOutput(input.agentOutput);
+        const envelope = input.agentOutput === undefined || rec.verdict.failureReason === "taken_over" ? undefined : storedAgentOutput(input.agentOutput);
         const at = new Date(now());
         return withTenant(runnerPool, input.accountId, async (client): Promise<FinishRunnerDoneResult> => {
           // Fenced again, in the transaction that writes: the lease may have ended while GitHub was being asked. The fence takes the run
@@ -212,7 +241,7 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
             return stored ? { kind: "replay", verdict: stored } : { kind: "fenced", reason: stopReasonFor(held) };
           }
           if (held !== "ok") return { kind: "fenced", reason: stopReasonFor(held) };
-          const { verdict } = input;
+          const { verdict } = rec;
           await requireBoundBranch(client, input, verdict);
           const moved = await writeRunStatusOn(client, {
             accountId: input.accountId,
@@ -226,7 +255,8 @@ export function createRunnerDoneFacade(runnerPool: Pool, deps: RunnerDoneDeps = 
           // Held under the row lock, so this is a defence: the run was running a statement ago.
           if (!moved.updated) return { kind: "fenced", reason: "run_terminal" };
           await noteRunnerActivityCap(client, { accountId: input.accountId, runId: input.runId });
-          await recordRunnerLedger(client, input);
+          await recordRunnerLedger(client, rec);
+          await recordRunnerCheck(client, rec);
           return { kind: "recorded", verdict };
         });
       }),

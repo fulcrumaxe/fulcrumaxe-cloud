@@ -91,6 +91,8 @@ export type FailureReason =
   | "push_rejected"
   /** D#6 R4a-7: the owner took the run over by hand on the runner machine (`fx-runner attach --take-over`). The run ends with no result and no push, so it never counts toward a merge gate. */
   | "taken_over"
+  /** D#6 R-CHK-3 (C47): the repository's approved check failed, timed out or could not start. The run ends with no pull request and a fix round follows (a limited number). */
+  | "check_failed"
   /** D#599 HO-2b: the run stopped at a checkpoint (or at its deadline) so the other side can continue it. It ends `cancelled` with no result and no pull request; its work is on the run branch and the next run continues from there. */
   | "handed_off";
 

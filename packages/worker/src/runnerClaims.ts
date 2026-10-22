@@ -193,6 +193,8 @@ const RUN_ENDED_ENDINGS = {
  * D#599 HO-1: `handed_off` is deliberately not in the table. The event is stored and ends nothing here; the handoff completion
  * (HO-2b, `runHandoffs.ts`) makes the parent terminal and the child run in one transaction, after this batch commits (`onHandedOff`),
  * because it must ask GitHub for the branch head first and a network call does not belong inside this transaction.
+ * D#6 R-CHK-3 (C47): `check_failed` is not in it either. The runner sends that event first, then `done`; the event is stored and ends nothing, so the `done` that follows is
+ * accepted and the cloud ends the run from its `check` (`failed check_failed`), never from the event alone.
  */
 const RUN_ENDED_ENDINGS_BY_REASON: Readonly<Partial<Record<RunEndedReason, Ending>>> = RUN_ENDED_ENDINGS;
 
