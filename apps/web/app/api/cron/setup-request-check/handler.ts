@@ -20,7 +20,7 @@ export interface SetupRequestCheckHandlerDeps {
   cronSecret: string;
   /** Called only after the request is authenticated and the tick has decided to connect. Null while not configured. */
   getWorker(): Promise<SetupRequestCheckWorker | null>;
-  /** Where a provider's variable names come from. Production binds the unavailable source until the customer's connection exists. */
+  /** Where a provider's variable names come from. Production binds the account's own sealed Vercel token (D#598 P8d-2); an account with none is unavailable. */
   envSource: VercelEnvSource;
   log(line: string): void;
   now?(): number;

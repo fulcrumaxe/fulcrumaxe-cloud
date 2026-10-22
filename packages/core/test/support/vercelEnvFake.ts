@@ -9,6 +9,7 @@ import { createVercelEnvSource, VERCEL_USER_AGENT, type VercelCredentialResolver
  * real socket ({@link FakeVercel.listen}). It enforces what the real API does that our code touches:
  *  - `Authorization: Bearer <token>` with a token that is currently connected, otherwise 401; a token scoped to a team needs that `teamId`
  *    query, otherwise 403; a request with no `User-Agent` header is refused (403);
+ *  - `GET /v10/projects` (the token check made when a person connects Vercel) answers 200 under the same rules, with no projects listed;
  *  - the project name is a real Vercel name (lowercase letters, digits, `.`, `_`, `-`; at most 100 characters; no `---`), otherwise 400; an
  *    unknown project is 404, never an empty list;
  *  - a listing carries what Vercel's does, including the fields our code must NOT keep: every entry has an id, a type, a `value` (plain
@@ -72,6 +73,14 @@ export class FakeVercel {
     if (t) this.revoked.add(t.token);
     return this;
   }
+  /** The token {@link connect} gave the account, for a test that plays the person pasting it. */
+  tokenOf(accountId: string): string {
+    return this.tokens.get(accountId)?.token ?? 'unknown';
+  }
+  /** The fake-side account a token belongs to (null if none), for a test that revokes a token it only knows by value. */
+  accountOfToken(token: string): string | null {
+    return this.accountOf(token);
+  }
   /** The account loses its connection: the lookup answers unavailable. */
   disconnect(accountId: string): this {
     this.tokens.delete(accountId);
@@ -118,6 +127,8 @@ export class FakeVercel {
   handle(req: { method: string; url: string; headers: Record<string, string | undefined> }): Answer {
     const url = new URL(req.url, 'http://fake.invalid');
     const match = /^\/v10\/projects\/([^/]+)\/env$/.exec(url.pathname);
+    // P8d-2: `GET /v10/projects` (the connect-time token check) answers under the same auth rules; the listing itself is not modelled.
+    const isProjectList = url.pathname === '/v10/projects';
     const project = match ? decodeURIComponent(match[1]!) : '';
     const bearer = /^Bearer (.+)$/.exec(req.headers['authorization'] ?? '')?.[1] ?? null;
     this.calls.push({ accountId: bearer === null ? null : this.accountOf(bearer), project, query: url.searchParams.toString(), userAgent: req.headers['user-agent'] ?? null });
@@ -130,12 +141,13 @@ export class FakeVercel {
       const status = Number(mode.slice(5));
       return { status, body: { error: { code: 'failure' } }, ...(status === 429 ? { headers: { 'retry-after': '30' } } : {}) };
     }
-    if (req.method !== 'GET' || !match) return { status: 404, body: { error: { code: 'not_found' } } };
+    if (req.method !== 'GET' || (!match && !isProjectList)) return { status: 404, body: { error: { code: 'not_found' } } };
     const account = bearer === null ? null : this.accountOf(bearer);
     if (bearer === null || account === null || this.revoked.has(bearer)) return { status: 401, body: { error: { code: 'forbidden' } } };
     if (!req.headers['user-agent']) return { status: 403, body: { error: { code: 'forbidden', message: 'a User-Agent header is required' } } };
     const team = this.tokens.get(account)!.teamId;
     if (team !== undefined && url.searchParams.get('teamId') !== team) return { status: 403, body: { error: { code: 'forbidden' } } };
+    if (isProjectList) return { status: 200, body: { projects: [], pagination: { count: 0, next: null, prev: null } } };
     if (!/^[a-z0-9._-]{1,100}$/.test(project) || project.includes('---')) return { status: 400, body: { error: { code: 'bad_request' } } };
     if (url.searchParams.getAll('decrypt').includes('true')) return { status: 400, body: { error: { code: 'bad_request', message: 'decrypt is not allowed' } } };
     // `limit` and `until` are not in Vercel's published reference for this endpoint; the fake treats them as hints and invents no bounds.

@@ -86,6 +86,8 @@ export const SESSION_LIMITS = {
   /** Saving or testing a model key calls the provider's key-check endpoint on every call: one per 10 s, 30 an hour, per account. */
   modelKeyPut: { name: "model-key-put", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
   modelKeyTest: { name: "model-key-test", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
+  /** Connecting or replacing a Vercel token calls Vercel to check it each time: same budget as a model key. */
+  vercelTokenPut: { name: "vercel-token-put", account: [{ limit: 1, seconds: 10 }, { limit: 30, seconds: 3600 }] },
   /** Building a GitHub install link, and minting a repo-create link (which also has its own hour and day count). */
   githubInstallUrl: { name: "github-install-url", account: TEN_PER_MINUTE },
   githubCreateIntent: { name: "github-create-intent", account: TEN_PER_MINUTE },

@@ -1,0 +1,14 @@
+{
+  "state": "connected",
+  "fingerprint": "a3f9",
+  "team_id": null,
+  "connected_at": "2026-10-22T10:15:30.000Z",
+  "rotated_at": null,
+  "rejected_at": null,
+  "copy": {
+    "headline": "Vercel is connected",
+    "detail": "Your token (fingerprint a3f9) is in use. We read variable names only, never their values.",
+    "action": "Replace token",
+    "secondary_action": "Disconnect"
+  }
+}

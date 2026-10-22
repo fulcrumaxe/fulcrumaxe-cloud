@@ -332,6 +332,8 @@ describe('session rate limits', () => {
         createRepoIntent: 'github-create-intent',
         putModelConnection: 'model-key-put',
         testModelConnection: 'model-key-test',
+        connectVercel: 'vercel-token-put',
+        rotateVercelConnection: 'vercel-token-put',
         createPortalSession: 'stripe',
         createCheckoutSession: 'stripe',
         createSiteSetupCheckout: 'stripe',

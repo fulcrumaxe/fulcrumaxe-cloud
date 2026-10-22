@@ -952,6 +952,74 @@ export interface Operations {
       }) | (null);
     };
   };
+  getVercelConnection: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      state: "not_connected" | "connected" | "rejected";
+      fingerprint: string | null;
+      team_id: string | null;
+      connected_at: string | null;
+      rotated_at: string | null;
+      rejected_at: string | null;
+      copy: {
+        headline: string;
+        detail: string;
+        action: string | null;
+        secondary_action: string | null;
+      };
+    };
+  };
+  rotateVercelConnection: {
+    path: undefined;
+    query: undefined;
+    body: {
+      token: string;
+    };
+    response: {
+      state: "not_connected" | "connected" | "rejected";
+      fingerprint: string | null;
+      team_id: string | null;
+      connected_at: string | null;
+      rotated_at: string | null;
+      rejected_at: string | null;
+      copy: {
+        headline: string;
+        detail: string;
+        action: string | null;
+        secondary_action: string | null;
+      };
+    };
+  };
+  connectVercel: {
+    path: undefined;
+    query: undefined;
+    body: {
+      token: string;
+      team_id?: string;
+    };
+    response: {
+      state: "not_connected" | "connected" | "rejected";
+      fingerprint: string | null;
+      team_id: string | null;
+      connected_at: string | null;
+      rotated_at: string | null;
+      rejected_at: string | null;
+      copy: {
+        headline: string;
+        detail: string;
+        action: string | null;
+        secondary_action: string | null;
+      };
+    };
+  };
+  disconnectVercel: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: null;
+  };
   listRepos: {
     path: undefined;
     query: {
@@ -4129,6 +4197,50 @@ export const operations = {
   testModelConnection: {
     method: "POST",
     path: "/api/v1/model-connection/test",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  getVercelConnection: {
+    method: "GET",
+    path: "/api/v1/vercel-connection",
+    tokenAccess: true,
+    scope: "read",
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
+  },
+  rotateVercelConnection: {
+    method: "PUT",
+    path: "/api/v1/vercel-connection",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  connectVercel: {
+    method: "POST",
+    path: "/api/v1/vercel-connection",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
+  disconnectVercel: {
+    method: "DELETE",
+    path: "/api/v1/vercel-connection",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,
