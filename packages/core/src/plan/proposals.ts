@@ -13,6 +13,8 @@ import {
   type InboxSection,
   type Verification,
 } from './proposalVerification.js';
+import { verifyWait, type VerifyWait } from './proposalVerifyLimits.js';
+import { discoverySettings, type DiscoverySettings } from '@fx/plan-data';
 
 /**
  * D#483 S3-L2a: the proposal inbox reads and decisions.
@@ -118,6 +120,8 @@ export interface ProposalEvidence {
 export interface ProposalDetail extends ProposalRow {
   claims: ProposalClaim[];
   evidence: ProposalEvidence[];
+  /** D#483 S4-b2b: why a `pending` proposal is waiting (null otherwise); see proposalVerifyLimits.ts. */
+  verify_wait: VerifyWait | null;
 }
 
 /** A refusal the decision functions raise, carried as its stable code. The API answers it 409 (400 for `invalid_cursor`). */
@@ -286,10 +290,22 @@ const CLAIM_ORDER = `CASE verdict WHEN 'refuted' THEN 0 WHEN 'unverifiable' THEN
  * app_user under the tables' own RLS, so another account's id is a 404 and an inactive account reads empty lists. Excerpts and
  * claim text are returned exactly as stored. The links are built here from the repository row (see buildEvidenceUrl).
  */
-export async function getProposal(ctx: ProposalCtx, id: string): Promise<ProposalDetail> {
+export async function getProposal(ctx: ProposalCtx, id: string, settings: () => DiscoverySettings = discoverySettings): Promise<ProposalDetail> {
   if (!UUID_RE.test(id)) throw new NotFoundError('proposal not found');
   return proposalTenant(ctx, async (c) => {
     const row = await readProposal(c, id);
+    // The same predicate the verifier sweep refuses by (one function, no second count).
+    // Plan data that cannot be read must not fail the detail read: the wait degrades to `queued` and a code is logged. The sweep, which
+    // reads the same settings, fails closed and verifies nothing.
+    let current: DiscoverySettings;
+    try {
+      current = settings();
+    } catch {
+      // fx-swallow-ok: the read degrades to `queued` and a fixed code is logged (never the error's text); the sweep fails closed on the same settings
+      console.warn(JSON.stringify({ event: 'proposal.verify_wait_degraded', code: 'discovery_settings_failed' }));
+      current = { on: false, code: 'discovery_unconfigured' };
+    }
+    const wait = await verifyWait(c, ctx.principal.accountId, row, current);
     const claims = await c.query(
       `SELECT id, text, verdict, refute_code, checked_sha, checked_at FROM proposal_claims WHERE proposal_id = $1::uuid
        ORDER BY ${CLAIM_ORDER}, text COLLATE "C", id`,
@@ -309,6 +325,7 @@ export async function getProposal(ctx: ProposalCtx, id: string): Promise<Proposa
         url: buildEvidenceUrl({ kind: r.kind as EvidenceKind, ref: r.ref as string, commit_sha: r.commit_sha as string | null }, owner),
         created_at: iso(r.created_at)!,
       })),
+      verify_wait: wait,
     };
   });
 }

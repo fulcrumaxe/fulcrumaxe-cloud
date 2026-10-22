@@ -3169,6 +3169,7 @@ export interface Operations {
           url: string | null;
           created_at: string;
         }>;
+        verify_wait: ("queued" | "daily_limit" | "daily_spend") | (null);
       };
     };
   };

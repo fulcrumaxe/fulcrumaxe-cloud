@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ProposalRefusedError, type RequestStart } from "@fx/core/src/plan/index.js";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
 import { INBOX_SECTIONS, VERIFICATIONS } from "@fx/core/src/plan/proposalVerification.js";
+import { VERIFY_WAITS } from "@fx/core/src/plan/proposalVerifyLimits.js";
 import type { RouteContext } from "../registry.js";
 import { ApiError, ProposalRefusedApiError } from "../errors.js";
 import { mapDbError, runActionDeps } from "./run-actions.js";
@@ -89,6 +90,12 @@ const evidenceSchema = z.object({
 export const proposalDetailSchema = proposalSchema.extend({
   claims: z.array(claimSchema).describe("Refuted first, then unverifiable, pending and supported; then by text."),
   evidence: z.array(evidenceSchema).describe("Oldest first."),
+  verify_wait: z
+    .enum(VERIFY_WAITS)
+    .nullable()
+    .describe(
+      "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `queued`: it waits for the next check pass or its check is running.",
+    ),
 });
 
 export function proposalCtx(ctx: RouteContext) {

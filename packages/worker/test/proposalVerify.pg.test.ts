@@ -3,6 +3,8 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLAUDE_CLI_VERSION, CLONE_PINNED_SCRIPT, FX_AGENT_SETTINGS_PATH, VERIFIER_WORKDIR, PROPOSAL_VERIFIER_ROLE, agentSettingsFor, createTestConnectionStatusPort, type SdkCommand, type SdkSandbox, type VercelSandboxSdk } from "@fx/runner";
 import { createPool } from "@fx/db/src/pool.js";
+import { discoverySettings, resetPlanDataCache } from "@fx/plan-data";
+import { verifyWait } from "../../core/src/plan/proposalVerifyLimits.js";
 import { seedAccount, type SeedRefs } from "@fx/db/test/helpers/seed.js";
 import { MAX_VERIFY_ATTEMPTS } from "../../core/src/plan/proposalVerification.js";
 import { fileReaderFromContents, type ContentsRequester } from "../../pipeline/src/discovery/verifierCites.js";
@@ -83,7 +85,11 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
   let worker: Worker;
   const headReads: string[] = [];
   let limit = 7;
-  let settings: () => VerifySettings = () => ({ on: true, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: limit });
+  let dailyUsd = 50;
+  const on = (): VerifySettings => ({ on: true, perRepoDailyUsd: dailyUsd, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: limit });
+  let settings: () => VerifySettings = on;
+  /** While set, every head read waits on it: a pass can be held part-way, with its lock taken. */
+  let headGate: Promise<void> | null = null;
   let sweep: () => Promise<ProposalVerifyCounts>;
 
   beforeAll(async () => {
@@ -103,7 +109,11 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
       resolveSeat: worker.resolveRunSeat,
       starter: createRunStarter({ pool: writerPool, registry: worker.registry, follow: async () => undefined, queued: "refuse" }),
       github: (repo) => ({
-        headSha: async () => (headReads.push(repo.repoId), SHA),
+        headSha: async () => {
+          headReads.push(repo.repoId);
+          if (headGate) await headGate;
+          return SHA;
+        },
         readFile: (path, sha) => fileReaderFromContents(contents, repo).readFile(path, sha),
       }),
       settings: () => settings(),
@@ -367,7 +377,7 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
     try {
       expect(await sweep()).toMatchObject({ idle: "discovery_unconfigured", started: 0 });
     } finally {
-      settings = () => ({ on: true, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: limit });
+      settings = on;
     }
     const holder = await writerPool.connect();
     try {
@@ -379,5 +389,140 @@ describe("the proposal verifier sweep [pg]", { timeout: 120_000 }, () => {
       holder.release();
     }
     expect(await runsOf(id)).toEqual([]);
+  });
+
+  it("one pass per tick: a second sweep that overlaps a pass in progress does nothing (busy), and the proposal gets exactly one run", async () => {
+    const { a, repoId } = await target();
+    const id = await proposal(a, repoId, "internal");
+    envelope = GOOD;
+    let release!: () => void;
+    headGate = new Promise<void>((r) => (release = r));
+    const before = headReads.length;
+    const first = sweep();
+    try {
+      // The first pass holds the lock and is parked at a head read.
+      for (let i = 0; i < 400 && headReads.length === before; i++) await new Promise((r) => setTimeout(r, 25));
+      expect(headReads.length).toBeGreaterThan(before);
+      expect(await sweep()).toMatchObject({ idle: "busy", listed: 0, started: 0 });
+    } finally {
+      headGate = null;
+      release();
+    }
+    expect((await first).started).toBeGreaterThanOrEqual(1);
+    expect(await runsOf(id)).toHaveLength(1);
+    await ended(id);
+  });
+
+  /** A verifier run of the repository started today holding `usd`: settled in the ledger, or still an open reservation. */
+  async function spentToday(a: SeedRefs, repoId: string, usd: number, as: "ledger" | "open" | "settled_and_ledger"): Promise<void> {
+    // Its proposal is internal-loop, so the sweep never lists it; only its run counts against the repository's day.
+    const num = ++n;
+    const { rows } = await admin.query<{ id: string }>(
+      `INSERT INTO proposals (account_id, repo_id, dedupe_key, sources, gh_number, title, provenance, owner_process) VALUES ($1, $2, $3, '{github_issue}', $4, 'spent', 'internal', 'internal_loop') RETURNING id`,
+      [a.accountId, repoId, `gh:issue:${num}`, num],
+    );
+    const runId = randomUUID();
+    await admin.query(`INSERT INTO agent_runs (id, account_id, role, runtime, status, ended_at) VALUES ($1, $2, $3, 'local', 'succeeded', now())`, [runId, a.accountId, PROPOSAL_VERIFIER_ROLE]);
+    await admin.query(`INSERT INTO agent_run_idempotency_keys (account_id, idempotency_key, run_id, request_hash) VALUES ($1, $2, $3, $4)`, [a.accountId, await keyOf(rows[0]!.id, 0), runId, "d".repeat(64)]);
+    if (as !== "open") await admin.query(`INSERT INTO ledger (account_id, kind, source, usd, run_id, budget) VALUES ($1, 'model', 'customer_gateway', $2, $3, 'model')`, [a.accountId, usd, runId]);
+    if (as !== "ledger") await admin.query(`INSERT INTO spend_reservations (account_id, run_id, usd_reserved, state, budget) VALUES ($1, $2, $3, $4, 'model')`, [a.accountId, runId, usd, as === "open" ? "open" : "settled"]);
+  }
+  const reservedFor = async (id: string): Promise<number> =>
+    (await admin.query("SELECT count(*)::int AS n FROM spend_reservations s JOIN agent_run_idempotency_keys k ON k.run_id = s.run_id WHERE k.idempotency_key LIKE $1", [`proposal-verify:${id}:%`])).rows[0].n;
+
+  it("perRepoDailyUsd: a run that would take the repository's verifier spend today past the cap is not started and nothing is reserved; ledger and open reservations both count, settled ones once", async () => {
+    dailyUsd = 1;
+    try {
+      envelope = GOOD;
+      // 0.7 in the ledger + 0.4 for the next run = 1.1 > 1: held, as "daily_cap", with no run and no reservation.
+      const t1 = await target();
+      await spentToday(t1.a, t1.repoId, 0.7, "ledger");
+      const held = await proposal(t1.a, t1.repoId, "internal");
+      expect((await sweep()).daily_cap).toBeGreaterThanOrEqual(1);
+      expect(await runsOf(held)).toEqual([]);
+      expect(await reservedFor(held)).toBe(0);
+      expect(await row(held)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+
+      // An open reservation counts the same way.
+      const t2 = await target();
+      await spentToday(t2.a, t2.repoId, 0.7, "open");
+      const heldOpen = await proposal(t2.a, t2.repoId, "internal");
+      await sweep();
+      expect(await runsOf(heldOpen)).toEqual([]);
+
+      // The cap is per repository: another repository of the same account with nothing spent starts. And a settled reservation is in the
+      // ledger already, so 0.5 settled + 0.5 in the ledger is 0.5 spent: 0.5 + 0.4 fits under 1 and the run starts.
+      const t3 = await target();
+      await spentToday(t3.a, t3.repoId, 0.5, "settled_and_ledger");
+      const fits = await proposal(t3.a, t3.repoId, "internal");
+      await sweep();
+      expect(await runsOf(fits)).toHaveLength(1);
+      await ended(fits);
+
+      // Raising the cap lets the held proposal start on the next pass.
+      dailyUsd = 1.1;
+      await sweep();
+      expect(await runsOf(held)).toHaveLength(1);
+      await ended(held);
+    } finally {
+      dailyUsd = 50;
+    }
+  });
+
+  it("the sweep and the detail read share one hold function: a proposal the sweep holds reads daily_spend, then daily_limit when the outside limit holds too, then queued once the cap is raised", async () => {
+    dailyUsd = 1;
+    const savedLimit = limit;
+    try {
+      envelope = GOOD;
+      const t = await target();
+      await spentToday(t.a, t.repoId, 0.7, "ledger");
+      const id = await proposal(t.a, t.repoId, "external");
+      const wait = async (): Promise<string | null> => {
+        const { rows } = await admin.query("SELECT id, title, summary, gh_number, discussion_number, verify_attempts, repo_id, provenance, verification FROM proposals WHERE id = $1", [id]);
+        return verifyWait(admin, t.a.accountId, rows[0], { on: true, perRepoDailyUsd: dailyUsd, verifyPerProposalUsd: 0.4, externalVerifiesPerRepoPerDay: limit });
+      };
+      expect(await wait()).toBe("daily_spend");
+      expect((await sweep()).daily_cap).toBeGreaterThanOrEqual(1);
+      expect(await runsOf(id)).toEqual([]);
+      // The outside limit takes precedence when both hold: with no outside check allowed today, the sweep counts it as daily_limit.
+      limit = 0;
+      expect(await wait()).toBe("daily_limit");
+      expect((await sweep()).daily_limit).toBeGreaterThanOrEqual(1);
+      expect(await runsOf(id)).toEqual([]);
+      limit = savedLimit;
+      dailyUsd = 1.1;
+      expect(await wait()).toBe("queued");
+      await sweep();
+      expect(await runsOf(id)).toHaveLength(1);
+      await ended(id);
+    } finally {
+      dailyUsd = 50;
+      limit = savedLimit;
+    }
+  });
+
+  it("settings that cannot be read, and plan data that is present but invalid, verify nothing: the pass ends idle with a code and the proposal stays pending", async () => {
+    envelope = GOOD;
+    const t = await target();
+    const id = await proposal(t.a, t.repoId, "internal");
+    const saved = process.env.FX_PLAN_DATA;
+    try {
+      settings = () => {
+        throw new Error("plan data is broken");
+      };
+      expect(await sweep()).toMatchObject({ idle: "discovery_settings_failed", listed: 0, started: 0 });
+      // The real reader, on an invalid file: off (fail closed), never a verified proposal.
+      process.env.FX_PLAN_DATA = JSON.stringify({ plans: 1 });
+      resetPlanDataCache();
+      settings = discoverySettings;
+      expect(await sweep()).toMatchObject({ idle: "discovery_unconfigured", listed: 0, started: 0 });
+      expect(await runsOf(id)).toEqual([]);
+      expect(await row(id)).toMatchObject({ verification: "pending", verify_attempts: 0 });
+    } finally {
+      settings = on;
+      if (saved === undefined) delete process.env.FX_PLAN_DATA;
+      else process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
   });
 });

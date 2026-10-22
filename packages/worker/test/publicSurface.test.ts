@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorker } from "../src/index.js";
 import * as entry from "../src/index.js";
 import { forgetWorkerForTests } from "../src/compositionRoot.js";
+import { resetPlanDataCache } from "@fx/plan-data";
 
 const poolA = { tag: "runner-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
 const poolB = { tag: "ops-pool", query: async () => ({ rows: [] }), connect: async () => ({}) } as unknown as Pool;
@@ -118,6 +119,7 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
       "sweepComputeSettle",
       "sweepInvariants",
       "sweepParkedStages",
+      "sweepProposalVerification",
       "sweepRunHandoffs",
       "sweepRunnerLeases",
       "sweepRunnerNotices",
@@ -127,6 +129,8 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     ]);
     // With no follower and no prompt builder given, a request is refused up front.
     expect(worker.previewReady()).toBe(false);
+    // With no verifier pieces given, the verifier sweep starts nothing and says so (D#483 S4-b2b).
+    expect(await worker.sweepProposalVerification()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
     const everything = reachable(worker);
     expect(everything).not.toContain(poolA);
     expect(everything).not.toContain(poolB);
@@ -153,6 +157,26 @@ describe("C70 / CARRY-8: what createWorker hands a web route", () => {
     const keys = everything.flatMap((v) => (typeof v === "object" && v !== null ? Object.keys(v) : []));
     for (const forbidden of ["start", "starter", "follow", "inCreateTransaction", "hookToken", "token"]) expect(keys, forbidden).not.toContain(forbidden);
     await worker.close();
+  });
+
+  it("D#483 S4-b2b: verifier pieces without a follower (so no run starter) still answer not_configured and start nothing; with the follower the sweep is wired and reads its settings", async () => {
+    const verify = { github: () => { throw new Error("unused"); }, prompt: () => "p", record: async () => { throw new Error("unused"); } };
+    const saved = process.env.FX_PLAN_DATA;
+    delete process.env.FX_PLAN_DATA;
+    resetPlanDataCache();
+    try {
+      const noStarter = await createWorker({ ...OPTIONS, verify });
+      expect(await noStarter.sweepProposalVerification()).toMatchObject({ idle: "not_configured", listed: 0, started: 0 });
+      await noStarter.close();
+      forgetWorkerForTests();
+      // The same pieces with a follower: the real sweep runs, and without plan data it is idle for that reason, not "not_configured".
+      const wired = await createWorker({ ...OPTIONS, verify, ports: { ...OPTIONS.ports, follow: async (): Promise<void> => undefined } });
+      expect(await wired.sweepProposalVerification()).toMatchObject({ idle: "discovery_unconfigured", listed: 0, started: 0 });
+      await wired.close();
+    } finally {
+      if (saved !== undefined) process.env.FX_PLAN_DATA = saved;
+      resetPlanDataCache();
+    }
   });
 
   it("no system or internal cancel is reachable, and a forged system principal is refused", async () => {

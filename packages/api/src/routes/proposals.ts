@@ -100,7 +100,8 @@ export const proposalRoutes: RouteEntry[] = [
     description:
       "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. " +
       "`claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. " +
-      "`excerpt` and claim `text` are untrusted and returned as stored; render them as plain text.",
+      "`excerpt` and claim `text` are untrusted and returned as stored; render them as plain text. " +
+      "`verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up) or `queued`.",
     principals: ["session", "token"],
     minRole: "member",
     scope: "read",

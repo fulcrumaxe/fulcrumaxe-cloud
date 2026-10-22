@@ -27079,7 +27079,7 @@
       "get": {
         "operationId": "getProposal",
         "summary": "One proposal",
-        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. `claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. `excerpt` and claim `text` are untrusted and returned as stored; render them as plain text.",
+        "description": "The proposal with its sources, task, decision stamp and, when approved, its work item's live stage, plus the full `claims` and `evidence` the verifier recorded. `claims` are ordered refuted, unverifiable, pending, supported. Each evidence row carries a `url` the server built from the repository, the parsed `ref` and the commit (never from stored link text), or null. `excerpt` and claim `text` are untrusted and returned as stored; render them as plain text. `verify_wait` says why a `pending` proposal is waiting: `daily_limit` (its repository's daily limit on checks of outside proposals is used up), `daily_spend` (its repository's daily checking budget is used up) or `queued`.",
         "security": [
           {
             "session": []
@@ -27508,6 +27508,22 @@
                             "additionalProperties": false
                           },
                           "description": "Oldest first."
+                        },
+                        "verify_wait": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "queued",
+                                "daily_limit",
+                                "daily_spend"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Why a `pending` proposal is waiting; null for any other `verification`. `daily_limit`: it is an outside author's proposal and its repository has used today's checks for outside proposals, so it is checked after the UTC day turns. `daily_spend`: its repository's verifier spend for today leaves no room for one more check, so it is checked after the UTC day turns (`daily_limit` wins when both hold). `queued`: it waits for the next check pass or its check is running."
                         }
                       },
                       "required": [
@@ -27547,7 +27563,8 @@
                         "claim_counts",
                         "evidence_count",
                         "claims",
-                        "evidence"
+                        "evidence",
+                        "verify_wait"
                       ],
                       "additionalProperties": false
                     }
