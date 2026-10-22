@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { GitTicketResult } from "./client.js";
 import { assertGitVersion, createGit, GitPathError, type Git, type GitDeps } from "./git.js";
-import { PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
+import { mirrorCheckBase, PUSHING_ROLES, type GitJob, type GitPath, type GitPathDeps } from "./gitPath.js";
 import { createMirrors, githubUrl, type Mirrors, type RepoRef } from "./mirror.js";
 import { publishBranch, pushPlan, workspaceHead, type PushLease } from "./push.js";
 import { gitProxyHashFor, gitProxyPinned, PINNED_GIT_PROXIES, type PinnedGitProxies } from "../keyring.js";
@@ -150,6 +150,8 @@ export function createGitPathA(deps: GitPathADeps): GitPath {
     },
     readGrants: (job) => [forObjects.objects(job.repo)],
     mirrorDir: (job) => forObjects.dir(job.repo),
+    // D#6 R-CHK-2b: the same pin as path B, from the same mirror the run was just synced into. A local read with the plain git: no ticket is asked for and nothing is fetched.
+    checkBase: (job, sha) => mirrorCheckBase(git, forObjects.dir(job.repo), sha),
     async publish(job, lease, workspace, base, stopped) {
       if (!PUSHING_ROLES.has(job.role)) return { pushed: false };
       const transport = {
