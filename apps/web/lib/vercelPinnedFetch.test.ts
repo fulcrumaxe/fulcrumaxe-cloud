@@ -39,6 +39,14 @@ describe("createPinnedVercelFetch refusals", () => {
     expect(t.sent[0]!.headers).toMatchObject({ authorization: "Bearer tok", "user-agent": "ua/1" });
   });
 
+  it("sends the connect-time token check, GET /v10/projects with only limit and teamId, the same way", async () => {
+    const t = recorder({ status: 200, body: '{"projects":[]}' });
+    const res = await t.fetchImpl(new URL("https://api.vercel.com/v10/projects?limit=1&teamId=team_abc1"), { headers: { Authorization: "Bearer tok" } });
+    expect(res.status).toBe(200);
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0]).toMatchObject({ host: "api.vercel.com", method: "GET", path: "/v10/projects?limit=1&teamId=team_abc1", body: null });
+  });
+
   it("refuses any other host, scheme, port, credentials, fragment, path, method, body or decrypt=true, before resolving or sending anything", async () => {
     const t = recorder();
     const bad: Array<[string, RequestInit?]> = [
@@ -54,6 +62,10 @@ describe("createPinnedVercelFetch refusals", () => {
       ["https://api.vercel.com/v10/projects/../teams/env"],
       ["https://api.vercel.com/v1/projects/cloud-staging/env/abc"],
       ["https://api.vercel.com/v2/user"],
+      ["https://api.vercel.com/v10/projects?limit=1&decrypt=true"],
+      ["https://api.vercel.com/v10/projects?limit=1&search=x"],
+      ["https://api.vercel.com/v10/projects/"],
+      ["https://api.vercel.com/v11/projects?limit=1"],
       ["https://api.vercel.com/v10/projects/cloud-staging/env?decrypt=true"],
       ["https://api.vercel.com/v10/projects/cloud-staging/env?decrypt=false&decrypt=true"],
       [OK, { method: "POST" }],

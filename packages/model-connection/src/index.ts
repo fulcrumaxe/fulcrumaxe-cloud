@@ -60,3 +60,16 @@ export {
 
 export type { NoticeAckCtx, NoticeAckView } from './noticeAck.js';
 export { recordAcknowledgement, hasAcknowledgement, hasAcknowledgementWithClient } from './noticeAck.js';
+
+export type { VercelConnectionCtx, VercelConnectionErrorCode, VercelConnectionState, VercelConnectionView, VercelTokenCheck, VercelTokenValidator } from './vercelConnection.js';
+export {
+  VercelConnectionError,
+  connectVercel,
+  createSealedVercelCredentials,
+  createVercelTokenValidator,
+  getVercelConnection,
+  removeVercel,
+  rotateVercel,
+} from './vercelConnection.js';
+export type { VercelStateCopy } from './vercelCopy.js';
+export { VERCEL_ERROR_COPY, VERCEL_ROTATE_COPY, vercelStateCopy } from './vercelCopy.js';

@@ -421,6 +421,9 @@ describe('ask_routes (0836)', () => {
       'context_rule.saved',
       'context_rule.replaced',
       'context_rule.removed',
+      'vercel_connection.connect',
+      'vercel_connection.rotate',
+      'vercel_connection.remove',
     ];
 
     it('audit_write accepts every expected action', async () => {

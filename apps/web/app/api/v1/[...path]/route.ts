@@ -6,6 +6,9 @@ import { onboardingDeps } from "@fx/api/src/routes/onboarding.js";
 import { memoryEditDeps } from "@fx/api/src/routes/memory.js";
 import { publicChangeDeps } from "@fx/api/src/routes/work-item-actions.js";
 import { setupRequestDeps } from "@fx/api/src/routes/setupRequests.js";
+import { vercelConnectionDeps } from "@fx/api/src/routes/vercel-connection.js";
+import { createVercelTokenValidator } from "@fx/model-connection";
+import { createPinnedVercelFetch } from "../../../../lib/vercelPinnedFetch";
 import { productionVercelEnvSource } from "../../../../lib/setupRequestEnvSource";
 import { liveInstallationTokens } from "@fx/github";
 import { parsePreviewResult } from "@fx/pipeline";
@@ -49,6 +52,8 @@ publicChangeDeps.startRetryPush = (args) => (workerConfigured() ? createStartRet
 publicChangeDeps.openPublicPullRequest = openPublicPullRequestViaWorker;
 // D#598 P8b-2: Mark done runs the request's own check at once, against the same credential source the once-a-minute sweep uses.
 setupRequestDeps.getEnvSource = () => productionVercelEnvSource;
+// D#598 P8d-2: connecting or replacing a Vercel token is checked with Vercel through the same net-guarded, address-pinned fetch.
+vercelConnectionDeps.getValidator = () => createVercelTokenValidator({ fetch: createPinnedVercelFetch() });
 // D#601 MEM-4a2b: an edited memory is scanned against this process's live installation tokens, the same source the worker's intake uses.
 memoryEditDeps.liveSecrets = () => liveInstallationTokens();
 onboardingDeps.projectPreviewResult = parsePreviewResult;

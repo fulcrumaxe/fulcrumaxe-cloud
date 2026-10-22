@@ -12,6 +12,7 @@ import { runInsightRoutes } from "./run-insight.js";
 import { webhookEndpointRoutes } from "./webhook-endpoints.js";
 import { eventRoutes } from "./events.js";
 import { modelConnectionRoutes } from "./model-connection.js";
+import { vercelConnectionRoutes } from "./vercel-connection.js";
 import { repoRoutes } from "./repos.js";
 import { roleRoutes } from "./roles.js";
 import { decisionSettingRoutes } from "./decision-settings.js";
@@ -53,7 +54,7 @@ import { memoryRoutes } from "./memory.js";
  * D#45 S3 adds `statsRoutes` (`GET /stats`, `GET /work-items/{id}/timeline`).
  * D#31 API-4b adds `webhookEndpointRoutes`. D#31 API-5 adds `eventRoutes`
  * (the JSON half of the two event streams; the SSE half is the two route
- * files under apps/web/app/api/v1/). D#31 API-2 adds `modelConnectionRoutes`.
+ * files under apps/web/app/api/v1/). D#31 API-2 adds `modelConnectionRoutes`; D#598 P8d-2 adds `vercelConnectionRoutes`.
  * D#31 API-8a adds `repoRoutes` and `roleRoutes`. API-8c adds `githubRoutes`.
  * API-7a adds `billingRoutes` (usage and budgets reads).
  * API-8d adds `runLimitRoutes` (run limits read and set).
@@ -76,6 +77,7 @@ export const ROUTES: RouteEntry[] = [
   ...webhookEndpointRoutes,
   ...eventRoutes,
   ...modelConnectionRoutes,
+  ...vercelConnectionRoutes,
   ...repoRoutes,
   ...roleRoutes,
   ...decisionSettingRoutes,

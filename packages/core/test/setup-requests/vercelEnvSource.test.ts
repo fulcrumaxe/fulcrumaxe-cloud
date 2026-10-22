@@ -213,6 +213,28 @@ describe('Vercel env-name adapter (P8d-1)', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('a 401 or 403 from Vercel tells the lookup which stored credential was refused; other failures do not, and a failing hook cannot change the answer', async () => {
+    const v = fresh().project('cloud-staging', names(1));
+    const marked: Array<[string, string | undefined]> = [];
+    const mk = (markRejected: VercelCredentialResolver['markRejected']) =>
+      v.source({ credentials: { configured: true, resolve: async () => ({ status: 'ok', token: TOKEN, ref: 'abc' }), ...(markRejected ? { markRejected } : {}) }, log });
+    const record = async (a: string, r: string | undefined) => void marked.push([a, r]);
+    v.revoke(ACCOUNT);
+    expect(await list(mk(record))).toEqual({ ok: false });
+    expect(marked).toEqual([[ACCOUNT, 'abc']]);
+    marked.length = 0;
+    v.failNext('http_500');
+    v.disconnect(ACCOUNT).connect(ACCOUNT);
+    expect(await list(mk(record))).toEqual({ ok: false });
+    v.failNext('http_429');
+    expect(await list(mk(record))).toEqual({ ok: false });
+    expect(marked).toEqual([]);
+    v.revoke(ACCOUNT);
+    expect(await list(mk(async () => { throw new Error('db down'); }))).toEqual({ ok: false });
+    expect(await list(mk(undefined))).toEqual({ ok: false });
+    expect(lines.join('\n')).toContain('mark_rejected_error');
+  });
+
   it('the production binding has no credential: unavailable, and it makes no network call', async () => {
     const fetchSpy = vi.fn();
     const source = createVercelEnvSource({ credentials: unavailableVercelCredentials, fetch: fetchSpy as unknown as typeof fetch, log });

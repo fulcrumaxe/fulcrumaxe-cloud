@@ -157,7 +157,7 @@ describe("GET /api/cron/setup-request-check", () => {
     expect(s.statements).toHaveLength(before);
   });
 
-  it("the production binding is the unavailable source: it never answers a check, so it can never pass one", async () => {
+  it("with no database or key configured the production binding never answers a check, so it can never pass one", async () => {
     expect(productionVercelEnvSource.available).toBe(false);
     expect(await productionVercelEnvSource.listEnvNames({ accountId: "a", project: "p" })).toEqual({ ok: false });
   });

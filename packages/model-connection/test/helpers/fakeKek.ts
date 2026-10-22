@@ -19,3 +19,20 @@ export function fakeKekSource(version = 1): KekSource {
     },
   };
 }
+
+/** Two key versions held at once; `setCurrent` is the platform rolling its root key forward (new seals use it, old rows still open under theirs). */
+export function fakeVersionedKek(): { source: KekSource; setCurrent(version: number): void } {
+  const keys = new Map<number, Buffer>([[1, randomBytes(32)], [2, randomBytes(32)]]);
+  let current = 1;
+  return {
+    source: {
+      currentVersion: () => current,
+      keyFor: (v: number): Buffer => {
+        const key = keys.get(v);
+        if (!key) throw new Error(`fakeVersionedKek: no key for version ${v}`);
+        return key;
+      },
+    },
+    setCurrent: (v) => void (current = v),
+  };
+}

@@ -21,10 +21,10 @@ export interface KekSource {
  * bytes decoded). Current version from `FX_KEK_CURRENT_VERSION`
  * (default 1) -- `FX_KEK_V1` is that default's env var name.
  *
- * `FX_KEK_V*` is this package's own root key, scoped to model
- * connections specifically (crypto.ts's AAD binds every ciphertext to
- * `purpose: 'model_key'`) -- not a platform-wide key shared across
- * secret types. A future category (D#31 named webhook signing secrets)
+ * `FX_KEK_V*` is the root key for this package's sealed credentials:
+ * model keys and customer Vercel tokens (vercelConnection.ts). Each
+ * ciphertext's AAD binds it to its own purpose (`model_key...` or
+ * `vercel_token`), so one kind cannot be opened as the other. A future category (D#31 named webhook signing secrets)
  * gets its own `FX_WEBHOOK_KEK_V1` and its own KekSource, never this one.
  */
 export function envKekSource(env: Readonly<Record<string, string | undefined>> = process.env): KekSource {

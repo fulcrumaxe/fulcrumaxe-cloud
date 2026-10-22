@@ -1,0 +1,14 @@
+{
+  "state": "rejected",
+  "fingerprint": "a3f9",
+  "team_id": "team_abc1",
+  "connected_at": "2026-10-22T10:15:30.000Z",
+  "rotated_at": null,
+  "rejected_at": "2026-10-22T11:00:00.000Z",
+  "copy": {
+    "headline": "Vercel is not accepting your token",
+    "detail": "The token (fingerprint a3f9) was refused. It may have expired or been revoked. Until you replace it, we cannot check your environment variables for you.",
+    "action": "Replace token",
+    "secondary_action": "Disconnect"
+  }
+}

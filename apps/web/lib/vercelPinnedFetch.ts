@@ -7,12 +7,13 @@ import { nodeHttpsPinnedRequester, type PinnedRequester } from "../app/api/gh-pr
  * loopback or link-local address), and the socket is connected to that one validated address by the pinned connector, with SNI and Host
  * kept as `api.vercel.com`, over verified TLS. It is not the global `fetch`.
  *
- * It sends exactly one kind of request, `GET https://api.vercel.com/v10/projects/<name>/env[?query]`. Any other scheme, host, port, credentials,
+ * It sends two kinds of request: `GET https://api.vercel.com/v10/projects/<name>/env[?query]`, and the connect-time token check `GET https://api.vercel.com/v10/projects?limit=&teamId=`. Any other scheme, host, port, credentials,
  * fragment, path or method is refused before anything is resolved or sent, and so is a query that asks for `decrypt=true`. A redirect is never
  * followed (the token would travel with it). The caller's abort signal ends both the wait for headers and the body read.
  */
 const HOST = "api.vercel.com";
 const PATH_RE = /^\/v10\/projects\/[a-z0-9._-]{1,100}\/env$/;
+const CHECK_PATH = "/v10/projects";
 
 function abortable(stream: ReadableStream<Uint8Array>, signal: AbortSignal | undefined): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
@@ -56,7 +57,10 @@ export function createPinnedVercelFetch(deps: { resolveUpstream?: (host: string)
       return refuse("not a URL");
     }
     if (url.protocol !== "https:" || url.hostname !== HOST || url.port !== "" || url.username !== "" || url.password !== "" || url.hash !== "") refuse("only https://api.vercel.com");
-    if (!PATH_RE.test(url.pathname)) refuse("only /v10/projects/<name>/env");
+    // P8d-2: the one other request is the connect-time token check, `GET /v10/projects?limit=&teamId=` (can this token list projects), with no other query key.
+    if (url.pathname === CHECK_PATH) {
+      if ([...url.searchParams.keys()].some((k) => k !== "limit" && k !== "teamId")) refuse("only limit and teamId on /v10/projects");
+    } else if (!PATH_RE.test(url.pathname)) refuse("only /v10/projects/<name>/env");
     if (url.searchParams.getAll("decrypt").some((v) => v !== "false")) refuse("decrypt is never requested");
     const signal = init?.signal ?? undefined;
     signal?.throwIfAborted();
