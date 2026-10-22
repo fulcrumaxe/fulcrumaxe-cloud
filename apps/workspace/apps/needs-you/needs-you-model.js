@@ -1,6 +1,7 @@
 // D#598 P8c: the Needs you list's logic, with no DOM (unit-tested with a fake call()). The page is needs-you-app.js.
 //
-// A row is a decision ask (GET /api/v1/decision-asks, D#598 P8c-2a) or a setup request (GET /api/v1/setup-requests). An ask shows the cloud's own name for
+// A row is a pull request waiting for a person to merge it (GET /api/v1/merge-ready, D#598 P8c-2b: a link to GitHub, no buttons; the cloud drops it when the
+// pull request is merged or closed), a decision ask (GET /api/v1/decision-asks, D#598 P8c-2a) or a setup request (GET /api/v1/setup-requests). An ask shows the cloud's own name for
 // the decision, the option the agent recommends, one button per option and Deny, and the agent's reason as a quotation. Answering is final (the work item
 // resumes), so there is no undo here; a second answer from another window is told it was already answered.
 // The cloud writes every sentence about a request's check: `status_sentence` and
@@ -17,6 +18,7 @@ export const LIST_URL = "/api/v1/setup-requests?state=open";
 export const actionUrl = (id, verb) => "/api/v1/setup-requests/" + encodeURIComponent(id) + "/" + verb;
 export const ASKS_URL = "/api/v1/decision-asks";
 export const answerUrl = (id) => "/api/v1/decision-asks/" + encodeURIComponent(id) + "/answer";
+export const MERGE_URL = "/api/v1/merge-ready";
 export const REFRESH_MS = 30000;
 export const PROVIDER_HOSTS = ["github.com", "vercel.com"];
 const STATES = ["open", "done", "withdrawn"];
@@ -40,6 +42,8 @@ export const WORDS = {
   overdue: "Overdue",
   answered: "Answered",
   alreadyAnswered: "That was already answered.",
+  mergeStep: "Merge this pull request on GitHub",
+  openPr: "Open pull request",
 };
 
 const text = (v) => (typeof v === "string" ? v : "");
@@ -107,6 +111,27 @@ export function readAsk(a) {
   };
 }
 
+/** The pull request link of a merge row: https on github.com, no credentials or port, a /pull/<number> path; else null. */
+export function pullRequestLink(url) {
+  if (typeof url !== "string" || url === "") return null;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    // fx-swallow-ok: an address that does not parse is simply not drawn as a link
+    return null;
+  }
+  if (u.protocol !== "https:" || u.hostname !== "github.com" || u.username !== "" || u.password !== "" || u.port !== "" || !/^\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(u.pathname)) return null;
+  return { href: u.href, host: u.hostname };
+}
+
+/** One item of the merge-ready read, or null when it is not usable. A row without a title is named by its pull request number; no text is ever null. */
+export function readMerge(m) {
+  if (!m || typeof m.work_item_id !== "string" || m.work_item_id === "" || !Number.isInteger(m.pr_number) || m.pr_number < 1) return null;
+  const title = typeof m.title === "string" && m.title !== "" ? m.title : "Pull request #" + m.pr_number;
+  return { kind: "merge", id: "merge-" + m.work_item_id, title, reason: text(m.why), state: "open", sentence: WORDS.mergeStep, link: pullRequestLink(m.pr_url) };
+}
+
 /** The sentence for a failed action, chosen by status; the server's own message is never shown. */
 export function failureSentence(e) {
   if (isRateLimited(e)) return retryWords(waitSeconds(e));
@@ -135,12 +160,12 @@ export function createNeedsYou({ call = api, signal, onChange = () => {} } = {})
     const mine = ++gen;
     try {
       // Both reads must answer: a screen that showed only one of them would say nothing is waiting while the other part is unread.
-      const [data, asks] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal)]);
+      const [data, asks, merges] = await Promise.all([call("GET", LIST_URL, undefined, signal), call("GET", ASKS_URL, undefined, signal), call("GET", MERGE_URL, undefined, signal)]);
       if (mine !== gen) return;
-      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks)) throw new Error("shape");
-      open = [...asks.asks.map(readAsk).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
+      if (!data || !Array.isArray(data.requests) || !asks || !Array.isArray(asks.asks) || !merges || !Array.isArray(merges.items)) throw new Error("shape");
+      open = [...asks.asks.map(readAsk).filter(Boolean), ...merges.items.map(readMerge).filter(Boolean), ...data.requests.map(readRequest).filter((r) => r && r.state === "open")];
       for (const r of open) closed.delete(r.id);
-      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: Number.isInteger(asks.not_shown) && asks.not_shown > 0 ? asks.not_shown : 0 };
+      st = { ...st, status: "ready", truncated: data.truncated === true, notShown: [asks, merges].reduce((n, r) => n + (Number.isInteger(r.not_shown) && r.not_shown > 0 ? r.not_shown : 0), 0) };
       merge();
     } catch (e) {
       if (mine !== gen || cancelled(e)) return;

@@ -1762,6 +1762,22 @@ export interface Operations {
       answered_option: string;
     };
   };
+  listMergeReady: {
+    path: undefined;
+    query: undefined;
+    body: undefined;
+    response: {
+      items: Array<{
+        work_item_id: string;
+        title: string | null;
+        pr_number: number;
+        pr_url: string | null;
+        why: string;
+        since: string;
+      }>;
+      not_shown: number;
+    };
+  };
   getActionAccountRules: {
     path: undefined;
     query: undefined;
@@ -4657,6 +4673,17 @@ export const operations = {
     pathParams: ["id"],
     queryParams: [],
     hasBody: true,
+  },
+  listMergeReady: {
+    method: "GET",
+    path: "/api/v1/merge-ready",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "never",
+    pathParams: [],
+    queryParams: [],
+    hasBody: false,
   },
   getActionAccountRules: {
     method: "GET",
