@@ -77,14 +77,14 @@ function harness(lines: string[], hold?: Promise<void>) {
   const events: NormalizedEvent[] = [];
   const opts: StartDetachedOptions = {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: "card",
     prompt: "go",
     model: "sonnet-5",
     workdir: "/vercel/sandbox/repo",
     capUsd: 5,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: (e) => void events.push(e),
   };
   /** `restarted`: the port never created this sandbox (a worker restart); the SDK reports `sdkTimeoutMs` for it, or nothing. */
@@ -93,7 +93,7 @@ function harness(lines: string[], hold?: Promise<void>) {
     (sandbox as { timeout?: number }).timeout = restarted?.sdkTimeoutMs;
     const handle = restarted
       ? { runId: "", sandboxName: NAME }
-      : await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 80_000_000 });
+      : await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 80_000_000 });
     const o = { ...opts, extension, ...(restarted?.perRun && { limits: restarted.perRun }) };
     const started = resumeId ? port.resume(handle, resumeId, "next", o) : port.startDetached(handle, o);
     return started.hookFired;
@@ -116,7 +116,7 @@ describe("W-1: the time-remaining file", () => {
     expect(files.map((f) => f.mode)).toEqual([0o444, 0o444]);
     expect(files[0]!.json).toEqual({ started_epoch_s: T0 / 1000, deadline_epoch_s: T0 / 1000 + 600, max_model_calls: 300 });
     expect(files[1]!.json.deadline_epoch_s).toBe(T0 / 1000 + 690);
-    for (const f of files) for (const secret of Object.values(buildSandboxEnv("reviewer")).filter((v) => v.length > 3)) expect(f.content).not.toContain(secret);
+    for (const f of files) for (const secret of Object.values(buildSandboxEnv("code-reviewer")).filter((v) => v.length > 3)) expect(f.content).not.toContain(secret);
   });
 
   it("the runner's own clock rewrites the file once at 80% of the window with the minutes left; no clock is read by the hook", async () => {
@@ -378,7 +378,7 @@ describe("W-2: the model-call warning", () => {
 
 describe("W-3: the agent's checkpoint", () => {
   const resultEvent = (agentOutput: Record<string, unknown> | undefined, extra: Partial<NormalizedEvent> = {}): NormalizedEvent =>
-    ({ runId: "r", role: "reviewer", seq: 1, type: "result", ts: "t", agentOutput, ...extra }) as NormalizedEvent;
+    ({ runId: "r", role: "code-reviewer", seq: 1, type: "result", ts: "t", agentOutput, ...extra }) as NormalizedEvent;
 
   it("a final checkpoint envelope ends the run as timed_out, carrying the summary", () => {
     const report = buildTerminalReport(resultEvent({ verdict: "checkpoint", summary: "done A, left B" }), "cc-1", 1.5);
@@ -561,7 +561,7 @@ describe("X-4: in-run extension at the port (run_time and model_calls)", () => {
   });
 
   it("extensions_used reaches the report only when an extension happened", () => {
-    const ev = { runId: "r", role: "reviewer", seq: 1, type: "result", ts: "t", agentOutput: { verdict: "checkpoint", summary: "s" } } as NormalizedEvent;
+    const ev = { runId: "r", role: "code-reviewer", seq: 1, type: "result", ts: "t", agentOutput: { verdict: "checkpoint", summary: "s" } } as NormalizedEvent;
     const snap = (extensionsUsed: number) => ({ tokens: { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 }, flags: [], extensionsUsed });
     expect(buildTerminalReport(ev, "cc", 0, snap(2)).extensionsUsed).toBe(2);
     expect(buildTerminalReport(ev, "cc", 0, snap(0))).not.toHaveProperty("extensionsUsed");

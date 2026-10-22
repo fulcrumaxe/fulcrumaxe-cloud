@@ -25,7 +25,7 @@ import type { NormalizedEvent } from "../../src/types.js";
  */
 
 export const CONFORMANCE_RUN_ID = "run-1";
-export const CONFORMANCE_ROLE = "reviewer";
+export const CONFORMANCE_ROLE = "code-reviewer";
 /** The per-line ceiling on the input side of one line's usage (tokens); a line above it is implausible. */
 export const CONFORMANCE_LINE_CEILING = 1_000_000;
 

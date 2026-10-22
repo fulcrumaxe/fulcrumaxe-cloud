@@ -150,15 +150,15 @@ const conn = { provider: "ai_gateway", githubForwardHost: GH_PROXY } as const;
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
   return {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: "card",
     prompt: "go",
     model: "sonnet-5",
     capUsd: 5,
     workdir: WORKDIR,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", conn)),
-    installPolicy: async () => keyedPolicy(networkPolicy("reviewer", "team", conn, "install")),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", conn)),
+    installPolicy: async () => keyedPolicy(networkPolicy("code-reviewer", "team", conn, "install")),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: () => {},
     ...overrides,
   };
@@ -166,14 +166,14 @@ function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetached
 
 async function launch(f: ReturnType<typeof fakeSdk>, overrides: Partial<StartDetachedOptions> = {}, installTimeoutMs?: number) {
   const port = newPort(f.sdk, installTimeoutMs);
-  const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+  const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
   const stages: string[] = [];
   const installs: unknown[] = [];
   const run = port.startDetached(made as SandboxHandle, startOpts({ onStage: (s) => void stages.push(s), onInstall: (r) => void installs.push(r), ...overrides }));
   return { run, stages, installs };
 }
 
-const registryRules = async () => registryOnly(keyedPolicy(networkPolicy("reviewer", "team", conn, "install")));
+const registryRules = async () => registryOnly(keyedPolicy(networkPolicy("code-reviewer", "team", conn, "install")));
 const sequence = (log: string[]): string[] => log.filter((l) => !l.startsWith("cmd:fx-pin"));
 const lastPrompt = (f: ReturnType<typeof fakeSdk>): string => f.writes.filter((w) => w.path.startsWith("/tmp/fx-prompt-")).at(-1)!.content;
 
@@ -198,7 +198,7 @@ describe("order of the install phase", () => {
 
   it("the fake itself refuses an agent under the install policy (it cannot be looser than the platform)", async () => {
     const f = fakeSdk();
-    const made = await newPort(f.sdk).createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const made = await newPort(f.sdk).createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     void made;
     const sandbox = await f.sdk.get({ name: NAME } as never);
     await sandbox.updateNetworkPolicy({ allow: { [REGISTRY]: [] } } as never);
@@ -225,7 +225,7 @@ describe("order of the install phase", () => {
   it("a resumed workspace already installed from the same lockfile skips the install and the policy change", async () => {
     const f = fakeSdk({ lock: "installed" });
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const stages: string[] = [];
     const run = port.resume(made as SandboxHandle, "cc-session-1", "again", startOpts({ onStage: (s) => void stages.push(s) }));
     await run.launched;
@@ -243,7 +243,7 @@ describe("order of the install phase", () => {
 
   it("the install policy is built only when an install is due", async () => {
     let built = 0;
-    const installPolicy = async () => (built++, keyedPolicy(networkPolicy("reviewer", "team", conn, "install")));
+    const installPolicy = async () => (built++, keyedPolicy(networkPolicy("code-reviewer", "team", conn, "install")));
     const none = fakeSdk({ lock: "none" });
     await (await launch(none, { installPolicy })).run.launched;
     expect(built).toBe(0);
@@ -320,7 +320,7 @@ describe("the agent is started from what the runner wrote, not from what the ins
 
 describe("the install-phase firewall is the registries only", () => {
   it("registryOnly drops the model host (with its key) and the GitHub proxy", () => {
-    const rules = keyedPolicy(networkPolicy("reviewer", "team", conn, "install"));
+    const rules = keyedPolicy(networkPolicy("code-reviewer", "team", conn, "install"));
     expect(rules.some((r) => r.purpose === "model")).toBe(true);
     const only = registryOnly(rules);
     expect(only.length).toBeGreaterThan(0);

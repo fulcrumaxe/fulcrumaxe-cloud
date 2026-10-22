@@ -46,14 +46,14 @@ function harness(pin: { out?: string; exit?: number } = {}) {
 
 const startOpts = (over: Partial<StartDetachedOptions> = {}): StartDetachedOptions => ({
   runId: "run-1",
-  role: "reviewer",
+  role: "code-reviewer",
   roleCard: "card",
   prompt: "go",
   model: "sonnet-5",
   workdir: "/vercel/sandbox/repo",
   capUsd: 5,
-  networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-  env: buildSandboxEnv("reviewer"),
+  networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+  env: buildSandboxEnv("code-reviewer"),
   onEvent: () => {},
   ...over,
 });
@@ -61,7 +61,7 @@ const startOpts = (over: Partial<StartDetachedOptions> = {}): StartDetachedOptio
 async function setup(pin?: Parameters<typeof harness>[0], backends = BACKENDS) {
   const h = harness(pin);
   const port = createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk: h.sdk, backends });
-  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+  const handle = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
   return { ...h, port, handle };
 }
 

@@ -52,8 +52,8 @@ export class UnknownRoleError extends Error {
 }
 
 /**
- * The tools of a role. Fails closed: an unknown role throws, where the cloud's own `toolsForRole` would hand back a
- * look-only list. Own-property lookup only, so names like `constructor` and `__proto__` are unknown too.
+ * The tools of a role. Fails closed: an unknown role throws, as the cloud's own `toolsForRole` does. Own-property
+ * lookup only, so names like `constructor` and `__proto__` are unknown too.
  */
 export function roleToolsFor(role: string): readonly string[] {
   if (typeof role !== "string" || !Object.hasOwn(ROLE_TOOLS, role)) throw new UnknownRoleError(String(role));

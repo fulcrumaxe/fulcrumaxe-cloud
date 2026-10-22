@@ -49,8 +49,8 @@ describe("role tools digest", () => {
 });
 
 describe("unknown role fails closed", () => {
-  it("throws, where the cloud's own lookup falls back to a look-only list", () => {
-    expect(toolsForRole("not-a-role").length).toBeGreaterThan(0);
+  it("throws, as the cloud's own lookup does", () => {
+    expect(() => toolsForRole("not-a-role")).toThrow(/no tool list/);
     for (const role of ["not-a-role", "", "Executor", "constructor", "__proto__", "toString", "hasOwnProperty"]) {
       expect(() => roleToolsFor(role), role).toThrow(UnknownRoleError);
       expect(() => roleToolsDigest(role), role).toThrow(UnknownRoleError);

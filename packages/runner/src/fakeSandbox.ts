@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AgentRuntime, NormalizedEvent, Role } from "./types.js";
 import { OPERATOR_OAUTH_ENV_NAME, buildSandboxEnv } from "./sandboxEnv.js";
 import { PLANE_PUBLISH_ROLE } from "./sandboxNaming.js";
+import { toolsForRole } from "./agentConfig.js";
 import { RUN_COMMAND_MAX_OUTPUT_CHARS, assertNoAgentInPublishSandbox, assertRunCommandOptions, assertWriteFiles, vcpusForCreate } from "./runCommand.js";
 import {
   LISTABLE_PREFIXES,
@@ -191,6 +192,8 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
   function runStart(handle: SandboxHandle, opts: StartDetachedOptions): StartDetachedResult {
     refusePublishAgent(handle, opts.role);
     assertSandboxEnvMatchesRole(opts.role, opts.env);
+    // As the real port: a role with no tool list is refused before anything starts.
+    toolsForRole(opts.role);
     if (hungLaunchNames.has(handle.sandboxName)) {
       return { handle, hookFired: new Promise<NormalizedEvent | undefined>(() => {}), launched: new Promise<void>(() => {}) };
     }
@@ -285,6 +288,7 @@ export function createFakeSandbox(runtime: AgentRuntime): { port: SandboxPort } 
     resume(handle, sessionId, prompt, opts) {
       refusePublishAgent(handle, opts.role);
       assertSandboxEnvMatchesRole(opts.role, opts.env);
+      toolsForRole(opts.role);
       if (notFoundOnResume.has(handle.sandboxName)) {
         throw new SandboxNotFoundError(handle.sandboxName);
       }

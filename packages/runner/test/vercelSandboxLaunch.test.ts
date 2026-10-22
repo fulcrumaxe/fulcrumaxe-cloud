@@ -13,6 +13,7 @@ import { buildSandboxEnv } from "../src/sandboxEnv.js";
 import { networkPolicy } from "../src/networkPolicy.js";
 import { retentionPolicyFor } from "../src/sandboxNaming.js";
 import { keyedPolicy } from "./helpers/keyedPolicy.js";
+import { UnknownRoleError } from "../src/agentConfig.js";
 
 /** PREVIEW-AGENT-LAUNCH: the port's `launched` promise and `sandboxState` (fake SDK). */
 
@@ -26,6 +27,7 @@ function fakeSdk(knobs: { status?: string; agentCommandError?: Error; getError?:
     release = resolve;
   });
   const events: string[] = [];
+  const calls: string[] = [];
   const sandbox: SdkSandbox = {
     name: NAME,
     get status() {
@@ -33,6 +35,7 @@ function fakeSdk(knobs: { status?: string; agentCommandError?: Error; getError?:
     },
     currentSession: () => ({ sessionId: "sess-1" }),
     async runCommand(params): Promise<SdkCommand> {
+      calls.push("runCommand");
       const isAgent = params.args?.[1] === PROMPT_WRAPPER;
       if (isAgent) {
         events.push("agentCommand");
@@ -47,7 +50,7 @@ function fakeSdk(knobs: { status?: string; agentCommandError?: Error; getError?:
         kill: async () => undefined,
       };
     },
-    writeFiles: async () => undefined,
+    writeFiles: async () => void calls.push("writeFiles"),
     updateNetworkPolicy: async () => undefined,
     extendTimeout: async () => undefined,
     stop: async () => undefined,
@@ -61,7 +64,7 @@ function fakeSdk(knobs: { status?: string; agentCommandError?: Error; getError?:
       return sandbox;
     },
   };
-  return { sdk, events, release };
+  return { sdk, events, calls, release };
 }
 
 const newPort = (sdk: VercelSandboxSdk) => createVercelSandboxPort({ teamId: "t", projectId: "p", getToken: async () => "tok", sdk, measureRetryDelayMs: 0 });
@@ -69,13 +72,13 @@ const newPort = (sdk: VercelSandboxSdk) => createVercelSandboxPort({ teamId: "t"
 function startOpts(overrides: Partial<StartDetachedOptions> = {}): StartDetachedOptions {
   return {
     runId: "run-1",
-    role: "reviewer",
+    role: "code-reviewer",
     roleCard: "card",
     prompt: "go",
     model: "sonnet-5",
     capUsd: 5,
-    networkPolicy: keyedPolicy(networkPolicy("reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
-    env: buildSandboxEnv("reviewer"),
+    networkPolicy: keyedPolicy(networkPolicy("code-reviewer", "team", { provider: "ai_gateway", githubForwardHost: "gh-proxy.fulcrumaxe.app" })),
+    env: buildSandboxEnv("code-reviewer"),
     onEvent: () => {},
     ...overrides,
   };
@@ -85,7 +88,7 @@ describe("launched", () => {
   it("settles when the agent command exists, not when the agent ends", async () => {
     const f = fakeSdk();
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const run = port.startDetached(made, startOpts());
     const ended = run.hookFired.then(() => "ended");
     await run.launched;
@@ -99,7 +102,7 @@ describe("launched", () => {
   it("rejects when the launch fails before a command exists, and the run's hook rejects with it", async () => {
     const f = fakeSdk({ agentCommandError: httpError(500) });
     const port = newPort(f.sdk);
-    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("reviewer"), timeoutMs: 7_200_000 });
+    const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
     const run = port.startDetached(made, startOpts());
     await expect(run.launched).rejects.toBeTruthy();
     await expect(run.hookFired).rejects.toBeTruthy();
@@ -111,6 +114,21 @@ describe("launched", () => {
     const run = port.startDetached(handle, startOpts());
     await expect(run.launched).rejects.toBeTruthy();
     await expect(run.hookFired).rejects.toBeTruthy();
+  });
+});
+
+describe("a role with no tool list", () => {
+  it("is refused before any file is written or command run, for a start and a resume", async () => {
+    for (const sessionId of [undefined, "sess-1"]) {
+      const f = fakeSdk();
+      const port = newPort(f.sdk);
+      const made = await port.createSandbox({ sandboxName: NAME, retention: retentionPolicyFor("code-reviewer"), timeoutMs: 7_200_000 });
+      const opts = startOpts({ role: "no-such-role" });
+      // Thrown at the call, as the port's other launch checks are: no run object, nothing started.
+      expect(() => (sessionId === undefined ? port.startDetached(made, opts) : port.resume(made, sessionId, "go", opts))).toThrow(UnknownRoleError);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(f.calls).toEqual([]);
+    }
   });
 });
 

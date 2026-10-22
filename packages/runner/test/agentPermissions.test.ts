@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXCLUDE_PROMPT_LINE, EXECUTOR_TOOLS, FX_AGENT_SETTINGS, MAX_EXCLUDE_RULES, OTHER_ROLE_TOOLS, REVIEWER_TOOLS, agentSettingsFor, escapeRulePath, excludeDenyRules, toolsForRole } from "../src/agentConfig.js";
+import { EXCLUDE_PROMPT_LINE, EXECUTOR_TOOLS, FX_AGENT_SETTINGS, MAX_EXCLUDE_RULES, OTHER_ROLE_TOOLS, PLATFORM_ROLES, PROPOSAL_VERIFIER_ROLE, REVIEWER_TOOLS, TOOL_LISTED_ROLES, UnknownRoleError, agentSettingsFor, escapeRulePath, excludeDenyRules, toolsForRole } from "../src/agentConfig.js";
 
 /**
  * D#483 P3 (owner ruling): every role's settings carry an explicit tool allow list and `defaultMode: "dontAsk"`, the
@@ -12,6 +12,8 @@ const READ = ["Read", "Glob", "Grep", "LS"];
 const EXECUTOR = [...READ, "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"];
 const REVIEWER = [...READ, "Bash"];
 const OTHER = [...READ, "Bash(curl:*)", "Bash(git:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(pwd)"];
+// The claim verifier (a platform role, not in the manifest): Read under the checkout only, Glob and Grep (verifierConfinement.test.ts covers its deny rules and hook).
+const VERIFIER = ["Read(//vercel/sandbox/repo/**)", "Glob", "Grep"];
 
 /** The manifest's other roles (packages/roles/src/manifest.ts); packages/worker agentRolesParity.test.ts pins the manifest to these lists. */
 const OTHER_ROLE_NAMES = [
@@ -45,10 +47,33 @@ describe("per-role tool permissions", () => {
       for (const t of ["Bash(node:*)", "Bash(npm:*)", "Bash(rm:*)", "Bash(mkdir:*)"]) expect(toolsForRole(role), role).not.toContain(t);
     }
     expect([...OTHER_ROLE_TOOLS]).toEqual(OTHER);
-    // A name that is no role at all gets the look-only list too (fail to the narrowest).
-    expect([...toolsForRole("no-such-role")]).toEqual(OTHER);
-    expect([...toolsForRole("__proto__")]).toEqual(OTHER);
-    expect([...toolsForRole("constructor")]).toEqual(OTHER);
+  });
+
+  it("pins every role that runs today to its exact tool list, and lists no other role", () => {
+    const pinned: Record<string, string[]> = {
+      executor: EXECUTOR, "code-reviewer": REVIEWER, "security-reviewer": REVIEWER, "acceptance-tester": REVIEWER, debater: REVIEWER,
+      ...Object.fromEntries(OTHER_ROLE_NAMES.map((r) => [r, OTHER])),
+      "proposal-verifier": VERIFIER,
+    };
+    expect([...TOOL_LISTED_ROLES].sort()).toEqual(Object.keys(pinned).sort());
+    expect(TOOL_LISTED_ROLES).toHaveLength(27);
+    expect([...PLATFORM_ROLES]).toEqual(["proposal-verifier"]);
+    expect(PLATFORM_ROLES).toEqual([PROPOSAL_VERIFIER_ROLE]);
+    for (const [role, tools] of Object.entries(pinned)) expect([...toolsForRole(role)], role).toEqual(tools);
+  });
+
+  it("a role with no tool list gets nothing: toolsForRole and agentSettingsFor throw unknown_role (no fallback list)", () => {
+    const unknown = ["no-such-role", "", "Executor", "reviewer", "Proposal-Verifier", "proposal_verifier", "plane_publish", "__proto__", "constructor", "toString", "hasOwnProperty"];
+    for (const role of unknown) {
+      expect(() => toolsForRole(role), role).toThrow(UnknownRoleError);
+      expect(() => agentSettingsFor(role), role).toThrow(UnknownRoleError);
+      try {
+        toolsForRole(role);
+      } catch (err) {
+        expect((err as UnknownRoleError).code, role).toBe("unknown_role");
+      }
+    }
+    expect(() => toolsForRole(undefined as unknown as string)).toThrow(UnknownRoleError);
   });
 
   it("the settings are the runner's hook plus the role's allow list and dontAsk, and the same call gives the same bytes (fresh and resumed)", () => {
