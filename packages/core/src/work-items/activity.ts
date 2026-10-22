@@ -642,7 +642,7 @@ export async function getWorkItemActivity(ctx: ActivityCtx, workItemId: string):
         .reverse(),
       notice,
       review_recheck: reviewRecheck,
-      public_change: await readPublicChange(client, accountId, workItemId),
+      public_change: await readPublicChange(client, accountId, workItemId, facts),
       actions: facts ? operatorActionsFor(facts) : [],
       close_on_github: facts ? closeOnGithub(facts) : false,
     };

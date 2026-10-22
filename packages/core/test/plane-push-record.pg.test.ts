@@ -109,6 +109,23 @@ describe('plane push record (D#598 P1f-1)', () => {
     expect(await run(a, (c) => readPlanePush(c, a.accountId, row.workItemId))).toMatchObject({ state: 'pr_opened', code: null, prNumber: 9, headSha: SHA1 });
   });
 
+  it('a pr_opened outcome is recorded only with the address of that pull request in the paired repository; any other address is refused and nothing is written', async () => {
+    const row = (await stamp(a, await item(a)))!;
+    const rec = (prNumber: number, prUrl: string) =>
+      run(a, (c) => recordVerifiedOutcome(c, { accountId: a.accountId, id: row.id, outcome: { state: 'pr_opened', headSha: SHA1, tipSha: SHA2, prNumber, prUrl } }));
+    for (const [n, url] of [
+      [9, 'https://github.com/acme/pub/pull/10'],
+      [9, 'https://github.com/evil/pub/pull/9'],
+      [9, 'https://github.com/acme/pub/pull/9/files'],
+      [9, 'https://evil.example/acme/pub/pull/9'],
+    ] as const) {
+      await expect(rec(n, url), url).rejects.toMatchObject({ name: 'PlanePushRecordError', code: 'bad_outcome' });
+    }
+    expect((await admin.query(`SELECT state, pr_number, pr_url FROM plane_pushes WHERE id = $1`, [row.id])).rows[0]).toEqual({ state: 'building', pr_number: null, pr_url: null });
+    // control: the same row takes the right address, whatever case GitHub spells the repository in.
+    expect(await rec(9, 'https://github.com/Acme/Pub/pull/9')).toMatchObject({ state: 'pr_opened', prNumber: 9 });
+  });
+
   it('a row with managed_by_person_at set is settled even when its state is not: a late outcome writes nothing', async () => {
     const row = (await stamp(a, await item(a)))!;
     await admin.query(`UPDATE plane_pushes SET managed_by_person_at = now() WHERE id = $1`, [row.id]);

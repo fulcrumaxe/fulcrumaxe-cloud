@@ -720,6 +720,18 @@ describe("the Public change block", () => {
     expect(buildInsight(data).publicChange.prUrl).toBeNull();
   });
 
+  it("the anchor leads to exactly this pull request of this repository: another pull request, another repository or another host gets none", () => {
+    const data = fx("200-public-change-pr_opened.json");
+    data.public_change.pr_url = "https://github.com/acme/docs-public/pull/89";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/evil/other/pull/88";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/acme/docs-public/pull/88/files";
+    expect(buildInsight(data).publicChange.prUrl).toBeNull();
+    data.public_change.pr_url = "https://github.com/Acme/Docs-Public/pull/88";
+    expect(buildInsight(data).publicChange.prUrl).toBe("https://github.com/Acme/Docs-Public/pull/88");
+  });
+
   it("an item with no public change draws no block", async () => {
     expect(buildInsight(OK).publicChange).toBeNull();
     const panel = await show(OK);

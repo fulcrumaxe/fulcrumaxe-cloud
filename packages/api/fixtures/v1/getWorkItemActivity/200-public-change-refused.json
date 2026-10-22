@@ -16,7 +16,10 @@
   "runs_truncated": false,
   "steps": [],
   "notice": null,
-  "actions": [],
+  "actions": [
+    "close",
+    "retry_push"
+  ],
   "close_on_github": false,
   "public_change": {
     "state": "refused",
@@ -27,6 +30,8 @@
     "pr_number": null,
     "pr_url": null,
     "head_sha": null,
-    "actions": []
+    "actions": [
+      "retry_push"
+    ]
   }
 }

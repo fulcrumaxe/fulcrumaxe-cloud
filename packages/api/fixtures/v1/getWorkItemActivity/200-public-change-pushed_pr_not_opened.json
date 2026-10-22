@@ -16,7 +16,10 @@
   "runs_truncated": false,
   "steps": [],
   "notice": null,
-  "actions": [],
+  "actions": [
+    "close",
+    "open_pr"
+  ],
   "close_on_github": false,
   "public_change": {
     "state": "pushed_pr_not_opened",
@@ -27,6 +30,8 @@
     "pr_number": null,
     "pr_url": null,
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "actions": []
+    "actions": [
+      "open_pr"
+    ]
   }
 }

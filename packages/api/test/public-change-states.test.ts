@@ -28,6 +28,8 @@ interface Seed {
   /** The runtime of the latest push attempt, and how many push attempts the item has. */
   attempts?: { runtime: 'runner' | 'sandbox'; count: number };
   expected: string;
+  /** What an owner is offered under the change (P1f-6b): the same predicate the action routes ask. */
+  actions?: string[];
 }
 
 /** One row per state of the item view, then the refusals that need words of their own. Each is read through the real route and pinned. */
@@ -36,12 +38,12 @@ const SEEDS: Seed[] = [
   { name: 'scanning', state: 'scanning', expected: 'Scanning' },
   { name: 'pushed', state: 'pushed', expected: 'Pushed' },
   { name: 'pr_opened', state: 'pr_opened', expected: 'PR opened' },
-  { name: 'refused', state: 'refused', code: 'scan_refused', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the scan found something that must not be public' },
-  { name: 'pushed_pr_not_opened', state: 'pushed_pr_not_opened', expected: 'Pushed, PR not opened' },
+  { name: 'refused', state: 'refused', code: 'scan_refused', attempts: { runtime: 'sandbox', count: 1 }, expected: 'Refused: the scan found something that must not be public', actions: ['retry_push'] },
+  { name: 'pushed_pr_not_opened', state: 'pushed_pr_not_opened', expected: 'Pushed, PR not opened', actions: ['open_pr'] },
   { name: 'no_public_change', state: 'no_public_change', expected: 'No public change' },
   { name: 'refused-retry_limit', state: 'refused', code: 'retry_limit', attempts: { runtime: 'sandbox', count: 3 }, expected: 'Refused: the push has already been tried three times' },
-  { name: 'refused-pairing_off', state: 'refused', code: 'pairing_off', attempts: { runtime: 'sandbox', count: 2 }, expected: 'Refused: the pairing is off' },
-  { name: 'refused-unknown_code', state: 'refused', code: 'a_code_from_the_future', attempts: { runtime: 'sandbox', count: 1 }, expected: PUBLIC_CHANGE_UNKNOWN_REFUSAL },
+  { name: 'refused-pairing_off', state: 'refused', code: 'pairing_off', attempts: { runtime: 'sandbox', count: 2 }, expected: 'Refused: the pairing is off', actions: ['retry_push'] },
+  { name: 'refused-unknown_code', state: 'refused', code: 'a_code_from_the_future', attempts: { runtime: 'sandbox', count: 1 }, expected: PUBLIC_CHANGE_UNKNOWN_REFUSAL, actions: ['retry_push'] },
   { name: 'refused-runner', state: 'refused', code: 'public_unavailable', attempts: { runtime: 'runner', count: 1 }, expected: 'Refused: the public repository could not be reached. Use Build again to try once more.' },
 ];
 
@@ -60,7 +62,7 @@ describe('public_change through getWorkItemActivity (D#598 P1f-6a)', { timeout: 
     appUserPool = createPool(process.env.API_DATABASE_URL_APP_USER!);
     platformOpsPool = createPool(process.env.API_DATABASE_URL_PLATFORM_OPS!);
     process.env.FX_SESSION_SECRET = FX_SESSION_SECRET;
-    me = await seedAccountWithMember(admin);
+    me = await seedAccountWithMember(admin, { role: 'owner' });
     repoId = randomUUID();
     await admin.query(`INSERT INTO repos (id, account_id, gh_repo_id, product, gh_owner, gh_name, settings) VALUES ($1, $2, $3, 'team', 'acme', 'docs', '{}'::jsonb)`, [repoId, me.accountId, Math.floor(Math.random() * 1e9)]);
   });
@@ -123,7 +125,10 @@ describe('public_change through getWorkItemActivity (D#598 P1f-6a)', { timeout: 
       const change = body.public_change as { sentence: string; repo: string; actions: string[] };
       expect(change.sentence).toBe(s.expected);
       expect(change.repo).toBe('acme/docs-public');
-      expect(change.actions).toEqual([]);
+      expect(change.actions).toEqual(s.actions ?? []);
+      // The item's own list is drawn from the same table, so it names exactly these two when (and only when) the change does.
+      const top = (body.actions as string[]).filter((a) => a === 'retry_push' || a === 'open_pr');
+      expect(top).toEqual(s.actions ?? []);
       expect(JSON.stringify(change)).not.toMatch(/undefined|NaN/);
       if (s.name === 'refused-unknown_code') expect(JSON.stringify(change.sentence)).not.toContain('a_code_from_the_future');
       pin(s.name, body);

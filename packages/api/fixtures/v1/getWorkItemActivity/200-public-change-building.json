@@ -16,7 +16,9 @@
   "runs_truncated": false,
   "steps": [],
   "notice": null,
-  "actions": [],
+  "actions": [
+    "close"
+  ],
   "close_on_github": false,
   "public_change": {
     "state": "building",

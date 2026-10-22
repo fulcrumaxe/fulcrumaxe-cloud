@@ -508,7 +508,7 @@ export interface Operations {
         head_sha: string | null;
         actions: Array<"retry_push" | "open_pr" | "build_again">;
       }) | (null);
-      actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen">;
+      actions: Array<"build_again" | "respec" | "back_to_discussion" | "treat_as_feature" | "close" | "reopen" | "retry_push" | "open_pr">;
       close_on_github: boolean;
     };
   };
@@ -565,6 +565,30 @@ export interface Operations {
     response: {
       work_item_id: string;
       stage: "triaged";
+    };
+  };
+  retryPushWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      state: "started";
+    };
+  };
+  openPrWorkItem: {
+    path: {
+      id: string;
+    };
+    query: undefined;
+    body: undefined;
+    response: {
+      work_item_id: string;
+      result: "opened" | "refused";
+      code: string | null;
+      pr_number: (number) | (null);
     };
   };
   getRunInsight: {
@@ -3942,6 +3966,28 @@ export const operations = {
   reopenWorkItem: {
     method: "POST",
     path: "/api/v1/work-items/{id}/reopen",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  retryPushWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/retry-push",
+    tokenAccess: false,
+    scope: null,
+    tokenSelfOnly: false,
+    idempotency: "optional",
+    pathParams: ["id"],
+    queryParams: [],
+    hasBody: false,
+  },
+  openPrWorkItem: {
+    method: "POST",
+    path: "/api/v1/work-items/{id}/open-pr",
     tokenAccess: false,
     scope: null,
     tokenSelfOnly: false,

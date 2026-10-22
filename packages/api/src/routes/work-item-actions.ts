@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { requestRunAction } from "@fx/core/src/runActions/index.js";
-import { OperatorMovedOnError, OperatorRefusedError, checkRespec, closeWorkItem, reopenWorkItem, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
+import { OperatorMovedOnError, OperatorRefusedError, checkRespec, closeWorkItem, reopenWorkItem, requestPublicChangeAction, sendBackToDiscussion, treatAsFeature } from "@fx/core/src/work-items/operatorMoves.js";
 import type { OperatorVerdict } from "@fx/core/src/work-items/operatorActions.js";
 import type { RouteContext, RouteEntry } from "../registry.js";
 import { ActionNotAvailableError, AlreadyRunningError, ExternalRequiresHumanError, NoRepoError, RunActionsUnavailableError } from "../errors.js";
@@ -90,6 +90,45 @@ async function reopen(ctx: RouteContext, id: string) {
   if (!UUID_RE.test(id)) throw notFound();
   const done = await guarded(() => reopenWorkItem({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: ctx.idempotencyKey || null }, id));
   return { work_item_id: done.workItemId, stage: done.stage };
+}
+
+/**
+ * D#598 P1f-6b: the two ports Try the push again and Open the pull request again reach the worker through (this package never imports it). Both are `null` until
+ * apps/web registers them, and the routes then answer 503 before anything is written. Plain data in, so a fake in a test needs no Workflow service.
+ */
+export const publicChangeDeps: {
+  /** Starts the durable job that makes the next push attempt (one step: the worker's `retryPublish`). Resolves once the start is accepted. */
+  startRetryPush: ((args: { accountId: string; userId: string; workItemId: string }) => Promise<void>) | null;
+  /** Opens the public pull request for a pushed branch, now, and says how it ended. `skipped`: the item no longer allows it. */
+  openPublicPullRequest: ((args: { accountId: string; workItemId: string }) => Promise<{ kind: "opened"; prNumber: number } | { kind: "refused"; code: string } | { kind: "skipped" } | { kind: "not_configured" }>) | null;
+} = { startRetryPush: null, openPublicPullRequest: null };
+
+const retryStartedSchema = z.object({ work_item_id: z.string().uuid(), state: z.literal("started") });
+const openPrSchema = z.object({ work_item_id: z.string().uuid(), result: z.enum(["opened", "refused"]), code: z.string().nullable(), pr_number: z.number().int().nullable() });
+
+/** Try the push again: the table's verdict and the audit row first, then the durable job; the attempt's outcome reaches the item's public change on its next read. */
+async function retryPush(ctx: RouteContext, id: string) {
+  if (!UUID_RE.test(id)) throw notFound();
+  const start = publicChangeDeps.startRetryPush;
+  if (!start) throw new RunActionsUnavailableError();
+  await guarded(() => requestPublicChangeAction({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: ctx.idempotencyKey || null }, id, "retry_push"));
+  // fx-swallow-ok: the job did not start, so no attempt was made; the item still shows the refusal and the button, and the answer is the usual 503
+  await start({ accountId: ctx.principal.accountId, userId: ctx.principal.userId, workItemId: id }).catch(() => {
+    throw new RunActionsUnavailableError();
+  });
+  return { work_item_id: id, state: "started" as const };
+}
+
+/** Open the pull request again: no sandbox and no git, one call to GitHub, so it answers with the outcome. */
+async function openPr(ctx: RouteContext, id: string) {
+  if (!UUID_RE.test(id)) throw notFound();
+  const open = publicChangeDeps.openPublicPullRequest;
+  if (!open) throw new RunActionsUnavailableError();
+  await guarded(() => requestPublicChangeAction({ pool: ctx.pool, principal: ctx.principal, idempotencyKey: ctx.idempotencyKey || null }, id, "open_pr"));
+  const r = await open({ accountId: ctx.principal.accountId, workItemId: id });
+  if (r.kind === "not_configured") throw new RunActionsUnavailableError();
+  if (r.kind === "skipped") throw new ActionNotAvailableError("work item moved on; open it again");
+  return r.kind === "opened" ? { work_item_id: id, result: "opened" as const, code: null, pr_number: r.prNumber } : { work_item_id: id, result: "refused" as const, code: r.code, pr_number: null };
 }
 
 const reopenedSchema = z.object({ work_item_id: z.string().uuid(), stage: z.literal("triaged") });
@@ -187,5 +226,38 @@ export const workItemActionRoutes: RouteEntry[] = [
       "409": "Error `action_not_available` (the work item is not at `closed`) or `already_running` (agents are working on it).",
     },
     handler: (ctx, input) => reopen(ctx, input.params.id!),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/retry-push",
+    operationId: "retryPushWorkItem",
+    summary: "Try the push to the public repository again",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a work item whose push to its paired public repository was refused on a build the platform ran: records an audit row and starts one more push attempt (at most three per item). Answers 202 `{ work_item_id, state: 'started' }` before the attempt has run; how it ended is the item's `public_change` on the next activity read, where a refusal shows as its fixed sentence. " +
+      "Allowed only while `public_change.actions` lists `retry_push` (the same rule): the push is `refused`, its latest attempt ran in the platform's sandbox, fewer than three attempts were made, nobody has taken the branch over, and no agent run of the item is live. A repository that is no longer paired ends the attempt with the stored refusal `pairing_off`, with nothing pushed.",
+    responseSchema: retryStartedSchema,
+    successStatus: 202,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (the item has no refused push that may be tried again) or `already_running` (an agent run of the item is live, a publish attempt included).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => retryPush(ctx, input.params.id!),
+  },
+  {
+    ...common,
+    path: "/api/v1/work-items/{id}/open-pr",
+    operationId: "openPrWorkItem",
+    summary: "Open the public pull request again",
+    description:
+      "Session only, owner or admin; a token is refused. Takes no request body. `Idempotency-Key` is optional. For a work item whose branch was pushed to its paired public repository but whose pull request was not opened: records an audit row, checks that the branch still holds exactly what was pushed, and opens the pull request, with no sandbox and no push. Answers 200 `{ work_item_id, result, code, pr_number }`: `opened` with the number, or `refused` with a fixed `code` and the branch left as it is. " +
+      "Allowed only while `public_change.actions` lists `open_pr`: the state is `pushed_pr_not_opened`, nobody has taken the branch over, and no agent run of the item is live.",
+    responseSchema: openPrSchema,
+    extraResponses: {
+      "403": SHARED_ERRORS,
+      "409": "Error `action_not_available` (the item has no pushed branch waiting for a pull request) or `already_running` (an agent run of the item is live).",
+      "503": UNAVAILABLE_TEXT,
+    },
+    handler: (ctx, input) => openPr(ctx, input.params.id!),
   },
 ];
