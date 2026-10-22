@@ -36,11 +36,17 @@ const ask = (over: Req = {}): Req => ({
   rationale: "<<UNTRUSTED EXTERNAL CONTENT>>\nThe patch release fixes a crash we hit in the last run.\n<<END UNTRUSTED>>",
   answer_due_at: "2026-10-23T09:00:00.000Z", timeout_outcome: "stop_and_flag", state: "open", ...over,
 });
+const merge = (over: Req = {}): Req => ({
+  work_item_id: "4b7e1c20-3d95-4a6f-8e12-7a9c5d0b3f81", title: "Add a retry to the export job", pr_number: 42, pr_url: "https://github.com/example-org/example-repo/pull/42",
+  why: "The checks are done. A person merges this pull request on GitHub.", since: "2026-10-22T15:30:00.000Z", ...over,
+});
 const closed = (state: "done" | "withdrawn", over: Req = {}) => request({ state, status_sentence: null, check_interval_seconds: null, ...over });
 
 interface Mock {
   requests: Req[];
   asks: Req[];
+  /** The merge-ready read: pull requests waiting for a person to merge them. */
+  merges: Req[];
   /** What the answer POST replies: the contract's body, or a number for an error status. */
   answerReply: Req | number;
   /** The bodies the answer POSTs carried, by path. */
@@ -61,7 +67,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
   page.on("console", (m) => m.type() === "error" && !m.text().startsWith("Failed to load resource") && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
   await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (e) => console.error(`CSP ${e.violatedDirective}`)));
-  const mock: Mock = { requests: [request()], asks: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
+  const mock: Mock = { requests: [request()], asks: [], merges: [], answerReply: { ask_id: A1, receipt_id: "e1b7c3d4-2f58-4a09-8c6b-7d3e9f1a2b45", answered_option: "bump_now" }, answers: [], notShown: 0, listStatus: 200, doneAnswer: closed("done"), withdrawAnswer: closed("withdrawn"), delay: 0, posts: [], ...tweak };
   await page.route((u) => u.pathname === "/", async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, headers: { ...res.headers(), "content-security-policy": CSP } });
@@ -76,6 +82,7 @@ async function setup(page: Page, tweak: Partial<Mock> = {}) {
       return json(route, 200, { requests: mock.requests.filter((r) => r.state === "open"), truncated: false });
     }
     if (p === "/api/v1/decision-asks" && req.method() === "GET") return json(route, 200, { asks: mock.asks, not_shown: mock.notShown });
+    if (p === "/api/v1/merge-ready" && req.method() === "GET") return json(route, 200, { items: mock.merges, not_shown: 0 });
     const answerMatch = p.match(/^\/api\/v1\/decision-asks\/([^/]+)\/answer$/);
     if (answerMatch && req.method() === "POST") {
       mock.answers.push({ path: p, body: req.postDataJSON() });
@@ -317,6 +324,33 @@ test.describe("D#598 P8c: Needs you", () => {
     await press(t(page, "ny-withdraw-" + R1)); // a closed row is checked too
     await expect(t(page, "ny-state")).toHaveText("Withdrawn");
     expect(await axeSeriousOrCritical(page)).toEqual([]);
+  });
+
+  test("a pull request waiting for a person shows its title, why, and one link to GitHub, with no buttons", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], merges: [merge()] });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(t(page, "ny-title")).toHaveText("Add a retry to the export job");
+    await expect(t(page, "ny-sentence")).toHaveText("Merge this pull request on GitHub");
+    await expect(t(page, "ny-reason")).toHaveText("The checks are done. A person merges this pull request on GitHub.");
+    await expect(t(page, "ny-link")).toHaveAttribute("href", "https://github.com/example-org/example-repo/pull/42");
+    await expect(t(page, "ny-link")).toHaveText("Open pull request");
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    await clean(page, errors);
+  });
+
+  test("a pull request with no address on record still shows its title, sentence and reason, with no link and no button, and the page has no errors", async ({ page }) => {
+    const { errors } = await setup(page, { requests: [], merges: [merge({ pr_url: null })] });
+    await open(page);
+    await expect(page.locator(`${WIN} h2`)).toHaveText("Needs you (1)");
+    await expect(t(page, "ny-row")).toHaveCount(1);
+    await expect(t(page, "ny-title")).toHaveText("Add a retry to the export job");
+    await expect(t(page, "ny-sentence")).toHaveText("Merge this pull request on GitHub");
+    await expect(t(page, "ny-reason")).toHaveText("The checks are done. A person merges this pull request on GitHub.");
+    await expect(t(page, "ny-link")).toHaveCount(0);
+    await expect(page.locator(`${WIN} .ny-link`)).toHaveCount(0);
+    await expect(t(page, "ny-row").locator("button")).toHaveCount(0);
+    await clean(page, errors);
   });
 
   test("an ask shows the cloud's name for the decision, the recommended option, the reason as a quotation and one button per option and Deny", async ({ page }) => {

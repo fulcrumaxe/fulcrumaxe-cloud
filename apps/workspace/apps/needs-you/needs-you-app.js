@@ -75,8 +75,22 @@ function mountApp(contentEl) {
     );
   }
 
+  // A pull request waiting for a person: its words and one link to GitHub. No buttons: merging happens there, and the row leaves on the next read.
+  function mergeView(row) {
+    const headId = "ny-h-" + row.id;
+    return h(
+      "li",
+      { class: "ny-row", "data-testid": "ny-row", "data-kind": "merge", "data-id": row.id, "data-state": row.state },
+      h("h3", { id: headId, class: "ny-row-title", tabindex: "-1", "data-testid": "ny-title" }, row.title),
+      h("p", { class: "ny-sentence", "data-testid": "ny-sentence" }, row.sentence),
+      row.reason ? h("p", { class: "ny-reason", "data-testid": "ny-reason" }, row.reason) : null,
+      row.link ? h("p", null, h("a", { class: "ny-link", href: row.link.href, target: "_blank", rel: "noopener noreferrer", "aria-describedby": headId, "data-testid": "ny-link" }, WORDS.openPr)) : null
+    );
+  }
+
   function rowView(row) {
     if (row.kind === "ask") return askView(row);
+    if (row.kind === "merge") return mergeView(row);
     const working = list.busyVerb(row.id);
     const headId = "ny-h-" + row.id;
     // While Mark done is in flight on a request with an automatic check, the approved "Checking now." stands in for the answer.

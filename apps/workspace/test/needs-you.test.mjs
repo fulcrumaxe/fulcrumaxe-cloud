@@ -9,12 +9,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ASKS_URL, LIST_URL, PROVIDER_HOSTS, WORDS, actionUrl, answerUrl, createNeedsYou, failureSentence, notShownWords, providerLink, quotedReason, readAsk, readRequest } from "../apps/needs-you/needs-you-model.js";
+import { ASKS_URL, LIST_URL, MERGE_URL, PROVIDER_HOSTS, WORDS, actionUrl, answerUrl, createNeedsYou, failureSentence, notShownWords, providerLink, pullRequestLink, quotedReason, readAsk, readMerge, readRequest } from "../apps/needs-you/needs-you-model.js";
 
 const PACKAGES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages");
 const fixture = (op, name) => JSON.parse(readFileSync(join(PACKAGES, "api", "fixtures", "v1", op, name), "utf8"));
 const LIST = fixture("listSetupRequests", "200-ok.json");
 const BASE = LIST.requests[0];
+const MERGES = fixture("listMergeReady", "200-ok.json");
 const SERVER_TEXT = "server text that must never be shown";
 const fail = (status, code, extra = {}) => Object.assign(new Error(SERVER_TEXT), { status, code, ...extra });
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -31,9 +32,9 @@ const closed = (state, over = {}) => req({ state, status_sentence: null, check_i
 function fakeCall(routes) {
   const log = [];
   const askLog = []; // the decision-ask calls; kept apart so the setup-request tests below count only their own requests
-  const all = { ["GET " + ASKS_URL]: { asks: [], not_shown: 0 }, ...routes };
+  const all = { ["GET " + ASKS_URL]: { asks: [], not_shown: 0 }, ["GET " + MERGE_URL]: { items: [], not_shown: 0 }, ...routes };
   const call = vi.fn(async (method, path, body) => {
-    (path.startsWith(ASKS_URL) ? askLog : log).push([method, path, body]);
+    (path.startsWith(ASKS_URL) || path.startsWith(MERGE_URL) ? askLog : log).push([method, path, body]);
     // The real API answers 400 to any body on the done and withdraw routes (packages/api/src/handler.ts).
     if (method === "POST" && /\/(done|withdraw)$/.test(path) && body !== undefined) throw fail(400, "invalid_request");
     const r = all[method + " " + path];
@@ -427,7 +428,7 @@ describe("decision asks", () => {
     expect(f.list.state.rows.map((r) => r.kind)).toEqual(["ask", "setup"]);
     expect(f.list.state.notShown).toBe(3);
     expect(f.log).toEqual([["GET", LIST_URL, undefined]]);
-    expect(f.askLog).toEqual([["GET", ASKS_URL, undefined]]);
+    expect(f.askLog).toEqual([["GET", ASKS_URL, undefined], ["GET", MERGE_URL, undefined]]);
     expect(notShownWords(1)).toBe("1 more isn't shown.");
     expect(notShownWords(3)).toBe("3 more aren't shown.");
   });
@@ -506,5 +507,72 @@ describe("decision asks", () => {
     await f.list.answer(ASK.id, "bump_now");
     expect(f.list.state.error).toBe(WORDS.failed);
     expect(f.list.state.rows[0].state).toBe("open");
+  });
+});
+
+describe("pull requests waiting for a person to merge (D#598 P8c-2b)", () => {
+  const item = (n, over = {}) => ({ ...MERGES.items[0], work_item_id: "w-" + n, pr_number: n, pr_url: "https://github.com/example-org/example-repo/pull/" + n, ...over });
+  const MERGE_GET = "GET " + MERGE_URL;
+
+  it("reads the contract fixture whole: the title, the cloud's reason and a link to the pull request", () => {
+    const row = readMerge(MERGES.items[0]);
+    expect(row).toMatchObject({ kind: "merge", title: MERGES.items[0].title, reason: MERGES.items[0].why, state: "open", sentence: WORDS.mergeStep });
+    expect(row.link).toEqual({ href: MERGES.items[0].pr_url, host: "github.com" });
+  });
+
+  it("the link is only an https github.com pull request address; anything else is no link", () => {
+    for (const bad of [null, "", "not a url", "http://github.com/a/b/pull/1", "https://evil.test/a/b/pull/1", "https://github.com.evil.test/a/b/pull/1", "https://u:p@github.com/a/b/pull/1", "https://github.com:444/a/b/pull/1", "https://github.com/a/b/issues/1", "javascript:alert(1)"]) {
+      expect(pullRequestLink(bad)).toBeNull();
+    }
+    expect(readMerge(item(5, { pr_url: "javascript:alert(1)" })).link).toBeNull();
+  });
+
+  it("a row without a title is named by its pull request number, and an unusable item is skipped; no text is null", () => {
+    expect(readMerge(item(9, { title: null })).title).toBe("Pull request #9");
+    expect(readMerge({ ...item(9), work_item_id: "" })).toBeNull();
+    expect(readMerge({ ...item(9), pr_number: 0 })).toBeNull();
+    expect(readMerge(null)).toBeNull();
+    for (const v of Object.values(readMerge(item(9, { title: null, why: null })))) expect(v === null || v === undefined).toBe(false);
+  });
+
+  it("empty: nothing is listed", async () => {
+    const { list } = await loaded({ [GET]: listOf([]) });
+    expect(list.state.status).toBe("ready");
+    expect(list.state.rows).toEqual([]);
+  });
+
+  it("one: a single row with the pull request link", async () => {
+    const { list } = await loaded({ [GET]: listOf([]), [MERGE_GET]: { items: [item(42)], not_shown: 0 } });
+    expect(list.state.rows.map((r) => [r.kind, r.title, r.link && r.link.href])).toEqual([["merge", MERGES.items[0].title, "https://github.com/example-org/example-repo/pull/42"]]);
+  });
+
+  it("many: all rows next to the requests, and the not-shown counts add up", async () => {
+    const { list } = await loaded({ [GET]: listOf([BASE]), [MERGE_GET]: { items: [item(1), item(2), item(3)], not_shown: 4 } });
+    expect(list.state.rows.filter((r) => r.kind === "merge")).toHaveLength(3);
+    expect(list.state.rows).toHaveLength(4);
+    expect(list.state.notShown).toBe(4);
+  });
+
+  it("a pull request with no address (no repository on record) is still a row: title, sentence and reason, and no link", async () => {
+    const { list } = await loaded({ [GET]: listOf([]), [MERGE_GET]: { items: [item(8, { pr_url: null })], not_shown: 0 } });
+    expect(list.state.status).toBe("ready");
+    expect(list.state.rows).toHaveLength(1);
+    const row = list.state.rows[0];
+    expect(row).toMatchObject({ kind: "merge", title: MERGES.items[0].title, sentence: WORDS.mergeStep, reason: MERGES.items[0].why, state: "open", link: null });
+  });
+
+  it("merged or closed leaves: the next read no longer has it, and nothing was sent but reads", async () => {
+    let items = [item(1), item(2)];
+    const { list, askLog } = await loaded({ [GET]: listOf([]), [MERGE_GET]: () => ({ items, not_shown: 0 }) });
+    expect(list.state.rows).toHaveLength(2);
+    items = [item(2)];
+    await list.load();
+    expect(list.state.rows.map((r) => r.link.href)).toEqual(["https://github.com/example-org/example-repo/pull/2"]);
+    expect(askLog.every(([method]) => method === "GET")).toBe(true);
+  });
+
+  it("a failed merge-ready read is the error state, never a list that looks empty", async () => {
+    const { list } = await loaded({ [GET]: listOf([]), [MERGE_GET]: fail(500, "internal") });
+    expect(list.state.status).toBe("error");
   });
 });
