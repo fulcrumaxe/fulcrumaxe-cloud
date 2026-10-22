@@ -312,6 +312,28 @@ export function startFixtureServer({ distDir = DEFAULT_DIST_DIR, port = DEFAULT_
       return;
     }
 
+    // D#598 P0a: the real API refuses ANY body on the setup-request done and withdraw routes (packages/api/src/handler.ts: 400
+    // invalid_request, "this route does not accept a request body"). This fake does the same, so a client that sends "{}" fails here as it
+    // does on the real API. Without a body it answers with the contract fixture.
+    const setupAction = /^\/api\/v1\/setup-requests\/[^/]+\/(done|withdraw)$/.exec(urlPath);
+    if (setupAction && req.method === "POST") {
+      let size = 0;
+      req.on("data", (c) => (size += c.length));
+      req.on("end", () => {
+        if (size > 0) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: { code: "invalid_request", message: "this route does not accept a request body", request_id: "fixture" } }));
+          return;
+        }
+        const dir = setupAction[1] === "done" ? "markSetupRequestDone" : "withdrawSetupRequest";
+        readFile(join(V1_FIXTURES_DIR, dir, "200-ok.json")).then(
+          (body) => res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(body),
+          () => res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "fixture unreadable" }))
+        );
+      });
+      return;
+    }
+
     // D#37 WS-F9a: opening the Onboarding app reads the setup progress (GET only; onboarding.spec.ts mocks the rest).
     if (urlPath === "/api/v1/onboarding" && req.method === "GET") {
       readFile(join(V1_FIXTURES_DIR, "getOnboarding", "200-new.json")).then(
