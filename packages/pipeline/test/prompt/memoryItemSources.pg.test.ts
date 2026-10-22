@@ -150,7 +150,9 @@ describe("memory item sources (D#601 MEM-8b)", () => {
       for (let i = 0; i < 5; i += 1) await putNote(w, { body: `${"n".repeat(1000)} ${i}` });
       await h.admin.query("INSERT INTO repo_context_settings (account_id, repo_id, memory_slot_bytes, updated_by) VALUES ($1, $2, 2048, $3)", [w.accountId, w.repoId, w.adminId]);
       const got = await recall(w, "item");
-      expect(got[0]!.source).toBeUndefined();
+      // "First" is about what the budget keeps (item entries are chosen before the item's records), not where a line renders: inside the slot a
+      // person's lines are ordered by random uuid, so the approved entry's position is arbitrary and only its presence is stable.
+      expect(got.filter((e) => e.source === undefined).map((e) => e.text)).toEqual(["an approved item entry"]);
       expect(Buffer.byteLength(renderMemorySlot(got, 2048).text, "utf8")).toBeLessThanOrEqual(2048);
       expect(got.length).toBeLessThan(6);
     });
